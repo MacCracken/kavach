@@ -1,0 +1,191 @@
+//! OCI container backend — runc/crun integration.
+//!
+//! Detects available OCI runtime (prefers crun over runc) and executes
+//! commands in OCI-compliant containers.
+
+use crate::backend::oci_spec;
+use crate::backend::oci_spec::oci_runtime::ProcessBuilder;
+use crate::backend::{Backend, SandboxBackend, which_exists};
+use crate::lifecycle::{ExecResult, SandboxConfig};
+use crate::policy::SandboxPolicy;
+
+/// OCI container-based sandbox backend.
+pub struct OciBackend {
+    config: SandboxConfig,
+    runtime: String,
+}
+
+impl OciBackend {
+    /// Create a new OCI backend. Detects available runtime.
+    pub fn new(config: &SandboxConfig) -> crate::Result<Self> {
+        let runtime = detect_runtime().ok_or_else(|| {
+            crate::KavachError::BackendUnavailable("no OCI runtime (runc/crun) found".into())
+        })?;
+        Ok(Self {
+            config: config.clone(),
+            runtime,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl SandboxBackend for OciBackend {
+    fn backend_type(&self) -> Backend {
+        Backend::Oci
+    }
+
+    async fn exec(&self, command: &str, policy: &SandboxPolicy) -> crate::Result<ExecResult> {
+        let start = std::time::Instant::now();
+        let container_id = oci_spec::container_id("kavach-oci");
+
+        // Create temp bundle directory
+        let bundle_dir = tempfile::tempdir()
+            .map_err(|e| crate::KavachError::CreationFailed(format!("temp bundle dir: {e}")))?;
+
+        // Create rootfs directory
+        let rootfs_dir = bundle_dir.path().join("rootfs");
+        std::fs::create_dir_all(&rootfs_dir)
+            .map_err(|e| crate::KavachError::CreationFailed(format!("rootfs dir: {e}")))?;
+
+        // Generate and write OCI spec
+        let mut spec = oci_spec::generate_spec(&self.config)?;
+
+        // Override process args with the actual command
+        if let Some(process) = spec.process_mut() {
+            let cwd = self
+                .config
+                .workdir
+                .clone()
+                .unwrap_or_else(|| "/".to_string());
+            *process = ProcessBuilder::default()
+                .terminal(false)
+                .args(vec!["/bin/sh".into(), "-c".into(), command.into()])
+                .cwd(cwd)
+                .env(oci_spec::build_env(&self.config))
+                .build()
+                .map_err(|e| crate::KavachError::ExecFailed(format!("OCI process: {e}")))?;
+        }
+
+        oci_spec::write_spec(&spec, bundle_dir.path())?;
+
+        let _ = policy; // Policy is embedded in the OCI spec
+
+        // Run the container
+        let mut cmd = tokio::process::Command::new(&self.runtime);
+        cmd.args([
+            "run",
+            "--bundle",
+            &bundle_dir.path().to_string_lossy(),
+            &container_id,
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+
+        let timeout = std::time::Duration::from_millis(self.config.timeout_ms);
+
+        let mut child = cmd.spawn().map_err(|e| {
+            crate::KavachError::ExecFailed(format!("{} spawn failed: {e}", self.runtime))
+        })?;
+
+        let stdout_handle = child.stdout.take();
+        let stderr_handle = child.stderr.take();
+
+        let collect = async {
+            use tokio::io::AsyncReadExt;
+            let stdout_fut = async {
+                let mut buf = Vec::new();
+                if let Some(out) = stdout_handle {
+                    out.take(1024 * 1024).read_to_end(&mut buf).await?;
+                }
+                Ok::<_, std::io::Error>(buf)
+            };
+            let stderr_fut = async {
+                let mut buf = Vec::new();
+                if let Some(err) = stderr_handle {
+                    err.take(1024 * 1024).read_to_end(&mut buf).await?;
+                }
+                Ok::<_, std::io::Error>(buf)
+            };
+            let (stdout_buf, stderr_buf, status) =
+                tokio::try_join!(stdout_fut, stderr_fut, child.wait())?;
+            Ok::<_, std::io::Error>((status, stdout_buf, stderr_buf))
+        };
+
+        let result = match tokio::time::timeout(timeout, collect).await {
+            Ok(Ok((status, stdout_buf, stderr_buf))) => {
+                let duration_ms = start.elapsed().as_millis() as u64;
+                ExecResult {
+                    exit_code: status.code().unwrap_or(-1),
+                    stdout: String::from_utf8_lossy(&stdout_buf).into_owned(),
+                    stderr: String::from_utf8_lossy(&stderr_buf).into_owned(),
+                    duration_ms,
+                    timed_out: false,
+                }
+            }
+            Ok(Err(e)) => {
+                return Err(crate::KavachError::ExecFailed(format!(
+                    "{} error: {e}",
+                    self.runtime
+                )));
+            }
+            Err(_) => {
+                let _ = tokio::process::Command::new(&self.runtime)
+                    .args(["kill", &container_id, "SIGKILL"])
+                    .output()
+                    .await;
+                let duration_ms = start.elapsed().as_millis() as u64;
+                ExecResult {
+                    exit_code: -1,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    duration_ms,
+                    timed_out: true,
+                }
+            }
+        };
+
+        // Cleanup container
+        let _ = tokio::process::Command::new(&self.runtime)
+            .args(["delete", "--force", &container_id])
+            .output()
+            .await;
+
+        Ok(result)
+    }
+
+    async fn health_check(&self) -> crate::Result<bool> {
+        let output = tokio::process::Command::new(&self.runtime)
+            .arg("--version")
+            .output()
+            .await
+            .map_err(|e| crate::KavachError::ExecFailed(format!("{} health: {e}", self.runtime)))?;
+        Ok(output.status.success())
+    }
+
+    async fn destroy(&self) -> crate::Result<()> {
+        Ok(())
+    }
+}
+
+/// Detect available OCI runtime. Prefers crun (faster) over runc.
+fn detect_runtime() -> Option<String> {
+    for name in &["crun", "runc"] {
+        if which_exists(name) {
+            return Some((*name).to_string());
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn env_defaults() {
+        let config = SandboxConfig::builder().backend(Backend::Oci).build();
+        let env = oci_spec::build_env(&config);
+        assert!(env.iter().any(|e| e.starts_with("PATH=")));
+        assert!(env.iter().any(|e| e == "TERM=xterm"));
+    }
+}

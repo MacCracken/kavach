@@ -43,6 +43,8 @@ pub mod scoring;
 mod error;
 pub use error::KavachError;
 
+pub use backend::health::HealthStatus;
+pub use backend::metrics::SandboxMetrics;
 pub use backend::{Backend, SandboxBackend};
 pub use credential::{CredentialProxy, SecretRef};
 pub use lifecycle::{ExecResult, Sandbox, SandboxConfig, SandboxState};

@@ -8,6 +8,14 @@ use crate::lifecycle::{ExecResult, SandboxConfig};
 use crate::policy::SandboxPolicy;
 
 pub mod capabilities;
+#[cfg(feature = "gvisor")]
+pub mod gvisor;
+pub mod health;
+pub mod metrics;
+#[cfg(feature = "oci")]
+pub mod oci;
+#[cfg(any(feature = "gvisor", feature = "oci"))]
+pub mod oci_spec;
 #[cfg(feature = "process")]
 pub mod process;
 
@@ -141,13 +149,17 @@ pub fn create_backend(config: &SandboxConfig) -> crate::Result<Box<dyn SandboxBa
         Backend::Process => Err(crate::KavachError::BackendUnavailable(
             "process feature not enabled".into(),
         )),
+        #[cfg(feature = "gvisor")]
+        Backend::GVisor => Ok(Box::new(gvisor::GVisorBackend::new(config)?)),
+        #[cfg(feature = "oci")]
+        Backend::Oci => Ok(Box::new(oci::OciBackend::new(config)?)),
         _ => Err(crate::KavachError::BackendUnavailable(
             config.backend.to_string(),
         )),
     }
 }
 
-fn which_exists(name: &str) -> bool {
+pub(crate) fn which_exists(name: &str) -> bool {
     if let Ok(path) = std::env::var("PATH") {
         for dir in path.split(':') {
             if std::path::Path::new(dir).join(name).exists() {
