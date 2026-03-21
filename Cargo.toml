@@ -1,6 +1,6 @@
 [package]
 name = "kavach"
-version = "0.21.3"
+version = "0.25.3"
 edition = "2024"
 rust-version = "1.89"
 license = "AGPL-3.0-only"
@@ -15,12 +15,13 @@ categories = ["os", "web-programming"]
 default = ["process"]
 process = ["dep:seccompiler", "dep:landlock", "dep:nix", "dep:caps", "dep:regex"]
 gvisor = ["dep:oci-spec", "dep:tempfile"]
-firecracker = []
+firecracker = ["dep:tempfile"]
 wasm = ["dep:wasmtime", "dep:wasmtime-wasi"]
 oci = ["dep:oci-spec", "dep:tempfile"]
-sgx = []
-sev = []
-full = ["process", "gvisor", "firecracker", "wasm", "oci", "sgx", "sev"]
+sgx = ["dep:tempfile"]
+sev = ["dep:tempfile"]
+sy-agnos = ["dep:tempfile"]
+full = ["process", "gvisor", "firecracker", "wasm", "oci", "sgx", "sev", "sy-agnos"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

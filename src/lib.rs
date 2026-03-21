@@ -46,7 +46,7 @@ pub use error::KavachError;
 pub use backend::health::HealthStatus;
 pub use backend::metrics::SandboxMetrics;
 pub use backend::{Backend, SandboxBackend};
-pub use credential::{CredentialProxy, SecretRef};
+pub use credential::{CredentialProxy, FileInjection, SecretRef};
 pub use lifecycle::{ExecResult, Sandbox, SandboxConfig, SandboxState};
 pub use policy::{LandlockRule, NetworkPolicy, SandboxPolicy, SeccompProfile};
 pub use scanning::{ExternalizationGate, ExternalizationPolicy, ScanVerdict, Severity};

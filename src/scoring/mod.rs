@@ -45,6 +45,7 @@ pub fn base_score(backend: Backend) -> StrengthScore {
         Backend::GVisor => 70,
         Backend::Sgx => 80,
         Backend::Sev => 82,
+        Backend::SyAgnos => 80, // Base; tier detection can raise to 85 (dm-verity) or 88 (TPM)
         Backend::Firecracker => 90,
     })
 }

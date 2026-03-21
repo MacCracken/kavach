@@ -90,10 +90,29 @@ impl SandboxBackend for ProcessBackend {
             // Clone policy for pre_exec closure
             let policy_clone = policy.clone();
 
-            // SAFETY: pre_exec runs between fork and exec in the child.
-            // The closure must be signal-safe. We pre-built the BPF program
-            // above and only call kernel syscalls (unshare, landlock, seccomp)
-            // which are signal-safe.
+            // SAFETY: `CommandExt::pre_exec` requires unsafe because the closure
+            // runs in the child process between fork() and exec(), where only
+            // async-signal-safe operations are permitted (no heap allocation,
+            // no mutex acquisition, no stdio beyond write()).
+            //
+            // This closure satisfies those requirements:
+            // 1. The BPF program is pre-compiled above (before fork) — no
+            //    allocation happens inside the closure.
+            // 2. All operations are direct kernel syscalls via FFI:
+            //    - unshare(2) for namespace isolation
+            //    - landlock_create_ruleset(2) / landlock_restrict_self(2)
+            //    - prctl(2) for capability dropping
+            //    - setrlimit(2) for resource limits
+            //    - seccomp(2) / prctl(PR_SET_SECCOMP) for BPF filter
+            // 3. Error paths use eprintln! (write to fd 2) which is
+            //    async-signal-safe, or return Err (no cleanup needed).
+            // 4. No heap-allocated data is created inside the closure —
+            //    all captured values (ns_config, policy_clone, seccomp_program,
+            //    apply_ll) are moved in and only read.
+            // 5. Ordering is critical and documented inline: namespaces first
+            //    (needs unshare), then landlock (needs landlock_* syscalls),
+            //    then caps (needs capset), then seccomp last (would block
+            //    all preceding syscalls).
             unsafe {
                 cmd.pre_exec(move || {
                     // Order matters: each step needs syscalls the next would block.

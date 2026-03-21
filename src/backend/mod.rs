@@ -8,6 +8,8 @@ use crate::lifecycle::{ExecResult, SandboxConfig};
 use crate::policy::SandboxPolicy;
 
 pub mod capabilities;
+#[cfg(feature = "firecracker")]
+pub mod firecracker;
 #[cfg(feature = "gvisor")]
 pub mod gvisor;
 pub mod health;
@@ -18,6 +20,14 @@ pub mod oci;
 pub mod oci_spec;
 #[cfg(feature = "process")]
 pub mod process;
+#[cfg(feature = "sev")]
+pub mod sev;
+#[cfg(feature = "sgx")]
+pub mod sgx;
+#[cfg(feature = "sy-agnos")]
+pub mod sy_agnos;
+#[cfg(feature = "wasm")]
+pub mod wasm;
 
 /// Available sandbox backends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -37,6 +47,8 @@ pub enum Backend {
     Sgx,
     /// AMD SEV — encrypted VM memory.
     Sev,
+    /// Hardened AGNOS OS image — OS-level sandbox (strength 80–88).
+    SyAgnos,
     /// No isolation — for testing only.
     Noop,
 }
@@ -53,6 +65,7 @@ impl Backend {
             Self::Oci => which_exists("runc") || which_exists("crun"),
             Self::Sgx => std::path::Path::new("/dev/sgx_enclave").exists(),
             Self::Sev => std::path::Path::new("/dev/sev").exists(),
+            Self::SyAgnos => which_exists("docker") || which_exists("podman"),
         }
     }
 
@@ -66,6 +79,7 @@ impl Backend {
             Self::Oci,
             Self::Sgx,
             Self::Sev,
+            Self::SyAgnos,
             Self::Noop,
         ]
     }
@@ -90,6 +104,7 @@ impl fmt::Display for Backend {
             Self::Oci => write!(f, "oci"),
             Self::Sgx => write!(f, "sgx"),
             Self::Sev => write!(f, "sev"),
+            Self::SyAgnos => write!(f, "sy-agnos"),
             Self::Noop => write!(f, "noop"),
         }
     }
@@ -151,8 +166,18 @@ pub fn create_backend(config: &SandboxConfig) -> crate::Result<Box<dyn SandboxBa
         )),
         #[cfg(feature = "gvisor")]
         Backend::GVisor => Ok(Box::new(gvisor::GVisorBackend::new(config)?)),
+        #[cfg(feature = "firecracker")]
+        Backend::Firecracker => Ok(Box::new(firecracker::FirecrackerBackend::new(config)?)),
         #[cfg(feature = "oci")]
         Backend::Oci => Ok(Box::new(oci::OciBackend::new(config)?)),
+        #[cfg(feature = "wasm")]
+        Backend::Wasm => Ok(Box::new(wasm::WasmBackend::new(config)?)),
+        #[cfg(feature = "sgx")]
+        Backend::Sgx => Ok(Box::new(sgx::SgxBackend::new(config)?)),
+        #[cfg(feature = "sev")]
+        Backend::Sev => Ok(Box::new(sev::SevBackend::new(config)?)),
+        #[cfg(feature = "sy-agnos")]
+        Backend::SyAgnos => Ok(Box::new(sy_agnos::SyAgnosBackend::new(config)?)),
         _ => Err(crate::KavachError::BackendUnavailable(
             config.backend.to_string(),
         )),
@@ -196,7 +221,7 @@ mod tests {
 
     #[test]
     fn all_backends_count() {
-        assert_eq!(Backend::all().len(), 8);
+        assert_eq!(Backend::all().len(), 9);
     }
 
     #[test]
