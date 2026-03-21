@@ -37,6 +37,7 @@ pub mod backend;
 pub mod credential;
 pub mod lifecycle;
 pub mod policy;
+pub mod scanning;
 pub mod scoring;
 
 mod error;
@@ -46,6 +47,7 @@ pub use backend::{Backend, SandboxBackend};
 pub use credential::{CredentialProxy, SecretRef};
 pub use lifecycle::{ExecResult, Sandbox, SandboxConfig, SandboxState};
 pub use policy::{LandlockRule, NetworkPolicy, SandboxPolicy, SeccompProfile};
+pub use scanning::{ExternalizationGate, ExternalizationPolicy, ScanVerdict, Severity};
 pub use scoring::{StrengthScore, score_backend};
 
 /// Result type alias for kavach operations.

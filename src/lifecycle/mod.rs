@@ -6,9 +6,10 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::backend::Backend;
+use crate::backend::{Backend, SandboxBackend};
 use crate::credential::SecretRef;
 use crate::policy::SandboxPolicy;
+use crate::scanning::ExternalizationPolicy;
 
 /// Unique sandbox identifier.
 pub type SandboxId = Uuid;
@@ -73,6 +74,8 @@ pub struct SandboxConfig {
     pub env: Vec<(String, String)>,
     /// Agent ID that owns this sandbox.
     pub agent_id: Option<String>,
+    /// Externalization policy for output scanning.
+    pub externalization: Option<ExternalizationPolicy>,
 }
 
 impl Default for SandboxConfig {
@@ -85,6 +88,7 @@ impl Default for SandboxConfig {
             workdir: None,
             env: Vec::new(),
             agent_id: None,
+            externalization: None,
         }
     }
 }
@@ -133,6 +137,11 @@ impl SandboxConfigBuilder {
         self
     }
 
+    pub fn externalization(mut self, policy: ExternalizationPolicy) -> Self {
+        self.config.externalization = Some(policy);
+        self
+    }
+
     pub fn build(self) -> SandboxConfig {
         self.config
     }
@@ -154,7 +163,6 @@ pub struct ExecResult {
 }
 
 /// A sandbox instance with lifecycle management.
-#[derive(Debug)]
 pub struct Sandbox {
     pub id: SandboxId,
     pub config: SandboxConfig,
@@ -162,6 +170,21 @@ pub struct Sandbox {
     pub created_at: DateTime<Utc>,
     pub started_at: Option<DateTime<Utc>>,
     pub stopped_at: Option<DateTime<Utc>>,
+    backend: Box<dyn SandboxBackend>,
+}
+
+impl fmt::Debug for Sandbox {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Sandbox")
+            .field("id", &self.id)
+            .field("config", &self.config)
+            .field("state", &self.state)
+            .field("created_at", &self.created_at)
+            .field("started_at", &self.started_at)
+            .field("stopped_at", &self.stopped_at)
+            .field("backend", &self.config.backend.to_string())
+            .finish()
+    }
 }
 
 impl Sandbox {
@@ -173,6 +196,8 @@ impl Sandbox {
             ));
         }
 
+        let backend = crate::backend::create_backend(&config)?;
+
         Ok(Self {
             id: Uuid::new_v4(),
             config,
@@ -180,6 +205,7 @@ impl Sandbox {
             created_at: Utc::now(),
             started_at: None,
             stopped_at: None,
+            backend,
         })
     }
 
@@ -202,26 +228,29 @@ impl Sandbox {
         Ok(())
     }
 
-    /// Execute a command (placeholder — real impl delegates to backend).
-    pub async fn exec(&self, _command: &str) -> crate::Result<ExecResult> {
+    /// Execute a command — delegates to the backend, then applies externalization gate.
+    pub async fn exec(&self, command: &str) -> crate::Result<ExecResult> {
         if self.state != SandboxState::Running {
             return Err(crate::KavachError::ExecFailed(format!(
                 "sandbox is {}, not running",
                 self.state
             )));
         }
-        // Backend dispatch happens here in real implementation
-        Ok(ExecResult {
-            exit_code: 0,
-            stdout: String::new(),
-            stderr: String::new(),
-            duration_ms: 0,
-            timed_out: false,
-        })
+
+        let result = self.backend.exec(command, &self.config.policy).await?;
+
+        // Apply externalization gate if configured
+        if let Some(ref ext_policy) = self.config.externalization {
+            let gate = crate::scanning::ExternalizationGate::new();
+            gate.apply(result, ext_policy)
+        } else {
+            Ok(result)
+        }
     }
 
-    /// Destroy the sandbox.
+    /// Destroy the sandbox and release backend resources.
     pub async fn destroy(mut self) -> crate::Result<()> {
+        self.backend.destroy().await?;
         self.transition(SandboxState::Destroyed)?;
         Ok(())
     }

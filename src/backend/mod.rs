@@ -4,8 +4,12 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::lifecycle::ExecResult;
+use crate::lifecycle::{ExecResult, SandboxConfig};
 use crate::policy::SandboxPolicy;
+
+pub mod capabilities;
+#[cfg(feature = "process")]
+pub mod process;
 
 /// Available sandbox backends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -99,6 +103,50 @@ pub trait SandboxBackend: Send + Sync {
     async fn destroy(&self) -> crate::Result<()>;
 }
 
+/// No-op backend — no isolation, for testing only.
+pub struct NoopBackend;
+
+#[async_trait::async_trait]
+impl SandboxBackend for NoopBackend {
+    fn backend_type(&self) -> Backend {
+        Backend::Noop
+    }
+
+    async fn exec(&self, _command: &str, _policy: &SandboxPolicy) -> crate::Result<ExecResult> {
+        Ok(ExecResult {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+            duration_ms: 0,
+            timed_out: false,
+        })
+    }
+
+    async fn health_check(&self) -> crate::Result<bool> {
+        Ok(true)
+    }
+
+    async fn destroy(&self) -> crate::Result<()> {
+        Ok(())
+    }
+}
+
+/// Create a backend instance from configuration.
+pub fn create_backend(config: &SandboxConfig) -> crate::Result<Box<dyn SandboxBackend>> {
+    match config.backend {
+        Backend::Noop => Ok(Box::new(NoopBackend)),
+        #[cfg(feature = "process")]
+        Backend::Process => Ok(Box::new(process::ProcessBackend::new(config)?)),
+        #[cfg(not(feature = "process"))]
+        Backend::Process => Err(crate::KavachError::BackendUnavailable(
+            "process feature not enabled".into(),
+        )),
+        _ => Err(crate::KavachError::BackendUnavailable(
+            config.backend.to_string(),
+        )),
+    }
+}
+
 fn which_exists(name: &str) -> bool {
     if let Ok(path) = std::env::var("PATH") {
         for dir in path.split(':') {
@@ -146,5 +194,27 @@ mod tests {
             let back: Backend = serde_json::from_str(&json).unwrap();
             assert_eq!(*b, back);
         }
+    }
+
+    #[tokio::test]
+    async fn noop_backend_exec() {
+        let noop = NoopBackend;
+        let policy = SandboxPolicy::minimal();
+        let result = noop.exec("anything", &policy).await.unwrap();
+        assert_eq!(result.exit_code, 0);
+        assert!(result.stdout.is_empty());
+    }
+
+    #[tokio::test]
+    async fn noop_backend_health() {
+        let noop = NoopBackend;
+        assert!(noop.health_check().await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn create_backend_noop() {
+        let config = SandboxConfig::builder().backend(Backend::Noop).build();
+        let backend = create_backend(&config).unwrap();
+        assert_eq!(backend.backend_type(), Backend::Noop);
     }
 }
