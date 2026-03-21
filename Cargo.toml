@@ -1,0 +1,47 @@
+[package]
+name = "kavach"
+version = "0.21.3"
+edition = "2024"
+rust-version = "1.89"
+license = "AGPL-3.0-only"
+description = "Sandbox execution framework — backend abstraction, strength scoring, policy engine, credential proxy, and audit hooks"
+homepage = "https://github.com/MacCracken/kavach"
+repository = "https://github.com/MacCracken/kavach"
+readme = "README.md"
+keywords = ["sandbox", "security", "isolation", "container", "wasm"]
+categories = ["os", "web-programming"]
+
+[features]
+default = ["process"]
+process = []
+gvisor = []
+firecracker = []
+wasm = ["dep:wasmtime", "dep:wasmtime-wasi"]
+oci = []
+sgx = []
+sev = []
+full = ["process", "gvisor", "firecracker", "wasm", "oci", "sgx", "sev"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+async-trait = "0.1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time", "sync", "fs"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+# WASM sandbox
+wasmtime = { version = "42", optional = true }
+wasmtime-wasi = { version = "42", optional = true }
+
+[dev-dependencies]
+tempfile = "3"
+criterion = { version = "0.5", features = ["html_reports"] }
+tokio-test = "0.4"
+
+[[bench]]
+name = "sandbox"
+harness = false
