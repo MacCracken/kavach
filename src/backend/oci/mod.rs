@@ -5,11 +5,12 @@
 
 use crate::backend::oci_spec;
 use crate::backend::oci_spec::oci_runtime::ProcessBuilder;
-use crate::backend::{Backend, SandboxBackend, which_exists};
+use crate::backend::{Backend, SandboxBackend};
 use crate::lifecycle::{ExecResult, SandboxConfig};
 use crate::policy::SandboxPolicy;
 
 /// OCI container-based sandbox backend.
+#[derive(Debug)]
 pub struct OciBackend {
     config: SandboxConfig,
     runtime: String,
@@ -35,7 +36,6 @@ impl SandboxBackend for OciBackend {
     }
 
     async fn exec(&self, command: &str, policy: &SandboxPolicy) -> crate::Result<ExecResult> {
-        let start = std::time::Instant::now();
         let container_id = oci_spec::container_id("kavach-oci");
 
         // Create temp bundle directory
@@ -77,80 +77,22 @@ impl SandboxBackend for OciBackend {
             "--bundle",
             &bundle_dir.path().to_string_lossy(),
             &container_id,
-        ])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
+        ]);
 
-        let timeout = std::time::Duration::from_millis(self.config.timeout_ms);
+        let result = crate::backend::exec_util::execute_with_timeout(
+            &mut cmd,
+            self.config.timeout_ms,
+            &self.runtime,
+        )
+        .await;
 
-        let mut child = cmd.spawn().map_err(|e| {
-            crate::KavachError::ExecFailed(format!("{} spawn failed: {e}", self.runtime))
-        })?;
-
-        let stdout_handle = child.stdout.take();
-        let stderr_handle = child.stderr.take();
-
-        let collect = async {
-            use tokio::io::AsyncReadExt;
-            let stdout_fut = async {
-                let mut buf = Vec::new();
-                if let Some(out) = stdout_handle {
-                    out.take(1024 * 1024).read_to_end(&mut buf).await?;
-                }
-                Ok::<_, std::io::Error>(buf)
-            };
-            let stderr_fut = async {
-                let mut buf = Vec::new();
-                if let Some(err) = stderr_handle {
-                    err.take(1024 * 1024).read_to_end(&mut buf).await?;
-                }
-                Ok::<_, std::io::Error>(buf)
-            };
-            let (stdout_buf, stderr_buf, status) =
-                tokio::try_join!(stdout_fut, stderr_fut, child.wait())?;
-            Ok::<_, std::io::Error>((status, stdout_buf, stderr_buf))
-        };
-
-        let result = match tokio::time::timeout(timeout, collect).await {
-            Ok(Ok((status, stdout_buf, stderr_buf))) => {
-                let duration_ms = start.elapsed().as_millis() as u64;
-                ExecResult {
-                    exit_code: status.code().unwrap_or(-1),
-                    stdout: String::from_utf8_lossy(&stdout_buf).into_owned(),
-                    stderr: String::from_utf8_lossy(&stderr_buf).into_owned(),
-                    duration_ms,
-                    timed_out: false,
-                }
-            }
-            Ok(Err(e)) => {
-                return Err(crate::KavachError::ExecFailed(format!(
-                    "{} error: {e}",
-                    self.runtime
-                )));
-            }
-            Err(_) => {
-                let _ = tokio::process::Command::new(&self.runtime)
-                    .args(["kill", &container_id, "SIGKILL"])
-                    .output()
-                    .await;
-                let duration_ms = start.elapsed().as_millis() as u64;
-                ExecResult {
-                    exit_code: -1,
-                    stdout: String::new(),
-                    stderr: String::new(),
-                    duration_ms,
-                    timed_out: true,
-                }
-            }
-        };
-
-        // Cleanup container
+        // Cleanup container regardless of result
         let _ = tokio::process::Command::new(&self.runtime)
             .args(["delete", "--force", &container_id])
             .output()
             .await;
 
-        Ok(result)
+        result
     }
 
     async fn health_check(&self) -> crate::Result<bool> {
@@ -169,12 +111,7 @@ impl SandboxBackend for OciBackend {
 
 /// Detect available OCI runtime. Prefers crun (faster) over runc.
 fn detect_runtime() -> Option<String> {
-    for name in &["crun", "runc"] {
-        if which_exists(name) {
-            return Some((*name).to_string());
-        }
-    }
-    None
+    crate::backend::which_first(&["crun", "runc"])
 }
 
 #[cfg(test)]
@@ -187,5 +124,102 @@ mod tests {
         let env = oci_spec::build_env(&config);
         assert!(env.iter().any(|e| e.starts_with("PATH=")));
         assert!(env.iter().any(|e| e == "TERM=xterm"));
+    }
+
+    #[test]
+    fn env_custom_vars() {
+        let mut config = SandboxConfig::builder().backend(Backend::Oci).build();
+        config.env.push(("MY_VAR".into(), "my_value".into()));
+        let env = oci_spec::build_env(&config);
+        assert!(env.iter().any(|e| e == "MY_VAR=my_value"));
+    }
+
+    #[test]
+    fn env_preserves_defaults_with_custom() {
+        let mut config = SandboxConfig::builder().backend(Backend::Oci).build();
+        config.env.push(("X".into(), "1".into()));
+        let env = oci_spec::build_env(&config);
+        // defaults still present
+        assert!(env.iter().any(|e| e.starts_with("PATH=")));
+        assert!(env.iter().any(|e| e == "TERM=xterm"));
+        // custom also present
+        assert!(env.iter().any(|e| e == "X=1"));
+    }
+
+    #[test]
+    fn network_mode_default_disabled() {
+        let config = SandboxConfig::builder()
+            .backend(Backend::Oci)
+            .network(false)
+            .build();
+        assert_eq!(oci_spec::network_mode(&config), "none");
+    }
+
+    #[test]
+    fn network_mode_when_enabled() {
+        let mut config = SandboxConfig::builder().backend(Backend::Oci).build();
+        config.policy.network.enabled = true;
+        assert_eq!(oci_spec::network_mode(&config), "host");
+    }
+
+    #[test]
+    fn container_id_has_prefix() {
+        let id = oci_spec::container_id("kavach-oci");
+        assert!(id.starts_with("kavach-oci-"));
+    }
+
+    #[test]
+    fn container_ids_are_unique() {
+        let id1 = oci_spec::container_id("kavach-oci");
+        let id2 = oci_spec::container_id("kavach-oci");
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn detect_runtime_returns_known_or_none() {
+        let rt = detect_runtime();
+        if let Some(ref name) = rt {
+            assert!(name == "crun" || name == "runc");
+        }
+    }
+
+    #[test]
+    fn generate_spec_basic() {
+        let config = SandboxConfig::builder().backend(Backend::Oci).build();
+        let spec = oci_spec::generate_spec(&config).unwrap();
+        assert_eq!(spec.version(), "1.0.2");
+    }
+
+    #[test]
+    fn generate_spec_strict_has_limits() {
+        let config = SandboxConfig::builder()
+            .backend(Backend::Oci)
+            .policy(SandboxPolicy::strict())
+            .build();
+        let spec = oci_spec::generate_spec(&config).unwrap();
+        let linux = spec.linux().as_ref().unwrap();
+        let resources = linux.resources().as_ref().unwrap();
+        assert!(resources.memory().is_some());
+        assert!(resources.pids().is_some());
+    }
+
+    #[test]
+    fn write_and_read_spec() {
+        let config = SandboxConfig::builder().backend(Backend::Oci).build();
+        let spec = oci_spec::generate_spec(&config).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        oci_spec::write_spec(&spec, dir.path()).unwrap();
+        let content = std::fs::read_to_string(dir.path().join("config.json")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(parsed["ociVersion"], "1.0.2");
+    }
+
+    #[test]
+    fn new_fails_without_runtime() {
+        if !Backend::Oci.is_available() {
+            let config = SandboxConfig::builder().backend(Backend::Oci).build();
+            let err = OciBackend::new(&config).unwrap_err();
+            assert!(err.to_string().contains("OCI runtime"));
+        }
     }
 }

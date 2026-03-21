@@ -120,11 +120,6 @@ const PATTERNS: &[SecretPattern] = &[
     },
 ];
 
-/// Compiled scanner with pre-built regex patterns.
-pub struct SecretsScanner {
-    compiled: Vec<CompiledPattern>,
-}
-
 struct CompiledPattern {
     name: &'static str,
     category: &'static str,
@@ -132,10 +127,10 @@ struct CompiledPattern {
     regex: Regex,
 }
 
-impl SecretsScanner {
-    /// Create a new scanner with compiled patterns.
-    pub fn new() -> Self {
-        let compiled = PATTERNS
+/// Compiled patterns are cached globally — regex compilation happens once.
+static COMPILED_PATTERNS: std::sync::LazyLock<Vec<CompiledPattern>> =
+    std::sync::LazyLock::new(|| {
+        PATTERNS
             .iter()
             .filter_map(|p| {
                 Regex::new(p.regex).ok().map(|regex| CompiledPattern {
@@ -145,14 +140,27 @@ impl SecretsScanner {
                     regex,
                 })
             })
-            .collect();
-        Self { compiled }
+            .collect()
+    });
+
+/// Compiled scanner with pre-built regex patterns.
+///
+/// Patterns are compiled once and shared across all scanner instances via
+/// a global `LazyLock`. Creating multiple scanners is cheap (no re-compilation).
+pub struct SecretsScanner;
+
+impl SecretsScanner {
+    /// Create a new scanner (cheap — patterns are compiled once globally).
+    pub fn new() -> Self {
+        // Force pattern compilation on first use
+        let _ = &*COMPILED_PATTERNS;
+        Self
     }
 
     /// Scan text for secrets. Returns findings.
     pub fn scan(&self, text: &str) -> Vec<ScanFinding> {
         let mut findings = Vec::new();
-        for pattern in &self.compiled {
+        for pattern in &*COMPILED_PATTERNS {
             if let Some(m) = pattern.regex.find(text) {
                 let evidence = m.as_str();
                 // Truncate evidence to avoid leaking the full secret
@@ -177,7 +185,7 @@ impl SecretsScanner {
     /// Redact secrets in text, replacing matches with `[REDACTED:CATEGORY]`.
     pub fn redact(&self, text: &str) -> String {
         let mut result = text.to_string();
-        for pattern in &self.compiled {
+        for pattern in &*COMPILED_PATTERNS {
             result = pattern
                 .regex
                 .replace_all(&result, format!("[REDACTED:{}]", pattern.category))

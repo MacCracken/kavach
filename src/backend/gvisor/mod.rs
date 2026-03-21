@@ -9,6 +9,7 @@ use crate::lifecycle::{ExecResult, SandboxConfig};
 use crate::policy::SandboxPolicy;
 
 /// gVisor-based sandbox backend using runsc.
+#[derive(Debug)]
 pub struct GVisorBackend {
     config: SandboxConfig,
 }
@@ -34,7 +35,6 @@ impl SandboxBackend for GVisorBackend {
     }
 
     async fn exec(&self, command: &str, policy: &SandboxPolicy) -> crate::Result<ExecResult> {
-        let start = std::time::Instant::now();
         let container_id = oci_spec::container_id("kavach-gvisor");
 
         // Create temp bundle directory
@@ -79,77 +79,22 @@ impl SandboxBackend for GVisorBackend {
             "--bundle",
             &bundle_dir.path().to_string_lossy(),
             &container_id,
-        ])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
+        ]);
 
-        let timeout = std::time::Duration::from_millis(self.config.timeout_ms);
+        let result = crate::backend::exec_util::execute_with_timeout(
+            &mut cmd,
+            self.config.timeout_ms,
+            "runsc",
+        )
+        .await;
 
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| crate::KavachError::ExecFailed(format!("runsc spawn failed: {e}")))?;
-
-        let stdout_handle = child.stdout.take();
-        let stderr_handle = child.stderr.take();
-
-        let collect = async {
-            use tokio::io::AsyncReadExt;
-            let stdout_fut = async {
-                let mut buf = Vec::new();
-                if let Some(out) = stdout_handle {
-                    out.take(1024 * 1024).read_to_end(&mut buf).await?;
-                }
-                Ok::<_, std::io::Error>(buf)
-            };
-            let stderr_fut = async {
-                let mut buf = Vec::new();
-                if let Some(err) = stderr_handle {
-                    err.take(1024 * 1024).read_to_end(&mut buf).await?;
-                }
-                Ok::<_, std::io::Error>(buf)
-            };
-            let (stdout_buf, stderr_buf, status) =
-                tokio::try_join!(stdout_fut, stderr_fut, child.wait())?;
-            Ok::<_, std::io::Error>((status, stdout_buf, stderr_buf))
-        };
-
-        let result = match tokio::time::timeout(timeout, collect).await {
-            Ok(Ok((status, stdout_buf, stderr_buf))) => {
-                let duration_ms = start.elapsed().as_millis() as u64;
-                ExecResult {
-                    exit_code: status.code().unwrap_or(-1),
-                    stdout: String::from_utf8_lossy(&stdout_buf).into_owned(),
-                    stderr: String::from_utf8_lossy(&stderr_buf).into_owned(),
-                    duration_ms,
-                    timed_out: false,
-                }
-            }
-            Ok(Err(e)) => {
-                return Err(crate::KavachError::ExecFailed(format!("runsc error: {e}")));
-            }
-            Err(_) => {
-                let _ = tokio::process::Command::new("runsc")
-                    .args(["kill", &container_id, "SIGKILL"])
-                    .output()
-                    .await;
-                let duration_ms = start.elapsed().as_millis() as u64;
-                ExecResult {
-                    exit_code: -1,
-                    stdout: String::new(),
-                    stderr: String::new(),
-                    duration_ms,
-                    timed_out: true,
-                }
-            }
-        };
-
-        // Cleanup container
+        // Cleanup container regardless of result
         let _ = tokio::process::Command::new("runsc")
             .args(["delete", "--force", &container_id])
             .output()
             .await;
 
-        Ok(result)
+        result
     }
 
     async fn health_check(&self) -> crate::Result<bool> {
@@ -183,5 +128,125 @@ mod tests {
         config.env.push(("FOO".into(), "bar".into()));
         let env = oci_spec::build_env(&config);
         assert!(env.iter().any(|e| e == "FOO=bar"));
+    }
+
+    #[test]
+    fn env_includes_term() {
+        let config = SandboxConfig::builder().backend(Backend::GVisor).build();
+        let env = oci_spec::build_env(&config);
+        assert!(env.iter().any(|e| e == "TERM=xterm"));
+    }
+
+    #[test]
+    fn env_multiple_custom_vars() {
+        let mut config = SandboxConfig::builder().backend(Backend::GVisor).build();
+        config.env.push(("A".into(), "1".into()));
+        config.env.push(("B".into(), "2".into()));
+        config.env.push(("C".into(), "3".into()));
+        let env = oci_spec::build_env(&config);
+        assert!(env.iter().any(|e| e == "A=1"));
+        assert!(env.iter().any(|e| e == "B=2"));
+        assert!(env.iter().any(|e| e == "C=3"));
+    }
+
+    #[test]
+    fn network_mode_disabled() {
+        let config = SandboxConfig::builder()
+            .backend(Backend::GVisor)
+            .network(false)
+            .build();
+        assert_eq!(oci_spec::network_mode(&config), "none");
+    }
+
+    #[test]
+    fn network_mode_enabled() {
+        let mut config = SandboxConfig::builder().backend(Backend::GVisor).build();
+        config.policy.network.enabled = true;
+        assert_eq!(oci_spec::network_mode(&config), "host");
+    }
+
+    #[test]
+    fn container_id_unique() {
+        let id1 = oci_spec::container_id("kavach-gvisor");
+        let id2 = oci_spec::container_id("kavach-gvisor");
+        assert_ne!(id1, id2);
+        assert!(id1.starts_with("kavach-gvisor-"));
+    }
+
+    #[test]
+    fn generate_spec_sets_version() {
+        let config = SandboxConfig::builder().backend(Backend::GVisor).build();
+        let spec = oci_spec::generate_spec(&config).unwrap();
+        assert_eq!(spec.version(), "1.0.2");
+    }
+
+    #[test]
+    fn generate_spec_readonly_rootfs() {
+        let config = SandboxConfig::builder()
+            .backend(Backend::GVisor)
+            .policy(SandboxPolicy::strict())
+            .build();
+        let spec = oci_spec::generate_spec(&config).unwrap();
+        let root = spec.root().as_ref().unwrap();
+        assert_eq!(root.readonly().unwrap_or(false), true);
+    }
+
+    #[test]
+    fn generate_spec_resource_limits() {
+        let config = SandboxConfig::builder()
+            .backend(Backend::GVisor)
+            .policy(SandboxPolicy::strict())
+            .build();
+        let spec = oci_spec::generate_spec(&config).unwrap();
+        let linux = spec.linux().as_ref().unwrap();
+        let resources = linux.resources().as_ref().unwrap();
+        assert!(resources.memory().is_some());
+        assert!(resources.pids().is_some());
+    }
+
+    #[test]
+    fn generate_spec_no_limits_minimal() {
+        let config = SandboxConfig::builder()
+            .backend(Backend::GVisor)
+            .policy(SandboxPolicy::minimal())
+            .build();
+        let spec = oci_spec::generate_spec(&config).unwrap();
+        let linux = spec.linux().as_ref().unwrap();
+        let resources = linux.resources().as_ref();
+        // minimal policy has no memory/pids limits
+        if let Some(r) = resources {
+            assert!(r.memory().is_none());
+            assert!(r.pids().is_none());
+        }
+    }
+
+    #[test]
+    fn write_spec_creates_config_json() {
+        let config = SandboxConfig::builder().backend(Backend::GVisor).build();
+        let spec = oci_spec::generate_spec(&config).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        oci_spec::write_spec(&spec, dir.path()).unwrap();
+        assert!(dir.path().join("config.json").exists());
+    }
+
+    #[test]
+    fn write_spec_valid_json() {
+        let config = SandboxConfig::builder().backend(Backend::GVisor).build();
+        let spec = oci_spec::generate_spec(&config).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        oci_spec::write_spec(&spec, dir.path()).unwrap();
+        let content = std::fs::read_to_string(dir.path().join("config.json")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(parsed["ociVersion"], "1.0.2");
+    }
+
+    #[test]
+    fn new_fails_without_runsc() {
+        // Unless runsc is actually installed, this should fail
+        if !Backend::GVisor.is_available() {
+            let config = SandboxConfig::builder().backend(Backend::GVisor).build();
+            let err = GVisorBackend::new(&config).unwrap_err();
+            assert!(err.to_string().contains("runsc"));
+        }
     }
 }

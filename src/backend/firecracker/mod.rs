@@ -12,6 +12,7 @@ use crate::policy::SandboxPolicy;
 use config::FirecrackerConfig;
 
 /// Firecracker microVM sandbox backend.
+#[derive(Debug)]
 pub struct FirecrackerBackend {
     sandbox_config: SandboxConfig,
     fc_config: FirecrackerConfig,
@@ -93,7 +94,6 @@ impl SandboxBackend for FirecrackerBackend {
     }
 
     async fn exec(&self, command: &str, policy: &SandboxPolicy) -> crate::Result<ExecResult> {
-        let start = std::time::Instant::now();
         let vm_id = format!("kavach-fc-{}", uuid::Uuid::new_v4().as_simple());
 
         // Create temp working directory
@@ -122,72 +122,18 @@ impl SandboxBackend for FirecrackerBackend {
         };
 
         let mut cmd = tokio::process::Command::new(&program);
-        cmd.args(&args)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
+        cmd.args(&args);
 
-        // Set environment from config
         for (k, v) in &self.sandbox_config.env {
             cmd.env(k, v);
         }
 
-        let timeout = std::time::Duration::from_millis(self.sandbox_config.timeout_ms);
-
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| crate::KavachError::ExecFailed(format!("{program} spawn failed: {e}")))?;
-
-        let stdout_handle = child.stdout.take();
-        let stderr_handle = child.stderr.take();
-
-        let collect = async {
-            use tokio::io::AsyncReadExt;
-            let stdout_fut = async {
-                let mut buf = Vec::new();
-                if let Some(out) = stdout_handle {
-                    out.take(1024 * 1024).read_to_end(&mut buf).await?;
-                }
-                Ok::<_, std::io::Error>(buf)
-            };
-            let stderr_fut = async {
-                let mut buf = Vec::new();
-                if let Some(err) = stderr_handle {
-                    err.take(1024 * 1024).read_to_end(&mut buf).await?;
-                }
-                Ok::<_, std::io::Error>(buf)
-            };
-            let (stdout_buf, stderr_buf, status) =
-                tokio::try_join!(stdout_fut, stderr_fut, child.wait())?;
-            Ok::<_, std::io::Error>((status, stdout_buf, stderr_buf))
-        };
-
-        match tokio::time::timeout(timeout, collect).await {
-            Ok(Ok((status, stdout_buf, stderr_buf))) => {
-                let duration_ms = start.elapsed().as_millis() as u64;
-                Ok(ExecResult {
-                    exit_code: status.code().unwrap_or(-1),
-                    stdout: String::from_utf8_lossy(&stdout_buf).into_owned(),
-                    stderr: String::from_utf8_lossy(&stderr_buf).into_owned(),
-                    duration_ms,
-                    timed_out: false,
-                })
-            }
-            Ok(Err(e)) => Err(crate::KavachError::ExecFailed(format!(
-                "firecracker error: {e}"
-            ))),
-            Err(_) => {
-                // Timeout — kill the VM
-                let _ = child.kill().await;
-                let duration_ms = start.elapsed().as_millis() as u64;
-                Ok(ExecResult {
-                    exit_code: -1,
-                    stdout: String::new(),
-                    stderr: String::new(),
-                    duration_ms,
-                    timed_out: true,
-                })
-            }
-        }
+        crate::backend::exec_util::execute_with_timeout(
+            &mut cmd,
+            self.sandbox_config.timeout_ms,
+            &program,
+        )
+        .await
     }
 
     async fn health_check(&self) -> crate::Result<bool> {

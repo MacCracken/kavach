@@ -103,7 +103,7 @@ pub fn write_spec(spec: &oci_runtime::Spec, bundle_dir: &std::path::Path) -> cra
 }
 
 /// Get the network flag for the container runtime.
-pub fn network_mode(config: &SandboxConfig) -> &'static str {
+pub(crate) fn network_mode(config: &SandboxConfig) -> &'static str {
     if config.policy.network.enabled {
         "host"
     } else {
@@ -112,12 +112,12 @@ pub fn network_mode(config: &SandboxConfig) -> &'static str {
 }
 
 /// Generate a unique container ID.
-pub fn container_id(prefix: &str) -> String {
+pub(crate) fn container_id(prefix: &str) -> String {
     format!("{prefix}-{}", uuid::Uuid::new_v4().as_simple())
 }
 
 /// Build environment variable list for OCI process.
-pub fn build_env(config: &SandboxConfig) -> Vec<String> {
+pub(crate) fn build_env(config: &SandboxConfig) -> Vec<String> {
     let mut env = vec![
         "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".into(),
         "TERM=xterm".into(),

@@ -10,6 +10,7 @@ use crate::lifecycle::{ExecResult, SandboxConfig};
 use crate::policy::SandboxPolicy;
 
 /// Process-based sandbox backend.
+#[derive(Debug)]
 pub struct ProcessBackend {
     _config: SandboxConfig,
 }
@@ -30,8 +31,6 @@ impl SandboxBackend for ProcessBackend {
     }
 
     async fn exec(&self, command: &str, policy: &SandboxPolicy) -> crate::Result<ExecResult> {
-        let start = std::time::Instant::now();
-
         // Parse command into program + args
         let parts = shell_words(command);
         if parts.is_empty() {
@@ -146,71 +145,12 @@ impl SandboxBackend for ProcessBackend {
             }
         }
 
-        let timeout_ms = self._config.timeout_ms;
-        let timeout = std::time::Duration::from_millis(timeout_ms);
-
-        // Spawn and race against timeout
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| crate::KavachError::ExecFailed(format!("spawn failed: {e}")))?;
-
-        // Take stdout/stderr handles before waiting
-        let stdout_handle = child.stdout.take();
-        let stderr_handle = child.stderr.take();
-
-        let collect = async {
-            use tokio::io::AsyncReadExt;
-
-            // Read stdout/stderr concurrently while waiting for process
-            let stdout_fut = async {
-                let mut buf = Vec::new();
-                if let Some(out) = stdout_handle {
-                    const MAX: u64 = 1024 * 1024; // 1MB limit
-                    out.take(MAX).read_to_end(&mut buf).await?;
-                }
-                Ok::<_, std::io::Error>(buf)
-            };
-            let stderr_fut = async {
-                let mut buf = Vec::new();
-                if let Some(err) = stderr_handle {
-                    const MAX: u64 = 1024 * 1024;
-                    err.take(MAX).read_to_end(&mut buf).await?;
-                }
-                Ok::<_, std::io::Error>(buf)
-            };
-
-            let (stdout_buf, stderr_buf, status) =
-                tokio::try_join!(stdout_fut, stderr_fut, child.wait())?;
-            Ok::<_, std::io::Error>((status, stdout_buf, stderr_buf))
-        };
-
-        match tokio::time::timeout(timeout, collect).await {
-            Ok(Ok((status, stdout_buf, stderr_buf))) => {
-                let duration_ms = start.elapsed().as_millis() as u64;
-                Ok(ExecResult {
-                    exit_code: status.code().unwrap_or(-1),
-                    stdout: String::from_utf8_lossy(&stdout_buf).into_owned(),
-                    stderr: String::from_utf8_lossy(&stderr_buf).into_owned(),
-                    duration_ms,
-                    timed_out: false,
-                })
-            }
-            Ok(Err(e)) => Err(crate::KavachError::ExecFailed(format!(
-                "process error: {e}"
-            ))),
-            Err(_) => {
-                // Timeout — kill the child
-                let _ = child.kill().await;
-                let duration_ms = start.elapsed().as_millis() as u64;
-                Ok(ExecResult {
-                    exit_code: -1,
-                    stdout: String::new(),
-                    stderr: String::new(),
-                    duration_ms,
-                    timed_out: true,
-                })
-            }
-        }
+        crate::backend::exec_util::execute_with_timeout(
+            &mut cmd,
+            self._config.timeout_ms,
+            "process",
+        )
+        .await
     }
 
     async fn health_check(&self) -> crate::Result<bool> {

@@ -8,6 +8,7 @@ use crate::lifecycle::{ExecResult, SandboxConfig};
 use crate::policy::SandboxPolicy;
 
 pub mod capabilities;
+pub mod exec_util;
 #[cfg(feature = "firecracker")]
 pub mod firecracker;
 #[cfg(feature = "gvisor")]
@@ -55,6 +56,7 @@ pub enum Backend {
 
 impl Backend {
     /// Whether this backend is available on the current system.
+    #[must_use]
     pub fn is_available(&self) -> bool {
         match self {
             Self::Process => true, // Always available
@@ -85,6 +87,7 @@ impl Backend {
     }
 
     /// All backends available on this system.
+    #[must_use]
     pub fn available() -> Vec<Backend> {
         Self::all()
             .iter()
@@ -127,6 +130,7 @@ pub trait SandboxBackend: Send + Sync {
 }
 
 /// No-op backend — no isolation, for testing only.
+#[derive(Debug)]
 pub struct NoopBackend;
 
 #[async_trait::async_trait]
@@ -182,6 +186,12 @@ pub fn create_backend(config: &SandboxConfig) -> crate::Result<Box<dyn SandboxBa
             config.backend.to_string(),
         )),
     }
+}
+
+/// Find the first available binary from a list of candidates.
+/// Returns the name of the first binary found in PATH.
+pub(crate) fn which_first(names: &[&str]) -> Option<String> {
+    names.iter().find(|n| which_exists(n)).map(|n| (*n).to_string())
 }
 
 pub(crate) fn which_exists(name: &str) -> bool {
