@@ -82,6 +82,7 @@ async fn seccomp_allows_basic_ops() {
 
 // ── Externalization Gate ────────────────────────────────────────────────
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn gate_blocks_private_key() {
     let config = SandboxConfig::builder()
@@ -96,6 +97,7 @@ async fn gate_blocks_private_key() {
     assert!(result.is_err(), "private key should be blocked");
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn gate_blocks_aws_key() {
     let config = SandboxConfig::builder()
@@ -110,6 +112,7 @@ async fn gate_blocks_aws_key() {
     assert!(result.is_err(), "AWS key should be blocked");
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn gate_passes_clean_output() {
     let config = SandboxConfig::builder()
@@ -125,6 +128,7 @@ async fn gate_passes_clean_output() {
     assert!(result.stdout.contains("hello world"));
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn gate_redacts_api_key() {
     let policy = ExternalizationPolicy {
@@ -148,6 +152,7 @@ async fn gate_redacts_api_key() {
     assert!(result.stdout.contains("[REDACTED:"));
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn gate_blocks_oversized() {
     let policy = ExternalizationPolicy {
@@ -167,6 +172,7 @@ async fn gate_blocks_oversized() {
     assert!(result.is_err(), "oversized output should be blocked");
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn gate_disabled_passes_secrets() {
     let policy = ExternalizationPolicy {
@@ -298,6 +304,7 @@ fn all_backends_serde_roundtrip() {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn externalization_composes_with_seccomp() {
     let config = SandboxConfig::builder()
