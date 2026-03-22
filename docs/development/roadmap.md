@@ -179,9 +179,26 @@ Completed items are in [CHANGELOG.md](../../CHANGELOG.md).
 - [ ] Image signature verification — reject unsigned/tampered images via ark signing
 - [ ] Veraison EAR integration — standardized attestation result encoding (IETF RATS)
 
-### Platform
-- [ ] macOS sandbox (sandbox-exec / App Sandbox)
-- [ ] Windows sandboxing (AppContainer / Hyper-V isolation)
+### Cross-platform porting
+
+- [ ] **macOS: App Sandbox / sandbox-exec for process isolation** —
+  `sandbox-exec` with custom Scheme profiles for filesystem and network
+  restrictions. Map `SandboxPolicy` Landlock rules to sandbox profile
+  `(allow file-read* (subpath ...))` directives. App Sandbox entitlements
+  for distributed builds.
+- [ ] **Windows: AppContainer for process isolation** — `CreateAppContainerProfile`
+  + `UpdateProcThreadAttribute` via `windows-rs` for process-level
+  isolation. Map `SandboxPolicy` seccomp rules to Windows restricted
+  tokens and integrity levels.
+- [ ] **Windows: Hyper-V for VM isolation** — Hyper-V lightweight utility
+  VM as alternative to Firecracker. Similar strength score (85-90).
+  Requires Windows Pro/Enterprise with Hyper-V enabled.
+- [ ] **Cross-platform: platform-specific policy enforcement behind
+  SandboxBackend trait** — Process backend dispatches to
+  Linux (namespaces + seccomp + Landlock), macOS (sandbox-exec + App
+  Sandbox), or Windows (AppContainer + restricted tokens) at runtime.
+  `SandboxPolicy` remains the single API; platform mapping is internal.
+  Feature-gated: `linux` (default), `macos`, `windows`.
 - [ ] FreeBSD jails
 
 ---

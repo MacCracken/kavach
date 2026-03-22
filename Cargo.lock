@@ -1261,7 +1261,7 @@ dependencies = [
 
 [[package]]
 name = "kavach"
-version = "0.25.3"
+version = "0.21.3"
 dependencies = [
  "anyhow",
  "async-trait",

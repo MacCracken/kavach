@@ -164,7 +164,7 @@ impl SandboxBackend for ProcessBackend {
 
 /// Simple whitespace-based command splitting (no shell expansion).
 fn shell_words(input: &str) -> Vec<String> {
-    let mut words = Vec::new();
+    let mut words = Vec::with_capacity(8);
     let mut current = String::new();
     let mut in_single = false;
     let mut in_double = false;

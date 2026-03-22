@@ -183,14 +183,39 @@ impl SecretsScanner {
     }
 
     /// Redact secrets in text, replacing matches with `[REDACTED:CATEGORY]`.
+    ///
+    /// Uses a single-pass approach: collects all match ranges, resolves overlaps,
+    /// then builds the output string once (instead of 16 sequential replace_all calls).
     pub fn redact(&self, text: &str) -> String {
-        let mut result = text.to_string();
+        // Collect all matches with their byte ranges and categories
+        let mut matches: Vec<(usize, usize, &str)> = Vec::new();
         for pattern in &*COMPILED_PATTERNS {
-            result = pattern
-                .regex
-                .replace_all(&result, format!("[REDACTED:{}]", pattern.category))
-                .into_owned();
+            for m in pattern.regex.find_iter(text) {
+                matches.push((m.start(), m.end(), pattern.category));
+            }
         }
+
+        if matches.is_empty() {
+            return text.to_string();
+        }
+
+        // Sort by start position; on tie, longest match wins
+        matches.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
+
+        // Build output in one pass, skipping overlapping matches
+        let mut result = String::with_capacity(text.len());
+        let mut cursor = 0;
+        for (start, end, category) in &matches {
+            if *start < cursor {
+                continue; // skip overlapping match
+            }
+            result.push_str(&text[cursor..*start]);
+            result.push_str("[REDACTED:");
+            result.push_str(category);
+            result.push(']');
+            cursor = *end;
+        }
+        result.push_str(&text[cursor..]);
         result
     }
 }

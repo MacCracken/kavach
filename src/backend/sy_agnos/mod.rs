@@ -254,7 +254,7 @@ fn parse_tier_from_release(content: &str) -> SyAgnosTier {
 
 /// Detect available container runtime. Prefers docker over podman.
 fn detect_runtime() -> Option<String> {
-    crate::backend::which_first(&["docker", "podman"])
+    crate::backend::which_first(&["docker", "podman"]).map(Into::into)
 }
 
 /// Lightweight regex for attestation without pulling in full regex crate.

@@ -190,8 +190,9 @@ pub fn create_backend(config: &SandboxConfig) -> crate::Result<Box<dyn SandboxBa
 
 /// Find the first available binary from a list of candidates.
 /// Returns the name of the first binary found in PATH.
-pub(crate) fn which_first(names: &[&str]) -> Option<String> {
-    names.iter().find(|n| which_exists(n)).map(|n| (*n).to_string())
+#[cfg(any(feature = "oci", feature = "sy-agnos"))]
+pub(crate) fn which_first<'a>(names: &[&'a str]) -> Option<&'a str> {
+    names.iter().copied().find(|n| which_exists(n))
 }
 
 pub(crate) fn which_exists(name: &str) -> bool {

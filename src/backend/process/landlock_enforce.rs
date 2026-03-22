@@ -26,13 +26,15 @@ pub fn apply_landlock(policy: &SandboxPolicy) -> crate::Result<()> {
         .map_err(|e| crate::KavachError::ExecFailed(format!("landlock create: {e}")))?;
 
     // If no explicit rules but read_only_rootfs is set, apply defaults
+    let default_rules;
     let rules = if policy.landlock_rules.is_empty() && policy.read_only_rootfs {
-        default_readonly_rules(policy)
+        default_rules = default_readonly_rules(policy);
+        &default_rules
     } else {
-        policy.landlock_rules.clone()
+        &policy.landlock_rules
     };
 
-    for rule in &rules {
+    for rule in rules {
         let access = match rule.access.as_str() {
             "rw" => access_all,
             _ => access_read,

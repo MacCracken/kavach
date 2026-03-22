@@ -111,7 +111,7 @@ impl SandboxBackend for OciBackend {
 
 /// Detect available OCI runtime. Prefers crun (faster) over runc.
 fn detect_runtime() -> Option<String> {
-    crate::backend::which_first(&["crun", "runc"])
+    crate::backend::which_first(&["crun", "runc"]).map(Into::into)
 }
 
 #[cfg(test)]

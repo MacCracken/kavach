@@ -23,12 +23,23 @@ lcov.info
 tarpaulin-report.html
 coverage/
 
-# Benchmark output
+# Benchmark output (criterion stores baselines in target/)
 criterion/
 
 # Environment / secrets
 .env
 .env.*
+*.pem
+*.key
+credentials.json
+secrets.json
+
+# Rust artifacts
+**/*.rs.bk
+Cargo.lock.bak
 
 # Claude Code
 .claude/
+
+# Logs
+*.log
