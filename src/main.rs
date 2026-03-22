@@ -158,7 +158,7 @@ async fn main() -> ExitCode {
         }
 
         Command::Backends => {
-            println!("{:<15} {}", "BACKEND", "AVAILABLE");
+            println!("{:<15} AVAILABLE", "BACKEND");
             for b in Backend::all() {
                 let available = if b.is_available() { "yes" } else { "no" };
                 println!("{:<15} {}", b, available);
