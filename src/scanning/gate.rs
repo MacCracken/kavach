@@ -133,10 +133,11 @@ mod tests {
     #[test]
     fn redact_medium_severity() {
         let gate = ExternalizationGate::new();
-        let mut policy = ExternalizationPolicy::default();
-        // Lower quarantine threshold so medium doesn't get quarantined
-        policy.quarantine_threshold = Severity::High;
-        policy.block_threshold = Severity::Critical;
+        let policy = ExternalizationPolicy {
+            quarantine_threshold: Severity::High,
+            block_threshold: Severity::Critical,
+            ..Default::default()
+        };
         let result = gate
             .apply(
                 make_result(r#"config: api_key = "abcdefghijklmnopqrstuvwxyz""#),
@@ -149,8 +150,10 @@ mod tests {
     #[test]
     fn block_oversized() {
         let gate = ExternalizationGate::new();
-        let mut policy = ExternalizationPolicy::default();
-        policy.max_artifact_size_bytes = 10;
+        let policy = ExternalizationPolicy {
+            max_artifact_size_bytes: 10,
+            ..Default::default()
+        };
         let result = gate.apply(make_result("this is longer than 10 bytes"), &policy);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("size"));
@@ -159,8 +162,10 @@ mod tests {
     #[test]
     fn disabled_gate_passes_everything() {
         let gate = ExternalizationGate::new();
-        let mut policy = ExternalizationPolicy::default();
-        policy.enabled = false;
+        let policy = ExternalizationPolicy {
+            enabled: false,
+            ..Default::default()
+        };
         let result = gate
             .apply(make_result("-----BEGIN RSA PRIVATE KEY-----"), &policy)
             .unwrap();

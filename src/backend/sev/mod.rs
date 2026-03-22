@@ -107,12 +107,8 @@ impl SandboxBackend for SevBackend {
             cmd.env(k, v);
         }
 
-        crate::backend::exec_util::execute_with_timeout(
-            &mut cmd,
-            self.config.timeout_ms,
-            "qemu",
-        )
-        .await
+        crate::backend::exec_util::execute_with_timeout(&mut cmd, self.config.timeout_ms, "qemu")
+            .await
     }
 
     async fn health_check(&self) -> crate::Result<bool> {

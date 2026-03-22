@@ -127,9 +127,11 @@ async fn gate_passes_clean_output() {
 
 #[tokio::test]
 async fn gate_redacts_api_key() {
-    let mut policy = ExternalizationPolicy::default();
-    policy.quarantine_threshold = Severity::High;
-    policy.block_threshold = Severity::Critical;
+    let policy = ExternalizationPolicy {
+        quarantine_threshold: Severity::High,
+        block_threshold: Severity::Critical,
+        ..Default::default()
+    };
 
     let config = SandboxConfig::builder()
         .backend(Backend::Process)
@@ -148,8 +150,10 @@ async fn gate_redacts_api_key() {
 
 #[tokio::test]
 async fn gate_blocks_oversized() {
-    let mut policy = ExternalizationPolicy::default();
-    policy.max_artifact_size_bytes = 50;
+    let policy = ExternalizationPolicy {
+        max_artifact_size_bytes: 50,
+        ..Default::default()
+    };
 
     let config = SandboxConfig::builder()
         .backend(Backend::Process)
@@ -165,8 +169,10 @@ async fn gate_blocks_oversized() {
 
 #[tokio::test]
 async fn gate_disabled_passes_secrets() {
-    let mut policy = ExternalizationPolicy::default();
-    policy.enabled = false;
+    let policy = ExternalizationPolicy {
+        enabled: false,
+        ..Default::default()
+    };
 
     let config = SandboxConfig::builder()
         .backend(Backend::Process)

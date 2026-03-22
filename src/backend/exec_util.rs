@@ -71,7 +71,9 @@ pub async fn execute_with_timeout(
                 timed_out: false,
             })
         }
-        Ok(Err(e)) => Err(crate::KavachError::ExecFailed(format!("{label} error: {e}"))),
+        Ok(Err(e)) => Err(crate::KavachError::ExecFailed(format!(
+            "{label} error: {e}"
+        ))),
         Err(_) => {
             let _ = child.kill().await;
             let duration_ms = start.elapsed().as_millis() as u64;
