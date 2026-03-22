@@ -2,6 +2,18 @@
 
 All notable changes to kavach are documented here.
 
+## [0.22.3] — 2026-03-22
+
+### Changed
+- Version bump for stiva 0.22.3 ecosystem release
+
+## [0.21.4] — 2026-03-21
+
+### Fixed
+- **aarch64 Linux build** — map legacy syscalls (`open`, `stat`, `lstat`, `poll`, `access`, `pipe`, `select`, `dup2`, `fork`, `vfork`, `getdents`, `rename`, `mkdir`, `rmdir`, `link`, `unlink`, `symlink`, `readlink`, `chmod`, `chown`, `getrlimit`, `epoll_create`, `epoll_wait`, `sendfile`) to modern equivalents (`openat`, `newfstatat`, `ppoll`, `faccessat`, etc.) via `#[cfg(target_arch)]` in seccomp filter
+- **cargo-deny license failure** — added `MPL-2.0` to allowed licenses for `sized-chunks` dependency (via wasmtime)
+- **Release artifacts** — release workflow now packages platform binaries as `kavach-{version}-{arch}.tar.gz` with SHA-256 checksums attached to GitHub releases
+
 ## [0.21.3] — 2026-03-21
 
 ### Performance

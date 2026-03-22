@@ -48,8 +48,20 @@ jobs:
           echo 'linker = "aarch64-linux-gnu-gcc"' >> .cargo/config.toml
       - name: Build release
         run: cargo build --release --target ${{ matrix.target }}
-      - name: Verify build
-        run: echo "Build successful for ${{ matrix.target }}"
+      - name: Package
+        run: |
+          VERSION=$(cat VERSION | tr -d '[:space:]')
+          ARCHIVE="kavach-${VERSION}-${{ matrix.name }}.tar.gz"
+          tar czf "${ARCHIVE}" -C target/${{ matrix.target }}/release kavach
+          sha256sum "${ARCHIVE}" > "${ARCHIVE}.sha256"
+        shell: bash
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: kavach-${{ matrix.name }}
+          path: |
+            kavach-*.tar.gz
+            kavach-*.tar.gz.sha256
 
   publish:
     name: Publish to crates.io
@@ -83,7 +95,14 @@ jobs:
     needs: [ci, build, publish]
     steps:
       - uses: actions/checkout@v4
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          files: |
+            kavach-*.tar.gz
+            kavach-*.tar.gz.sha256
           generate_release_notes: true

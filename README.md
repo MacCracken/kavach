@@ -194,6 +194,7 @@ kavach = { version = "0.21", features = ["full"] }
 | **0.24.3** | Firecracker + WASM | microVM, wasmtime + WASI, checkpoint/restore |
 | **0.25.3** | Hardware enclaves | Intel SGX, AMD SEV-SNP, attestation |
 | **0.26.3** | Consumer adoption | SY, daimon, AgnosAI integration |
+| **0.27.3** | Stiva integration | `Sandbox::spawn()` (long-running), rootfs passthrough, graceful stop (SIGTERM→SIGKILL), stdout/stderr streaming |
 | **1.0.0** | Stable API | All 8 backends, 90%+ coverage, formally verified FSM |
 
 Full details: [docs/development/roadmap.md](docs/development/roadmap.md)
