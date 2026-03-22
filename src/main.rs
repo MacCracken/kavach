@@ -73,7 +73,11 @@ fn parse_policy(s: &str, no_network: bool) -> Result<SandboxPolicy, String> {
         "minimal" => SandboxPolicy::minimal(),
         "basic" => SandboxPolicy::basic(),
         "strict" => SandboxPolicy::strict(),
-        other => return Err(format!("unknown policy: {other} (use minimal, basic, strict)")),
+        other => {
+            return Err(format!(
+                "unknown policy: {other} (use minimal, basic, strict)"
+            ));
+        }
     };
     if no_network {
         policy.network.enabled = false;
