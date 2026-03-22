@@ -188,39 +188,37 @@ pub fn is_syscall_allowed(name: &str) -> bool {
 }
 
 /// Map a syscall name to its number on this architecture.
-/// Returns None if the name is not recognized.
+/// Returns None if the name is not recognized or not available on the current arch.
+///
+/// On aarch64, many legacy syscalls (open, stat, etc.) do not exist.
+/// We map those names to their modern equivalents (openat, newfstatat, etc.)
+/// so that profile definitions work consistently across architectures.
 #[cfg(target_os = "linux")]
 pub fn syscall_number(name: &str) -> Option<i64> {
-    // Map from name to libc::SYS_* constant (x86_64)
     Some(match name {
+        // Universal syscalls (available on both x86_64 and aarch64)
         "read" => libc::SYS_read,
         "write" => libc::SYS_write,
-        "open" => libc::SYS_open,
         "close" => libc::SYS_close,
-        "stat" => libc::SYS_stat,
         "fstat" => libc::SYS_fstat,
-        "lstat" => libc::SYS_lstat,
-        "poll" => libc::SYS_poll,
         "lseek" => libc::SYS_lseek,
         "mmap" => libc::SYS_mmap,
         "mprotect" => libc::SYS_mprotect,
         "munmap" => libc::SYS_munmap,
         "brk" => libc::SYS_brk,
         "ioctl" => libc::SYS_ioctl,
-        "access" => libc::SYS_access,
-        "pipe" => libc::SYS_pipe,
-        "select" => libc::SYS_select,
         "sched_yield" => libc::SYS_sched_yield,
         "mremap" => libc::SYS_mremap,
         "msync" => libc::SYS_msync,
         "mincore" => libc::SYS_mincore,
         "madvise" => libc::SYS_madvise,
         "dup" => libc::SYS_dup,
-        "dup2" => libc::SYS_dup2,
-        "pause" => libc::SYS_pause,
         "nanosleep" => libc::SYS_nanosleep,
         "getpid" => libc::SYS_getpid,
+        #[cfg(target_arch = "x86_64")]
         "sendfile" => libc::SYS_sendfile,
+        #[cfg(target_arch = "aarch64")]
+        "sendfile" => 71, // sendfile on aarch64 (not defined in libc crate)
         "socket" => libc::SYS_socket,
         "connect" => libc::SYS_connect,
         "accept" => libc::SYS_accept,
@@ -236,8 +234,6 @@ pub fn syscall_number(name: &str) -> Option<i64> {
         "setsockopt" => libc::SYS_setsockopt,
         "getsockopt" => libc::SYS_getsockopt,
         "clone" => libc::SYS_clone,
-        "fork" => libc::SYS_fork,
-        "vfork" => libc::SYS_vfork,
         "execve" => libc::SYS_execve,
         "exit" => libc::SYS_exit,
         "wait4" => libc::SYS_wait4,
@@ -248,21 +244,10 @@ pub fn syscall_number(name: &str) -> Option<i64> {
         "fdatasync" => libc::SYS_fdatasync,
         "truncate" => libc::SYS_truncate,
         "ftruncate" => libc::SYS_ftruncate,
-        "getdents" => libc::SYS_getdents,
         "getcwd" => libc::SYS_getcwd,
         "chdir" => libc::SYS_chdir,
-        "rename" => libc::SYS_rename,
-        "mkdir" => libc::SYS_mkdir,
-        "rmdir" => libc::SYS_rmdir,
-        "link" => libc::SYS_link,
-        "unlink" => libc::SYS_unlink,
-        "symlink" => libc::SYS_symlink,
-        "readlink" => libc::SYS_readlink,
-        "chmod" => libc::SYS_chmod,
-        "chown" => libc::SYS_chown,
         "umask" => libc::SYS_umask,
         "gettimeofday" => libc::SYS_gettimeofday,
-        "getrlimit" => libc::SYS_getrlimit,
         "getrusage" => libc::SYS_getrusage,
         "sysinfo" => libc::SYS_sysinfo,
         "times" => libc::SYS_times,
@@ -271,7 +256,6 @@ pub fn syscall_number(name: &str) -> Option<i64> {
         "geteuid" => libc::SYS_geteuid,
         "getegid" => libc::SYS_getegid,
         "getppid" => libc::SYS_getppid,
-        "getpgrp" => libc::SYS_getpgrp,
         "setsid" => libc::SYS_setsid,
         "setpgid" => libc::SYS_setpgid,
         "sigaltstack" => libc::SYS_sigaltstack,
@@ -281,16 +265,145 @@ pub fn syscall_number(name: &str) -> Option<i64> {
         "clock_gettime" => libc::SYS_clock_gettime,
         "clock_nanosleep" => libc::SYS_clock_nanosleep,
         "exit_group" => libc::SYS_exit_group,
-        "epoll_create" => libc::SYS_epoll_create,
         "epoll_ctl" => libc::SYS_epoll_ctl,
-        "epoll_wait" => libc::SYS_epoll_wait,
         "futex" => libc::SYS_futex,
         "set_tid_address" => libc::SYS_set_tid_address,
+
+        // Syscalls that exist on x86_64 but not aarch64.
+        // On aarch64, map to modern equivalents.
+        #[cfg(target_arch = "x86_64")]
+        "open" => libc::SYS_open,
+        #[cfg(not(target_arch = "x86_64"))]
+        "open" => libc::SYS_openat,
+
+        #[cfg(target_arch = "x86_64")]
+        "stat" => libc::SYS_stat,
+        #[cfg(not(target_arch = "x86_64"))]
+        "stat" => libc::SYS_newfstatat,
+
+        #[cfg(target_arch = "x86_64")]
+        "lstat" => libc::SYS_lstat,
+        #[cfg(not(target_arch = "x86_64"))]
+        "lstat" => libc::SYS_newfstatat,
+
+        #[cfg(target_arch = "x86_64")]
+        "poll" => libc::SYS_poll,
+        #[cfg(not(target_arch = "x86_64"))]
+        "poll" => libc::SYS_ppoll,
+
+        #[cfg(target_arch = "x86_64")]
+        "access" => libc::SYS_access,
+        #[cfg(not(target_arch = "x86_64"))]
+        "access" => libc::SYS_faccessat,
+
+        #[cfg(target_arch = "x86_64")]
+        "pipe" => libc::SYS_pipe,
+        #[cfg(not(target_arch = "x86_64"))]
+        "pipe" => libc::SYS_pipe2,
+
+        #[cfg(target_arch = "x86_64")]
+        "select" => libc::SYS_select,
+        #[cfg(not(target_arch = "x86_64"))]
+        "select" => libc::SYS_pselect6,
+
+        #[cfg(target_arch = "x86_64")]
+        "dup2" => libc::SYS_dup2,
+        #[cfg(not(target_arch = "x86_64"))]
+        "dup2" => libc::SYS_dup3,
+
+        #[cfg(target_arch = "x86_64")]
+        "pause" => libc::SYS_pause,
+        #[cfg(not(target_arch = "x86_64"))]
+        "pause" => return None, // no equivalent on aarch64
+
+        #[cfg(target_arch = "x86_64")]
+        "fork" => libc::SYS_fork,
+        #[cfg(not(target_arch = "x86_64"))]
+        "fork" => libc::SYS_clone,
+
+        #[cfg(target_arch = "x86_64")]
+        "vfork" => libc::SYS_vfork,
+        #[cfg(not(target_arch = "x86_64"))]
+        "vfork" => libc::SYS_clone,
+
+        #[cfg(target_arch = "x86_64")]
+        "getdents" => libc::SYS_getdents,
+        #[cfg(not(target_arch = "x86_64"))]
+        "getdents" => libc::SYS_getdents64,
+
+        #[cfg(target_arch = "x86_64")]
+        "rename" => libc::SYS_rename,
+        #[cfg(not(target_arch = "x86_64"))]
+        "rename" => libc::SYS_renameat,
+
+        #[cfg(target_arch = "x86_64")]
+        "mkdir" => libc::SYS_mkdir,
+        #[cfg(not(target_arch = "x86_64"))]
+        "mkdir" => libc::SYS_mkdirat,
+
+        #[cfg(target_arch = "x86_64")]
+        "rmdir" => libc::SYS_rmdir,
+        #[cfg(not(target_arch = "x86_64"))]
+        "rmdir" => libc::SYS_unlinkat,
+
+        #[cfg(target_arch = "x86_64")]
+        "link" => libc::SYS_link,
+        #[cfg(not(target_arch = "x86_64"))]
+        "link" => libc::SYS_linkat,
+
+        #[cfg(target_arch = "x86_64")]
+        "unlink" => libc::SYS_unlink,
+        #[cfg(not(target_arch = "x86_64"))]
+        "unlink" => libc::SYS_unlinkat,
+
+        #[cfg(target_arch = "x86_64")]
+        "symlink" => libc::SYS_symlink,
+        #[cfg(not(target_arch = "x86_64"))]
+        "symlink" => libc::SYS_symlinkat,
+
+        #[cfg(target_arch = "x86_64")]
+        "readlink" => libc::SYS_readlink,
+        #[cfg(not(target_arch = "x86_64"))]
+        "readlink" => libc::SYS_readlinkat,
+
+        #[cfg(target_arch = "x86_64")]
+        "chmod" => libc::SYS_chmod,
+        #[cfg(not(target_arch = "x86_64"))]
+        "chmod" => libc::SYS_fchmodat,
+
+        #[cfg(target_arch = "x86_64")]
+        "chown" => libc::SYS_chown,
+        #[cfg(not(target_arch = "x86_64"))]
+        "chown" => libc::SYS_fchownat,
+
+        #[cfg(target_arch = "x86_64")]
+        "getrlimit" => libc::SYS_getrlimit,
+        #[cfg(not(target_arch = "x86_64"))]
+        "getrlimit" => libc::SYS_prlimit64,
+
+        #[cfg(target_arch = "x86_64")]
+        "getpgrp" => libc::SYS_getpgrp,
+        #[cfg(not(target_arch = "x86_64"))]
+        "getpgrp" => return None, // not available on aarch64
+
+        #[cfg(target_arch = "x86_64")]
+        "epoll_create" => libc::SYS_epoll_create,
+        #[cfg(not(target_arch = "x86_64"))]
+        "epoll_create" => libc::SYS_epoll_create1,
+
+        #[cfg(target_arch = "x86_64")]
+        "epoll_wait" => libc::SYS_epoll_wait,
+        #[cfg(not(target_arch = "x86_64"))]
+        "epoll_wait" => libc::SYS_epoll_pwait,
+
         // Blocked syscalls
         "ptrace" => libc::SYS_ptrace,
         "mount" => libc::SYS_mount,
         "umount2" => libc::SYS_umount2,
         "reboot" => libc::SYS_reboot,
+        #[cfg(target_arch = "x86_64")]
+        "kexec_load" => libc::SYS_kexec_load,
+        #[cfg(not(target_arch = "x86_64"))]
         "kexec_load" => libc::SYS_kexec_load,
         "init_module" => libc::SYS_init_module,
         "delete_module" => libc::SYS_delete_module,
