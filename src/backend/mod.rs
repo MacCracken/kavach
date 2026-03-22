@@ -19,7 +19,7 @@ pub mod metrics;
 pub mod oci;
 #[cfg(any(feature = "gvisor", feature = "oci"))]
 pub mod oci_spec;
-#[cfg(feature = "process")]
+#[cfg(all(feature = "process", target_os = "linux"))]
 pub mod process;
 #[cfg(feature = "sev")]
 pub mod sev;
@@ -59,7 +59,7 @@ impl Backend {
     #[must_use]
     pub fn is_available(&self) -> bool {
         match self {
-            Self::Process => true, // Always available
+            Self::Process => cfg!(all(feature = "process", target_os = "linux")),
             Self::Noop => true,
             Self::GVisor => which_exists("runsc"),
             Self::Firecracker => which_exists("firecracker"),
@@ -162,11 +162,11 @@ impl SandboxBackend for NoopBackend {
 pub fn create_backend(config: &SandboxConfig) -> crate::Result<Box<dyn SandboxBackend>> {
     match config.backend {
         Backend::Noop => Ok(Box::new(NoopBackend)),
-        #[cfg(feature = "process")]
+        #[cfg(all(feature = "process", target_os = "linux"))]
         Backend::Process => Ok(Box::new(process::ProcessBackend::new(config)?)),
-        #[cfg(not(feature = "process"))]
+        #[cfg(not(all(feature = "process", target_os = "linux")))]
         Backend::Process => Err(crate::KavachError::BackendUnavailable(
-            "process feature not enabled".into(),
+            "process backend requires Linux with the 'process' feature".into(),
         )),
         #[cfg(feature = "gvisor")]
         Backend::GVisor => Ok(Box::new(gvisor::GVisorBackend::new(config)?)),
