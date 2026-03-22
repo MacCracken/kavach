@@ -5,8 +5,9 @@ use crate::*;
 #[test]
 fn backend_availability() {
     let avail = Backend::available();
-    assert!(avail.contains(&Backend::Process));
     assert!(avail.contains(&Backend::Noop));
+    #[cfg(all(feature = "process", target_os = "linux"))]
+    assert!(avail.contains(&Backend::Process));
 }
 
 #[test]
@@ -38,7 +39,7 @@ fn policy_presets() {
 #[tokio::test]
 async fn full_lifecycle() {
     let config = SandboxConfig::builder()
-        .backend(Backend::Process)
+        .backend(Backend::Noop)
         .policy_seccomp("basic")
         .network(false)
         .agent_id("test-agent")

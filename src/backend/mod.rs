@@ -211,13 +211,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn process_always_available() {
-        assert!(Backend::Process.is_available());
+    fn noop_always_available() {
         assert!(Backend::Noop.is_available());
     }
 
+    #[cfg(all(feature = "process", target_os = "linux"))]
     #[test]
-    fn available_includes_process() {
+    fn process_available_on_linux() {
+        assert!(Backend::Process.is_available());
         let avail = Backend::available();
         assert!(avail.contains(&Backend::Process));
     }

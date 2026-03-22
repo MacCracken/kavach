@@ -297,14 +297,14 @@ mod tests {
 
     #[tokio::test]
     async fn create_sandbox() {
-        let config = SandboxConfig::default();
+        let config = SandboxConfig::builder().backend(Backend::Noop).build();
         let sandbox = Sandbox::create(config).await.unwrap();
         assert_eq!(sandbox.state, SandboxState::Created);
     }
 
     #[tokio::test]
     async fn sandbox_lifecycle() {
-        let config = SandboxConfig::default();
+        let config = SandboxConfig::builder().backend(Backend::Noop).build();
         let mut sandbox = Sandbox::create(config).await.unwrap();
 
         sandbox.transition(SandboxState::Running).unwrap();
@@ -319,7 +319,7 @@ mod tests {
 
     #[tokio::test]
     async fn exec_requires_running() {
-        let config = SandboxConfig::default();
+        let config = SandboxConfig::builder().backend(Backend::Noop).build();
         let sandbox = Sandbox::create(config).await.unwrap();
         // Not started yet
         assert!(sandbox.exec("echo hello").await.is_err());
