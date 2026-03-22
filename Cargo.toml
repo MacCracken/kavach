@@ -33,6 +33,7 @@ async-trait = "0.1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time", "sync", "fs", "io-util"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
 
 # Process backend (Linux-only)
 regex = { version = "1", optional = true }
