@@ -16,6 +16,7 @@ pub type SandboxId = Uuid;
 
 /// Sandbox lifecycle state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum SandboxState {
     /// Created but not yet started.
     Created,
@@ -30,6 +31,8 @@ pub enum SandboxState {
 }
 
 impl SandboxState {
+    #[inline]
+    #[must_use]
     pub fn valid_transition(&self, to: &SandboxState) -> bool {
         matches!(
             (self, to),
@@ -94,6 +97,7 @@ impl Default for SandboxConfig {
 }
 
 impl SandboxConfig {
+    #[must_use]
     pub fn builder() -> SandboxConfigBuilder {
         SandboxConfigBuilder::default()
     }
@@ -142,6 +146,7 @@ impl SandboxConfigBuilder {
         self
     }
 
+    #[must_use]
     pub fn build(self) -> SandboxConfig {
         self.config
     }
@@ -351,6 +356,121 @@ mod tests {
     fn state_display() {
         assert_eq!(SandboxState::Running.to_string(), "running");
         assert_eq!(SandboxState::Destroyed.to_string(), "destroyed");
+    }
+
+    #[test]
+    fn invalid_transition_error() {
+        let mut sandbox_state = SandboxState::Created;
+        // Created → Stopped is invalid
+        assert!(!sandbox_state.valid_transition(&SandboxState::Stopped));
+        // Created → Destroyed is invalid
+        assert!(!sandbox_state.valid_transition(&SandboxState::Destroyed));
+        // Destroyed → anything is invalid
+        sandbox_state = SandboxState::Destroyed;
+        assert!(!sandbox_state.valid_transition(&SandboxState::Created));
+        assert!(!sandbox_state.valid_transition(&SandboxState::Running));
+    }
+
+    #[test]
+    fn state_serde_roundtrip() {
+        for state in [
+            SandboxState::Created,
+            SandboxState::Running,
+            SandboxState::Paused,
+            SandboxState::Stopped,
+            SandboxState::Destroyed,
+        ] {
+            let json = serde_json::to_string(&state).unwrap();
+            let back: SandboxState = serde_json::from_str(&json).unwrap();
+            assert_eq!(state, back);
+        }
+    }
+
+    /// Exhaustive FSM transition matrix verification.
+    /// The FSM has 5 states × 5 states = 25 possible transitions.
+    /// Exactly 8 should be valid.
+    #[test]
+    fn fsm_exhaustive_transition_matrix() {
+        const STATES: &[SandboxState] = &[
+            SandboxState::Created,
+            SandboxState::Running,
+            SandboxState::Paused,
+            SandboxState::Stopped,
+            SandboxState::Destroyed,
+        ];
+
+        // Expected valid transitions encoded as (from_idx, to_idx)
+        let expected_valid: &[(usize, usize)] = &[
+            (0, 1), // Created → Running
+            (1, 2), // Running → Paused
+            (1, 3), // Running → Stopped
+            (1, 4), // Running → Destroyed
+            (2, 1), // Paused → Running
+            (2, 3), // Paused → Stopped
+            (2, 4), // Paused → Destroyed
+            (3, 4), // Stopped → Destroyed
+        ];
+
+        for (from_idx, from) in STATES.iter().enumerate() {
+            for (to_idx, to) in STATES.iter().enumerate() {
+                let is_valid = from.valid_transition(to);
+                let should_be_valid = expected_valid.contains(&(from_idx, to_idx));
+                assert_eq!(
+                    is_valid, should_be_valid,
+                    "{:?} → {:?}: got {is_valid}, expected {should_be_valid}",
+                    from, to
+                );
+            }
+        }
+    }
+
+    /// Verify state invariants: started_at only set when Running,
+    /// stopped_at only set when Stopped.
+    #[tokio::test]
+    async fn fsm_state_invariants() {
+        let config = SandboxConfig::builder().backend(Backend::Noop).build();
+        let mut sandbox = Sandbox::create(config).await.unwrap();
+
+        // Created: no timestamps
+        assert!(sandbox.started_at.is_none());
+        assert!(sandbox.stopped_at.is_none());
+
+        // Running: started_at set
+        sandbox.transition(SandboxState::Running).unwrap();
+        assert!(sandbox.started_at.is_some());
+        assert!(sandbox.stopped_at.is_none());
+
+        // Paused: started_at still set, stopped_at not
+        sandbox.transition(SandboxState::Paused).unwrap();
+        assert!(sandbox.started_at.is_some());
+        assert!(sandbox.stopped_at.is_none());
+
+        // Resume: same
+        sandbox.transition(SandboxState::Running).unwrap();
+        assert!(sandbox.started_at.is_some());
+
+        // Stopped: stopped_at now set
+        sandbox.transition(SandboxState::Stopped).unwrap();
+        assert!(sandbox.started_at.is_some());
+        assert!(sandbox.stopped_at.is_some());
+    }
+
+    /// Verify Destroyed is a terminal state — no transitions out.
+    #[test]
+    fn destroyed_is_terminal() {
+        for state in [
+            SandboxState::Created,
+            SandboxState::Running,
+            SandboxState::Paused,
+            SandboxState::Stopped,
+            SandboxState::Destroyed,
+        ] {
+            assert!(
+                !SandboxState::Destroyed.valid_transition(&state),
+                "Destroyed → {:?} should be invalid",
+                state
+            );
+        }
     }
 
     #[test]

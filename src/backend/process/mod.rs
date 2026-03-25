@@ -246,6 +246,30 @@ mod tests {
         assert!(shell_words("   ").is_empty());
     }
 
+    #[test]
+    fn shell_words_escaped() {
+        assert_eq!(
+            shell_words(r"echo hello\ world"),
+            vec!["echo", "hello world"]
+        );
+    }
+
+    #[test]
+    fn shell_words_mixed_quotes() {
+        assert_eq!(
+            shell_words(r#"echo "it's" 'a "test"'"#),
+            vec!["echo", "it's", r#"a "test""#]
+        );
+    }
+
+    #[test]
+    fn shell_words_tabs() {
+        assert_eq!(
+            shell_words("echo\thello\tworld"),
+            vec!["echo", "hello", "world"]
+        );
+    }
+
     #[tokio::test]
     async fn exec_echo() {
         let config = SandboxConfig::builder().backend(Backend::Process).build();

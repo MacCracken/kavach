@@ -13,6 +13,7 @@ pub struct SecretRef {
 
 /// How a secret is delivered to the sandboxed process.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum InjectionMethod {
     /// Set as an environment variable.
     EnvVar { var_name: String },
@@ -51,19 +52,22 @@ impl CredentialProxy {
     }
 
     /// Resolve a secret reference to its value.
+    #[inline]
+    #[must_use]
     pub fn resolve(&self, secret_ref: &SecretRef) -> Option<&str> {
         self.secrets.get(&secret_ref.name).map(|s| s.as_str())
     }
 
     /// Build environment variables for a set of secret refs.
     /// Only returns refs with `InjectionMethod::EnvVar`.
+    #[must_use]
     pub fn env_vars(&self, refs: &[SecretRef]) -> Vec<(String, String)> {
         refs.iter()
             .filter_map(|r| {
                 let value = self.resolve(r)?;
                 match &r.inject_via {
                     InjectionMethod::EnvVar { var_name } => {
-                        Some((var_name.clone(), value.to_string()))
+                        Some((var_name.clone(), value.to_owned()))
                     }
                     _ => None,
                 }
@@ -74,6 +78,7 @@ impl CredentialProxy {
     /// Build file injection descriptors for a set of secret refs.
     /// Returns (path, content, mode) tuples for refs with `InjectionMethod::File`.
     /// The caller is responsible for writing these files inside the sandbox.
+    #[must_use]
     pub fn file_injections(&self, refs: &[SecretRef]) -> Vec<FileInjection> {
         refs.iter()
             .filter_map(|r| {
@@ -81,7 +86,7 @@ impl CredentialProxy {
                 match &r.inject_via {
                     InjectionMethod::File { path, mode } => Some(FileInjection {
                         path: path.clone(),
-                        content: value.to_string(),
+                        content: value.to_owned(),
                         mode: *mode,
                     }),
                     _ => None,
@@ -93,6 +98,7 @@ impl CredentialProxy {
     /// Build a stdin payload from all refs with `InjectionMethod::Stdin`.
     /// Secrets are concatenated with newline separators.
     /// Returns None if no stdin-injected secrets exist.
+    #[must_use]
     pub fn stdin_payload(&self, refs: &[SecretRef]) -> Option<String> {
         let parts: Vec<&str> = refs
             .iter()
@@ -113,10 +119,14 @@ impl CredentialProxy {
     }
 
     /// Number of registered secrets.
+    #[inline]
+    #[must_use]
     pub fn len(&self) -> usize {
         self.secrets.len()
     }
 
+    #[inline]
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.secrets.is_empty()
     }

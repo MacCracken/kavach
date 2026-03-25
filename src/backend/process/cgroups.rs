@@ -21,6 +21,8 @@ impl CgroupScope {
     }
 
     /// Check if any resource limits are configured in the policy.
+    #[inline]
+    #[must_use]
     pub fn has_limits(policy: &SandboxPolicy) -> bool {
         policy.memory_limit_mb.is_some() || policy.cpu_limit.is_some() || policy.max_pids.is_some()
     }
@@ -143,6 +145,7 @@ impl Drop for CgroupScope {
 /// Format CPU limit as cgroup v2 `cpu.max` value.
 /// `cpu_limit` is fractional cores (e.g., 0.5 = 50% of one core).
 /// Format: "QUOTA PERIOD" where both are in microseconds.
+#[must_use]
 pub fn format_cpu_max(cpu_limit: f64) -> String {
     let period: u64 = 100_000; // 100ms period
     let quota = (cpu_limit * period as f64) as u64;

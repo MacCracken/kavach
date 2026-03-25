@@ -5,6 +5,7 @@ use uuid::Uuid;
 
 /// Scan verdict — what to do with the artifact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum ScanVerdict {
     Pass,
     Warn,
@@ -14,6 +15,7 @@ pub enum ScanVerdict {
 
 /// Finding severity level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum Severity {
     Info,
     Low,

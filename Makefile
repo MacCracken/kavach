@@ -1,4 +1,4 @@
-.PHONY: check fmt clippy test audit deny build doc clean
+.PHONY: check fmt clippy test audit deny build doc clean semver
 
 # Run all CI checks locally
 check: fmt clippy test audit
@@ -30,6 +30,10 @@ build:
 # Generate documentation
 doc:
 	cargo doc --no-deps
+
+# Semver compatibility check (requires cargo-semver-checks)
+semver:
+	cargo semver-checks check-release
 
 # Clean build artifacts
 clean:

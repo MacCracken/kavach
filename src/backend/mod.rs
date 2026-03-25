@@ -72,6 +72,7 @@ impl Backend {
     }
 
     /// All known backends.
+    #[must_use]
     pub fn all() -> &'static [Backend] {
         &[
             Self::Process,

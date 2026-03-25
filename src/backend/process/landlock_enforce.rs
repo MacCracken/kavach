@@ -69,6 +69,8 @@ pub fn apply_landlock(policy: &SandboxPolicy) -> crate::Result<()> {
 }
 
 /// Check if Landlock rules should be applied for this policy.
+#[inline]
+#[must_use]
 pub fn should_apply(policy: &SandboxPolicy) -> bool {
     !policy.landlock_rules.is_empty() || policy.read_only_rootfs
 }
@@ -105,6 +107,7 @@ fn default_readonly_rules(policy: &SandboxPolicy) -> Vec<LandlockRule> {
 }
 
 /// Convert a LandlockRule access string to a human-readable description.
+#[must_use]
 pub fn access_description(access: &str) -> &'static str {
     match access {
         "rw" => "read-write",

@@ -4,6 +4,9 @@
 //! inside the VM via a task script on a secondary drive, and captures output.
 
 pub mod config;
+pub mod network;
+pub mod snapshot;
+pub mod vsock;
 
 use crate::backend::{Backend, SandboxBackend};
 use crate::lifecycle::{ExecResult, SandboxConfig};

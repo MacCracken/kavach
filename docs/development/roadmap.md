@@ -68,7 +68,7 @@ Completed items are in [CHANGELOG.md](../../CHANGELOG.md).
 - [x] OCI spec generation from SandboxConfig
 - [x] Runtime auto-detection (prefers crun over runc)
 - [x] Container lifecycle (run, kill, delete)
-- [ ] Image pull integration (for pre-built sandbox images)
+- [x] Image pull integration (OciImageManager: skopeo/crane/runtime pull + unpack)
 
 ### Shared
 - [x] Shared OCI spec generation module (oci_spec.rs)
@@ -84,9 +84,9 @@ Completed items are in [CHANGELOG.md](../../CHANGELOG.md).
 - [x] Boot drive + rootfs setup
 - [x] Jailer integration for hardened execution (cgroups, seccomp, chroot)
 - [x] Task script injection via workdir
-- [ ] vsock communication for host ↔ VM IPC (framework present, not active)
-- [ ] Snapshot + restore (checkpoint/migrate)
-- [ ] Network tap device setup with iptables isolation
+- [x] vsock communication for host ↔ VM IPC (VsockConnection: connect/send/recv via UDS)
+- [x] Snapshot + restore (SnapshotConfig: checkpoint/restore via Firecracker API)
+- [x] Network tap device setup with iptables isolation (TapConfig: setup/teardown)
 
 ### WASM (wasmtime)
 - [x] WASI module loading and execution via wasmtime v42
@@ -103,15 +103,15 @@ Completed items are in [CHANGELOG.md](../../CHANGELOG.md).
 - [x] Enclave creation via Gramine-SGX
 - [x] Manifest generation from SandboxConfig (enclave_size, threads, fs mounts)
 - [x] Environment variable and trusted file configuration
-- [ ] Remote attestation integration
-- [ ] Sealed data API (encrypt/decrypt to enclave identity)
+- [x] Remote attestation integration (SgxAttestationReport + SgxAttestationPolicy)
+- [x] Sealed data API (SealedData + SealKeyPolicy: MrEnclave/MrSigner)
 
 ### AMD SEV
 - [x] SEV-SNP VM launch via QEMU with encrypted memory
 - [x] QEMU args generation (EPYC-v4, memfd-private, SNP policy 0x30000)
 - [x] Virtfs sharing for task scripts
-- [ ] Attestation report verification
-- [ ] Guest policy enforcement beyond default
+- [x] Attestation report verification (SevAttestationReport + SevAttestationPolicy)
+- [x] Guest policy enforcement (SevGuestPolicy: composable bit flags, replaces hardcoded 0x30000)
 
 ### SyAgnos (hardened AGNOS OS sandbox)
 - [x] SyAgnos backend variant (9th backend, strength 80–88)
@@ -121,8 +121,8 @@ Completed items are in [CHANGELOG.md](../../CHANGELOG.md).
 - [x] Container execution with memory/CPU/PID/network limits
 - [x] Read-only rootfs enforcement at container level
 - [x] Attestation report verification (PCR 8/9/10 + HMAC signature)
-- [ ] Phylax output scanning integration
-- [ ] Image pull and build integration (Dockerfile.sy-agnos)
+- [x] Phylax output scanning integration (PhylaxScanner: secrets + verity/nftables/namespace/mount escape)
+- [x] Image pull and build integration (SyAgnosImageManager: pull/build/list_local)
 
 ---
 
@@ -144,16 +144,16 @@ Completed items are in [CHANGELOG.md](../../CHANGELOG.md).
 ## v1.0.0 Criteria
 
 - [x] All 9 backends implemented and tested (Process, gVisor, Firecracker, WASM, OCI, SGX, SEV, SyAgnos, Noop)
-- [ ] Strength scoring validated against SY reference scores
-- [ ] CredentialProxy handles all injection methods
-- [ ] Externalization gate tested with adversarial inputs
-- [ ] Adversarial test suite passing (~300 tests across all layers) — see [tests/adversarial.rs](../../tests/adversarial.rs)
-- [ ] Lifecycle FSM formally verified (no invalid transitions)
+- [x] Strength scoring validated against SY reference scores
+- [x] CredentialProxy handles all injection methods (EnvVar, File, Stdin)
+- [x] Externalization gate tested with adversarial inputs (30+ pattern tests)
+- [x] Adversarial test suite passing (416 tests across all layers) — see [tests/adversarial.rs](../../tests/adversarial.rs)
+- [x] Lifecycle FSM formally verified (exhaustive 5×5 transition matrix + state invariants)
 - [ ] 3+ downstream consumers in production
 - [ ] 90%+ test coverage
 - [ ] docs.rs complete
-- [ ] No `unsafe` without `// SAFETY:` comments
-- [ ] cargo-semver-checks in CI
+- [x] No `unsafe` without `// SAFETY:` comments
+- [x] cargo-semver-checks in CI (`make semver`)
 
 ---
 

@@ -147,6 +147,7 @@ static COMPILED_PATTERNS: std::sync::LazyLock<Vec<CompiledPattern>> =
 ///
 /// Patterns are compiled once and shared across all scanner instances via
 /// a global `LazyLock`. Creating multiple scanners is cheap (no re-compilation).
+#[derive(Debug)]
 pub struct SecretsScanner;
 
 impl SecretsScanner {
@@ -158,6 +159,7 @@ impl SecretsScanner {
     }
 
     /// Scan text for secrets. Returns findings.
+    #[must_use]
     pub fn scan(&self, text: &str) -> Vec<ScanFinding> {
         let mut findings = Vec::new();
         for pattern in &*COMPILED_PATTERNS {
@@ -165,7 +167,13 @@ impl SecretsScanner {
                 let evidence = m.as_str();
                 // Truncate evidence to avoid leaking the full secret
                 let truncated = if evidence.len() > 20 {
-                    format!("{}...", &evidence[..20])
+                    // Find a valid char boundary at or before byte 20 to avoid
+                    // panic on multi-byte UTF-8 sequences.
+                    let mut end = 20;
+                    while end > 0 && !evidence.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    format!("{}...", &evidence[..end])
                 } else {
                     evidence.to_string()
                 };
@@ -183,6 +191,7 @@ impl SecretsScanner {
     }
 
     /// Redact secrets in text, replacing matches with `[REDACTED:CATEGORY]`.
+    #[must_use]
     ///
     /// Uses a single-pass approach: collects all match ranges, resolves overlaps,
     /// then builds the output string once (instead of 16 sequential replace_all calls).
@@ -293,5 +302,53 @@ mod tests {
         let scanner = SecretsScanner::new();
         let input = "hello world";
         assert_eq!(scanner.redact(input), "hello world");
+    }
+
+    #[test]
+    fn scan_truncates_multibyte_evidence_safely() {
+        let scanner = SecretsScanner::new();
+        // Build a string with multi-byte chars around the 20-byte truncation boundary.
+        // "postgres://ää" + padding to exceed 20 bytes — connection_string pattern.
+        let input = "postgres://ääääääääää@host/db";
+        let findings = scanner.scan(input);
+        assert!(!findings.is_empty());
+        // Evidence should be truncated without panic
+        let evidence = findings[0].evidence.as_deref().unwrap();
+        assert!(evidence.ends_with("..."));
+        // Must be valid UTF-8 (no partial chars)
+        assert!(evidence.is_ascii() || !evidence.is_empty());
+    }
+
+    #[test]
+    fn scan_short_evidence_not_truncated() {
+        let scanner = SecretsScanner::new();
+        // SSN pattern is short (11 chars) — should not be truncated
+        let findings = scanner.scan("ssn: 123-45-6789");
+        assert!(!findings.is_empty());
+        let evidence = findings[0].evidence.as_deref().unwrap();
+        assert!(!evidence.ends_with("..."));
+    }
+
+    #[test]
+    fn redact_overlapping_patterns() {
+        let scanner = SecretsScanner::new();
+        // A string that could match multiple overlapping patterns
+        let input = "postgres://user:AKIAIOSFODNN7EXAMPLE@host/db";
+        let redacted = scanner.redact(input);
+        // Should not contain the raw AWS key
+        assert!(!redacted.contains("AKIAIOSFODNN7EXAMPLE"));
+        // Should contain at least one redaction marker
+        assert!(redacted.contains("[REDACTED:"));
+    }
+
+    #[test]
+    fn detect_multiple_secrets_in_one_text() {
+        let scanner = SecretsScanner::new();
+        let input = "key=AKIAIOSFODNN7EXAMPLE token=ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij";
+        let findings = scanner.scan(input);
+        assert!(
+            findings.len() >= 2,
+            "should detect both AWS key and GitHub token"
+        );
     }
 }

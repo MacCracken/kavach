@@ -31,18 +31,25 @@ impl NamespaceConfig {
             new_mount: true,                  // Always isolate mounts
             new_net: !policy.network.enabled, // Isolate network if disabled
             new_user: true,                   // Always use user namespace (unprivileged)
+            // SAFETY: getuid() is reentrant, signal-safe, always succeeds,
+            // and returns the real UID of the calling process.
             host_uid: unsafe { libc::getuid() },
+            // SAFETY: getgid() is reentrant, signal-safe, always succeeds,
+            // and returns the real GID of the calling process.
             host_gid: unsafe { libc::getgid() },
         }
     }
 
     /// Check if any namespace isolation is configured.
+    #[inline]
+    #[must_use]
     pub fn any_enabled(&self) -> bool {
         self.new_pid || self.new_mount || self.new_net || self.new_user
     }
 
     /// Build clone flags from configuration.
     #[cfg(target_os = "linux")]
+    #[must_use]
     pub fn clone_flags(&self) -> CloneFlags {
         let mut flags = CloneFlags::empty();
         if self.new_pid {

@@ -175,6 +175,7 @@ pub const ALLOWED_SYSCALLS_STRICT: &[&str] = &[
 ];
 
 /// Resolve a profile name to a syscall allowlist.
+#[must_use]
 pub fn resolve_profile(name: &str) -> &'static [&'static str] {
     match name {
         "strict" => ALLOWED_SYSCALLS_STRICT,
@@ -183,6 +184,8 @@ pub fn resolve_profile(name: &str) -> &'static [&'static str] {
 }
 
 /// Check if a syscall name is in the basic allowlist.
+#[inline]
+#[must_use]
 pub fn is_syscall_allowed(name: &str) -> bool {
     ALLOWED_SYSCALLS_BASIC.contains(&name)
 }

@@ -14,6 +14,7 @@ pub struct HealthStatus {
 
 impl HealthStatus {
     /// Create a healthy status.
+    #[must_use]
     pub fn healthy(duration_ms: u64) -> Self {
         Self {
             healthy: true,
@@ -24,6 +25,7 @@ impl HealthStatus {
     }
 
     /// Create an unhealthy status.
+    #[must_use]
     pub fn unhealthy(duration_ms: u64, error: String) -> Self {
         Self {
             healthy: false,

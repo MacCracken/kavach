@@ -19,6 +19,7 @@ pub struct SandboxCapabilities {
 
 /// Detect all sandbox capabilities for the current system.
 #[cfg(target_os = "linux")]
+#[must_use]
 pub fn detect_capabilities() -> SandboxCapabilities {
     SandboxCapabilities {
         seccomp_available: seccomp_is_available(),
@@ -31,6 +32,7 @@ pub fn detect_capabilities() -> SandboxCapabilities {
 }
 
 #[cfg(not(target_os = "linux"))]
+#[must_use]
 pub fn detect_capabilities() -> SandboxCapabilities {
     SandboxCapabilities {
         seccomp_available: false,
@@ -70,6 +72,7 @@ pub fn seccomp_current_mode() -> String {
 }
 
 /// Parse seccomp mode from /proc/self/status content.
+#[must_use]
 pub fn parse_seccomp_mode(status_content: &str) -> String {
     for line in status_content.lines() {
         if let Some(val) = line.strip_prefix("Seccomp:") {
@@ -115,12 +118,14 @@ pub fn landlock_abi_version() -> u32 {
 }
 
 /// Parse ABI version from /proc/sys/kernel/landlock_restrict_self content.
+#[must_use]
 pub fn parse_abi_from_proc(content: &str) -> Option<u32> {
     let val: u32 = content.trim().parse().ok()?;
     if val > 0 { Some(val) } else { None }
 }
 
 /// Parse kernel version string and check if >= 5.13 (Landlock minimum).
+#[must_use]
 pub fn kernel_version_supports_landlock(release: &str) -> bool {
     let parts: Vec<u32> = release
         .trim()
@@ -161,6 +166,7 @@ pub fn cgroup_is_v2() -> bool {
 }
 
 /// Parse /proc/mounts content for cgroup2 presence.
+#[must_use]
 pub fn parse_mounts_for_cgroup2(mounts: &str) -> bool {
     mounts
         .lines()
@@ -194,6 +200,7 @@ pub fn cgroup_memory_current() -> Option<u64> {
 }
 
 /// Parse memory.max content. Returns None for "max" (unlimited).
+#[must_use]
 pub fn parse_memory_max(content: &str) -> Option<u64> {
     let trimmed = content.trim();
     if trimmed == "max" {

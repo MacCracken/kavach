@@ -9,6 +9,119 @@ use crate::backend::{Backend, SandboxBackend};
 use crate::lifecycle::{ExecResult, SandboxConfig};
 use crate::policy::SandboxPolicy;
 
+/// OCI image manager — pull and unpack container images.
+#[derive(Debug)]
+pub struct OciImageManager {
+    /// Image pull tool (skopeo, crane, or container runtime).
+    pull_tool: String,
+}
+
+impl OciImageManager {
+    /// Create an image manager. Detects the best available pull tool.
+    pub fn detect() -> crate::Result<Self> {
+        // Prefer skopeo for native OCI support
+        let tool = crate::backend::which_first(&["skopeo", "crane"])
+            .map(Into::into)
+            .or_else(detect_runtime)
+            .ok_or_else(|| {
+                crate::KavachError::BackendUnavailable(
+                    "no image pull tool found (skopeo, crane, runc, crun)".into(),
+                )
+            })?;
+
+        Ok(Self { pull_tool: tool })
+    }
+
+    /// Pull an OCI image to a local OCI layout directory.
+    pub async fn pull(&self, image_ref: &str, dest: &std::path::Path) -> crate::Result<()> {
+        tracing::debug!(image = image_ref, tool = %self.pull_tool, "pulling OCI image");
+
+        let output = if self.pull_tool.contains("skopeo") {
+            tokio::process::Command::new(&self.pull_tool)
+                .args([
+                    "copy",
+                    &format!("docker://{image_ref}"),
+                    &format!("oci:{}", dest.display()),
+                ])
+                .output()
+                .await
+        } else if self.pull_tool.contains("crane") {
+            tokio::process::Command::new(&self.pull_tool)
+                .args(["pull", image_ref, &dest.join("image.tar").to_string_lossy()])
+                .output()
+                .await
+        } else {
+            // Fallback: use docker/podman to pull then export
+            let pull = tokio::process::Command::new(&self.pull_tool)
+                .args(["pull", image_ref])
+                .output()
+                .await;
+            if pull.as_ref().is_ok_and(|o| o.status.success()) {
+                tokio::process::Command::new(&self.pull_tool)
+                    .args([
+                        "save",
+                        "-o",
+                        &dest.join("image.tar").to_string_lossy(),
+                        image_ref,
+                    ])
+                    .output()
+                    .await
+            } else {
+                pull
+            }
+        };
+
+        let output =
+            output.map_err(|e| crate::KavachError::ExecFailed(format!("image pull: {e}")))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(crate::KavachError::ExecFailed(format!(
+                "image pull failed: {stderr}"
+            )));
+        }
+
+        tracing::debug!(image = image_ref, "image pull complete");
+        Ok(())
+    }
+
+    /// Unpack an OCI image tar into a rootfs directory.
+    pub async fn unpack(
+        &self,
+        image_tar: &std::path::Path,
+        rootfs_dir: &std::path::Path,
+    ) -> crate::Result<()> {
+        tracing::debug!(
+            tar = %image_tar.display(),
+            rootfs = %rootfs_dir.display(),
+            "unpacking OCI image"
+        );
+
+        std::fs::create_dir_all(rootfs_dir)
+            .map_err(|e| crate::KavachError::CreationFailed(format!("rootfs dir: {e}")))?;
+
+        let output = tokio::process::Command::new("tar")
+            .args([
+                "xf",
+                &image_tar.to_string_lossy(),
+                "-C",
+                &rootfs_dir.to_string_lossy(),
+            ])
+            .output()
+            .await
+            .map_err(|e| crate::KavachError::ExecFailed(format!("image unpack: {e}")))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(crate::KavachError::ExecFailed(format!(
+                "image unpack failed: {stderr}"
+            )));
+        }
+
+        Ok(())
+    }
+}
+
 /// OCI container-based sandbox backend.
 #[derive(Debug)]
 pub struct OciBackend {
@@ -212,6 +325,12 @@ mod tests {
         let content = std::fs::read_to_string(dir.path().join("config.json")).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
         assert_eq!(parsed["ociVersion"], "1.0.2");
+    }
+
+    #[test]
+    fn image_manager_detect_does_not_panic() {
+        // May succeed or fail depending on available tools
+        let _ = OciImageManager::detect();
     }
 
     #[test]

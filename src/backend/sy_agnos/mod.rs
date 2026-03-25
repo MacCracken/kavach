@@ -105,12 +105,245 @@ impl AttestationReport {
     }
 }
 
+// ─── Phylax Output Scanning ──────────────────────────────────────────
+
+/// SyAgnos-specific output scanner.
+///
+/// Wraps the standard secrets scanner and adds sy-agnos-specific patterns
+/// for detecting container escape attempts, verity violations, and
+/// nftables bypass indicators.
+#[derive(Debug)]
+pub struct PhylaxScanner {
+    secrets_scanner: crate::scanning::secrets::SecretsScanner,
+}
+
+/// Patterns that indicate a security event in sy-agnos output.
+const PHYLAX_PATTERNS: &[(&str, &str)] = &[
+    ("dm-verity", "VERITY"),
+    ("verity validation failed", "VERITY"),
+    ("device-mapper: verity", "VERITY"),
+    ("nft ", "NFTABLES_BYPASS"),
+    ("nftables", "NFTABLES_BYPASS"),
+    ("iptables", "NFTABLES_BYPASS"),
+    ("nsenter", "NAMESPACE_ESCAPE"),
+    ("setns(", "NAMESPACE_ESCAPE"),
+    ("unshare(", "NAMESPACE_ESCAPE"),
+    ("/proc/1/ns/", "NAMESPACE_ESCAPE"),
+    ("mount -t proc", "MOUNT_ESCAPE"),
+    ("mount -o remount,rw", "MOUNT_ESCAPE"),
+    ("pivot_root", "MOUNT_ESCAPE"),
+    ("chroot", "MOUNT_ESCAPE"),
+];
+
+impl PhylaxScanner {
+    /// Create a new Phylax scanner.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            secrets_scanner: crate::scanning::secrets::SecretsScanner::new(),
+        }
+    }
+
+    /// Scan output for both secrets and sy-agnos-specific security events.
+    #[must_use]
+    pub fn scan(&self, output: &str) -> Vec<PhylaxFinding> {
+        let mut findings = Vec::new();
+
+        // Standard secret scanning
+        for finding in self.secrets_scanner.scan(output) {
+            findings.push(PhylaxFinding {
+                category: finding.category,
+                severity: PhylaxSeverity::High,
+                evidence: finding.evidence,
+            });
+        }
+
+        // SyAgnos-specific pattern scanning
+        let output_lower = output.to_lowercase();
+        for &(pattern, category) in PHYLAX_PATTERNS {
+            if output_lower.contains(pattern) {
+                let evidence = extract_line_containing(output, pattern);
+                findings.push(PhylaxFinding {
+                    category: category.into(),
+                    severity: PhylaxSeverity::Critical,
+                    evidence: Some(evidence),
+                });
+            }
+        }
+
+        tracing::debug!(findings = findings.len(), "phylax scan complete");
+
+        findings
+    }
+
+    /// Redact secrets and flag security events in output.
+    #[must_use]
+    pub fn redact(&self, output: &str) -> String {
+        self.secrets_scanner.redact(output)
+    }
+}
+
+impl Default for PhylaxScanner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// A finding from the Phylax scanner.
+#[derive(Debug, Clone)]
+pub struct PhylaxFinding {
+    /// Category of the finding (e.g., "AWS_KEY", "VERITY", "NAMESPACE_ESCAPE").
+    pub category: String,
+    /// Severity of the finding.
+    pub severity: PhylaxSeverity,
+    /// Evidence snippet (truncated).
+    pub evidence: Option<String>,
+}
+
+/// Severity levels for Phylax findings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[non_exhaustive]
+pub enum PhylaxSeverity {
+    /// Informational finding.
+    Info,
+    /// Secret or credential detected.
+    High,
+    /// Container escape or integrity violation attempt.
+    Critical,
+}
+
+/// Extract the line containing a pattern for evidence.
+fn extract_line_containing(text: &str, pattern: &str) -> String {
+    let pattern_lower = pattern.to_lowercase();
+    for line in text.lines() {
+        if line.to_lowercase().contains(&pattern_lower) {
+            if line.len() > 80 {
+                let mut end = 80;
+                while end > 0 && !line.is_char_boundary(end) {
+                    end -= 1;
+                }
+                return format!("{}...", &line[..end]);
+            }
+            return line.to_string();
+        }
+    }
+    pattern.to_string()
+}
+
+// ─── Image Management ────────────────────────────────────────────────
+
+/// SyAgnos container image manager.
+///
+/// Handles pulling, building, and listing sy-agnos images via the
+/// detected container runtime (docker/podman).
+#[derive(Debug)]
+pub struct SyAgnosImageManager {
+    runtime: String,
+}
+
+impl SyAgnosImageManager {
+    /// Create a new image manager with the given container runtime.
+    pub fn new(runtime: &str) -> Self {
+        Self {
+            runtime: runtime.to_owned(),
+        }
+    }
+
+    /// Pull a sy-agnos image from the registry.
+    pub async fn pull(&self, image: &str) -> crate::Result<()> {
+        tracing::debug!(image = image, runtime = %self.runtime, "pulling sy-agnos image");
+
+        let output = tokio::process::Command::new(&self.runtime)
+            .args(["pull", image])
+            .output()
+            .await
+            .map_err(|e| crate::KavachError::ExecFailed(format!("image pull: {e}")))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(crate::KavachError::ExecFailed(format!(
+                "image pull failed: {stderr}"
+            )));
+        }
+
+        tracing::debug!(image = image, "image pull complete");
+        Ok(())
+    }
+
+    /// Build a sy-agnos image from a Dockerfile.
+    pub async fn build(&self, dockerfile_path: &std::path::Path, tag: &str) -> crate::Result<()> {
+        tracing::debug!(
+            dockerfile = %dockerfile_path.display(),
+            tag = tag,
+            "building sy-agnos image"
+        );
+
+        let context_dir = dockerfile_path
+            .parent()
+            .unwrap_or(std::path::Path::new("."));
+
+        let output = tokio::process::Command::new(&self.runtime)
+            .args([
+                "build",
+                "-f",
+                &dockerfile_path.to_string_lossy(),
+                "-t",
+                tag,
+                &context_dir.to_string_lossy(),
+            ])
+            .output()
+            .await
+            .map_err(|e| crate::KavachError::ExecFailed(format!("image build: {e}")))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(crate::KavachError::ExecFailed(format!(
+                "image build failed: {stderr}"
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// List locally available sy-agnos images.
+    pub async fn list_local(&self) -> crate::Result<Vec<String>> {
+        let output = tokio::process::Command::new(&self.runtime)
+            .args([
+                "images",
+                "--format",
+                "{{.Repository}}:{{.Tag}}",
+                "--filter",
+                "reference=*sy-agnos*",
+            ])
+            .output()
+            .await
+            .map_err(|e| crate::KavachError::ExecFailed(format!("image list: {e}")))?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        Ok(stdout
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(String::from)
+            .collect())
+    }
+
+    /// Check if a specific image is available locally.
+    pub async fn is_local(&self, image: &str) -> bool {
+        tokio::process::Command::new(&self.runtime)
+            .args(["image", "inspect", image])
+            .output()
+            .await
+            .is_ok_and(|o| o.status.success())
+    }
+}
+
 /// SyAgnos container sandbox backend.
 #[derive(Debug)]
 pub struct SyAgnosBackend {
     config: SandboxConfig,
     runtime: String,
     image: String,
+    phylax_enabled: bool,
 }
 
 impl SyAgnosBackend {
@@ -126,7 +359,30 @@ impl SyAgnosBackend {
             config: config.clone(),
             runtime,
             image: DEFAULT_IMAGE.into(),
+            phylax_enabled: false,
         })
+    }
+
+    /// Enable or disable Phylax output scanning.
+    pub fn with_phylax_scanning(mut self, enabled: bool) -> Self {
+        self.phylax_enabled = enabled;
+        self
+    }
+
+    /// Get an image manager for this backend's runtime.
+    #[must_use]
+    pub fn image_manager(&self) -> SyAgnosImageManager {
+        SyAgnosImageManager::new(&self.runtime)
+    }
+
+    /// Ensure the configured image is available locally, pulling if needed.
+    pub async fn ensure_image(&self) -> crate::Result<()> {
+        let mgr = self.image_manager();
+        if !mgr.is_local(&self.image).await {
+            tracing::debug!(image = %self.image, "image not found locally, pulling");
+            mgr.pull(&self.image).await?;
+        }
+        Ok(())
     }
 
     /// Detect the sy-agnos image tier by reading /etc/sy-agnos-release.
@@ -212,12 +468,34 @@ impl SandboxBackend for SyAgnosBackend {
         let mut cmd = tokio::process::Command::new(&self.runtime);
         cmd.args(&args);
 
-        crate::backend::exec_util::execute_with_timeout(
+        let result = crate::backend::exec_util::execute_with_timeout(
             &mut cmd,
             self.config.timeout_ms,
             &self.runtime,
         )
-        .await
+        .await?;
+
+        // Phylax output scanning
+        if self.phylax_enabled {
+            let scanner = PhylaxScanner::new();
+            let combined_output = format!("{}{}", result.stdout, result.stderr);
+            let findings = scanner.scan(&combined_output);
+
+            if findings
+                .iter()
+                .any(|f| f.severity >= PhylaxSeverity::Critical)
+            {
+                tracing::warn!(
+                    findings = findings.len(),
+                    "phylax detected critical security events in sandbox output"
+                );
+                return Err(crate::KavachError::ExternalizationBlocked(
+                    "phylax scanner detected critical security events".into(),
+                ));
+            }
+        }
+
+        Ok(result)
     }
 
     async fn health_check(&self) -> crate::Result<bool> {
@@ -387,5 +665,91 @@ mod tests {
     #[test]
     fn detect_runtime_does_not_panic() {
         let _ = detect_runtime();
+    }
+
+    // ─── Phylax Scanner tests ────────────────────────────────────────
+
+    #[test]
+    fn phylax_detects_secrets() {
+        let scanner = PhylaxScanner::new();
+        let findings = scanner.scan("key=AKIAIOSFODNN7EXAMPLE");
+        assert!(!findings.is_empty());
+        assert!(findings.iter().any(|f| f.severity == PhylaxSeverity::High));
+    }
+
+    #[test]
+    fn phylax_detects_verity_violation() {
+        let scanner = PhylaxScanner::new();
+        let findings = scanner.scan("error: dm-verity device corruption detected");
+        assert!(!findings.is_empty());
+        assert!(findings.iter().any(|f| f.category == "VERITY"));
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.severity == PhylaxSeverity::Critical)
+        );
+    }
+
+    #[test]
+    fn phylax_detects_nftables_bypass() {
+        let scanner = PhylaxScanner::new();
+        let findings = scanner.scan("attempting iptables -F INPUT");
+        assert!(findings.iter().any(|f| f.category == "NFTABLES_BYPASS"));
+    }
+
+    #[test]
+    fn phylax_detects_namespace_escape() {
+        let scanner = PhylaxScanner::new();
+        let findings = scanner.scan("nsenter --target 1 --pid --mount");
+        assert!(findings.iter().any(|f| f.category == "NAMESPACE_ESCAPE"));
+    }
+
+    #[test]
+    fn phylax_detects_mount_escape() {
+        let scanner = PhylaxScanner::new();
+        let findings = scanner.scan("mount -o remount,rw /");
+        assert!(findings.iter().any(|f| f.category == "MOUNT_ESCAPE"));
+    }
+
+    #[test]
+    fn phylax_clean_output() {
+        let scanner = PhylaxScanner::new();
+        let findings = scanner.scan("hello world\neverything is fine\n");
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn phylax_redact_secrets() {
+        let scanner = PhylaxScanner::new();
+        let redacted = scanner.redact("key=AKIAIOSFODNN7EXAMPLE");
+        assert!(!redacted.contains("AKIAIOSFODNN7EXAMPLE"));
+    }
+
+    #[test]
+    fn phylax_severity_ordering() {
+        assert!(PhylaxSeverity::Info < PhylaxSeverity::High);
+        assert!(PhylaxSeverity::High < PhylaxSeverity::Critical);
+    }
+
+    #[test]
+    fn extract_line_containing_truncates_long_lines() {
+        let long_line = format!("prefix: {} suffix", "a".repeat(200));
+        let evidence = extract_line_containing(&long_line, "prefix");
+        assert!(evidence.ends_with("..."));
+        assert!(evidence.len() <= 84); // 80 + "..."
+    }
+
+    #[test]
+    fn extract_line_containing_short_line() {
+        let evidence = extract_line_containing("hello world", "hello");
+        assert_eq!(evidence, "hello world");
+    }
+
+    // ─── Image Manager tests ────────────────────────────────────────
+
+    #[test]
+    fn image_manager_creation() {
+        let mgr = SyAgnosImageManager::new("docker");
+        assert_eq!(mgr.runtime, "docker");
     }
 }

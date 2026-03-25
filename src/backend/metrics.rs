@@ -58,6 +58,7 @@ impl SandboxMetrics {
     }
 
     /// Parse CPU usage from a cpu.stat file content.
+    #[must_use]
     pub fn parse_cpu_stat(content: &str) -> Option<u64> {
         for line in content.lines() {
             if let Some(val) = line.strip_prefix("usage_usec ") {
