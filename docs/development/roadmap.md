@@ -6,152 +6,50 @@ Completed items are in [CHANGELOG.md](../../CHANGELOG.md).
 
 ---
 
-## v0.21.3 — Foundation
+## Completed
 
-- [x] Backend enum (8 variants: Process, gVisor, Firecracker, WASM, OCI, SGX, SEV, Noop)
-- [x] SandboxBackend trait (exec, health_check, destroy)
-- [x] Backend availability detection (PATH check, sysfs, feature flags)
-- [x] StrengthScore (0-100) with base scores and policy modifiers
-- [x] SandboxPolicy (seccomp, Landlock, network, resource limits, presets)
-- [x] CredentialProxy (register, resolve, env_vars generation)
-- [x] SecretRef with InjectionMethod (EnvVar, File, Stdin)
-- [x] Sandbox lifecycle FSM (Created → Running → Paused → Stopped → Destroyed)
-- [x] SandboxConfig builder pattern
-- [x] ExecResult (exit code, stdout, stderr, duration, timeout flag)
-- [x] KavachError with structured error types
-- [x] Tests, CI/CD, benchmarks scaffold
-
----
-
-## v0.22.3 — Process Backend
-
-### Process isolation (the default backend)
-- [x] Spawn child process with `tokio::process::Command`
-- [x] Seccomp-bpf filter application (denylist basic + allowlist strict profiles)
-- [x] Landlock filesystem restriction enforcement
-- [x] Linux namespace isolation (PID, mount, network, user)
-- [x] Timeout enforcement with kill-on-timeout
-- [x] stdout/stderr capture with 1MB size limits
-- [x] Resource limits via cgroups v2 (memory, CPU, PIDs) with setrlimit fallback
-- [x] Capability dropping (CAP_SYS_ADMIN, CAP_SYS_PTRACE, etc.)
-- [x] Best-effort isolation — degrades gracefully without privileges
-
-### Platform detection
-- [x] Seccomp mode detection from /proc/self/status
-- [x] Landlock ABI version probing with kernel version fallback
-- [x] cgroup v2 detection from /proc/mounts
-- [x] Namespace availability check
-
-### Externalization gate
-- [x] Content policy check on sandbox output before release
-- [x] 17 secret detection patterns (AWS, GitHub, Stripe, JWTs, private keys, PII)
-- [x] Verdict system (pass/warn/quarantine/block)
-- [x] Secret redaction in output
-- [x] File size limits on externalized data
-
-### Backend dispatch
-- [x] Sandbox holds Box<dyn SandboxBackend>, delegates exec/destroy
-- [x] NoopBackend for testing
-- [x] create_backend() factory with feature-gated dispatch
-
----
-
-## v0.23.3 — gVisor & OCI Backends
-
-### gVisor (runsc)
-- [x] OCI bundle creation for gVisor runtime
-- [x] runsc run with config-file startup and timeout
-- [x] Network isolation (--network=none when disabled)
-- [x] Container cleanup (kill + delete --force)
-
-### OCI (runc/crun)
-- [x] OCI spec generation from SandboxConfig
-- [x] Runtime auto-detection (prefers crun over runc)
-- [x] Container lifecycle (run, kill, delete)
-- [x] Image pull integration (OciImageManager: skopeo/crane/runtime pull + unpack)
-
-### Shared
-- [x] Shared OCI spec generation module (oci_spec.rs)
-- [x] Backend health monitoring (HealthStatus, check_health)
-- [x] Sandbox metrics (SandboxMetrics: CPU, memory, PIDs from cgroup)
-
----
-
-## v0.24.3 — Firecracker & WASM Backends
-
-### Firecracker
-- [x] microVM configuration from SandboxConfig (VmConfig JSON)
-- [x] Boot drive + rootfs setup
-- [x] Jailer integration for hardened execution (cgroups, seccomp, chroot)
-- [x] Task script injection via workdir
-- [x] vsock communication for host ↔ VM IPC (VsockConnection: connect/send/recv via UDS)
-- [x] Snapshot + restore (SnapshotConfig: checkpoint/restore via Firecracker API)
-- [x] Network tap device setup with iptables isolation (TapConfig: setup/teardown)
-
-### WASM (wasmtime)
-- [x] WASI module loading and execution via wasmtime v42
-- [x] Filesystem preopen mapping from Landlock rules
-- [x] Memory limit enforcement via wasmtime config
-- [x] Fuel-based CPU metering
-- [x] Async execution with timeout
-
----
-
-## v0.25.3 — Hardware Enclaves & SyAgnos
-
-### Intel SGX
-- [x] Enclave creation via Gramine-SGX
-- [x] Manifest generation from SandboxConfig (enclave_size, threads, fs mounts)
-- [x] Environment variable and trusted file configuration
-- [x] Remote attestation integration (SgxAttestationReport + SgxAttestationPolicy)
-- [x] Sealed data API (SealedData + SealKeyPolicy: MrEnclave/MrSigner)
-
-### AMD SEV
-- [x] SEV-SNP VM launch via QEMU with encrypted memory
-- [x] QEMU args generation (EPYC-v4, memfd-private, SNP policy 0x30000)
-- [x] Virtfs sharing for task scripts
-- [x] Attestation report verification (SevAttestationReport + SevAttestationPolicy)
-- [x] Guest policy enforcement (SevGuestPolicy: composable bit flags, replaces hardcoded 0x30000)
-
-### SyAgnos (hardened AGNOS OS sandbox)
-- [x] SyAgnos backend variant (9th backend, strength 80–88)
-- [x] Container runtime detection (docker/podman)
-- [x] Three hardening tiers: minimal (80), dm-verity (85), TPM measured (88)
-- [x] Tier detection from /etc/sy-agnos-release (JSON or key=value)
-- [x] Container execution with memory/CPU/PID/network limits
-- [x] Read-only rootfs enforcement at container level
-- [x] Attestation report verification (PCR 8/9/10 + HMAC signature)
-- [x] Phylax output scanning integration (PhylaxScanner: secrets + verity/nftables/namespace/mount escape)
-- [x] Image pull and build integration (SyAgnosImageManager: pull/build/list_local)
+| Version | Milestone | Summary |
+|---------|-----------|---------|
+| v0.21.3 | Foundation | 9-variant Backend enum, SandboxBackend trait, StrengthScore (0–100), SandboxPolicy, CredentialProxy, lifecycle FSM, SandboxConfig builder, KavachError |
+| v0.22.3 | Process Backend | Seccomp-bpf, Landlock, namespaces, cgroups v2, capability dropping, externalization gate (17 patterns), backend dispatch |
+| v0.23.3 | gVisor & OCI | runsc/runc/crun integration, OCI spec generation, health monitoring, metrics, OciImageManager |
+| v0.24.3 | Firecracker & WASM | Firecracker microVM (jailer, vsock, snapshot/restore, TAP networking), wasmtime WASI (fuel metering, memory limits) |
+| v0.25.3 | Hardware Enclaves & SyAgnos | SGX (Gramine, attestation, sealed data), SEV-SNP (QEMU, attestation, guest policy), SyAgnos (3 tiers, Phylax scanning, image management) |
 
 ---
 
 ## v0.26.3 — Consumer Integration
 
 ### Adoption
-- [ ] SecureYeoman replaces internal sandbox framework with kavach
-- [ ] daimon replaces 7 backend implementations with kavach
-- [ ] AgnosAI adds sandboxed crew execution
-- [ ] aethersafta uses kavach for plugin isolation
+
+| Consumer | Status | Roadmap location |
+|----------|--------|------------------|
+| **Stiva** | Active dependency (`kavach = ">=0.22"`) | [stiva/CLAUDE.md](../../../stiva/CLAUDE.md) |
+| **Kiran** | Active dependency (`kavach = "0.22"`, `wasm` feature) | [kiran/CLAUDE.md](../../../kiran/CLAUDE.md) |
+| **SecureYeoman** | Active (sy-sandbox + kavach) | [SY migration roadmap](../../../secureyeoman/docs/development/migration/roadmap.md) Phase 5 |
+| **AgnosAI** | Planned — sandboxed crew execution | [agnosai roadmap](../../../agnosai/docs/development/roadmap.md) Kavach Integration section |
+| **Hoosh** | Planned — tool sandboxing + externalization gate | [hoosh roadmap](../../../hoosh/docs/development/roadmap.md) Post-v1; [ADR-006](../../../hoosh/docs/decisions/006-kavach-tool-sandbox.md) |
+| **Bote** | Planned — tool handler sandboxing | [bote roadmap](../../../bote/docs/development/roadmap.md) Post-v1 |
+| **Aethersafta** | Planned — plugin isolation | [aethersafta roadmap](../../../aethersafta/docs/development/roadmap.md) Post-v1 ecosystem |
 
 ### Validation
-- [ ] Cross-crate integration tests
-- [ ] Strength scoring matches SY's existing scores
-- [~] Performance: kavach framework overhead ~2.8ms vs direct spawn (namespace isolation cost; framework dispatch itself < 50µs)
+- [ ] Cross-crate integration tests (stiva + kiran + kavach)
+- [x] Strength scoring validated against SY reference scores
+- [~] Performance: framework dispatch < 50µs; namespace isolation adds ~2.8ms (inherent OS cost)
 
 ---
 
 ## v1.0.0 Criteria
 
-- [x] All 9 backends implemented and tested (Process, gVisor, Firecracker, WASM, OCI, SGX, SEV, SyAgnos, Noop)
+- [x] All 9 backends implemented and tested
 - [x] Strength scoring validated against SY reference scores
 - [x] CredentialProxy handles all injection methods (EnvVar, File, Stdin)
 - [x] Externalization gate tested with adversarial inputs (30+ pattern tests)
-- [x] Adversarial test suite passing (416 tests across all layers) — see [tests/adversarial.rs](../../tests/adversarial.rs)
+- [x] Adversarial test suite passing (438 tests) — see [tests/adversarial.rs](../../tests/adversarial.rs)
 - [x] Lifecycle FSM formally verified (exhaustive 5×5 transition matrix + state invariants)
-- [ ] 3+ downstream consumers in production
-- [~] 90%+ test coverage (438 tests; ~49% line coverage — backends needing external tools limit measurable coverage)
-- [x] docs.rs complete (0 missing_docs warnings, cargo doc clean)
+- [~] 3+ downstream consumers in production (stiva, kiran active; SY integrating)
+- [~] 90%+ test coverage (438 tests; line coverage limited by untestable external backends)
+- [x] docs.rs complete (0 `missing_docs` warnings)
 - [x] No `unsafe` without `// SAFETY:` comments
 - [x] cargo-semver-checks in CI (`make semver`)
 
@@ -180,25 +78,10 @@ Completed items are in [CHANGELOG.md](../../CHANGELOG.md).
 - [ ] Veraison EAR integration — standardized attestation result encoding (IETF RATS)
 
 ### Cross-platform porting
-
-- [ ] **macOS: App Sandbox / sandbox-exec for process isolation** —
-  `sandbox-exec` with custom Scheme profiles for filesystem and network
-  restrictions. Map `SandboxPolicy` Landlock rules to sandbox profile
-  `(allow file-read* (subpath ...))` directives. App Sandbox entitlements
-  for distributed builds.
-- [ ] **Windows: AppContainer for process isolation** — `CreateAppContainerProfile`
-  + `UpdateProcThreadAttribute` via `windows-rs` for process-level
-  isolation. Map `SandboxPolicy` seccomp rules to Windows restricted
-  tokens and integrity levels.
-- [ ] **Windows: Hyper-V for VM isolation** — Hyper-V lightweight utility
-  VM as alternative to Firecracker. Similar strength score (85-90).
-  Requires Windows Pro/Enterprise with Hyper-V enabled.
-- [ ] **Cross-platform: platform-specific policy enforcement behind
-  SandboxBackend trait** — Process backend dispatches to
-  Linux (namespaces + seccomp + Landlock), macOS (sandbox-exec + App
-  Sandbox), or Windows (AppContainer + restricted tokens) at runtime.
-  `SandboxPolicy` remains the single API; platform mapping is internal.
-  Feature-gated: `linux` (default), `macos`, `windows`.
+- [ ] macOS: App Sandbox / sandbox-exec for process isolation
+- [ ] Windows: AppContainer for process isolation
+- [ ] Windows: Hyper-V for VM isolation
+- [ ] Cross-platform: platform-specific policy enforcement behind SandboxBackend trait
 - [ ] FreeBSD jails
 
 ---
