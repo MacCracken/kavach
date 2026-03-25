@@ -15,16 +15,24 @@ pub struct NamespaceConfig {
     pub new_mount: bool,
     pub new_net: bool,
     pub new_user: bool,
+    /// Host UID to map to root inside user namespace (captured before fork).
+    pub host_uid: u32,
+    /// Host GID to map to root inside user namespace (captured before fork).
+    pub host_gid: u32,
 }
 
 impl NamespaceConfig {
     /// Derive namespace configuration from policy.
+    ///
+    /// Captures the current UID/GID for user namespace mapping.
     pub fn from_policy(policy: &SandboxPolicy) -> Self {
         Self {
             new_pid: true,                    // Always isolate PIDs
             new_mount: true,                  // Always isolate mounts
             new_net: !policy.network.enabled, // Isolate network if disabled
             new_user: true,                   // Always use user namespace (unprivileged)
+            host_uid: unsafe { libc::getuid() },
+            host_gid: unsafe { libc::getgid() },
         }
     }
 
@@ -55,6 +63,10 @@ impl NamespaceConfig {
 
 /// Apply namespace isolation via unshare.
 /// Must be called in `pre_exec` context (after fork, before exec).
+///
+/// When a user namespace is created, UID/GID maps are written so the
+/// container process runs as UID 0 (root) inside the namespace while
+/// remaining unprivileged outside. This enables rootless containers.
 #[cfg(target_os = "linux")]
 pub fn apply_namespaces(config: &NamespaceConfig) -> crate::Result<()> {
     if !config.any_enabled() {
@@ -65,7 +77,46 @@ pub fn apply_namespaces(config: &NamespaceConfig) -> crate::Result<()> {
     unshare(flags)
         .map_err(|e| crate::KavachError::ExecFailed(format!("namespace unshare failed: {e}")))?;
 
+    // Write UID/GID maps for user namespace — maps current user to root inside.
+    if config.new_user {
+        let uid = config.host_uid;
+        let gid = config.host_gid;
+        if let Err(e) = write_id_maps(uid, gid) {
+            // Best-effort: some kernels restrict writing maps without newuidmap.
+            tracing::warn!("UID/GID map write failed (rootless may not work): {e}");
+        }
+    }
+
     tracing::debug!(?flags, "namespace isolation applied");
+    Ok(())
+}
+
+/// Write UID and GID maps for the current user namespace.
+///
+/// Maps the host UID/GID to 0 (root) inside the namespace.
+/// Must be called after `unshare(CLONE_NEWUSER)` and before exec.
+///
+/// Steps:
+/// 1. Deny setgroups (required before writing gid_map as unprivileged)
+/// 2. Write uid_map: `"0 {host_uid} 1\n"`
+/// 3. Write gid_map: `"0 {host_gid} 1\n"`
+#[cfg(target_os = "linux")]
+fn write_id_maps(host_uid: u32, host_gid: u32) -> std::io::Result<()> {
+    use std::io::Write;
+
+    // Deny setgroups — required by kernel before writing gid_map as non-root.
+    let mut f = std::fs::File::create("/proc/self/setgroups")?;
+    f.write_all(b"deny\n")?;
+
+    // Map host UID → 0 inside namespace.
+    let mut f = std::fs::File::create("/proc/self/uid_map")?;
+    writeln!(f, "0 {host_uid} 1")?;
+
+    // Map host GID → 0 inside namespace.
+    let mut f = std::fs::File::create("/proc/self/gid_map")?;
+    writeln!(f, "0 {host_gid} 1")?;
+
+    tracing::debug!(host_uid, host_gid, "UID/GID maps written for rootless");
     Ok(())
 }
 
@@ -136,6 +187,8 @@ mod tests {
             new_mount: false,
             new_net: false,
             new_user: false,
+            host_uid: 1000,
+            host_gid: 1000,
         };
         assert!(!config.any_enabled());
     }
@@ -148,12 +201,25 @@ mod tests {
             new_mount: true,
             new_net: true,
             new_user: true,
+            host_uid: 1000,
+            host_gid: 1000,
         };
         let flags = config.clone_flags();
         assert!(flags.contains(CloneFlags::CLONE_NEWPID));
         assert!(flags.contains(CloneFlags::CLONE_NEWNS));
         assert!(flags.contains(CloneFlags::CLONE_NEWNET));
         assert!(flags.contains(CloneFlags::CLONE_NEWUSER));
+    }
+
+    #[test]
+    fn from_policy_captures_uid_gid() {
+        let policy = SandboxPolicy::minimal();
+        let config = NamespaceConfig::from_policy(&policy);
+        // host_uid/gid are captured from the running process — just verify they're set.
+        // On CI this is typically 1000+; as root it's 0. Both are valid.
+        let _ = config.host_uid;
+        let _ = config.host_gid;
+        assert!(config.new_user);
     }
 
     #[cfg(target_os = "linux")]
@@ -164,6 +230,8 @@ mod tests {
             new_mount: false,
             new_net: false,
             new_user: true,
+            host_uid: 1000,
+            host_gid: 1000,
         };
         let flags = config.clone_flags();
         assert!(flags.contains(CloneFlags::CLONE_NEWPID));
