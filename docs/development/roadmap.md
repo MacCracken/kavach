@@ -15,6 +15,7 @@ Completed items are in [CHANGELOG.md](../../CHANGELOG.md).
 | v0.23.3 | gVisor & OCI | runsc/runc/crun integration, OCI spec generation, health monitoring, metrics, OciImageManager |
 | v0.24.3 | Firecracker & WASM | Firecracker microVM (jailer, vsock, snapshot/restore, TAP networking), wasmtime WASI (fuel metering, memory limits) |
 | v0.25.3 | Hardware Enclaves & SyAgnos | SGX (Gramine, attestation, sealed data), SEV-SNP (QEMU, attestation, guest policy), SyAgnos (3 tiers, Phylax scanning, image management) |
+| v0.25.3+ | SY Parity & Hardening | Code/data/threat scanners, quarantine, audit chain, runtime guards, HTTP credential proxy, backend auto-selection, TDX, SandboxPool, io_uring blocking, entropy detection |
 
 ---
 

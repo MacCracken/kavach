@@ -1,4 +1,11 @@
 //! Credential proxy — inject secrets into sandboxes without exposing them.
+//!
+//! Two injection mechanisms:
+//! - **Direct injection** — env vars, files, or stdin via [`CredentialProxy`]
+//! - **HTTP proxy** — transparent HTTP/HTTPS proxy that injects auth headers
+//!   for known hosts via [`http_proxy::start_proxy`]
+
+pub mod http_proxy;
 
 use serde::{Deserialize, Serialize};
 

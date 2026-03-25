@@ -100,6 +100,33 @@ impl Backend {
             .copied()
             .collect()
     }
+
+    /// Select the strongest available backend for the given policy.
+    ///
+    /// Ranks all available backends by their strength score (with policy
+    /// modifiers applied) and returns the highest-scoring one. Falls back
+    /// to `Noop` if nothing else is available.
+    #[must_use]
+    pub fn resolve_best(policy: &crate::policy::SandboxPolicy) -> Backend {
+        Self::available()
+            .into_iter()
+            .filter(|b| *b != Backend::Noop) // Prefer real isolation over noop
+            .max_by_key(|b| crate::scoring::score_backend(*b, policy))
+            .unwrap_or(Backend::Noop)
+    }
+
+    /// Select the strongest available backend with at least the given
+    /// minimum strength score. Returns `None` if no backend meets the threshold.
+    #[must_use]
+    pub fn resolve_min_strength(
+        policy: &crate::policy::SandboxPolicy,
+        min_score: u8,
+    ) -> Option<Backend> {
+        Self::available()
+            .into_iter()
+            .filter(|b| crate::scoring::score_backend(*b, policy).value() >= min_score)
+            .max_by_key(|b| crate::scoring::score_backend(*b, policy))
+    }
 }
 
 impl std::str::FromStr for Backend {
@@ -386,5 +413,35 @@ mod tests {
                 err.to_string().contains("not available") || err.to_string().contains("not found")
             );
         }
+    }
+
+    #[test]
+    fn resolve_best_returns_something() {
+        let policy = SandboxPolicy::basic();
+        let best = Backend::resolve_best(&policy);
+        // Should return at least Noop (always available) or better
+        assert!(best.is_available());
+    }
+
+    #[test]
+    fn resolve_best_prefers_stronger() {
+        let policy = SandboxPolicy::basic();
+        let best = Backend::resolve_best(&policy);
+        // If Process is available, it should be preferred over Noop
+        if Backend::Process.is_available() {
+            assert_ne!(best, Backend::Noop);
+        }
+    }
+
+    #[test]
+    fn resolve_min_strength_threshold() {
+        let policy = SandboxPolicy::strict();
+        // Score 0 should always find something (Process available on Linux)
+        let any = Backend::resolve_min_strength(&policy, 0);
+        assert!(any.is_some());
+
+        // Score 200 should find nothing
+        let none = Backend::resolve_min_strength(&policy, 200);
+        assert!(none.is_none());
     }
 }
