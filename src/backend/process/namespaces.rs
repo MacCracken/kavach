@@ -92,13 +92,13 @@ pub fn apply_namespaces(config: &NamespaceConfig) -> crate::Result<()> {
     if config.new_user {
         let uid = config.host_uid;
         let gid = config.host_gid;
-        if let Err(e) = write_id_maps(uid, gid) {
+        if let Err(_e) = write_id_maps(uid, gid) {
             // Best-effort: some kernels restrict writing maps without newuidmap.
-            tracing::warn!("UID/GID map write failed (rootless may not work): {e}");
+            // NOTE: No tracing here — this runs in pre_exec (async-signal-unsafe).
         }
     }
 
-    tracing::debug!(?flags, "namespace isolation applied");
+    // NOTE: No tracing here — this runs in pre_exec (async-signal-unsafe).
     Ok(())
 }
 
@@ -127,7 +127,7 @@ fn write_id_maps(host_uid: u32, host_gid: u32) -> std::io::Result<()> {
     let mut f = std::fs::File::create("/proc/self/gid_map")?;
     writeln!(f, "0 {host_gid} 1")?;
 
-    tracing::debug!(host_uid, host_gid, "UID/GID maps written for rootless");
+    // NOTE: No tracing here — this runs in pre_exec (async-signal-unsafe).
     Ok(())
 }
 
@@ -157,7 +157,7 @@ pub fn drop_capabilities() -> crate::Result<()> {
         let _ = caps::drop(None, CapSet::Inheritable, *cap);
     }
 
-    tracing::debug!("dangerous capabilities dropped");
+    // NOTE: No tracing here — this runs in pre_exec (async-signal-unsafe).
     Ok(())
 }
 

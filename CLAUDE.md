@@ -2,16 +2,16 @@
 
 ## Project Identity
 
-**Kavach** (Hindi: armor/shield) — Sandbox execution framework — 8 backends, strength scoring (0-100), policy engine, credential proxy
+**Kavach** (Hindi: armor/shield) — Sandbox execution framework — 10 backends, strength scoring (0-100), policy engine, 3-scanner pipeline, credential proxy (direct + HTTP), runtime guards, threat classification, audit chain
 
 - **Type**: Flat crate with binary
 - **License**: AGPL-3.0-only
 - **MSRV**: 1.89
-- **Version**: SemVer 0.D.M pre-1.0
+- **Version**: SemVer, v1.0.0
 
 ## Consumers
 
-SY (agent sandboxing), daimon (sandbox management), stiva (container isolation), AgnosAI (crew sandboxing), kiran (WASM scripting)
+SY (agent sandboxing), stiva (container isolation), kiran (WASM scripting), AgnosAI (crew sandboxing), hoosh (tool sandboxing), bote (MCP tool handlers), aethersafta (plugin isolation)
 
 ## Development Process
 
@@ -46,7 +46,7 @@ SY (agent sandboxing), daimon (sandbox management), stiva (container isolation),
 - **Tests + benchmarks are the way.** Minimum 80%+ coverage target.
 - **Own the stack.** If an AGNOS crate wraps an external lib, depend on the AGNOS crate.
 - **No magic.** Every operation is measurable, auditable, traceable.
-- **`#[non_exhaustive]`** on all public enums.
+- **`#[non_exhaustive]`** on all public enums and key public structs.
 - **`#[must_use]`** on all pure functions.
 - **`#[inline]`** on hot-path functions.
 - **`write!` over `format!`** — avoid temporary allocations.
@@ -54,10 +54,11 @@ SY (agent sandboxing), daimon (sandbox management), stiva (container isolation),
 - **Vec arena over HashMap** — when indices are known, direct access beats hashing.
 - **Feature-gate optional deps** — consumers pull only what they need.
 - **tracing on all operations** — structured logging for audit trail.
+- **`// SAFETY:`** comment on every `unsafe` block.
+- **async-signal-safe only in pre_exec** — no heap allocation, no mutex, no tracing after fork.
 
 ## DO NOT
 - **Do not commit or push** — the user handles all git operations (commit, push, tag)
-
 - **NEVER use `gh` CLI** — use `curl` to GitHub API only
 - Do not add unnecessary dependencies — keep it lean
 - Do not `unwrap()` or `panic!()` in library code

@@ -243,12 +243,15 @@ impl SecretsScanner {
 /// Scans for base64/hex-like tokens of 20+ characters with Shannon entropy > 4.5.
 /// Only triggers if no named pattern matched (to avoid double-flagging).
 fn detect_high_entropy(text: &str) -> Vec<ScanFinding> {
-    static HIGH_ENTROPY_RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
-        Regex::new(r"[A-Za-z0-9+/=_\-]{20,}").expect("high-entropy regex")
-    });
+    static HIGH_ENTROPY_RE: std::sync::LazyLock<Option<Regex>> =
+        std::sync::LazyLock::new(|| Regex::new(r"[A-Za-z0-9+/=_\-]{20,}").ok());
+
+    let Some(ref re) = *HIGH_ENTROPY_RE else {
+        return Vec::new();
+    };
 
     let mut findings = Vec::new();
-    for m in HIGH_ENTROPY_RE.find_iter(text) {
+    for m in re.find_iter(text) {
         let token = m.as_str();
         let entropy = shannon_entropy(token);
         if entropy > 4.5 {

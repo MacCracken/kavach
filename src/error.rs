@@ -4,6 +4,7 @@ use thiserror::Error;
 
 /// Errors produced by kavach operations.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum KavachError {
     /// The requested backend is not available on this system.
     #[error("backend not available: {0}")]

@@ -20,6 +20,7 @@ const DEFAULT_IMAGE: &str = "ghcr.io/maccracken/sy-agnos:latest";
 
 /// Hardening tier detected from /etc/sy-agnos-release inside the container.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum SyAgnosTier {
     /// Immutable rootfs, no shell, baked seccomp, nftables default-deny.
     Minimal,
@@ -31,6 +32,7 @@ pub enum SyAgnosTier {
 
 impl SyAgnosTier {
     /// Strength score for this tier.
+    #[must_use]
     pub fn strength(&self) -> u8 {
         match self {
             Self::Minimal => 80,
@@ -40,6 +42,7 @@ impl SyAgnosTier {
     }
 
     /// Parse tier from the "tier" field in sy-agnos-release.
+    #[must_use]
     pub fn parse(s: &str) -> Self {
         match s.trim() {
             "tpm_measured" => Self::TpmMeasured,
@@ -75,6 +78,7 @@ pub struct AttestationReport {
 impl AttestationReport {
     /// Verify attestation report integrity.
     /// Checks PCR registers 8, 9, 10 are present and well-formed.
+    #[must_use]
     pub fn verify(&self) -> bool {
         let required_pcrs = [8, 9, 10];
         let pcr_pattern = regex_lite::Regex::new(r"^[0-9a-f]{16,128}$").ok();

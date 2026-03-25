@@ -6,90 +6,51 @@ Completed items are in [CHANGELOG.md](../../CHANGELOG.md).
 
 ---
 
-## Completed
+## v1.0.0 — Released 2026-03-25
 
-| Version | Milestone | Summary |
-|---------|-----------|---------|
-| v0.21.3 | Foundation | 9-variant Backend enum, SandboxBackend trait, StrengthScore (0–100), SandboxPolicy, CredentialProxy, lifecycle FSM, SandboxConfig builder, KavachError |
-| v0.22.3 | Process Backend | Seccomp-bpf, Landlock, namespaces, cgroups v2, capability dropping, externalization gate (17 patterns), backend dispatch |
-| v0.23.3 | gVisor & OCI | runsc/runc/crun integration, OCI spec generation, health monitoring, metrics, OciImageManager |
-| v0.24.3 | Firecracker & WASM | Firecracker microVM (jailer, vsock, snapshot/restore, TAP networking), wasmtime WASI (fuel metering, memory limits) |
-| v0.25.3 | Hardware Enclaves & SyAgnos | SGX (Gramine, attestation, sealed data), SEV-SNP (QEMU, attestation, guest policy), SyAgnos (3 tiers, Phylax scanning, image management) |
-| v0.25.3+ | SY Parity & Hardening | Code/data/threat scanners, quarantine, audit chain, runtime guards, HTTP credential proxy, backend auto-selection, TDX, SandboxPool, io_uring blocking, entropy detection |
+| Milestone | Summary |
+|-----------|---------|
+| Foundation | 10-variant Backend enum, SandboxBackend trait, StrengthScore (0–100), SandboxPolicy, CredentialProxy, lifecycle FSM |
+| Process Backend | Seccomp-bpf (87 allowed + 17 blocked + io_uring), Landlock v5, namespaces, cgroups v2, capability dropping |
+| gVisor & OCI | runsc/runc/crun, OCI spec generation, health monitoring, metrics, OciImageManager |
+| Firecracker & WASM | microVM (jailer, vsock, snapshot/restore, TAP networking), wasmtime WASI (fuel metering) |
+| Hardware Enclaves | SGX (Gramine, attestation, sealed data), SEV-SNP (attestation, guest policy), TDX (10th backend) |
+| SyAgnos | 3 hardening tiers, Phylax scanning, image management |
+| Scanning Pipeline | Secrets (17 patterns + entropy), code (25 groups), data/compliance (10 patterns), threat classifier, quarantine, audit chain |
+| Runtime Security | Guards (fork bomb, path blocklist, command blocklist), integrity monitoring, 4-tier escalation |
+| Credential Proxy | Direct injection (env/file/stdin) + HTTP proxy (header injection, CONNECT tunnel, host allowlist) |
+| Infrastructure | SandboxPool, backend auto-selection, 541 tests, cargo-semver-checks |
+
+### Consumers
+
+| Consumer | Version | Status |
+|----------|---------|--------|
+| **Stiva** | `kavach >= 1.0` | Active — container isolation |
+| **Kiran** | `kavach = 1.0` | Active — WASM scripting sandbox |
+| **SecureYeoman** | sy-sandbox + kavach | Active — agent sandboxing |
+| **AgnosAI** | Planned | Sandboxed crew execution |
+| **Hoosh** | Planned | Tool sandboxing + externalization gate ([ADR-006](../../../hoosh/docs/decisions/006-kavach-tool-sandbox.md)) |
+| **Bote** | Planned | Tool handler sandboxing |
+| **Aethersafta** | Planned | Plugin isolation |
 
 ---
 
-## v0.26.3 — Consumer Integration
+## Remaining (blocked on external deps or design)
 
-### Adoption
+### Requires crate dependency additions
+- [ ] Landlock ABI v6 — IPC scoping (`landlock` crate v0.5+)
+- [ ] Landlock ABI v4 — TCP bind/connect (`landlock` crate v0.5+ `AccessNet`)
+- [ ] Unified attestation via EAR tokens (`veraison/rust-ear` crate)
+- [ ] OCI image signature verification (`sigstore` crate)
+- [ ] Cryptographic HMAC upgrade for audit chain (`hmac` + `sha2` crates)
 
-| Consumer | Status | Roadmap location |
-|----------|--------|------------------|
-| **Stiva** | Active dependency (`kavach = ">=0.25"`) | [stiva/CLAUDE.md](../../../stiva/CLAUDE.md) |
-| **Kiran** | Active dependency (`kavach = "0.25"`, `wasm` feature) | [kiran/CLAUDE.md](../../../kiran/CLAUDE.md) |
-| **SecureYeoman** | Active (sy-sandbox + kavach) | [SY migration roadmap](../../../secureyeoman/docs/development/migration/roadmap.md) Phase 5 |
-| **AgnosAI** | Planned — sandboxed crew execution | [agnosai roadmap](../../../agnosai/docs/development/roadmap.md) Kavach Integration section |
-| **Hoosh** | Planned — tool sandboxing + externalization gate | [hoosh roadmap](../../../hoosh/docs/development/roadmap.md) Post-v1; [ADR-006](../../../hoosh/docs/decisions/006-kavach-tool-sandbox.md) |
-| **Bote** | Planned — tool handler sandboxing | [bote roadmap](../../../bote/docs/development/roadmap.md) Post-v1 |
-| **Aethersafta** | Planned — plugin isolation | [aethersafta roadmap](../../../aethersafta/docs/development/roadmap.md) Post-v1 ecosystem |
-
-### Validation
+### Requires architectural design
+- [ ] `CompositeBackend` — stack multiple isolation layers (WASM+Firecracker, Process+gVisor)
 - [ ] Cross-crate integration tests (stiva + kiran + kavach)
-- [x] Strength scoring validated against SY reference scores
-- [~] Performance: framework dispatch < 50µs; namespace isolation adds ~2.8ms (inherent OS cost)
 
----
-
-## v1.0.0 Criteria
-
-- [x] All 9 backends implemented and tested
-- [x] Strength scoring validated against SY reference scores
-- [x] CredentialProxy handles all injection methods (EnvVar, File, Stdin)
-- [x] Externalization gate tested with adversarial inputs (30+ pattern tests)
-- [x] Adversarial test suite passing (438 tests) — see [tests/adversarial.rs](../../tests/adversarial.rs)
-- [x] Lifecycle FSM formally verified (exhaustive 5×5 transition matrix + state invariants)
-- [~] 3+ downstream consumers in production (stiva, kiran active; SY integrating)
-- [~] 90%+ test coverage (438 tests; line coverage limited by untestable external backends)
-- [x] docs.rs complete (0 `missing_docs` warnings)
-- [x] No `unsafe` without `// SAFETY:` comments
-- [x] cargo-semver-checks in CI (`make semver`)
-
----
-
-## Engineering Backlog (P1)
-
-### Performance
-- [x] `redact()` returns `Cow` — zero-copy when no secrets found
+### Minor optimizations
 - [ ] Policy clone optimization — extract only landlock/rlimit fields for pre_exec closure
 - [ ] `ScanFinding` fields use `Cow<'static, str>` for scanner/category
-- [x] Gate benchmark uses `iter_batched` — excludes `ExecResult::clone` from measurement
-- [x] `ExternalizationGate` cached on `Sandbox` struct — created once at sandbox creation
-- [x] `eprintln!` in pre_exec replaced with `libc::write(2, ...)` — true async-signal-safety
-
-### Scanning pipeline (SY parity)
-- [x] Code scanner — command injection, data exfiltration, privilege escalation, supply chain, obfuscation (25 pattern groups)
-- [x] Data/compliance scanner — PII (credit card, phone, IBAN, IPv4), HIPAA/GDPR/PCI-DSS/SOC2 keywords
-- [x] Threat classification — intent scoring (0.0–1.0), kill-chain stages, co-occurrence amplification, 4-tier escalation
-- [x] Repeat offender tracking — rolling window + time decay + per-agent scoring + escalation recommendations
-- [x] Quarantine storage — file-based with metadata sidecar, approval/reject workflow, list/remove
-- [x] Audit chain — keyed-hash append-only log with chain verification (upgrade to HMAC-SHA256 when `hmac`+`sha2` deps added)
-
-### Runtime security
-- [x] Runtime guards — fork bomb detection, sensitive path blocklist (15 paths), time anomaly detection
-- [x] Sandbox integrity monitoring — PID/mount/user namespace isolation verification
-- [x] Command allowlist/blocklist — 26 blocked commands (shells, interpreters, compilers), 30 allowed
-- [x] Escalation management — 4-tier response integrated in threat classifier (log/alert/suspend/revoke)
-
-### Platform advances
-- [ ] Landlock ABI v6 — IPC scoping (requires landlock crate update to support ABI::V6)
-- [ ] Landlock ABI v4 — TCP bind/connect (requires landlock crate update to support AccessNet)
-- [x] io_uring explicit blocking — `io_uring_setup/enter/register` added to seccomp blocklist
-- [x] TDX backend variant — `Backend::Tdx` (10th backend, strength 85, /dev/tdx_guest detection)
-- [x] `SandboxPool` — pre-warmed sandbox pool with claim/replenish lifecycle
-- [ ] `CompositeBackend` — stack multiple isolation layers (requires architectural design)
-- [ ] Unified attestation via EAR tokens (requires `veraison/rust-ear` crate dep)
-- [ ] OCI image signature verification (requires `sigstore` crate dep)
-- [x] Entropy-based secret detection — Shannon entropy > 4.5 on unrecognized high-entropy strings
 
 ---
 
@@ -102,23 +63,21 @@ Completed items are in [CHANGELOG.md](../../CHANGELOG.md).
 - [ ] Deterministic execution (same input → same output, bit-for-bit)
 
 ### Integration
-- [ ] majra integration (sandbox events as pub/sub topics via TypedPubSub)
+- [ ] majra integration (sandbox events as pub/sub topics)
 - [ ] ai-hwaccel integration (GPU passthrough for ML sandboxes)
 - [ ] nein integration (per-sandbox firewall rules)
-- [ ] stiva integration (attested Rust-native container runtime, replaces docker/podman)
-- [ ] Audit chain integration (cryptographic hash of all sandbox events)
+- [ ] stiva integration (attested Rust-native container runtime)
 
-### Composable isolation stacks — [stiva spec](stiva.md)
-- [ ] Backend composition — stack multiple isolation layers (Firecracker + jailer + stiva + sy-agnos + TPM → 98)
-- [ ] Composite strength scoring — sum of layered isolation with quantified degradation
+### Composable isolation stacks
+- [ ] Backend composition — stack multiple isolation layers
+- [ ] Composite strength scoring
 - [ ] Runtime attestation — verify stiva binary hash before launching containers
 - [ ] Image signature verification — reject unsigned/tampered images via ark signing
 - [ ] Veraison EAR integration — standardized attestation result encoding (IETF RATS)
 
 ### Cross-platform porting
-- [ ] macOS: App Sandbox / sandbox-exec for process isolation
-- [ ] Windows: AppContainer for process isolation
-- [ ] Windows: Hyper-V for VM isolation
+- [ ] macOS: App Sandbox / sandbox-exec
+- [ ] Windows: AppContainer + Hyper-V
 - [ ] Cross-platform: platform-specific policy enforcement behind SandboxBackend trait
 - [ ] FreeBSD jails
 
@@ -126,7 +85,7 @@ Completed items are in [CHANGELOG.md](../../CHANGELOG.md).
 
 ## Non-goals
 
-- **Container orchestration** — kavach is a sandbox primitive, not Kubernetes. daimon/AgnosAI handle orchestration.
-- **Image registry** — kavach doesn't store or distribute images. ark/nous handle packages.
-- **Network proxy** — kavach sets network policy, doesn't route traffic. nein handles firewall rules.
-- **Secret storage** — kavach injects secrets, doesn't store them. The source of truth is the host's secret manager.
+- **Container orchestration** — kavach is a sandbox primitive, not Kubernetes
+- **Image registry** — kavach doesn't store or distribute images
+- **Network proxy** — kavach sets network policy, doesn't route traffic
+- **Secret storage** — kavach injects secrets, doesn't store them

@@ -126,6 +126,10 @@ async fn handle_connection(mut client: TcpStream, config: &HttpProxyConfig) -> s
         let mut reader = BufReader::new(&mut client);
         reader.read_line(&mut request_line).await?;
     }
+    // Reject oversized request lines (prevent OOM from malicious clients)
+    if request_line.len() > 8192 {
+        return Ok(());
+    }
 
     let parts: Vec<&str> = request_line.split_whitespace().collect();
     if parts.len() < 3 {
@@ -141,7 +145,10 @@ async fn handle_connection(mut client: TcpStream, config: &HttpProxyConfig) -> s
     // Enforce allowlist
     if config.enforce_allowlist
         && !host.is_empty()
-        && !config.allowed_hosts.iter().any(|h| host.contains(h))
+        && !config
+            .allowed_hosts
+            .iter()
+            .any(|h| host == h.as_str() || host.ends_with(&format!(".{h}")))
     {
         tracing::debug!(host = %host, "proxy blocked: host not in allowlist");
         client
@@ -207,9 +214,12 @@ async fn handle_http(
     }
 
     // Inject credential header if we have one for this host
+    // Sanitize header name/value to prevent CRLF injection
     if let Some(rule) = config.credential_rules.get(host) {
-        headers.push_str(&format!("{}: {}\r\n", rule.header_name, rule.header_value));
-        tracing::debug!(host = %host, header = %rule.header_name, "injected credential");
+        let safe_name = rule.header_name.replace(['\r', '\n'], "");
+        let safe_value = rule.header_value.replace(['\r', '\n'], "");
+        headers.push_str(&format!("{safe_name}: {safe_value}\r\n"));
+        tracing::debug!(host = %host, header = %safe_name, "injected credential");
     }
     headers.push_str("\r\n");
 

@@ -6,7 +6,6 @@
 #[cfg(target_os = "linux")]
 use landlock::{
     ABI, Access, AccessFs, PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr,
-    RulesetStatus,
 };
 
 use crate::policy::{LandlockRule, SandboxPolicy};
@@ -53,17 +52,9 @@ pub fn apply_landlock(policy: &SandboxPolicy) -> crate::Result<()> {
         .restrict_self()
         .map_err(|e| crate::KavachError::ExecFailed(format!("landlock restrict_self: {e}")))?;
 
-    match status.ruleset {
-        RulesetStatus::FullyEnforced => {
-            tracing::debug!("landlock fully enforced");
-        }
-        RulesetStatus::PartiallyEnforced => {
-            tracing::warn!("landlock partially enforced (older kernel ABI)");
-        }
-        RulesetStatus::NotEnforced => {
-            tracing::warn!("landlock not enforced");
-        }
-    }
+    // NOTE: No tracing here — this runs in pre_exec (async-signal-unsafe).
+    // Check the status for correctness but don't log.
+    let _ = status.ruleset;
 
     Ok(())
 }

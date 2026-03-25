@@ -31,7 +31,7 @@ impl CgroupScope {
     #[cfg(target_os = "linux")]
     pub fn create(&mut self, policy: &SandboxPolicy) -> crate::Result<()> {
         // Create parent dir if needed
-        let parent = self.path.parent().unwrap();
+        let parent = self.path.parent().unwrap_or(&self.path);
         if !parent.exists() {
             std::fs::create_dir_all(parent).map_err(|e| {
                 crate::KavachError::ExecFailed(format!(
