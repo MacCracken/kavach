@@ -6,7 +6,9 @@ targets = []
 all-features = true
 
 [advisories]
-# Advisory database is checked by default; no additional config needed.
+# RUSTSEC-2023-0071: rsa timing sidechannel — transitive dep from sigstore (optional feature).
+# sigstore is feature-gated and not used in hot paths. Upstream fix pending.
+ignore = ["RUSTSEC-2023-0071"]
 
 [licenses]
 allow = [

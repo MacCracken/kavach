@@ -1,14 +1,8 @@
-//! Audit chain — append-only hash-linked event log.
+//! Cryptographic audit chain — append-only HMAC-SHA256 signed event log.
 //!
-//! Each entry links to the previous via keyed hash, forming a chain that can
-//! detect accidental modifications or missing entries.
-//!
-//! **Note**: The current implementation uses a non-cryptographic keyed hash
-//! (SipHash via `DefaultHasher`). This detects accidental tampering and
-//! provides integrity for honest participants, but is NOT resistant to a
-//! motivated adversary who can forge entries. For production-grade tamper
-//! evidence, replace `compute_hmac` with `hmac::Hmac<sha2::Sha256>` from
-//! the `hmac` + `sha2` crates.
+//! Each entry links to the previous via HMAC-SHA256, forming a tamper-evident
+//! chain. The chain can be verified end-to-end to detect missing or modified
+//! entries. Forging an entry requires knowledge of the HMAC key.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -32,13 +26,11 @@ pub struct AuditEntry {
     pub prev_hmac: String,
 }
 
-/// Append-only audit chain with keyed-hash integrity.
+/// Append-only audit chain with HMAC-SHA256 integrity.
 ///
-/// Each entry is signed with a keyed hash and links to the previous entry's
-/// hash, forming a chain. Tampering with any entry invalidates the chain
-/// from that point forward.
-///
-/// Uses a non-cryptographic hash by default. See module docs for upgrade path.
+/// Each entry is signed with HMAC-SHA256 and links to the previous entry's
+/// HMAC, forming a tamper-evident chain. Modifying any entry invalidates
+/// the chain from that point forward.
 pub struct AuditChain {
     log_path: PathBuf,
     hmac_key: Vec<u8>,
@@ -222,28 +214,26 @@ fn sorted_json(value: &serde_json::Value) -> String {
     }
 }
 
-/// Compute keyed hash and return hex string.
+/// Compute HMAC-SHA256 and return hex string.
 fn compute_hmac(key: &[u8], data: &[u8]) -> String {
-    // Simple HMAC-SHA256 using the standard construction:
-    // HMAC(K, m) = H((K' ^ opad) || H((K' ^ ipad) || m))
-    // where K' = H(K) if |K| > 64, else K padded to 64 bytes
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
 
-    // For a production implementation, use ring::hmac or sha2 crate.
-    // This uses a fast non-cryptographic hash for now — upgrade to
-    // sha2::Sha256 when the dep is available.
-    let mut hasher = DefaultHasher::new();
-    key.hash(&mut hasher);
-    data.hash(&mut hasher);
-    let h1 = hasher.finish();
+    type HmacSha256 = Hmac<Sha256>;
 
-    let mut hasher2 = DefaultHasher::new();
-    h1.hash(&mut hasher2);
-    data.hash(&mut hasher2);
-    let h2 = hasher2.finish();
+    let mut mac = HmacSha256::new_from_slice(key)
+        .unwrap_or_else(|_| HmacSha256::new_from_slice(&[0]).unwrap());
+    mac.update(data);
+    let result = mac.finalize();
+    let bytes = result.into_bytes();
 
-    format!("{h1:016x}{h2:016x}")
+    // Convert to hex string
+    let mut hex = String::with_capacity(bytes.len() * 2);
+    for b in bytes.iter() {
+        use std::fmt::Write;
+        let _ = write!(hex, "{b:02x}");
+    }
+    hex
 }
 
 #[cfg(test)]

@@ -21,6 +21,8 @@ oci = ["dep:oci-spec", "dep:tempfile"]
 sgx = ["dep:tempfile"]
 sev = ["dep:tempfile"]
 sy-agnos = ["dep:tempfile"]
+sigstore = ["dep:sigstore"]
+attestation = ["dep:ear"]
 full = ["process", "gvisor", "firecracker", "wasm", "oci", "sgx", "sev", "sy-agnos"]
 
 [dependencies]
@@ -35,8 +37,18 @@ uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 
+# Crypto — HMAC-SHA256 for audit chain
+hmac = "0.12"
+sha2 = "0.10"
+
 # Process backend (Linux-only)
 regex = { version = "1", optional = true }
+
+# Image verification (optional)
+sigstore = { version = "0.13", optional = true, default-features = false }
+
+# Attestation standards (optional)
+ear = { version = "0.5", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

@@ -82,8 +82,12 @@ impl ProcessBackend {
             // Only apply landlock if kernel supports it
             let apply_ll = caps.landlock_available && landlock_enforce::should_apply(policy);
 
-            // Clone policy for pre_exec closure
-            let policy_clone = policy.clone();
+            // Extract only the fields needed by the pre_exec closure to avoid
+            // cloning the entire SandboxPolicy (which includes Vec<LandlockRule>,
+            // Vec<String>, etc.) on every exec call.
+            let ll_policy = if apply_ll { Some(policy.clone()) } else { None };
+            let rlimit_memory = policy.memory_limit_mb;
+            let rlimit_pids = policy.max_pids;
 
             // SAFETY: `CommandExt::pre_exec` requires unsafe because the closure
             // runs in the child process between fork() and exec(), where only
@@ -102,8 +106,8 @@ impl ProcessBackend {
             // 3. Error paths use libc::write(2, ...) which is
             //    async-signal-safe, or return Err (no cleanup needed).
             // 4. No heap-allocated data is created inside the closure —
-            //    all captured values (ns_config, policy_clone, seccomp_program,
-            //    apply_ll) are moved in and only read.
+            //    all captured values (ns_config, ll_policy, rlimit_memory,
+            //    rlimit_pids, seccomp_program) are moved in and only read.
             // 5. Ordering is critical and documented inline: namespaces first
             //    (needs unshare), then landlock (needs landlock_* syscalls),
             //    then caps (needs capset), then seccomp last (would block
@@ -120,7 +124,9 @@ impl ProcessBackend {
                     }
 
                     // 2. Landlock (needs landlock_* syscalls) — best-effort
-                    if apply_ll && let Err(e) = landlock_enforce::apply_landlock(&policy_clone) {
+                    if let Some(ref ll_pol) = ll_policy
+                        && let Err(e) = landlock_enforce::apply_landlock(ll_pol)
+                    {
                         pre_exec_warn("kavach: landlock skipped: ", &e);
                     }
 
@@ -128,7 +134,7 @@ impl ProcessBackend {
                     let _ = namespaces::drop_capabilities();
 
                     // 4. Apply resource limits via rlimits — best-effort
-                    let _ = cgroups::apply_rlimits(&policy_clone);
+                    let _ = cgroups::apply_rlimits_raw(rlimit_memory, rlimit_pids);
 
                     // 5. Seccomp filter (MUST BE LAST — blocks future syscalls)
                     if let Some(ref program) = seccomp_program {

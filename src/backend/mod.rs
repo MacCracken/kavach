@@ -7,7 +7,9 @@ use serde::{Deserialize, Serialize};
 use crate::lifecycle::{ExecResult, SandboxConfig};
 use crate::policy::SandboxPolicy;
 
+pub mod attestation;
 pub mod capabilities;
+pub mod composite;
 pub mod exec_util;
 #[cfg(feature = "firecracker")]
 pub mod firecracker;
@@ -224,7 +226,28 @@ impl SandboxBackend for NoopBackend {
 }
 
 /// Create a backend instance from configuration.
+///
+/// If `config.inner_backend` is set, creates a [`composite::CompositeBackend`]
+/// that layers the inner backend's policy on top of the outer backend's execution.
 pub fn create_backend(config: &SandboxConfig) -> crate::Result<Box<dyn SandboxBackend>> {
+    let outer = create_single_backend(config)?;
+
+    // Wrap in composite if inner backend is specified
+    if let Some(inner) = config.inner_backend {
+        let inner_policy = config.policy.clone();
+        Ok(Box::new(composite::CompositeBackend::new(
+            outer,
+            config.backend,
+            inner,
+            inner_policy,
+        )))
+    } else {
+        Ok(outer)
+    }
+}
+
+/// Create a single (non-composite) backend instance.
+fn create_single_backend(config: &SandboxConfig) -> crate::Result<Box<dyn SandboxBackend>> {
     match config.backend {
         Backend::Noop => Ok(Box::new(NoopBackend)),
         #[cfg(all(feature = "process", target_os = "linux"))]

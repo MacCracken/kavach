@@ -155,15 +155,21 @@ pub fn format_cpu_max(cpu_limit: f64) -> String {
 /// Apply resource limits via setrlimit as a fallback when cgroups are unavailable.
 #[cfg(target_os = "linux")]
 pub fn apply_rlimits(policy: &SandboxPolicy) -> crate::Result<()> {
+    apply_rlimits_raw(policy.memory_limit_mb, policy.max_pids)
+}
+
+/// Apply resource limits from raw values (avoids cloning SandboxPolicy).
+#[cfg(target_os = "linux")]
+pub fn apply_rlimits_raw(memory_limit_mb: Option<u64>, max_pids: Option<u32>) -> crate::Result<()> {
     use nix::sys::resource::{Resource, setrlimit};
 
-    if let Some(mb) = policy.memory_limit_mb {
+    if let Some(mb) = memory_limit_mb {
         let bytes = mb * 1024 * 1024;
         setrlimit(Resource::RLIMIT_AS, bytes, bytes)
             .map_err(|e| crate::KavachError::ExecFailed(format!("setrlimit AS: {e}")))?;
     }
 
-    if let Some(pids) = policy.max_pids {
+    if let Some(pids) = max_pids {
         setrlimit(Resource::RLIMIT_NPROC, pids as u64, pids as u64)
             .map_err(|e| crate::KavachError::ExecFailed(format!("setrlimit NPROC: {e}")))?;
     }

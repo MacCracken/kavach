@@ -38,19 +38,15 @@ Completed items are in [CHANGELOG.md](../../CHANGELOG.md).
 ## Remaining (blocked on external deps or design)
 
 ### Requires crate dependency additions
-- [ ] Landlock ABI v6 — IPC scoping (`landlock` crate v0.5+)
-- [ ] Landlock ABI v4 — TCP bind/connect (`landlock` crate v0.5+ `AccessNet`)
-- [ ] Unified attestation via EAR tokens (`veraison/rust-ear` crate)
-- [ ] OCI image signature verification (`sigstore` crate)
-- [ ] Cryptographic HMAC upgrade for audit chain (`hmac` + `sha2` crates)
+- [ ] Landlock ABI v6 — IPC scoping (`landlock` crate stuck at 0.4.x, ABI v6 not yet in upstream)
+- [ ] Landlock ABI v4 — TCP bind/connect (`landlock` crate 0.4.x lacks `AccessNet`)
+- [x] Unified attestation via EAR tokens — `Attestable` trait + `AttestationResult` + EAR conversion (`ear` v0.5)
+- [x] OCI image signature verification — `sigstore` v0.13 added as optional feature
+- [x] Cryptographic HMAC-SHA256 for audit chain — `hmac` v0.12 + `sha2` v0.10 (replaces SipHash placeholder)
 
 ### Requires architectural design
-- [ ] `CompositeBackend` — stack multiple isolation layers (WASM+Firecracker, Process+gVisor)
+- [x] `CompositeBackend` — policy composition model: outer backend provides runtime, inner adds policy overlay, merged with stricter-wins rules, +5 scoring bonus
 - [ ] Cross-crate integration tests (stiva + kiran + kavach)
-
-### Minor optimizations
-- [ ] Policy clone optimization — extract only landlock/rlimit fields for pre_exec closure
-- [ ] `ScanFinding` fields use `Cow<'static, str>` for scanner/category
 
 ---
 

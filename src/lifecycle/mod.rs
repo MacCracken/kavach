@@ -80,6 +80,8 @@ pub struct SandboxConfig {
     pub agent_id: Option<String>,
     /// Externalization policy for output scanning.
     pub externalization: Option<ExternalizationPolicy>,
+    /// Optional inner backend for composite isolation (defense-in-depth).
+    pub inner_backend: Option<Backend>,
 }
 
 impl Default for SandboxConfig {
@@ -93,6 +95,7 @@ impl Default for SandboxConfig {
             env: Vec::new(),
             agent_id: None,
             externalization: None,
+            inner_backend: None,
         }
     }
 }
@@ -152,6 +155,15 @@ impl SandboxConfigBuilder {
     /// Set the externalization scanning policy.
     pub fn externalization(mut self, policy: ExternalizationPolicy) -> Self {
         self.config.externalization = Some(policy);
+        self
+    }
+
+    /// Set an inner backend for composite isolation (defense-in-depth).
+    ///
+    /// The outer backend (set via `backend()`) provides the runtime boundary.
+    /// The inner backend's policy is merged to tighten isolation constraints.
+    pub fn inner_backend(mut self, backend: Backend) -> Self {
+        self.config.inner_backend = Some(backend);
         self
     }
 
