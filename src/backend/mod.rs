@@ -125,6 +125,17 @@ pub trait SandboxBackend: Send + Sync {
     /// Check if the sandbox is healthy.
     async fn health_check(&self) -> crate::Result<bool>;
 
+    /// Spawn a long-running command without waiting for completion.
+    ///
+    /// Returns `None` if the backend does not support spawning.
+    async fn spawn(
+        &self,
+        _command: &str,
+        _policy: &SandboxPolicy,
+    ) -> crate::Result<Option<exec_util::SpawnedProcess>> {
+        Ok(None)
+    }
+
     /// Destroy the sandbox and release resources.
     async fn destroy(&self) -> crate::Result<()>;
 }
@@ -182,6 +193,7 @@ pub fn create_backend(config: &SandboxConfig) -> crate::Result<Box<dyn SandboxBa
         Backend::Sev => Ok(Box::new(sev::SevBackend::new(config)?)),
         #[cfg(feature = "sy-agnos")]
         Backend::SyAgnos => Ok(Box::new(sy_agnos::SyAgnosBackend::new(config)?)),
+        #[allow(unreachable_patterns)]
         _ => Err(crate::KavachError::BackendUnavailable(
             config.backend.to_string(),
         )),

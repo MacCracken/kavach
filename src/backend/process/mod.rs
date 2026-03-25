@@ -22,16 +22,14 @@ impl ProcessBackend {
             _config: config.clone(),
         })
     }
-}
 
-#[async_trait::async_trait]
-impl SandboxBackend for ProcessBackend {
-    fn backend_type(&self) -> Backend {
-        Backend::Process
-    }
-
-    async fn exec(&self, command: &str, policy: &SandboxPolicy) -> crate::Result<ExecResult> {
-        // Parse command into program + args
+    /// Build a [`tokio::process::Command`] with env, workdir, and pre-exec
+    /// isolation hooks applied. Shared between `exec` and `spawn`.
+    fn build_command(
+        &self,
+        command: &str,
+        policy: &SandboxPolicy,
+    ) -> crate::Result<tokio::process::Command> {
         let parts = shell_words(command);
         if parts.is_empty() {
             return Err(crate::KavachError::ExecFailed("empty command".into()));
@@ -41,9 +39,7 @@ impl SandboxBackend for ProcessBackend {
         let args = &parts[1..];
 
         let mut cmd = tokio::process::Command::new(program);
-        cmd.args(args)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
+        cmd.args(args);
 
         // Apply environment from config
         for (k, v) in &self._config.env {
@@ -145,12 +141,39 @@ impl SandboxBackend for ProcessBackend {
             }
         }
 
+        // Suppress unused variable warning on non-Linux
+        #[cfg(not(target_os = "linux"))]
+        let _ = policy;
+
+        Ok(cmd)
+    }
+}
+
+#[async_trait::async_trait]
+impl SandboxBackend for ProcessBackend {
+    fn backend_type(&self) -> Backend {
+        Backend::Process
+    }
+
+    async fn exec(&self, command: &str, policy: &SandboxPolicy) -> crate::Result<ExecResult> {
+        let mut cmd = self.build_command(command, policy)?;
+
         crate::backend::exec_util::execute_with_timeout(
             &mut cmd,
             self._config.timeout_ms,
             "process",
         )
         .await
+    }
+
+    async fn spawn(
+        &self,
+        command: &str,
+        policy: &SandboxPolicy,
+    ) -> crate::Result<Option<crate::backend::exec_util::SpawnedProcess>> {
+        let mut cmd = self.build_command(command, policy)?;
+        let proc = crate::backend::exec_util::spawn_process(&mut cmd, "process")?;
+        Ok(Some(proc))
     }
 
     async fn health_check(&self) -> crate::Result<bool> {

@@ -239,13 +239,35 @@ impl Sandbox {
 
         let result = self.backend.exec(command, &self.config.policy).await?;
 
-        // Apply externalization gate if configured
+        // Apply externalization gate if configured (requires process feature for regex scanning)
+        #[cfg(feature = "process")]
         if let Some(ref ext_policy) = self.config.externalization {
             let gate = crate::scanning::ExternalizationGate::new();
-            gate.apply(result, ext_policy)
-        } else {
-            Ok(result)
+            return gate.apply(result, ext_policy);
         }
+
+        Ok(result)
+    }
+
+    /// Spawn a long-running command in the sandbox.
+    ///
+    /// Unlike `exec`, this returns immediately with a handle to the running process.
+    /// The caller is responsible for managing the process lifecycle.
+    pub async fn spawn(
+        &self,
+        command: &str,
+    ) -> crate::Result<crate::backend::exec_util::SpawnedProcess> {
+        if self.state != SandboxState::Running {
+            return Err(crate::KavachError::ExecFailed(format!(
+                "sandbox is {}, not running",
+                self.state
+            )));
+        }
+
+        self.backend
+            .spawn(command, &self.config.policy)
+            .await?
+            .ok_or_else(|| crate::KavachError::ExecFailed("backend does not support spawn".into()))
     }
 
     /// Destroy the sandbox and release backend resources.

@@ -188,7 +188,7 @@ mod tests {
             .build();
         let spec = oci_spec::generate_spec(&config).unwrap();
         let root = spec.root().as_ref().unwrap();
-        assert_eq!(root.readonly().unwrap_or(false), true);
+        assert!(root.readonly().unwrap_or(false));
     }
 
     #[test]

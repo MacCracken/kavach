@@ -43,6 +43,7 @@ pub mod scoring;
 mod error;
 pub use error::KavachError;
 
+pub use backend::exec_util::SpawnedProcess;
 pub use backend::health::HealthStatus;
 pub use backend::metrics::SandboxMetrics;
 pub use backend::{Backend, SandboxBackend};

@@ -191,8 +191,10 @@ mod tests {
 
     #[test]
     fn vm_config_with_vsock() {
-        let mut fc = FirecrackerConfig::default();
-        fc.vsock_cid = Some(3);
+        let fc = FirecrackerConfig {
+            vsock_cid: Some(3),
+            ..Default::default()
+        };
         let vm = fc.to_vm_config(std::path::Path::new("/tmp"));
         assert!(vm.vsock.is_some());
         assert_eq!(vm.vsock.unwrap().guest_cid, 3);
