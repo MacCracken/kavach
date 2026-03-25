@@ -66,13 +66,27 @@ impl VsockConnection {
             })?;
 
         // Firecracker vsock protocol: send "CONNECT <port>\n" to initiate
-        use tokio::io::AsyncWriteExt;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
         let connect_msg = format!("CONNECT {}\n", self.port);
         let mut stream = stream;
         stream
             .write_all(connect_msg.as_bytes())
             .await
             .map_err(|e| crate::KavachError::ExecFailed(format!("vsock handshake: {e}")))?;
+
+        // Read response — Firecracker sends "OK <port>\n" on success
+        let mut reader = BufReader::new(&mut stream);
+        let mut response = String::new();
+        reader
+            .read_line(&mut response)
+            .await
+            .map_err(|e| crate::KavachError::ExecFailed(format!("vsock response: {e}")))?;
+
+        if !response.starts_with("OK") {
+            return Err(crate::KavachError::ExecFailed(format!(
+                "vsock connect rejected: {response}"
+            )));
+        }
 
         tracing::debug!(port = self.port, "vsock connected");
         Ok(stream)

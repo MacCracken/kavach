@@ -82,15 +82,15 @@ impl SgxBackend {
         std::fs::write(&input_path, plaintext)
             .map_err(|e| crate::KavachError::CreationFailed(format!("write plaintext: {e}")))?;
 
-        let seal_cmd = format!(
-            "gramine-sgx-seal --input {} --output {} --policy {}",
-            input_path.display(),
-            output_path.display(),
-            key_policy
-        );
-
-        let output = tokio::process::Command::new(&self.gramine_path)
-            .args(["-c", &seal_cmd])
+        let output = tokio::process::Command::new("gramine-sgx-seal")
+            .args([
+                "--input",
+                &input_path.to_string_lossy(),
+                "--output",
+                &output_path.to_string_lossy(),
+                "--policy",
+                &key_policy.to_string(),
+            ])
             .output()
             .await
             .map_err(|e| crate::KavachError::ExecFailed(format!("SGX seal: {e}")))?;
@@ -127,15 +127,15 @@ impl SgxBackend {
         std::fs::write(&input_path, &sealed.ciphertext)
             .map_err(|e| crate::KavachError::CreationFailed(format!("write sealed: {e}")))?;
 
-        let unseal_cmd = format!(
-            "gramine-sgx-unseal --input {} --output {} --policy {}",
-            input_path.display(),
-            output_path.display(),
-            sealed.key_policy
-        );
-
-        let output = tokio::process::Command::new(&self.gramine_path)
-            .args(["-c", &unseal_cmd])
+        let output = tokio::process::Command::new("gramine-sgx-unseal")
+            .args([
+                "--input",
+                &input_path.to_string_lossy(),
+                "--output",
+                &output_path.to_string_lossy(),
+                "--policy",
+                &sealed.key_policy.to_string(),
+            ])
             .output()
             .await
             .map_err(|e| crate::KavachError::ExecFailed(format!("SGX unseal: {e}")))?;

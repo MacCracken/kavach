@@ -192,6 +192,9 @@ pub struct Sandbox {
     /// Timestamp when the sandbox was stopped or destroyed.
     pub stopped_at: Option<DateTime<Utc>>,
     backend: Box<dyn SandboxBackend>,
+    /// Cached externalization gate (created once, reused per-exec).
+    #[cfg(feature = "process")]
+    gate: Option<crate::scanning::ExternalizationGate>,
 }
 
 impl fmt::Debug for Sandbox {
@@ -219,6 +222,13 @@ impl Sandbox {
 
         let backend = crate::backend::create_backend(&config)?;
 
+        // Pre-create the externalization gate if configured (avoids per-exec allocation)
+        #[cfg(feature = "process")]
+        let gate = config
+            .externalization
+            .as_ref()
+            .map(|_| crate::scanning::ExternalizationGate::new());
+
         Ok(Self {
             id: Uuid::new_v4(),
             config,
@@ -227,6 +237,8 @@ impl Sandbox {
             started_at: None,
             stopped_at: None,
             backend,
+            #[cfg(feature = "process")]
+            gate,
         })
     }
 
@@ -262,8 +274,9 @@ impl Sandbox {
 
         // Apply externalization gate if configured (requires process feature for regex scanning)
         #[cfg(feature = "process")]
-        if let Some(ref ext_policy) = self.config.externalization {
-            let gate = crate::scanning::ExternalizationGate::new();
+        if let Some(ref ext_policy) = self.config.externalization
+            && let Some(ref gate) = self.gate
+        {
             return gate.apply(result, ext_policy);
         }
 
@@ -296,6 +309,83 @@ impl Sandbox {
         self.backend.destroy().await?;
         self.transition(SandboxState::Destroyed)?;
         Ok(())
+    }
+}
+
+/// Pre-warmed sandbox pool for fast startup.
+///
+/// Maintains a configurable number of pre-created sandboxes that can be
+/// claimed on demand, avoiding the cold-start cost of backend creation.
+pub struct SandboxPool {
+    /// Template config for creating new sandboxes.
+    template: SandboxConfig,
+    /// Pre-created sandboxes ready to be claimed.
+    pool: Vec<Sandbox>,
+    /// Target number of warm sandboxes to maintain.
+    warm_count: usize,
+}
+
+impl SandboxPool {
+    /// Create a new pool with the given config template and warm count.
+    pub async fn new(template: SandboxConfig, warm_count: usize) -> crate::Result<Self> {
+        let mut pool = Vec::with_capacity(warm_count);
+        for _ in 0..warm_count {
+            pool.push(Sandbox::create(template.clone()).await?);
+        }
+        tracing::debug!(warm_count, "sandbox pool initialized");
+        Ok(Self {
+            template,
+            pool,
+            warm_count,
+        })
+    }
+
+    /// Claim a sandbox from the pool.
+    ///
+    /// Returns a pre-created sandbox in `Created` state. The caller must
+    /// transition it to `Running` before use. If the pool is empty, creates
+    /// a new sandbox on demand (cold start).
+    pub async fn claim(&mut self) -> crate::Result<Sandbox> {
+        if let Some(sandbox) = self.pool.pop() {
+            tracing::debug!(remaining = self.pool.len(), "claimed sandbox from pool");
+            Ok(sandbox)
+        } else {
+            tracing::debug!("pool empty, creating sandbox on demand");
+            Sandbox::create(self.template.clone()).await
+        }
+    }
+
+    /// Replenish the pool to maintain the target warm count.
+    ///
+    /// Call this periodically or after claiming sandboxes.
+    pub async fn replenish(&mut self) -> crate::Result<()> {
+        while self.pool.len() < self.warm_count {
+            self.pool
+                .push(Sandbox::create(self.template.clone()).await?);
+        }
+        Ok(())
+    }
+
+    /// Number of sandboxes currently available in the pool.
+    #[must_use]
+    pub fn available(&self) -> usize {
+        self.pool.len()
+    }
+
+    /// Target warm count.
+    #[must_use]
+    pub fn warm_count(&self) -> usize {
+        self.warm_count
+    }
+}
+
+impl std::fmt::Debug for SandboxPool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SandboxPool")
+            .field("available", &self.pool.len())
+            .field("warm_count", &self.warm_count)
+            .field("backend", &self.template.backend)
+            .finish()
     }
 }
 
@@ -579,5 +669,53 @@ mod tests {
             .build();
         let err = Sandbox::create(config).await.unwrap_err();
         assert!(err.to_string().contains("not available") || err.to_string().contains("not found"));
+    }
+
+    // ── SandboxPool tests ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn pool_create() {
+        let config = SandboxConfig::builder().backend(Backend::Noop).build();
+        let pool = SandboxPool::new(config, 3).await.unwrap();
+        assert_eq!(pool.available(), 3);
+        assert_eq!(pool.warm_count(), 3);
+    }
+
+    #[tokio::test]
+    async fn pool_claim() {
+        let config = SandboxConfig::builder().backend(Backend::Noop).build();
+        let mut pool = SandboxPool::new(config, 2).await.unwrap();
+        let sandbox = pool.claim().await.unwrap();
+        assert_eq!(sandbox.state, SandboxState::Created);
+        assert_eq!(pool.available(), 1);
+    }
+
+    #[tokio::test]
+    async fn pool_claim_empty_creates_on_demand() {
+        let config = SandboxConfig::builder().backend(Backend::Noop).build();
+        let mut pool = SandboxPool::new(config, 0).await.unwrap();
+        assert_eq!(pool.available(), 0);
+        let sandbox = pool.claim().await.unwrap();
+        assert_eq!(sandbox.state, SandboxState::Created);
+    }
+
+    #[tokio::test]
+    async fn pool_replenish() {
+        let config = SandboxConfig::builder().backend(Backend::Noop).build();
+        let mut pool = SandboxPool::new(config, 3).await.unwrap();
+        let _ = pool.claim().await.unwrap();
+        let _ = pool.claim().await.unwrap();
+        assert_eq!(pool.available(), 1);
+        pool.replenish().await.unwrap();
+        assert_eq!(pool.available(), 3);
+    }
+
+    #[tokio::test]
+    async fn pool_debug() {
+        let config = SandboxConfig::builder().backend(Backend::Noop).build();
+        let pool = SandboxPool::new(config, 1).await.unwrap();
+        let debug = format!("{pool:?}");
+        assert!(debug.contains("SandboxPool"));
+        assert!(debug.contains("Noop"));
     }
 }

@@ -49,7 +49,7 @@ pub use backend::health::HealthStatus;
 pub use backend::metrics::SandboxMetrics;
 pub use backend::{Backend, SandboxBackend};
 pub use credential::{CredentialProxy, FileInjection, SecretRef};
-pub use lifecycle::{ExecResult, Sandbox, SandboxConfig, SandboxState};
+pub use lifecycle::{ExecResult, Sandbox, SandboxConfig, SandboxPool, SandboxState};
 pub use policy::{LandlockRule, NetworkPolicy, SandboxPolicy, SeccompProfile};
 #[cfg(feature = "process")]
 pub use scanning::{CodeScanner, DataScanner};

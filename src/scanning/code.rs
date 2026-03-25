@@ -236,14 +236,15 @@ impl CodeScanner {
 
         for pattern in CODE_PATTERNS {
             for &substr in pattern.patterns {
-                if text_lower.contains(&substr.to_lowercase()) {
+                // Patterns are already lowercase constants — no per-iteration allocation
+                if text_lower.contains(substr) {
                     findings.push(ScanFinding {
                         id: Uuid::new_v4(),
                         scanner: "code".into(),
                         severity: pattern.severity,
                         category: pattern.category.into(),
                         message: format!("{} detected", pattern.name),
-                        evidence: extract_evidence(text, substr),
+                        evidence: extract_evidence(text, &text_lower, substr),
                     });
                     break; // One finding per pattern group
                 }
@@ -261,10 +262,9 @@ impl Default for CodeScanner {
 }
 
 /// Extract a snippet of evidence around the matched substring.
-fn extract_evidence(text: &str, pattern: &str) -> Option<String> {
-    let lower = text.to_lowercase();
-    let pat_lower = pattern.to_lowercase();
-    if let Some(pos) = lower.find(&pat_lower) {
+/// Accepts pre-lowered text to avoid redundant allocation.
+fn extract_evidence(text: &str, text_lower: &str, pattern: &str) -> Option<String> {
+    if let Some(pos) = text_lower.find(pattern) {
         let start = pos.saturating_sub(20);
         let end = (pos + pattern.len() + 20).min(text.len());
         // Find valid char boundaries
@@ -430,7 +430,8 @@ mod tests {
 
     #[test]
     fn evidence_extraction() {
-        let ev = extract_evidence("prefix exec('cmd') suffix", "exec(");
+        let text = "prefix exec('cmd') suffix";
+        let ev = extract_evidence(text, &text.to_lowercase(), "exec(");
         assert!(ev.is_some());
         let s = ev.unwrap();
         assert!(s.contains("exec("));

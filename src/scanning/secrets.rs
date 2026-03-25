@@ -152,6 +152,7 @@ pub struct SecretsScanner;
 
 impl SecretsScanner {
     /// Create a new scanner (cheap — patterns are compiled once globally).
+    #[must_use]
     pub fn new() -> Self {
         // Force pattern compilation on first use
         let _ = &*COMPILED_PATTERNS;
@@ -187,6 +188,12 @@ impl SecretsScanner {
                 });
             }
         }
+
+        // Entropy-based detection: flag high-entropy strings not caught by named patterns
+        if findings.is_empty() {
+            findings.extend(detect_high_entropy(text));
+        }
+
         findings
     }
 
@@ -195,7 +202,9 @@ impl SecretsScanner {
     ///
     /// Uses a single-pass approach: collects all match ranges, resolves overlaps,
     /// then builds the output string once (instead of 16 sequential replace_all calls).
-    pub fn redact(&self, text: &str) -> String {
+    ///
+    /// Returns borrowed input when no secrets are found (zero-copy fast path).
+    pub fn redact<'a>(&self, text: &'a str) -> std::borrow::Cow<'a, str> {
         // Collect all matches with their byte ranges and categories
         let mut matches: Vec<(usize, usize, &str)> = Vec::new();
         for pattern in &*COMPILED_PATTERNS {
@@ -205,7 +214,7 @@ impl SecretsScanner {
         }
 
         if matches.is_empty() {
-            return text.to_string();
+            return std::borrow::Cow::Borrowed(text);
         }
 
         // Sort by start position; on tie, longest match wins
@@ -225,8 +234,64 @@ impl SecretsScanner {
             cursor = *end;
         }
         result.push_str(&text[cursor..]);
-        result
+        std::borrow::Cow::Owned(result)
     }
+}
+
+/// Detect high-entropy strings that may be unrecognized secrets.
+///
+/// Scans for base64/hex-like tokens of 20+ characters with Shannon entropy > 4.5.
+/// Only triggers if no named pattern matched (to avoid double-flagging).
+fn detect_high_entropy(text: &str) -> Vec<ScanFinding> {
+    static HIGH_ENTROPY_RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+        Regex::new(r"[A-Za-z0-9+/=_\-]{20,}").expect("high-entropy regex")
+    });
+
+    let mut findings = Vec::new();
+    for m in HIGH_ENTROPY_RE.find_iter(text) {
+        let token = m.as_str();
+        let entropy = shannon_entropy(token);
+        if entropy > 4.5 {
+            findings.push(ScanFinding {
+                id: Uuid::new_v4(),
+                scanner: "secrets".into(),
+                severity: super::types::Severity::Low,
+                category: "high_entropy".into(),
+                message: format!("high-entropy string (entropy={entropy:.2})"),
+                evidence: Some(if token.len() > 20 {
+                    let mut end = 20;
+                    while end > 0 && !token.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    format!("{}...", &token[..end])
+                } else {
+                    token.to_string()
+                }),
+            });
+        }
+    }
+    findings
+}
+
+/// Compute Shannon entropy of a string (bits per character).
+#[inline]
+fn shannon_entropy(s: &str) -> f64 {
+    if s.is_empty() {
+        return 0.0;
+    }
+    let mut counts = [0u32; 256];
+    for b in s.bytes() {
+        counts[b as usize] += 1;
+    }
+    let len = s.len() as f64;
+    counts
+        .iter()
+        .filter(|&&c| c > 0)
+        .map(|&c| {
+            let p = c as f64 / len;
+            -p * p.log2()
+        })
+        .sum()
 }
 
 impl Default for SecretsScanner {

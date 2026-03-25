@@ -163,15 +163,20 @@ fn bench_secrets_redact(c: &mut Criterion) {
 fn bench_externalization_gate(c: &mut Criterion) {
     let gate = ExternalizationGate::new();
     let policy = ExternalizationPolicy::default();
-    let clean_result = ExecResult {
+    let stdout = "hello world\nstatus: ok\n".repeat(100);
+    let make_result = || ExecResult {
         exit_code: 0,
-        stdout: "hello world\nstatus: ok\n".repeat(100),
+        stdout: stdout.clone(),
         stderr: String::new(),
         duration_ms: 42,
         timed_out: false,
     };
     c.bench_function("gate_clean_output", |b| {
-        b.iter(|| gate.apply(clean_result.clone(), &policy))
+        b.iter_batched(
+            make_result,
+            |r| gate.apply(r, &policy),
+            criterion::BatchSize::SmallInput,
+        )
     });
 }
 

@@ -26,13 +26,18 @@ impl TapConfig {
     /// Create a TAP config for a VM with the given index.
     ///
     /// Uses a /30 subnet (4 addresses) per VM for isolation.
+    /// Supports up to 60 VMs (index 0–59) in the 172.16.0.0/24 range.
+    /// Higher indices use 172.16.{octet3}.{octet4} addressing.
     #[must_use]
     pub fn for_vm(index: u16) -> Self {
-        let base = 10 + (index as u32) * 4;
+        let offset = 10u32 + u32::from(index) * 4;
+        let octet3 = (offset / 256) as u8;
+        let octet4_host = ((offset % 256) + 1) as u8;
+        let octet4_guest = ((offset % 256) + 2) as u8;
         Self {
             tap_name: format!("kavach-tap{index}"),
-            host_ip: format!("172.16.0.{}", base + 1),
-            guest_ip: format!("172.16.0.{}", base + 2),
+            host_ip: format!("172.16.{octet3}.{octet4_host}"),
+            guest_ip: format!("172.16.{octet3}.{octet4_guest}"),
             subnet_mask: "255.255.255.252".into(),
             guest_mac: format!("AA:FC:00:00:{:02X}:{:02X}", index >> 8, index & 0xFF),
         }
@@ -54,14 +59,7 @@ impl TapConfig {
         // Bring up interface
         run_cmd("ip", &["link", "set", &self.tap_name, "up"]).await?;
 
-        // iptables: default DROP for this TAP
-        run_cmd(
-            "iptables",
-            &["-A", "FORWARD", "-i", &self.tap_name, "-j", "DROP"],
-        )
-        .await?;
-
-        // iptables: allow established connections back
+        // iptables: allow established connections back (must be BEFORE the DROP rule)
         run_cmd(
             "iptables",
             &[
@@ -76,6 +74,13 @@ impl TapConfig {
                 "-j",
                 "ACCEPT",
             ],
+        )
+        .await?;
+
+        // iptables: default DROP for this TAP (evaluated after ESTABLISHED rule)
+        run_cmd(
+            "iptables",
+            &["-A", "FORWARD", "-i", &self.tap_name, "-j", "DROP"],
         )
         .await?;
 

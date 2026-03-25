@@ -99,7 +99,7 @@ impl ProcessBackend {
             //    - prctl(2) for capability dropping
             //    - setrlimit(2) for resource limits
             //    - seccomp(2) / prctl(PR_SET_SECCOMP) for BPF filter
-            // 3. Error paths use eprintln! (write to fd 2) which is
+            // 3. Error paths use libc::write(2, ...) which is
             //    async-signal-safe, or return Err (no cleanup needed).
             // 4. No heap-allocated data is created inside the closure —
             //    all captured values (ns_config, policy_clone, seccomp_program,
@@ -116,12 +116,12 @@ impl ProcessBackend {
                         && ns.any_enabled()
                         && let Err(e) = namespaces::apply_namespaces(ns)
                     {
-                        eprintln!("kavach: namespace isolation skipped: {e}");
+                        pre_exec_warn("kavach: namespace isolation skipped: ", &e);
                     }
 
                     // 2. Landlock (needs landlock_* syscalls) — best-effort
                     if apply_ll && let Err(e) = landlock_enforce::apply_landlock(&policy_clone) {
-                        eprintln!("kavach: landlock skipped: {e}");
+                        pre_exec_warn("kavach: landlock skipped: ", &e);
                     }
 
                     // 3. Drop capabilities (needs capset syscall) — best-effort
@@ -182,6 +182,21 @@ impl SandboxBackend for ProcessBackend {
 
     async fn destroy(&self) -> crate::Result<()> {
         Ok(())
+    }
+}
+
+/// Write a warning message to stderr using async-signal-safe `libc::write`.
+///
+/// Unlike `eprintln!`, this does not acquire any mutex or allocate on the heap,
+/// making it safe to call in the `pre_exec` context between fork() and exec().
+/// Only writes the prefix (a static string) — the error detail is omitted to
+/// avoid the heap allocation that `Display::to_string()` would require.
+#[cfg(target_os = "linux")]
+fn pre_exec_warn(prefix: &str, _err: &dyn std::fmt::Display) {
+    // SAFETY: write(2, ...) is async-signal-safe per POSIX.
+    unsafe {
+        libc::write(2, prefix.as_ptr().cast(), prefix.len());
+        libc::write(2, b"\n".as_ptr().cast(), 1);
     }
 }
 

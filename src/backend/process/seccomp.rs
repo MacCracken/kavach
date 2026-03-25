@@ -109,7 +109,10 @@ pub const ALLOWED_SYSCALLS_BASIC: &[&str] = &[
     "set_tid_address",
 ];
 
-/// Blocked syscalls — 14 entries.
+/// Blocked syscalls — 17 entries.
+///
+/// Includes io_uring syscalls which can bypass seccomp-bpf filters
+/// (io_uring operations are not subject to seccomp checks).
 pub const BLOCKED_SYSCALLS: &[&str] = &[
     "ptrace",
     "mount",
@@ -125,6 +128,10 @@ pub const BLOCKED_SYSCALLS: &[&str] = &[
     "settimeofday",
     "sethostname",
     "setdomainname",
+    // io_uring — blocks seccomp bypass via async I/O
+    "io_uring_setup",
+    "io_uring_enter",
+    "io_uring_register",
 ];
 
 /// Strict profile — minimal set for non-interactive commands.
@@ -417,6 +424,10 @@ pub fn syscall_number(name: &str) -> Option<i64> {
         "settimeofday" => libc::SYS_settimeofday,
         "sethostname" => libc::SYS_sethostname,
         "setdomainname" => libc::SYS_setdomainname,
+        // io_uring — block to prevent seccomp bypass
+        "io_uring_setup" => libc::SYS_io_uring_setup,
+        "io_uring_enter" => libc::SYS_io_uring_enter,
+        "io_uring_register" => libc::SYS_io_uring_register,
         _ => return None,
     })
 }

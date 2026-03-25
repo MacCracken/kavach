@@ -51,8 +51,9 @@ impl ExternalizationGate {
             )));
         }
 
-        // Scan stdout and stderr with all scanners
-        let combined = format!("{}{}", result.stdout, result.stderr);
+        // Scan stdout and stderr with all scanners (newline separator prevents
+        // false positives at the stdout/stderr boundary)
+        let combined = format!("{}\n{}", result.stdout, result.stderr);
         let mut all_findings = Vec::new();
         all_findings.extend(self.secrets.scan(&combined));
         all_findings.extend(self.code.scan(&combined));
@@ -83,8 +84,8 @@ impl ExternalizationGate {
             ))),
             ScanVerdict::Warn => {
                 if policy.redact_secrets {
-                    result.stdout = self.secrets.redact(&result.stdout);
-                    result.stderr = self.secrets.redact(&result.stderr);
+                    result.stdout = self.secrets.redact(&result.stdout).into_owned();
+                    result.stderr = self.secrets.redact(&result.stderr).into_owned();
                 }
                 Ok(result)
             }

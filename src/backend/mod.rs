@@ -48,6 +48,8 @@ pub enum Backend {
     Sgx,
     /// AMD SEV — encrypted VM memory.
     Sev,
+    /// Intel TDX — Trust Domain Extensions (full-VM encryption).
+    Tdx,
     /// Hardened AGNOS OS image — OS-level sandbox (strength 80–88).
     SyAgnos,
     /// No isolation — for testing only.
@@ -67,6 +69,7 @@ impl Backend {
             Self::Oci => which_exists("runc") || which_exists("crun"),
             Self::Sgx => std::path::Path::new("/dev/sgx_enclave").exists(),
             Self::Sev => std::path::Path::new("/dev/sev").exists(),
+            Self::Tdx => std::path::Path::new("/dev/tdx_guest").exists(),
             Self::SyAgnos => which_exists("docker") || which_exists("podman"),
         }
     }
@@ -82,6 +85,7 @@ impl Backend {
             Self::Oci,
             Self::Sgx,
             Self::Sev,
+            Self::Tdx,
             Self::SyAgnos,
             Self::Noop,
         ]
@@ -111,6 +115,7 @@ impl std::str::FromStr for Backend {
             "oci" => Ok(Self::Oci),
             "sgx" => Ok(Self::Sgx),
             "sev" => Ok(Self::Sev),
+            "tdx" => Ok(Self::Tdx),
             "sy-agnos" | "syagnos" => Ok(Self::SyAgnos),
             "noop" => Ok(Self::Noop),
             other => Err(format!("unknown backend: {other}")),
@@ -128,6 +133,7 @@ impl fmt::Display for Backend {
             Self::Oci => write!(f, "oci"),
             Self::Sgx => write!(f, "sgx"),
             Self::Sev => write!(f, "sev"),
+            Self::Tdx => write!(f, "tdx"),
             Self::SyAgnos => write!(f, "sy-agnos"),
             Self::Noop => write!(f, "noop"),
         }
@@ -266,7 +272,7 @@ mod tests {
 
     #[test]
     fn all_backends_count() {
-        assert_eq!(Backend::all().len(), 9);
+        assert_eq!(Backend::all().len(), 10);
     }
 
     #[test]

@@ -178,7 +178,7 @@ impl PhylaxScanner {
 
     /// Redact secrets and flag security events in output.
     #[must_use]
-    pub fn redact(&self, output: &str) -> String {
+    pub fn redact<'a>(&self, output: &'a str) -> std::borrow::Cow<'a, str> {
         self.secrets_scanner.redact(output)
     }
 }

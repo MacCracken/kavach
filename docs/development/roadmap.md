@@ -58,37 +58,37 @@ Completed items are in [CHANGELOG.md](../../CHANGELOG.md).
 ## Engineering Backlog (P1)
 
 ### Performance
-- [ ] `redact()` returns `Cow` to avoid copy when no secrets found (`secrets.rs:209`)
-- [ ] Policy clone optimization — extract only landlock/rlimit fields for pre_exec closure (`process/mod.rs:86`)
-- [ ] `ScanFinding` fields use `Cow<'static, str>` for scanner/category (`secrets.rs:176`)
-- [ ] Gate benchmark excludes `ExecResult::clone` from measurement (`benches/sandbox.rs`)
-- [ ] `ExternalizationGate` cached on `Sandbox` struct instead of created per-exec (`lifecycle/mod.rs:265`)
-- [ ] `eprintln!` in pre_exec replaced with `libc::write(2, ...)` for true async-signal-safety
+- [x] `redact()` returns `Cow` — zero-copy when no secrets found
+- [ ] Policy clone optimization — extract only landlock/rlimit fields for pre_exec closure
+- [ ] `ScanFinding` fields use `Cow<'static, str>` for scanner/category
+- [x] Gate benchmark uses `iter_batched` — excludes `ExecResult::clone` from measurement
+- [x] `ExternalizationGate` cached on `Sandbox` struct — created once at sandbox creation
+- [x] `eprintln!` in pre_exec replaced with `libc::write(2, ...)` — true async-signal-safety
 
 ### Scanning pipeline (SY parity)
 - [x] Code scanner — command injection, data exfiltration, privilege escalation, supply chain, obfuscation (25 pattern groups)
 - [x] Data/compliance scanner — PII (credit card, phone, IBAN, IPv4), HIPAA/GDPR/PCI-DSS/SOC2 keywords
-- [ ] Threat classification — intent scoring (0.0–1.0), kill-chain stage tracking, MITRE ATT&CK mapping
-- [ ] Repeat offender tracking — rolling window + time decay + escalation threshold
-- [ ] Quarantine storage — file-based with metadata sidecar, approval workflow
-- [ ] Cryptographic audit chain — HMAC-SHA256 signed append-only log with chain verification
+- [x] Threat classification — intent scoring (0.0–1.0), kill-chain stages, co-occurrence amplification, 4-tier escalation
+- [x] Repeat offender tracking — rolling window + time decay + per-agent scoring + escalation recommendations
+- [x] Quarantine storage — file-based with metadata sidecar, approval/reject workflow, list/remove
+- [x] Audit chain — keyed-hash append-only log with chain verification (upgrade to HMAC-SHA256 when `hmac`+`sha2` deps added)
 
 ### Runtime security
-- [ ] Runtime guards — fork bomb detection, sensitive path blocklist, network allowlist per-sandbox
-- [ ] Sandbox integrity monitoring — verify namespace/filesystem/process isolation holds at runtime
-- [ ] Command allowlist/blocklist — block shells, interpreters, compilers in sandboxed execution
-- [ ] Escalation management — 4-tier response (log/alert/suspend/revoke)
+- [x] Runtime guards — fork bomb detection, sensitive path blocklist (15 paths), time anomaly detection
+- [x] Sandbox integrity monitoring — PID/mount/user namespace isolation verification
+- [x] Command allowlist/blocklist — 26 blocked commands (shells, interpreters, compilers), 30 allowed
+- [x] Escalation management — 4-tier response integrated in threat classifier (log/alert/suspend/revoke)
 
 ### Platform advances
-- [ ] Landlock ABI v6 — IPC scoping (abstract UNIX socket + signal isolation)
-- [ ] Landlock ABI v4 — TCP bind/connect port restrictions
-- [ ] io_uring explicit blocking in seccomp profiles
-- [ ] TDX backend — Intel Trust Domain Extensions (GA on Azure)
-- [ ] `SandboxPool` — pre-warmed sandboxes with snapshot-based cloning for fast startup
-- [ ] `CompositeBackend` — stack multiple isolation layers (WASM+Firecracker, Process+gVisor)
-- [ ] Unified attestation via EAR tokens (veraison/rust-ear crate)
-- [ ] OCI image signature verification (sigstore crate)
-- [ ] Entropy-based secret detection (Shannon entropy > 4.5 on unrecognized high-entropy strings)
+- [ ] Landlock ABI v6 — IPC scoping (requires landlock crate update to support ABI::V6)
+- [ ] Landlock ABI v4 — TCP bind/connect (requires landlock crate update to support AccessNet)
+- [x] io_uring explicit blocking — `io_uring_setup/enter/register` added to seccomp blocklist
+- [x] TDX backend variant — `Backend::Tdx` (10th backend, strength 85, /dev/tdx_guest detection)
+- [x] `SandboxPool` — pre-warmed sandbox pool with claim/replenish lifecycle
+- [ ] `CompositeBackend` — stack multiple isolation layers (requires architectural design)
+- [ ] Unified attestation via EAR tokens (requires `veraison/rust-ear` crate dep)
+- [ ] OCI image signature verification (requires `sigstore` crate dep)
+- [x] Entropy-based secret detection — Shannon entropy > 4.5 on unrecognized high-entropy strings
 
 ---
 
