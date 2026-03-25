@@ -421,7 +421,31 @@ pub fn syscall_number(name: &str) -> Option<i64> {
     })
 }
 
-/// Build a BPF program for the given profile.
+/// Cached BPF programs by profile name. Compiled once, reused on every exec.
+#[cfg(target_os = "linux")]
+static CACHED_FILTERS: std::sync::LazyLock<std::collections::HashMap<&'static str, BpfProgram>> =
+    std::sync::LazyLock::new(|| {
+        let mut cache = std::collections::HashMap::new();
+        for profile in &["basic", "strict"] {
+            if let Ok(program) = build_filter_uncached(profile) {
+                cache.insert(*profile, program);
+            }
+        }
+        cache
+    });
+
+/// Get a cached BPF program for the given profile, or compile on cache miss.
+#[cfg(target_os = "linux")]
+pub fn build_filter(profile_name: &str) -> crate::Result<BpfProgram> {
+    // Check cache first (covers "basic" and "strict")
+    if let Some(program) = CACHED_FILTERS.get(profile_name) {
+        return Ok(program.clone());
+    }
+    // Unknown profile name — compile fresh (falls back to basic)
+    build_filter_uncached(profile_name)
+}
+
+/// Build a BPF program for the given profile (uncached).
 ///
 /// Uses a **denylist approach**: default action is Allow, matched (dangerous)
 /// syscalls return EPERM. This avoids breaking programs that use modern
@@ -429,7 +453,7 @@ pub fn syscall_number(name: &str) -> Option<i64> {
 ///
 /// For "strict" profile, uses an allowlist approach instead.
 #[cfg(target_os = "linux")]
-pub fn build_filter(profile_name: &str) -> crate::Result<BpfProgram> {
+fn build_filter_uncached(profile_name: &str) -> crate::Result<BpfProgram> {
     let (rules, default_action, match_action) = if profile_name == "strict" {
         // Strict: allowlist approach — only permit known-safe syscalls
         let allowed = resolve_profile("strict");

@@ -23,6 +23,17 @@ pub struct SandboxCapabilities {
     pub namespaces_available: bool,
 }
 
+/// Cached capabilities — detected once, reused for all subsequent calls.
+/// Capabilities don't change during process lifetime, so reading `/proc`
+/// on every `exec()` is wasteful.
+static CACHED_CAPABILITIES: std::sync::OnceLock<SandboxCapabilities> = std::sync::OnceLock::new();
+
+/// Return cached sandbox capabilities (detected once on first call).
+#[must_use]
+pub fn cached_capabilities() -> &'static SandboxCapabilities {
+    CACHED_CAPABILITIES.get_or_init(detect_capabilities)
+}
+
 /// Detect all sandbox capabilities for the current system.
 #[cfg(target_os = "linux")]
 #[must_use]

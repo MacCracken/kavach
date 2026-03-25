@@ -12,6 +12,7 @@
 //! - [`policy`] — Seccomp profiles, Landlock rules, network allowlists, resource limits
 //! - [`credential`] — Secrets injection without exposing to sandboxed processes
 //! - [`lifecycle`] — Create, start, checkpoint, migrate, destroy with audit hooks
+//! - [`scanning`] — Multi-stage output scanning (secrets, code violations, PII/compliance)
 //!
 //! ## Quick start
 //!
@@ -50,6 +51,8 @@ pub use backend::{Backend, SandboxBackend};
 pub use credential::{CredentialProxy, FileInjection, SecretRef};
 pub use lifecycle::{ExecResult, Sandbox, SandboxConfig, SandboxState};
 pub use policy::{LandlockRule, NetworkPolicy, SandboxPolicy, SeccompProfile};
+#[cfg(feature = "process")]
+pub use scanning::{CodeScanner, DataScanner};
 pub use scanning::{ExternalizationGate, ExternalizationPolicy, ScanVerdict, Severity};
 pub use scoring::{StrengthScore, score_backend};
 

@@ -55,6 +55,43 @@ Completed items are in [CHANGELOG.md](../../CHANGELOG.md).
 
 ---
 
+## Engineering Backlog (P1)
+
+### Performance
+- [ ] `redact()` returns `Cow` to avoid copy when no secrets found (`secrets.rs:209`)
+- [ ] Policy clone optimization — extract only landlock/rlimit fields for pre_exec closure (`process/mod.rs:86`)
+- [ ] `ScanFinding` fields use `Cow<'static, str>` for scanner/category (`secrets.rs:176`)
+- [ ] Gate benchmark excludes `ExecResult::clone` from measurement (`benches/sandbox.rs`)
+- [ ] `ExternalizationGate` cached on `Sandbox` struct instead of created per-exec (`lifecycle/mod.rs:265`)
+- [ ] `eprintln!` in pre_exec replaced with `libc::write(2, ...)` for true async-signal-safety
+
+### Scanning pipeline (SY parity)
+- [x] Code scanner — command injection, data exfiltration, privilege escalation, supply chain, obfuscation (25 pattern groups)
+- [x] Data/compliance scanner — PII (credit card, phone, IBAN, IPv4), HIPAA/GDPR/PCI-DSS/SOC2 keywords
+- [ ] Threat classification — intent scoring (0.0–1.0), kill-chain stage tracking, MITRE ATT&CK mapping
+- [ ] Repeat offender tracking — rolling window + time decay + escalation threshold
+- [ ] Quarantine storage — file-based with metadata sidecar, approval workflow
+- [ ] Cryptographic audit chain — HMAC-SHA256 signed append-only log with chain verification
+
+### Runtime security
+- [ ] Runtime guards — fork bomb detection, sensitive path blocklist, network allowlist per-sandbox
+- [ ] Sandbox integrity monitoring — verify namespace/filesystem/process isolation holds at runtime
+- [ ] Command allowlist/blocklist — block shells, interpreters, compilers in sandboxed execution
+- [ ] Escalation management — 4-tier response (log/alert/suspend/revoke)
+
+### Platform advances
+- [ ] Landlock ABI v6 — IPC scoping (abstract UNIX socket + signal isolation)
+- [ ] Landlock ABI v4 — TCP bind/connect port restrictions
+- [ ] io_uring explicit blocking in seccomp profiles
+- [ ] TDX backend — Intel Trust Domain Extensions (GA on Azure)
+- [ ] `SandboxPool` — pre-warmed sandboxes with snapshot-based cloning for fast startup
+- [ ] `CompositeBackend` — stack multiple isolation layers (WASM+Firecracker, Process+gVisor)
+- [ ] Unified attestation via EAR tokens (veraison/rust-ear crate)
+- [ ] OCI image signature verification (sigstore crate)
+- [ ] Entropy-based secret detection (Shannon entropy > 4.5 on unrecognized high-entropy strings)
+
+---
+
 ## Post-v1
 
 ### Advanced isolation

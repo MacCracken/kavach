@@ -8,6 +8,12 @@ use crate::lifecycle::ExecResult;
 /// Maximum bytes to capture per output stream (1 MiB).
 const MAX_OUTPUT_BYTES: u64 = 1024 * 1024;
 
+/// Convert bytes to String, avoiding a copy when already valid UTF-8.
+#[inline]
+fn lossy_utf8(buf: Vec<u8>) -> String {
+    String::from_utf8(buf).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
+}
+
 /// Execute a pre-configured [`tokio::process::Command`] with timeout and output capture.
 ///
 /// Handles:
@@ -53,29 +59,39 @@ pub async fn execute_with_timeout(
             Ok::<_, std::io::Error>(buf)
         };
 
-        let (stdout_buf, stderr_buf, status) =
-            tokio::try_join!(stdout_fut, stderr_fut, child.wait())?;
-        Ok::<_, std::io::Error>((status, stdout_buf, stderr_buf))
+        let (stdout_buf, stderr_buf) = tokio::try_join!(stdout_fut, stderr_fut)?;
+        Ok::<_, std::io::Error>((stdout_buf, stderr_buf))
     };
 
     let timeout = std::time::Duration::from_millis(timeout_ms);
 
     match tokio::time::timeout(timeout, collect).await {
-        Ok(Ok((status, stdout_buf, stderr_buf))) => {
+        Ok(Ok((stdout_buf, stderr_buf))) => {
+            // I/O collected — now wait for child exit
+            let status = child
+                .wait()
+                .await
+                .map_err(|e| crate::KavachError::ExecFailed(format!("{label} wait: {e}")))?;
             let duration_ms = start.elapsed().as_millis() as u64;
             Ok(ExecResult {
                 exit_code: status.code().unwrap_or(-1),
-                stdout: String::from_utf8_lossy(&stdout_buf).into_owned(),
-                stderr: String::from_utf8_lossy(&stderr_buf).into_owned(),
+                stdout: lossy_utf8(stdout_buf),
+                stderr: lossy_utf8(stderr_buf),
                 duration_ms,
                 timed_out: false,
             })
         }
-        Ok(Err(e)) => Err(crate::KavachError::ExecFailed(format!(
-            "{label} error: {e}"
-        ))),
+        Ok(Err(e)) => {
+            // I/O error — kill the child to prevent zombie
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            Err(crate::KavachError::ExecFailed(format!(
+                "{label} error: {e}"
+            )))
+        }
         Err(_) => {
             let _ = child.kill().await;
+            let _ = child.wait().await;
             let duration_ms = start.elapsed().as_millis() as u64;
             Ok(ExecResult {
                 exit_code: -1,
@@ -147,8 +163,8 @@ impl SpawnedProcess {
 
         Ok(ExecResult {
             exit_code: status.code().unwrap_or(-1),
-            stdout: String::from_utf8_lossy(&stdout_buf).into_owned(),
-            stderr: String::from_utf8_lossy(&stderr_buf).into_owned(),
+            stdout: lossy_utf8(stdout_buf),
+            stderr: lossy_utf8(stderr_buf),
             duration_ms,
             timed_out: false,
         })

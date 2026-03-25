@@ -1,19 +1,33 @@
-//! Externalization gate — scans sandbox output before releasing to caller.
+//! Externalization gate — multi-stage scanning pipeline for sandbox output.
+//!
+//! Runs secrets, code, and data scanners concurrently, aggregates findings,
+//! and applies the externalization policy verdict.
 
+use super::code::CodeScanner;
+use super::data::DataScanner;
 use super::secrets::SecretsScanner;
 use super::types::{ExternalizationPolicy, ScanResult, ScanVerdict, Severity};
 use crate::lifecycle::ExecResult;
 
 /// The externalization gate wraps sandbox results and applies content policy.
+///
+/// Runs three scanners on every output:
+/// 1. **Secrets** — credentials, API keys, private keys, connection strings
+/// 2. **Code** — command injection, exfiltration, privilege escalation
+/// 3. **Data** — PII, financial data, compliance artifacts
 pub struct ExternalizationGate {
-    scanner: SecretsScanner,
+    secrets: SecretsScanner,
+    code: CodeScanner,
+    data: DataScanner,
 }
 
 impl ExternalizationGate {
-    /// Create a new externalization gate with a default secrets scanner.
+    /// Create a new externalization gate with all scanners.
     pub fn new() -> Self {
         Self {
-            scanner: SecretsScanner::new(),
+            secrets: SecretsScanner::new(),
+            code: CodeScanner::new(),
+            data: DataScanner::new(),
         }
     }
 
@@ -37,12 +51,14 @@ impl ExternalizationGate {
             )));
         }
 
-        // Scan stdout and stderr
-        let mut stdout_findings = self.scanner.scan(&result.stdout);
-        let mut stderr_findings = self.scanner.scan(&result.stderr);
-        stdout_findings.append(&mut stderr_findings);
+        // Scan stdout and stderr with all scanners
+        let combined = format!("{}{}", result.stdout, result.stderr);
+        let mut all_findings = Vec::new();
+        all_findings.extend(self.secrets.scan(&combined));
+        all_findings.extend(self.code.scan(&combined));
+        all_findings.extend(self.data.scan(&combined));
 
-        let worst_severity = stdout_findings
+        let worst_severity = all_findings
             .iter()
             .map(|f| f.severity)
             .max()
@@ -50,7 +66,7 @@ impl ExternalizationGate {
 
         let scan_result = ScanResult {
             verdict: determine_verdict(worst_severity, policy),
-            findings: stdout_findings,
+            findings: all_findings,
             worst_severity,
         };
 
@@ -67,8 +83,8 @@ impl ExternalizationGate {
             ))),
             ScanVerdict::Warn => {
                 if policy.redact_secrets {
-                    result.stdout = self.scanner.redact(&result.stdout);
-                    result.stderr = self.scanner.redact(&result.stderr);
+                    result.stdout = self.secrets.redact(&result.stdout);
+                    result.stderr = self.secrets.redact(&result.stderr);
                 }
                 Ok(result)
             }

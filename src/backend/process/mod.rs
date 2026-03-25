@@ -56,7 +56,7 @@ impl ProcessBackend {
         {
             use crate::backend::capabilities;
 
-            let caps = capabilities::detect_capabilities();
+            let caps = capabilities::cached_capabilities();
 
             // Pre-build seccomp BPF program (before fork, can allocate freely)
             let seccomp_program = if policy.seccomp_enabled && caps.seccomp_available {
