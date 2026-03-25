@@ -39,17 +39,20 @@ pub struct AttestationResult {
 }
 
 /// Trust tier for attestation results.
+///
+/// Ordered by trust level: `Contraindicated < Warning < None < Affirming`.
+/// Higher = more trusted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum AttestationTrust {
+    /// Attestation failed — environment should not be trusted.
+    Contraindicated,
+    /// Attestation passed with warnings — environment may be degraded.
+    Warning,
     /// No trust information available.
     None,
     /// Attestation passed — environment is trusted.
     Affirming,
-    /// Attestation passed with warnings — environment may be degraded.
-    Warning,
-    /// Attestation failed — environment should not be trusted.
-    Contraindicated,
 }
 
 impl std::fmt::Display for AttestationTrust {
@@ -212,9 +215,9 @@ mod tests {
 
     #[test]
     fn trust_ordering() {
+        assert!(AttestationTrust::Contraindicated < AttestationTrust::Warning);
+        assert!(AttestationTrust::Warning < AttestationTrust::None);
         assert!(AttestationTrust::None < AttestationTrust::Affirming);
-        assert!(AttestationTrust::Affirming < AttestationTrust::Warning);
-        assert!(AttestationTrust::Warning < AttestationTrust::Contraindicated);
     }
 
     #[test]

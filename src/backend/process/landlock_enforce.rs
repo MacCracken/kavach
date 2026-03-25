@@ -10,10 +10,40 @@ use landlock::{
 
 use crate::policy::{LandlockRule, SandboxPolicy};
 
+/// Lightweight extraction of landlock-relevant fields from SandboxPolicy.
+/// Used in pre_exec to avoid cloning the full policy.
+#[derive(Clone)]
+pub struct LandlockParams {
+    /// Landlock filesystem rules.
+    pub rules: Vec<LandlockRule>,
+    /// Whether rootfs should be read-only.
+    pub read_only_rootfs: bool,
+    /// Optional data directory (writable).
+    pub data_dir: Option<String>,
+}
+
+impl LandlockParams {
+    /// Extract landlock parameters from a full policy.
+    #[must_use]
+    pub fn from_policy(policy: &SandboxPolicy) -> Self {
+        Self {
+            rules: policy.landlock_rules.clone(),
+            read_only_rootfs: policy.read_only_rootfs,
+            data_dir: policy.data_dir.clone(),
+        }
+    }
+}
+
 /// Build and apply Landlock rules from a sandbox policy.
 /// Must be called in `pre_exec` context (after fork, before exec).
 #[cfg(target_os = "linux")]
 pub fn apply_landlock(policy: &SandboxPolicy) -> crate::Result<()> {
+    apply_landlock_params(&LandlockParams::from_policy(policy))
+}
+
+/// Apply Landlock from pre-extracted parameters (avoids full policy clone).
+#[cfg(target_os = "linux")]
+pub fn apply_landlock_params(params: &LandlockParams) -> crate::Result<()> {
     let abi = ABI::V5;
     let access_all = AccessFs::from_all(abi);
     let access_read = AccessFs::from_read(abi);
@@ -26,11 +56,11 @@ pub fn apply_landlock(policy: &SandboxPolicy) -> crate::Result<()> {
 
     // If no explicit rules but read_only_rootfs is set, apply defaults
     let default_rules;
-    let rules = if policy.landlock_rules.is_empty() && policy.read_only_rootfs {
-        default_rules = default_readonly_rules(policy);
+    let rules = if params.rules.is_empty() && params.read_only_rootfs {
+        default_rules = default_readonly_rules_from_params(params);
         &default_rules
     } else {
-        &policy.landlock_rules
+        &params.rules
     };
 
     for rule in rules {
@@ -67,7 +97,7 @@ pub fn should_apply(policy: &SandboxPolicy) -> bool {
 }
 
 /// Generate default rules when read_only_rootfs is true but no explicit rules given.
-fn default_readonly_rules(policy: &SandboxPolicy) -> Vec<LandlockRule> {
+fn default_readonly_rules_from_params(params: &LandlockParams) -> Vec<LandlockRule> {
     let mut rules = vec![
         LandlockRule {
             path: "/".into(),
@@ -87,7 +117,7 @@ fn default_readonly_rules(policy: &SandboxPolicy) -> Vec<LandlockRule> {
         },
     ];
 
-    if let Some(ref data_dir) = policy.data_dir {
+    if let Some(ref data_dir) = params.data_dir {
         rules.push(LandlockRule {
             path: data_dir.clone(),
             access: "rw".into(),
@@ -134,7 +164,7 @@ mod tests {
     fn default_rules_include_root() {
         let mut policy = SandboxPolicy::minimal();
         policy.read_only_rootfs = true;
-        let rules = default_readonly_rules(&policy);
+        let rules = default_readonly_rules_from_params(&LandlockParams::from_policy(&policy));
         assert!(rules.iter().any(|r| r.path == "/" && r.access == "ro"));
         assert!(rules.iter().any(|r| r.path == "/tmp" && r.access == "rw"));
     }
@@ -144,7 +174,7 @@ mod tests {
         let mut policy = SandboxPolicy::minimal();
         policy.read_only_rootfs = true;
         policy.data_dir = Some("/data".into());
-        let rules = default_readonly_rules(&policy);
+        let rules = default_readonly_rules_from_params(&LandlockParams::from_policy(&policy));
         assert!(rules.iter().any(|r| r.path == "/data" && r.access == "rw"));
     }
 

@@ -1,0 +1,6 @@
+# cargo-audit configuration
+
+[advisories]
+# RUSTSEC-2023-0071: rsa timing sidechannel — transitive dep from sigstore (optional feature).
+# sigstore is feature-gated and not used in hot paths. No upstream fix available.
+ignore = ["RUSTSEC-2023-0071"]

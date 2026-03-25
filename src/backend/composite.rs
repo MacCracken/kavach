@@ -129,6 +129,10 @@ pub fn merge_policies(base: &SandboxPolicy, overlay: &SandboxPolicy) -> SandboxP
             (Some(p), None) | (None, Some(p)) => Some(p.clone()),
             (None, None) => None,
         },
+        // Landlock rules are additive: the composite can access paths from
+        // either policy. This is correct because landlock defines allowed paths
+        // (not denied paths) — the outer backend's runtime boundary provides
+        // the hard restriction, and the inner may need additional paths.
         landlock_rules: {
             let mut rules = base.landlock_rules.clone();
             rules.extend(overlay.landlock_rules.iter().cloned());
@@ -136,20 +140,16 @@ pub fn merge_policies(base: &SandboxPolicy, overlay: &SandboxPolicy) -> SandboxP
         },
         network: crate::policy::NetworkPolicy {
             enabled: base.network.enabled && overlay.network.enabled,
-            allowed_hosts: {
-                let mut hosts = base.network.allowed_hosts.clone();
-                hosts.extend(overlay.network.allowed_hosts.iter().cloned());
-                hosts.sort();
-                hosts.dedup();
-                hosts
-            },
-            allowed_ports: {
-                let mut ports = base.network.allowed_ports.clone();
-                ports.extend(overlay.network.allowed_ports.iter().copied());
-                ports.sort();
-                ports.dedup();
-                ports
-            },
+            // Intersect allowlists — only hosts/ports allowed by BOTH policies pass.
+            // Empty list = "no restriction" in the source policy, so non-empty wins.
+            allowed_hosts: intersect_or_nonempty(
+                &base.network.allowed_hosts,
+                &overlay.network.allowed_hosts,
+            ),
+            allowed_ports: intersect_or_nonempty_ports(
+                &base.network.allowed_ports,
+                &overlay.network.allowed_ports,
+            ),
         },
         read_only_rootfs: base.read_only_rootfs || overlay.read_only_rootfs,
         memory_limit_mb: match (base.memory_limit_mb, overlay.memory_limit_mb) {
@@ -169,6 +169,28 @@ pub fn merge_policies(base: &SandboxPolicy, overlay: &SandboxPolicy) -> SandboxP
         },
         data_dir: base.data_dir.clone().or_else(|| overlay.data_dir.clone()),
     }
+}
+
+/// Intersect two host allowlists. Empty list = "allow all" in that policy.
+fn intersect_or_nonempty(a: &[String], b: &[String]) -> Vec<String> {
+    if a.is_empty() {
+        return b.to_vec();
+    }
+    if b.is_empty() {
+        return a.to_vec();
+    }
+    a.iter().filter(|h| b.contains(h)).cloned().collect()
+}
+
+/// Intersect two port allowlists. Empty list = "allow all" in that policy.
+fn intersect_or_nonempty_ports(a: &[u16], b: &[u16]) -> Vec<u16> {
+    if a.is_empty() {
+        return b.to_vec();
+    }
+    if b.is_empty() {
+        return a.to_vec();
+    }
+    a.iter().filter(|p| b.contains(p)).copied().collect()
 }
 
 /// Score a composite backend — bonus for layered isolation.

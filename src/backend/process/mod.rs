@@ -83,9 +83,12 @@ impl ProcessBackend {
             let apply_ll = caps.landlock_available && landlock_enforce::should_apply(policy);
 
             // Extract only the fields needed by the pre_exec closure to avoid
-            // cloning the entire SandboxPolicy (which includes Vec<LandlockRule>,
-            // Vec<String>, etc.) on every exec call.
-            let ll_policy = if apply_ll { Some(policy.clone()) } else { None };
+            // cloning the entire SandboxPolicy on every exec call.
+            let ll_params = if apply_ll {
+                Some(landlock_enforce::LandlockParams::from_policy(policy))
+            } else {
+                None
+            };
             let rlimit_memory = policy.memory_limit_mb;
             let rlimit_pids = policy.max_pids;
 
@@ -106,7 +109,7 @@ impl ProcessBackend {
             // 3. Error paths use libc::write(2, ...) which is
             //    async-signal-safe, or return Err (no cleanup needed).
             // 4. No heap-allocated data is created inside the closure —
-            //    all captured values (ns_config, ll_policy, rlimit_memory,
+            //    all captured values (ns_config, ll_params, rlimit_memory,
             //    rlimit_pids, seccomp_program) are moved in and only read.
             // 5. Ordering is critical and documented inline: namespaces first
             //    (needs unshare), then landlock (needs landlock_* syscalls),
@@ -124,8 +127,8 @@ impl ProcessBackend {
                     }
 
                     // 2. Landlock (needs landlock_* syscalls) — best-effort
-                    if let Some(ref ll_pol) = ll_policy
-                        && let Err(e) = landlock_enforce::apply_landlock(ll_pol)
+                    if let Some(ref params) = ll_params
+                        && let Err(e) = landlock_enforce::apply_landlock_params(params)
                     {
                         pre_exec_warn("kavach: landlock skipped: ", &e);
                     }

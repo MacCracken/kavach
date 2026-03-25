@@ -120,14 +120,15 @@ async fn proxy_loop(listener: TcpListener, config: HttpProxyConfig) {
 
 /// Handle a single proxy connection.
 async fn handle_connection(mut client: TcpStream, config: &HttpProxyConfig) -> std::io::Result<()> {
-    // Read the first line to determine request type
+    // Read the first line with a size cap to prevent OOM from malicious clients.
     let mut request_line = String::new();
     {
-        let mut reader = BufReader::new(&mut client);
+        use tokio::io::AsyncReadExt;
+        let limited = (&mut client).take(8192);
+        let mut reader = BufReader::new(limited);
         reader.read_line(&mut request_line).await?;
     }
-    // Reject oversized request lines (prevent OOM from malicious clients)
-    if request_line.len() > 8192 {
+    if request_line.is_empty() {
         return Ok(());
     }
 

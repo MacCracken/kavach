@@ -126,13 +126,21 @@ impl Backend {
     ) -> Option<Backend> {
         Self::available()
             .into_iter()
-            .filter(|b| crate::scoring::score_backend(*b, policy).value() >= min_score)
-            .max_by_key(|b| crate::scoring::score_backend(*b, policy))
+            .filter_map(|b| {
+                let score = crate::scoring::score_backend(b, policy);
+                if score.value() >= min_score {
+                    Some((b, score))
+                } else {
+                    Option::None
+                }
+            })
+            .max_by_key(|(_, score)| *score)
+            .map(|(b, _)| b)
     }
 }
 
 impl std::str::FromStr for Backend {
-    type Err = String;
+    type Err = crate::KavachError;
 
     /// Parse a backend name (case-insensitive).
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
@@ -147,7 +155,9 @@ impl std::str::FromStr for Backend {
             "tdx" => Ok(Self::Tdx),
             "sy-agnos" | "syagnos" => Ok(Self::SyAgnos),
             "noop" => Ok(Self::Noop),
-            other => Err(format!("unknown backend: {other}")),
+            other => Err(crate::KavachError::BackendUnavailable(format!(
+                "unknown backend: {other}"
+            ))),
         }
     }
 }
@@ -232,9 +242,11 @@ impl SandboxBackend for NoopBackend {
 pub fn create_backend(config: &SandboxConfig) -> crate::Result<Box<dyn SandboxBackend>> {
     let outer = create_single_backend(config)?;
 
-    // Wrap in composite if inner backend is specified
+    // Wrap in composite if inner backend is specified.
+    // The inner backend contributes its default strict policy — this is the
+    // isolation it would apply if running standalone.
     if let Some(inner) = config.inner_backend {
-        let inner_policy = config.policy.clone();
+        let inner_policy = SandboxPolicy::strict();
         Ok(Box::new(composite::CompositeBackend::new(
             outer,
             config.backend,
@@ -421,7 +433,7 @@ mod tests {
     #[test]
     fn from_str_unknown() {
         let err = "unknown".parse::<Backend>().unwrap_err();
-        assert!(err.contains("unknown backend"));
+        assert!(err.to_string().contains("unknown backend"));
     }
 
     #[test]

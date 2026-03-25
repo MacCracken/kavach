@@ -97,7 +97,7 @@ impl AuditChain {
 
         // Compute hash over: serial + event_type + payload + timestamp + prev_hmac
         // Use sorted payload for deterministic serialization
-        let payload_str = sorted_json(&payload);
+        let payload_str = sorted_json(&payload)?;
         let content = format!(
             "{}:{}:{}:{}:{}",
             serial, event_type, payload_str, timestamp, self.last_hmac
@@ -184,7 +184,7 @@ pub fn verify_chain(entries: &[AuditEntry], hmac_key: &[u8]) -> crate::Result<()
             "{}:{}:{}:{}:{}",
             entry.serial,
             entry.event_type,
-            sorted_json(&entry.payload),
+            sorted_json(&entry.payload)?,
             entry.timestamp,
             entry.prev_hmac
         );
@@ -204,13 +204,15 @@ pub fn verify_chain(entries: &[AuditEntry], hmac_key: &[u8]) -> crate::Result<()
 }
 
 /// Serialize a JSON value with keys sorted for deterministic output.
-fn sorted_json(value: &serde_json::Value) -> String {
+fn sorted_json(value: &serde_json::Value) -> crate::Result<String> {
     match value {
         serde_json::Value::Object(map) => {
             let sorted: std::collections::BTreeMap<_, _> = map.iter().collect();
-            serde_json::to_string(&sorted).unwrap_or_default()
+            serde_json::to_string(&sorted)
+                .map_err(|e| crate::KavachError::ExecFailed(format!("audit json serialize: {e}")))
         }
-        other => serde_json::to_string(other).unwrap_or_default(),
+        other => serde_json::to_string(other)
+            .map_err(|e| crate::KavachError::ExecFailed(format!("audit json serialize: {e}"))),
     }
 }
 
@@ -221,8 +223,10 @@ fn compute_hmac(key: &[u8], data: &[u8]) -> String {
 
     type HmacSha256 = Hmac<Sha256>;
 
-    let mut mac = HmacSha256::new_from_slice(key)
-        .unwrap_or_else(|_| HmacSha256::new_from_slice(&[0]).unwrap());
+    // HMAC-SHA256 accepts any key length per RFC 2104 — this cannot fail.
+    let Ok(mut mac) = HmacSha256::new_from_slice(key) else {
+        return String::new();
+    };
     mac.update(data);
     let result = mac.finalize();
     let bytes = result.into_bytes();
