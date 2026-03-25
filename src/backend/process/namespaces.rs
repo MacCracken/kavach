@@ -11,9 +11,13 @@ use crate::policy::SandboxPolicy;
 /// Namespace configuration derived from sandbox policy.
 #[derive(Debug, Clone)]
 pub struct NamespaceConfig {
+    /// Create a new PID namespace.
     pub new_pid: bool,
+    /// Create a new mount namespace.
     pub new_mount: bool,
+    /// Create a new network namespace.
     pub new_net: bool,
+    /// Create a new user namespace.
     pub new_user: bool,
     /// Host UID to map to root inside user namespace (captured before fork).
     pub host_uid: u32,

@@ -13,12 +13,14 @@ use crate::policy::SandboxPolicy;
 pub struct StrengthScore(pub u8);
 
 impl StrengthScore {
+    /// Return the raw numeric score.
     #[inline]
     #[must_use]
     pub fn value(&self) -> u8 {
         self.0
     }
 
+    /// Return a human-readable label for the score range.
     #[inline]
     #[must_use]
     pub fn label(&self) -> &'static str {
@@ -103,9 +105,30 @@ mod tests {
     #[test]
     fn score_labels() {
         assert_eq!(StrengthScore(0).label(), "minimal");
+        assert_eq!(StrengthScore(29).label(), "minimal");
+        assert_eq!(StrengthScore(30).label(), "basic");
+        assert_eq!(StrengthScore(49).label(), "basic");
         assert_eq!(StrengthScore(50).label(), "standard");
+        assert_eq!(StrengthScore(69).label(), "standard");
         assert_eq!(StrengthScore(70).label(), "hardened");
-        assert_eq!(StrengthScore(90).label(), "fortress");
+        assert_eq!(StrengthScore(84).label(), "hardened");
+        assert_eq!(StrengthScore(85).label(), "fortress");
+        assert_eq!(StrengthScore(100).label(), "fortress");
+    }
+
+    #[test]
+    fn landlock_rules_increase_score() {
+        let mut policy = SandboxPolicy::default();
+        let without = score_backend(Backend::Process, &policy);
+        policy.landlock_rules.push(crate::policy::LandlockRule {
+            path: "/tmp".into(),
+            access: "ro".into(),
+        });
+        let with = score_backend(Backend::Process, &policy);
+        assert!(
+            with.value() > without.value(),
+            "landlock rules should increase score"
+        );
     }
 
     #[test]

@@ -279,4 +279,56 @@ mod tests {
         let backend = create_backend(&config).unwrap();
         assert_eq!(backend.backend_type(), Backend::Noop);
     }
+
+    #[test]
+    fn display_all_backends() {
+        let displays: Vec<String> = Backend::all().iter().map(|b| b.to_string()).collect();
+        assert!(displays.contains(&"process".to_string()));
+        assert!(displays.contains(&"gvisor".to_string()));
+        assert!(displays.contains(&"firecracker".to_string()));
+        assert!(displays.contains(&"wasm".to_string()));
+        assert!(displays.contains(&"oci".to_string()));
+        assert!(displays.contains(&"sgx".to_string()));
+        assert!(displays.contains(&"sev".to_string()));
+        assert!(displays.contains(&"sy-agnos".to_string()));
+        assert!(displays.contains(&"noop".to_string()));
+    }
+
+    #[test]
+    fn which_exists_finds_common_binary() {
+        assert!(which_exists("sh") || which_exists("bash"));
+    }
+
+    #[test]
+    fn which_exists_missing_binary() {
+        assert!(!which_exists("nonexistent_binary_xyz_123_kavach"));
+    }
+
+    #[tokio::test]
+    async fn noop_backend_destroy() {
+        let noop = NoopBackend;
+        noop.destroy().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn noop_backend_spawn_returns_none() {
+        let noop = NoopBackend;
+        let policy = SandboxPolicy::minimal();
+        let result = noop.spawn("anything", &policy).await.unwrap();
+        assert!(result.is_none(), "NoopBackend::spawn should return None");
+    }
+
+    #[test]
+    fn create_backend_unavailable() {
+        // Try a backend that's unlikely to be available
+        let config = SandboxConfig::builder().backend(Backend::Sgx).build();
+        if !Backend::Sgx.is_available() {
+            let result = create_backend(&config);
+            assert!(result.is_err());
+            let err = result.err().unwrap();
+            assert!(
+                err.to_string().contains("not available") || err.to_string().contains("not found")
+            );
+        }
+    }
 }

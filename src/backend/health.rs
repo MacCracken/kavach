@@ -6,9 +6,13 @@ use serde::{Deserialize, Serialize};
 /// Health status of a sandbox backend.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HealthStatus {
+    /// Whether the backend is healthy.
     pub healthy: bool,
+    /// Timestamp of the last health check.
     pub last_checked: DateTime<Utc>,
+    /// Duration of the health check in milliseconds.
     pub check_duration_ms: u64,
+    /// Error message if unhealthy.
     pub error: Option<String>,
 }
 

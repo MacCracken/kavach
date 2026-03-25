@@ -9,11 +9,17 @@ use serde::{Deserialize, Serialize};
 /// Overall sandbox capabilities detected on this system.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandboxCapabilities {
+    /// Whether seccomp-bpf is available.
     pub seccomp_available: bool,
+    /// Current seccomp mode (disabled, strict, filter, unsupported).
     pub seccomp_mode: String,
+    /// Whether Landlock LSM is available.
     pub landlock_available: bool,
+    /// Landlock ABI version (0 if unavailable).
     pub landlock_abi: u32,
+    /// Whether cgroup v2 (unified hierarchy) is active.
     pub cgroup_v2: bool,
+    /// Whether user namespaces are available.
     pub namespaces_available: bool,
 }
 

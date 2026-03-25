@@ -7,9 +7,13 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum ScanVerdict {
+    /// Artifact is clean — no issues found.
     Pass,
+    /// Minor issues detected — output may be redacted.
     Warn,
+    /// Significant issues detected — output is quarantined.
     Quarantine,
+    /// Critical issues detected — output is blocked.
     Block,
 }
 
@@ -17,29 +21,43 @@ pub enum ScanVerdict {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum Severity {
+    /// Informational — no action needed.
     Info,
+    /// Low severity finding.
     Low,
+    /// Medium severity finding.
     Medium,
+    /// High severity finding.
     High,
+    /// Critical severity finding.
     Critical,
 }
 
 /// A single finding from a scanner.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScanFinding {
+    /// Unique identifier for this finding.
     pub id: Uuid,
+    /// Name of the scanner that produced this finding.
     pub scanner: String,
+    /// Severity level of the finding.
     pub severity: Severity,
+    /// Category of the finding (e.g. "secret", "malware").
     pub category: String,
+    /// Human-readable description of the finding.
     pub message: String,
+    /// Optional evidence snippet that triggered the finding.
     pub evidence: Option<String>,
 }
 
 /// Result of scanning an artifact.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScanResult {
+    /// Overall verdict for the scanned artifact.
     pub verdict: ScanVerdict,
+    /// Individual findings from all scanners.
     pub findings: Vec<ScanFinding>,
+    /// Worst severity across all findings.
     pub worst_severity: Severity,
 }
 
@@ -126,5 +144,50 @@ mod tests {
         let json = serde_json::to_string(&policy).unwrap();
         let back: ExternalizationPolicy = serde_json::from_str(&json).unwrap();
         assert_eq!(back.block_threshold, Severity::Critical);
+    }
+
+    #[test]
+    fn severity_display() {
+        assert_eq!(Severity::Info.to_string(), "info");
+        assert_eq!(Severity::Low.to_string(), "low");
+        assert_eq!(Severity::Medium.to_string(), "medium");
+        assert_eq!(Severity::High.to_string(), "high");
+        assert_eq!(Severity::Critical.to_string(), "critical");
+    }
+
+    #[test]
+    fn verdict_display() {
+        assert_eq!(ScanVerdict::Pass.to_string(), "pass");
+        assert_eq!(ScanVerdict::Warn.to_string(), "warn");
+        assert_eq!(ScanVerdict::Quarantine.to_string(), "quarantine");
+        assert_eq!(ScanVerdict::Block.to_string(), "block");
+    }
+
+    #[test]
+    fn scan_finding_serde() {
+        let finding = ScanFinding {
+            id: uuid::Uuid::new_v4(),
+            scanner: "test".into(),
+            severity: Severity::High,
+            category: "test_cat".into(),
+            message: "test msg".into(),
+            evidence: Some("evidence".into()),
+        };
+        let json = serde_json::to_string(&finding).unwrap();
+        let back: ScanFinding = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.severity, Severity::High);
+        assert_eq!(back.category, "test_cat");
+    }
+
+    #[test]
+    fn scan_result_serde() {
+        let result = ScanResult {
+            verdict: ScanVerdict::Block,
+            findings: vec![],
+            worst_severity: Severity::Critical,
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let back: ScanResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.verdict, ScanVerdict::Block);
     }
 }

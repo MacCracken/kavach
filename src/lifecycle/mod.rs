@@ -31,6 +31,7 @@ pub enum SandboxState {
 }
 
 impl SandboxState {
+    /// Check whether transitioning from this state to `to` is valid.
     #[inline]
     #[must_use]
     pub fn valid_transition(&self, to: &SandboxState) -> bool {
@@ -97,6 +98,7 @@ impl Default for SandboxConfig {
 }
 
 impl SandboxConfig {
+    /// Create a new builder for `SandboxConfig`.
     #[must_use]
     pub fn builder() -> SandboxConfigBuilder {
         SandboxConfigBuilder::default()
@@ -110,42 +112,50 @@ pub struct SandboxConfigBuilder {
 }
 
 impl SandboxConfigBuilder {
+    /// Set the sandbox backend.
     pub fn backend(mut self, backend: Backend) -> Self {
         self.config.backend = backend;
         self
     }
 
+    /// Set the security policy.
     pub fn policy(mut self, policy: SandboxPolicy) -> Self {
         self.config.policy = policy;
         self
     }
 
+    /// Enable seccomp with the given profile name.
     pub fn policy_seccomp(mut self, profile: &str) -> Self {
         self.config.policy.seccomp_enabled = true;
         self.config.policy.seccomp_profile = Some(profile.into());
         self
     }
 
+    /// Enable or disable network access.
     pub fn network(mut self, enabled: bool) -> Self {
         self.config.policy.network.enabled = enabled;
         self
     }
 
+    /// Set the execution timeout in milliseconds.
     pub fn timeout_ms(mut self, ms: u64) -> Self {
         self.config.timeout_ms = ms;
         self
     }
 
+    /// Set the owning agent ID.
     pub fn agent_id(mut self, id: impl Into<String>) -> Self {
         self.config.agent_id = Some(id.into());
         self
     }
 
+    /// Set the externalization scanning policy.
     pub fn externalization(mut self, policy: ExternalizationPolicy) -> Self {
         self.config.externalization = Some(policy);
         self
     }
 
+    /// Build the `SandboxConfig`.
     #[must_use]
     pub fn build(self) -> SandboxConfig {
         self.config
@@ -169,11 +179,17 @@ pub struct ExecResult {
 
 /// A sandbox instance with lifecycle management.
 pub struct Sandbox {
+    /// Unique identifier for this sandbox.
     pub id: SandboxId,
+    /// Configuration used to create this sandbox.
     pub config: SandboxConfig,
+    /// Current lifecycle state.
     pub state: SandboxState,
+    /// Timestamp when the sandbox was created.
     pub created_at: DateTime<Utc>,
+    /// Timestamp when the sandbox entered the Running state.
     pub started_at: Option<DateTime<Utc>>,
+    /// Timestamp when the sandbox was stopped or destroyed.
     pub stopped_at: Option<DateTime<Utc>>,
     backend: Box<dyn SandboxBackend>,
 }
@@ -486,5 +502,82 @@ mod tests {
         let back: ExecResult = serde_json::from_str(&json).unwrap();
         assert_eq!(back.exit_code, 0);
         assert_eq!(back.duration_ms, 42);
+    }
+
+    #[tokio::test]
+    async fn sandbox_debug_format() {
+        let config = SandboxConfig::builder().backend(Backend::Noop).build();
+        let sandbox = Sandbox::create(config).await.unwrap();
+        let debug = format!("{:?}", sandbox);
+        assert!(debug.contains("Sandbox"));
+        assert!(debug.contains("noop"));
+        assert!(debug.contains("Created"));
+    }
+
+    #[tokio::test]
+    async fn sandbox_transition_error_message() {
+        let config = SandboxConfig::builder().backend(Backend::Noop).build();
+        let mut sandbox = Sandbox::create(config).await.unwrap();
+        let err = sandbox.transition(SandboxState::Stopped).unwrap_err();
+        assert!(err.to_string().contains("created"));
+        assert!(err.to_string().contains("stopped"));
+    }
+
+    #[tokio::test]
+    async fn sandbox_exec_in_created_state() {
+        let config = SandboxConfig::builder().backend(Backend::Noop).build();
+        let sandbox = Sandbox::create(config).await.unwrap();
+        let err = sandbox.exec("echo test").await.unwrap_err();
+        assert!(err.to_string().contains("not running"));
+    }
+
+    #[tokio::test]
+    async fn sandbox_spawn_requires_running() {
+        let config = SandboxConfig::builder().backend(Backend::Noop).build();
+        let sandbox = Sandbox::create(config).await.unwrap();
+        let err = sandbox.spawn("echo test").await.unwrap_err();
+        assert!(err.to_string().contains("not running"));
+    }
+
+    #[tokio::test]
+    async fn sandbox_destroy_sets_destroyed() {
+        let config = SandboxConfig::builder().backend(Backend::Noop).build();
+        let mut sandbox = Sandbox::create(config).await.unwrap();
+        sandbox.transition(SandboxState::Running).unwrap();
+        // Direct transition to Destroyed is valid
+        sandbox.destroy().await.unwrap();
+    }
+
+    #[test]
+    fn config_serde_roundtrip() {
+        let config = SandboxConfig::builder()
+            .backend(Backend::GVisor)
+            .policy(SandboxPolicy::strict())
+            .timeout_ms(60_000)
+            .agent_id("test-agent")
+            .build();
+        let json = serde_json::to_string(&config).unwrap();
+        let back: SandboxConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.backend, Backend::GVisor);
+        assert_eq!(back.timeout_ms, 60_000);
+        assert_eq!(back.agent_id.as_deref(), Some("test-agent"));
+    }
+
+    #[test]
+    fn state_display_all() {
+        assert_eq!(SandboxState::Created.to_string(), "created");
+        assert_eq!(SandboxState::Running.to_string(), "running");
+        assert_eq!(SandboxState::Paused.to_string(), "paused");
+        assert_eq!(SandboxState::Stopped.to_string(), "stopped");
+        assert_eq!(SandboxState::Destroyed.to_string(), "destroyed");
+    }
+
+    #[tokio::test]
+    async fn unavailable_backend_fails() {
+        let config = SandboxConfig::builder()
+            .backend(Backend::Firecracker)
+            .build();
+        let err = Sandbox::create(config).await.unwrap_err();
+        assert!(err.to_string().contains("not available") || err.to_string().contains("not found"));
     }
 }

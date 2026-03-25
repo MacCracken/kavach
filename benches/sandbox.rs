@@ -273,6 +273,47 @@ fn bench_health_check(c: &mut Criterion) {
     });
 }
 
+// ── Overhead Measurement ─────────────────────────────────────────────────
+
+/// Measure kavach overhead vs direct process spawn.
+/// Compares: direct `tokio::process::Command::new("echo")` vs kavach Process backend.
+#[cfg(target_os = "linux")]
+fn bench_overhead_vs_direct(c: &mut Criterion) {
+    use kavach::backend::SandboxBackend;
+    use kavach::backend::process::ProcessBackend;
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+
+    // Direct spawn (baseline)
+    c.bench_function("direct_spawn_echo", |b| {
+        b.iter(|| {
+            rt.block_on(async {
+                let output = tokio::process::Command::new("echo")
+                    .arg("bench")
+                    .output()
+                    .await
+                    .unwrap();
+                assert!(output.status.success());
+            })
+        })
+    });
+
+    // Kavach Process backend with minimal policy (no seccomp)
+    let config_minimal = SandboxConfig::builder()
+        .backend(Backend::Process)
+        .timeout_ms(5_000)
+        .build();
+    let backend_minimal = ProcessBackend::new(&config_minimal).unwrap();
+    let policy_minimal = SandboxPolicy::minimal();
+
+    c.bench_function("kavach_process_echo_minimal", |b| {
+        b.iter(|| {
+            rt.block_on(backend_minimal.exec("echo bench", &policy_minimal))
+                .unwrap()
+        })
+    });
+}
+
 // ── Group Registration ──────────────────────────────────────────────────
 
 criterion_group!(
@@ -321,6 +362,9 @@ criterion_group!(
 );
 
 #[cfg(target_os = "linux")]
+criterion_group!(overhead_benches, bench_overhead_vs_direct,);
+
+#[cfg(target_os = "linux")]
 criterion_main!(
     scoring_benches,
     detection_benches,
@@ -330,6 +374,7 @@ criterion_main!(
     scanning_benches,
     lifecycle_benches,
     process_benches,
+    overhead_benches,
 );
 
 #[cfg(not(target_os = "linux"))]

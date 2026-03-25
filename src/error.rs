@@ -2,39 +2,53 @@
 
 use thiserror::Error;
 
+/// Errors produced by kavach operations.
 #[derive(Debug, Error)]
 pub enum KavachError {
+    /// The requested backend is not available on this system.
     #[error("backend not available: {0}")]
     BackendUnavailable(String),
 
+    /// Sandbox creation failed.
     #[error("sandbox creation failed: {0}")]
     CreationFailed(String),
 
+    /// Command execution inside the sandbox failed.
     #[error("sandbox execution failed: {0}")]
     ExecFailed(String),
 
+    /// Sandbox execution exceeded the configured timeout.
     #[error("sandbox timeout after {0}ms")]
     Timeout(u64),
 
+    /// A security policy violation was detected.
     #[error("policy violation: {0}")]
     PolicyViolation(String),
 
+    /// Credential injection or resolution failed.
     #[error("credential error: {0}")]
     CredentialError(String),
 
+    /// An invalid sandbox lifecycle state transition was attempted.
     #[error("lifecycle error: {state} -> {target}: {reason}")]
     InvalidTransition {
+        /// Current state of the sandbox.
         state: String,
+        /// Target state that was requested.
         target: String,
+        /// Reason the transition is invalid.
         reason: String,
     },
 
+    /// Output externalization was blocked by the scanning gate.
     #[error("externalization blocked: {0}")]
     ExternalizationBlocked(String),
 
+    /// An I/O error occurred.
     #[error(transparent)]
     Io(#[from] std::io::Error),
 
+    /// A wrapped generic error.
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }

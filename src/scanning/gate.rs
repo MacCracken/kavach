@@ -10,6 +10,7 @@ pub struct ExternalizationGate {
 }
 
 impl ExternalizationGate {
+    /// Create a new externalization gate with a default secrets scanner.
     pub fn new() -> Self {
         Self {
             scanner: SecretsScanner::new(),
@@ -170,6 +171,41 @@ mod tests {
             .apply(make_result("-----BEGIN RSA PRIVATE KEY-----"), &policy)
             .unwrap();
         assert!(result.stdout.contains("BEGIN RSA PRIVATE KEY"));
+    }
+
+    #[test]
+    fn default_gate() {
+        let gate = ExternalizationGate::default();
+        let policy = ExternalizationPolicy::default();
+        let result = gate.apply(make_result("hello"), &policy).unwrap();
+        assert_eq!(result.stdout, "hello");
+    }
+
+    #[test]
+    fn quarantine_medium_severity() {
+        let gate = ExternalizationGate::new();
+        let policy = ExternalizationPolicy {
+            quarantine_threshold: Severity::Medium,
+            block_threshold: Severity::Critical,
+            ..Default::default()
+        };
+        // Generic API key is Medium severity
+        let result = gate.apply(
+            make_result(r#"api_key = "abcdefghijklmnopqrstuvwxyz""#),
+            &policy,
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("quarantined"));
+    }
+
+    #[test]
+    fn stderr_scanning() {
+        let gate = ExternalizationGate::new();
+        let policy = ExternalizationPolicy::default();
+        let mut result = make_result("clean");
+        result.stderr = "-----BEGIN RSA PRIVATE KEY-----".into();
+        let outcome = gate.apply(result, &policy);
+        assert!(outcome.is_err(), "secret in stderr should be caught");
     }
 
     #[test]

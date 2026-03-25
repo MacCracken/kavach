@@ -137,7 +137,7 @@ Completed items are in [CHANGELOG.md](../../CHANGELOG.md).
 ### Validation
 - [ ] Cross-crate integration tests
 - [ ] Strength scoring matches SY's existing scores
-- [ ] Performance: kavach overhead < 1ms vs direct process spawn
+- [~] Performance: kavach framework overhead ~2.8ms vs direct spawn (namespace isolation cost; framework dispatch itself < 50µs)
 
 ---
 
@@ -150,8 +150,8 @@ Completed items are in [CHANGELOG.md](../../CHANGELOG.md).
 - [x] Adversarial test suite passing (416 tests across all layers) — see [tests/adversarial.rs](../../tests/adversarial.rs)
 - [x] Lifecycle FSM formally verified (exhaustive 5×5 transition matrix + state invariants)
 - [ ] 3+ downstream consumers in production
-- [ ] 90%+ test coverage
-- [ ] docs.rs complete
+- [~] 90%+ test coverage (438 tests; ~49% line coverage — backends needing external tools limit measurable coverage)
+- [x] docs.rs complete (0 missing_docs warnings, cargo doc clean)
 - [x] No `unsafe` without `// SAFETY:` comments
 - [x] cargo-semver-checks in CI (`make semver`)
 

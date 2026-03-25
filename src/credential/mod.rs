@@ -16,9 +16,17 @@ pub struct SecretRef {
 #[non_exhaustive]
 pub enum InjectionMethod {
     /// Set as an environment variable.
-    EnvVar { var_name: String },
+    EnvVar {
+        /// Name of the environment variable.
+        var_name: String,
+    },
     /// Write to a file inside the sandbox.
-    File { path: String, mode: u32 },
+    File {
+        /// Path inside the sandbox to write the secret to.
+        path: String,
+        /// File permissions (e.g. 0o600).
+        mode: u32,
+    },
     /// Pipe through stdin.
     Stdin,
 }
@@ -40,6 +48,7 @@ pub struct CredentialProxy {
 }
 
 impl CredentialProxy {
+    /// Create an empty credential proxy.
     pub fn new() -> Self {
         Self {
             secrets: std::collections::HashMap::new(),
@@ -125,6 +134,7 @@ impl CredentialProxy {
         self.secrets.len()
     }
 
+    /// Whether no secrets are registered.
     #[inline]
     #[must_use]
     pub fn is_empty(&self) -> bool {

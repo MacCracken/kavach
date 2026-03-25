@@ -161,8 +161,8 @@ impl SevGuestPolicy {
     /// Compose the policy into its u64 bit representation.
     ///
     /// Bit layout (AMD SEV-SNP ABI):
-    /// - Bit 0: minor_version[0:3]
-    /// - Bit 8: major_version[0:7]
+    /// - Bit 0: minor_version\[0:3\]
+    /// - Bit 8: major_version\[0:7\]
     /// - Bit 16: SMT allowed
     /// - Bit 17: reserved (must be 1, VLEK allowed)
     /// - Bit 18: migration agent allowed

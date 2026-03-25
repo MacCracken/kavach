@@ -28,6 +28,7 @@ pub struct SandboxPolicy {
 /// Seccomp profile presets.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SeccompProfile {
+    /// Profile name (e.g. "basic", "strict").
     pub name: String,
     /// Allowed syscall names.
     pub allowed_syscalls: Vec<String>,

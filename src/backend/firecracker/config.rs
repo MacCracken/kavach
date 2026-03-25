@@ -8,46 +8,70 @@ use crate::lifecycle::SandboxConfig;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct VmConfig {
+    /// Kernel and boot arguments.
     pub boot_source: BootSource,
+    /// Block devices (rootfs, data volumes).
     pub drives: Vec<Drive>,
+    /// vCPU and memory configuration.
     pub machine_config: MachineConfig,
+    /// Optional TAP network interfaces.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub network_interfaces: Option<Vec<NetworkInterface>>,
+    /// Optional vsock device for host-guest IPC.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vsock: Option<VsockConfig>,
 }
 
+/// Kernel boot source configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BootSource {
+    /// Path to the uncompressed kernel image (vmlinux).
     pub kernel_image_path: String,
+    /// Kernel command-line boot arguments.
     pub boot_args: String,
 }
 
+/// Block device (drive) configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Drive {
+    /// Unique identifier for this drive.
     pub drive_id: String,
+    /// Path to the drive image on the host.
     pub path_on_host: String,
+    /// Whether this is the root device.
     pub is_root_device: bool,
+    /// Whether the drive is read-only.
     pub is_read_only: bool,
 }
 
+/// Virtual machine hardware configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MachineConfig {
+    /// Number of virtual CPUs.
     pub vcpu_count: u32,
+    /// Memory size in MiB.
     pub mem_size_mib: u64,
+    /// Whether simultaneous multithreading is enabled.
     pub smt: bool,
 }
 
+/// TAP network interface configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NetworkInterface {
+    /// Unique identifier for this interface.
     pub iface_id: String,
+    /// MAC address assigned to the guest.
     pub guest_mac: String,
+    /// Host TAP device name.
     pub host_dev_name: String,
 }
 
+/// Vsock device configuration for host-guest communication.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VsockConfig {
+    /// Guest CID (Context Identifier).
     pub guest_cid: u32,
+    /// Path to the Unix domain socket on the host.
     pub uds_path: String,
 }
 
