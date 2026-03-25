@@ -24,8 +24,8 @@ Completed items are in [CHANGELOG.md](../../CHANGELOG.md).
 
 | Consumer | Status | Roadmap location |
 |----------|--------|------------------|
-| **Stiva** | Active dependency (`kavach = ">=0.22"`) | [stiva/CLAUDE.md](../../../stiva/CLAUDE.md) |
-| **Kiran** | Active dependency (`kavach = "0.22"`, `wasm` feature) | [kiran/CLAUDE.md](../../../kiran/CLAUDE.md) |
+| **Stiva** | Active dependency (`kavach = ">=0.25"`) | [stiva/CLAUDE.md](../../../stiva/CLAUDE.md) |
+| **Kiran** | Active dependency (`kavach = "0.25"`, `wasm` feature) | [kiran/CLAUDE.md](../../../kiran/CLAUDE.md) |
 | **SecureYeoman** | Active (sy-sandbox + kavach) | [SY migration roadmap](../../../secureyeoman/docs/development/migration/roadmap.md) Phase 5 |
 | **AgnosAI** | Planned — sandboxed crew execution | [agnosai roadmap](../../../agnosai/docs/development/roadmap.md) Kavach Integration section |
 | **Hoosh** | Planned — tool sandboxing + externalization gate | [hoosh roadmap](../../../hoosh/docs/development/roadmap.md) Post-v1; [ADR-006](../../../hoosh/docs/decisions/006-kavach-tool-sandbox.md) |

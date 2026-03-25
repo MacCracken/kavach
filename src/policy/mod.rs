@@ -91,6 +91,20 @@ impl SandboxPolicy {
             ..Default::default()
         }
     }
+
+    /// Create a policy from a preset name (case-insensitive).
+    ///
+    /// Known presets: `"minimal"`, `"basic"`, `"strict"`.
+    pub fn from_preset(name: &str) -> std::result::Result<Self, String> {
+        match name.to_lowercase().as_str() {
+            "minimal" => Ok(Self::minimal()),
+            "basic" => Ok(Self::basic()),
+            "strict" => Ok(Self::strict()),
+            other => Err(format!(
+                "unknown policy: {other} (use minimal, basic, strict)"
+            )),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -119,6 +133,37 @@ mod tests {
         assert!(p.read_only_rootfs);
         assert!(p.memory_limit_mb.is_some());
         assert!(p.max_pids.is_some());
+    }
+
+    #[test]
+    fn from_preset_all() {
+        assert!(
+            !SandboxPolicy::from_preset("minimal")
+                .unwrap()
+                .seccomp_enabled
+        );
+        assert!(SandboxPolicy::from_preset("basic").unwrap().seccomp_enabled);
+        assert!(
+            SandboxPolicy::from_preset("strict")
+                .unwrap()
+                .read_only_rootfs
+        );
+    }
+
+    #[test]
+    fn from_preset_case_insensitive() {
+        assert!(
+            SandboxPolicy::from_preset("STRICT")
+                .unwrap()
+                .read_only_rootfs
+        );
+        assert!(SandboxPolicy::from_preset("Basic").unwrap().seccomp_enabled);
+    }
+
+    #[test]
+    fn from_preset_unknown() {
+        let err = SandboxPolicy::from_preset("unknown").unwrap_err();
+        assert!(err.contains("unknown policy"));
     }
 
     #[test]

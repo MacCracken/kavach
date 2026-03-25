@@ -98,6 +98,26 @@ impl Backend {
     }
 }
 
+impl std::str::FromStr for Backend {
+    type Err = String;
+
+    /// Parse a backend name (case-insensitive).
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "process" => Ok(Self::Process),
+            "gvisor" => Ok(Self::GVisor),
+            "firecracker" => Ok(Self::Firecracker),
+            "wasm" => Ok(Self::Wasm),
+            "oci" => Ok(Self::Oci),
+            "sgx" => Ok(Self::Sgx),
+            "sev" => Ok(Self::Sev),
+            "sy-agnos" | "syagnos" => Ok(Self::SyAgnos),
+            "noop" => Ok(Self::Noop),
+            other => Err(format!("unknown backend: {other}")),
+        }
+    }
+}
+
 impl fmt::Display for Backend {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -316,6 +336,36 @@ mod tests {
         let policy = SandboxPolicy::minimal();
         let result = noop.spawn("anything", &policy).await.unwrap();
         assert!(result.is_none(), "NoopBackend::spawn should return None");
+    }
+
+    #[test]
+    fn from_str_all_backends() {
+        assert_eq!("process".parse::<Backend>().unwrap(), Backend::Process);
+        assert_eq!("gvisor".parse::<Backend>().unwrap(), Backend::GVisor);
+        assert_eq!(
+            "firecracker".parse::<Backend>().unwrap(),
+            Backend::Firecracker
+        );
+        assert_eq!("wasm".parse::<Backend>().unwrap(), Backend::Wasm);
+        assert_eq!("oci".parse::<Backend>().unwrap(), Backend::Oci);
+        assert_eq!("sgx".parse::<Backend>().unwrap(), Backend::Sgx);
+        assert_eq!("sev".parse::<Backend>().unwrap(), Backend::Sev);
+        assert_eq!("sy-agnos".parse::<Backend>().unwrap(), Backend::SyAgnos);
+        assert_eq!("syagnos".parse::<Backend>().unwrap(), Backend::SyAgnos);
+        assert_eq!("noop".parse::<Backend>().unwrap(), Backend::Noop);
+    }
+
+    #[test]
+    fn from_str_case_insensitive() {
+        assert_eq!("Process".parse::<Backend>().unwrap(), Backend::Process);
+        assert_eq!("GVISOR".parse::<Backend>().unwrap(), Backend::GVisor);
+        assert_eq!("Noop".parse::<Backend>().unwrap(), Backend::Noop);
+    }
+
+    #[test]
+    fn from_str_unknown() {
+        let err = "unknown".parse::<Backend>().unwrap_err();
+        assert!(err.contains("unknown backend"));
     }
 
     #[test]

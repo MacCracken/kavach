@@ -53,32 +53,8 @@ enum Command {
     },
 }
 
-fn parse_backend(s: &str) -> Result<Backend, String> {
-    match s.to_lowercase().as_str() {
-        "process" => Ok(Backend::Process),
-        "gvisor" => Ok(Backend::GVisor),
-        "firecracker" => Ok(Backend::Firecracker),
-        "wasm" => Ok(Backend::Wasm),
-        "oci" => Ok(Backend::Oci),
-        "sgx" => Ok(Backend::Sgx),
-        "sev" => Ok(Backend::Sev),
-        "sy-agnos" | "syagnos" => Ok(Backend::SyAgnos),
-        "noop" => Ok(Backend::Noop),
-        other => Err(format!("unknown backend: {other}")),
-    }
-}
-
-fn parse_policy(s: &str, no_network: bool) -> Result<SandboxPolicy, String> {
-    let mut policy = match s.to_lowercase().as_str() {
-        "minimal" => SandboxPolicy::minimal(),
-        "basic" => SandboxPolicy::basic(),
-        "strict" => SandboxPolicy::strict(),
-        other => {
-            return Err(format!(
-                "unknown policy: {other} (use minimal, basic, strict)"
-            ));
-        }
-    };
+fn resolve_policy(name: &str, no_network: bool) -> Result<SandboxPolicy, String> {
+    let mut policy = SandboxPolicy::from_preset(name)?;
     if no_network {
         policy.network.enabled = false;
     }
@@ -97,14 +73,14 @@ async fn main() -> ExitCode {
             timeout,
             cmd,
         } => {
-            let backend = match parse_backend(&backend) {
+            let backend: Backend = match backend.parse() {
                 Ok(b) => b,
                 Err(e) => {
                     eprintln!("error: {e}");
                     return ExitCode::from(2);
                 }
             };
-            let policy = match parse_policy(&policy, no_network) {
+            let policy = match resolve_policy(&policy, no_network) {
                 Ok(p) => p,
                 Err(e) => {
                     eprintln!("error: {e}");
@@ -171,14 +147,14 @@ async fn main() -> ExitCode {
             policy,
             no_network,
         } => {
-            let backend = match parse_backend(&backend) {
+            let backend: Backend = match backend.parse() {
                 Ok(b) => b,
                 Err(e) => {
                     eprintln!("error: {e}");
                     return ExitCode::from(2);
                 }
             };
-            let policy = match parse_policy(&policy, no_network) {
+            let policy = match resolve_policy(&policy, no_network) {
                 Ok(p) => p,
                 Err(e) => {
                     eprintln!("error: {e}");
