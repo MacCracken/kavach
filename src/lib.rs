@@ -52,9 +52,9 @@ pub use credential::{CredentialProxy, FileInjection, SecretRef};
 pub use lifecycle::{ExecResult, Sandbox, SandboxConfig, SandboxPool, SandboxState};
 pub use policy::{LandlockRule, NetworkPolicy, SandboxPolicy, SeccompProfile};
 #[cfg(feature = "process")]
-pub use scanning::{CodeScanner, DataScanner};
-#[cfg(feature = "process")]
 pub use scanning::ExternalizationGate;
+#[cfg(feature = "process")]
+pub use scanning::{CodeScanner, DataScanner};
 pub use scanning::{ExternalizationPolicy, ScanVerdict, Severity};
 pub use scoring::{StrengthScore, score_backend};
 
