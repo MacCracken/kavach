@@ -53,7 +53,9 @@ pub use lifecycle::{ExecResult, Sandbox, SandboxConfig, SandboxPool, SandboxStat
 pub use policy::{LandlockRule, NetworkPolicy, SandboxPolicy, SeccompProfile};
 #[cfg(feature = "process")]
 pub use scanning::{CodeScanner, DataScanner};
-pub use scanning::{ExternalizationGate, ExternalizationPolicy, ScanVerdict, Severity};
+#[cfg(feature = "process")]
+pub use scanning::ExternalizationGate;
+pub use scanning::{ExternalizationPolicy, ScanVerdict, Severity};
 pub use scoring::{StrengthScore, score_backend};
 
 /// Result type alias for kavach operations.
