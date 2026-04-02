@@ -23,6 +23,7 @@ sev = ["dep:tempfile"]
 sy-agnos = ["dep:tempfile"]
 sigstore = ["dep:sigstore"]
 attestation = ["dep:ear"]
+agnostik = ["dep:agnos-common", "dep:agnosys"]
 full = ["process", "gvisor", "firecracker", "wasm", "oci", "sgx", "sev", "sy-agnos"]
 
 [dependencies]
@@ -49,6 +50,10 @@ sigstore = { version = "0.13", optional = true, default-features = false }
 
 # Attestation standards (optional)
 ear = { version = "0.5", optional = true }
+
+# AGNOS shared types (optional — for sandbox_core bridge module)
+agnos-common = { path = "../agnosticos/userland/agnos-common", optional = true }
+agnosys = { path = "../agnosys", features = ["full"], optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

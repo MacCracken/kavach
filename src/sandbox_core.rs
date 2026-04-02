@@ -252,7 +252,10 @@ impl Sandbox {
                         // Apply firewall rules from network policy
                         let policy = self.build_firewall_policy();
                         if let Err(e) = netns::apply_firewall_rules(&handle, &policy) {
-                            warn!("Failed to apply nftables rules: {} (namespace created without firewall)", e);
+                            warn!(
+                                "Failed to apply nftables rules: {} (namespace created without firewall)",
+                                e
+                            );
                         }
                         info!(
                             patterns = self.egress_gate.pattern_count(),
@@ -293,50 +296,48 @@ impl Sandbox {
         if let Some(ref policy) = self.config.network_policy {
             // Allow specified outbound ports
             for &port in &policy.allowed_outbound_ports {
-                rules.push(netns::FirewallRule {
-                    direction: netns::TrafficDirection::Outbound,
-                    protocol: netns::Protocol::Tcp,
+                rules.push(netns::FirewallRule::new(
+                    netns::TrafficDirection::Outbound,
+                    netns::Protocol::Tcp,
                     port,
-                    remote_addr: String::new(),
-                    action: netns::FirewallAction::Accept,
-                    comment: format!("Allow outbound TCP/{}", port),
-                });
+                    "",
+                    netns::FirewallAction::Accept,
+                    format!("Allow outbound TCP/{}", port),
+                ));
             }
 
             // Allow specified outbound hosts
             for host in &policy.allowed_outbound_hosts {
-                rules.push(netns::FirewallRule {
-                    direction: netns::TrafficDirection::Outbound,
-                    protocol: netns::Protocol::Any,
-                    port: 0,
-                    remote_addr: host.clone(),
-                    action: netns::FirewallAction::Accept,
-                    comment: format!("Allow outbound to {}", host),
-                });
+                rules.push(netns::FirewallRule::new(
+                    netns::TrafficDirection::Outbound,
+                    netns::Protocol::Any,
+                    0,
+                    host.as_str(),
+                    netns::FirewallAction::Accept,
+                    format!("Allow outbound to {}", host),
+                ));
             }
 
             // Allow specified inbound ports
             for &port in &policy.allowed_inbound_ports {
-                rules.push(netns::FirewallRule {
-                    direction: netns::TrafficDirection::Inbound,
-                    protocol: netns::Protocol::Tcp,
+                rules.push(netns::FirewallRule::new(
+                    netns::TrafficDirection::Inbound,
+                    netns::Protocol::Tcp,
                     port,
-                    remote_addr: String::new(),
-                    action: netns::FirewallAction::Accept,
-                    comment: format!("Allow inbound TCP/{}", port),
-                });
+                    "",
+                    netns::FirewallAction::Accept,
+                    format!("Allow inbound TCP/{}", port),
+                ));
             }
         }
 
-        netns::FirewallPolicy {
-            default_inbound: netns::FirewallAction::Drop,
-            default_outbound: if self.config.network_policy.is_some() {
-                netns::FirewallAction::Drop // Explicit allow-list mode
-            } else {
-                netns::FirewallAction::Accept
-            },
-            rules,
-        }
+        let default_outbound = if self.config.network_policy.is_some() {
+            netns::FirewallAction::Drop // Explicit allow-list mode
+        } else {
+            netns::FirewallAction::Accept
+        };
+
+        netns::FirewallPolicy::new(netns::FirewallAction::Drop, default_outbound, rules)
     }
 
     /// Apply MAC (AppArmor/SELinux) profile based on sandbox config.
@@ -435,21 +436,21 @@ impl Sandbox {
     /// Called during agent unregistration to clean up kernel resources.
     pub async fn teardown(&mut self) {
         // Destroy network namespace
-        if let Some(ref handle) = self.netns_handle {
-            if let Err(e) = netns::destroy_agent_netns(handle) {
-                warn!(
-                    "Failed to destroy network namespace '{}': {}",
-                    handle.name, e
-                );
-            }
+        if let Some(ref handle) = self.netns_handle
+            && let Err(e) = netns::destroy_agent_netns(handle)
+        {
+            warn!(
+                "Failed to destroy network namespace '{}': {}",
+                handle.name, e
+            );
         }
         self.netns_handle = None;
 
         // Teardown LUKS volume
-        if let Some(ref name) = self.luks_name {
-            if let Err(e) = luks::teardown_agent_volume(name) {
-                warn!("Failed to teardown LUKS volume '{}': {}", name, e);
-            }
+        if let Some(ref name) = self.luks_name
+            && let Err(e) = luks::teardown_agent_volume(name)
+        {
+            warn!("Failed to teardown LUKS volume '{}': {}", name, e);
         }
         self.luks_name = None;
 
