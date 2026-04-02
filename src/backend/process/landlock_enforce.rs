@@ -6,10 +6,10 @@
 #[cfg(target_os = "linux")]
 use landlock::{
     ABI, Access, AccessFs, AccessNet, NetPort, PathBeneath, PathFd, Ruleset, RulesetAttr,
-    RulesetCreatedAttr,
+    RulesetCreatedAttr, Scope,
 };
 
-use crate::policy::{LandlockRule, SandboxPolicy};
+use crate::policy::{LandlockRule, LandlockScope, SandboxPolicy};
 
 /// Lightweight extraction of landlock-relevant fields from SandboxPolicy.
 /// Used in pre_exec to avoid cloning the full policy.
@@ -25,6 +25,8 @@ pub struct LandlockParams {
     pub tcp_bind_ports: Vec<u16>,
     /// TCP ports allowed for connect (ABI v4). Empty = no restriction.
     pub tcp_connect_ports: Vec<u16>,
+    /// Landlock scoping (ABI v6) — IPC and signal isolation.
+    pub scope: LandlockScope,
 }
 
 impl LandlockParams {
@@ -37,9 +39,9 @@ impl LandlockParams {
             data_dir: policy.data_dir.clone(),
             tcp_bind_ports: policy.network.tcp_bind_ports.clone(),
             tcp_connect_ports: policy.network.tcp_connect_ports.clone(),
+            scope: policy.landlock_scope.clone(),
         }
     }
-
 }
 
 /// Build and apply Landlock rules from a sandbox policy.
@@ -71,6 +73,19 @@ pub fn apply_landlock_params(params: &LandlockParams) -> crate::Result<()> {
         builder = builder
             .handle_access(AccessNet::ConnectTcp)
             .map_err(|e| crate::KavachError::ExecFailed(format!("landlock net connect: {e}")))?;
+    }
+
+    // Apply scoping restrictions (ABI v6).
+    // These are domain-level: the sandbox cannot reach outside its boundary.
+    if params.scope.abstract_unix_socket {
+        builder = builder
+            .scope(Scope::AbstractUnixSocket)
+            .map_err(|e| crate::KavachError::ExecFailed(format!("landlock scope uds: {e}")))?;
+    }
+    if params.scope.signal {
+        builder = builder
+            .scope(Scope::Signal)
+            .map_err(|e| crate::KavachError::ExecFailed(format!("landlock scope signal: {e}")))?;
     }
 
     let mut ruleset = builder
@@ -138,6 +153,8 @@ pub fn should_apply(policy: &SandboxPolicy) -> bool {
         || policy.read_only_rootfs
         || !policy.network.tcp_bind_ports.is_empty()
         || !policy.network.tcp_connect_ports.is_empty()
+        || policy.landlock_scope.abstract_unix_socket
+        || policy.landlock_scope.signal
 }
 
 /// Generate default rules when read_only_rootfs is true but no explicit rules given.
@@ -262,5 +279,37 @@ mod tests {
         let params = LandlockParams::from_policy(&policy);
         assert!(params.tcp_bind_ports.is_empty());
         assert!(params.tcp_connect_ports.is_empty());
+    }
+
+    #[test]
+    fn should_apply_with_scope_uds() {
+        let mut policy = SandboxPolicy::minimal();
+        assert!(!should_apply(&policy));
+
+        policy.landlock_scope.abstract_unix_socket = true;
+        assert!(should_apply(&policy));
+    }
+
+    #[test]
+    fn should_apply_with_scope_signal() {
+        let mut policy = SandboxPolicy::minimal();
+        policy.landlock_scope.signal = true;
+        assert!(should_apply(&policy));
+    }
+
+    #[test]
+    fn params_from_policy_captures_scope() {
+        let policy = SandboxPolicy::strict();
+        let params = LandlockParams::from_policy(&policy);
+        assert!(params.scope.abstract_unix_socket);
+        assert!(params.scope.signal);
+    }
+
+    #[test]
+    fn params_scope_default_disabled() {
+        let policy = SandboxPolicy::minimal();
+        let params = LandlockParams::from_policy(&policy);
+        assert!(!params.scope.abstract_unix_socket);
+        assert!(!params.scope.signal);
     }
 }

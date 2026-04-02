@@ -176,6 +176,11 @@ pub fn merge_policies(base: &SandboxPolicy, overlay: &SandboxPolicy) -> SandboxP
             (None, None) => None,
         },
         data_dir: base.data_dir.clone().or_else(|| overlay.data_dir.clone()),
+        landlock_scope: crate::policy::LandlockScope {
+            abstract_unix_socket: base.landlock_scope.abstract_unix_socket
+                || overlay.landlock_scope.abstract_unix_socket,
+            signal: base.landlock_scope.signal || overlay.landlock_scope.signal,
+        },
     }
 }
 

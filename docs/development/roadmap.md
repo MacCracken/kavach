@@ -9,8 +9,8 @@ Completed items are in [CHANGELOG.md](../../CHANGELOG.md).
 ## Ready to implement
 
 - [x] Landlock ABI v4 — TCP bind/connect via `AccessNet` + `NetPort`
-- [ ] Landlock ABI v5 — IOCTL scoping via `AccessFs::IoctlDev` (available since `landlock` 0.4.1)
-- [ ] Landlock ABI v6 — IPC scoping via `Scope` + signal scoping (available since `landlock` 0.4.2)
+- [x] Landlock ABI v5 — IOCTL scoping via `AccessFs::IoctlDev` (included in `AccessFs::from_all(V5+)`, active since ABI bump to V6)
+- [x] Landlock ABI v6 — IPC scoping via `Scope::AbstractUnixSocket` + `Scope::Signal` (`LandlockScope` policy type)
 
 ## Requires architectural design
 

@@ -23,6 +23,8 @@ pub struct SandboxPolicy {
     pub max_pids: Option<u32>,
     /// Data directory inside the sandbox (writable).
     pub data_dir: Option<String>,
+    /// Landlock scoping (ABI v6) — restrict IPC and signals across sandbox boundary.
+    pub landlock_scope: LandlockScope,
 }
 
 /// Seccomp profile presets.
@@ -43,6 +45,15 @@ pub struct LandlockRule {
     pub path: String,
     /// Access mode: "ro" (read-only) or "rw" (read-write).
     pub access: String,
+}
+
+/// Landlock scoping policy (ABI v6).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LandlockScope {
+    /// Block connecting to abstract UNIX sockets created outside the sandbox.
+    pub abstract_unix_socket: bool,
+    /// Block sending signals to processes outside the sandbox.
+    pub signal: bool,
 }
 
 /// Network access policy.
@@ -92,6 +103,10 @@ impl SandboxPolicy {
             memory_limit_mb: Some(512),
             cpu_limit: Some(1.0),
             max_pids: Some(64),
+            landlock_scope: LandlockScope {
+                abstract_unix_socket: true,
+                signal: true,
+            },
             ..Default::default()
         }
     }
@@ -198,5 +213,31 @@ mod tests {
         let policy = NetworkPolicy::default();
         assert!(policy.tcp_bind_ports.is_empty());
         assert!(policy.tcp_connect_ports.is_empty());
+    }
+
+    #[test]
+    fn landlock_scope_default_disabled() {
+        let scope = LandlockScope::default();
+        assert!(!scope.abstract_unix_socket);
+        assert!(!scope.signal);
+    }
+
+    #[test]
+    fn strict_policy_enables_scope() {
+        let p = SandboxPolicy::strict();
+        assert!(p.landlock_scope.abstract_unix_socket);
+        assert!(p.landlock_scope.signal);
+    }
+
+    #[test]
+    fn landlock_scope_serde() {
+        let scope = LandlockScope {
+            abstract_unix_socket: true,
+            signal: true,
+        };
+        let json = serde_json::to_string(&scope).unwrap();
+        let back: LandlockScope = serde_json::from_str(&json).unwrap();
+        assert!(back.abstract_unix_socket);
+        assert!(back.signal);
     }
 }

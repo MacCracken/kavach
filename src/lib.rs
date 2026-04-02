@@ -60,7 +60,7 @@ pub use backend::metrics::SandboxMetrics;
 pub use backend::{Backend, SandboxBackend};
 pub use credential::{CredentialProxy, FileInjection, SecretRef};
 pub use lifecycle::{ExecResult, Sandbox, SandboxConfig, SandboxPool, SandboxState};
-pub use policy::{LandlockRule, NetworkPolicy, SandboxPolicy, SeccompProfile};
+pub use policy::{LandlockRule, LandlockScope, NetworkPolicy, SandboxPolicy, SeccompProfile};
 #[cfg(feature = "process")]
 pub use scanning::ExternalizationGate;
 #[cfg(feature = "process")]
