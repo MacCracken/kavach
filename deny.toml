@@ -21,7 +21,6 @@ allow = [
     "Unicode-3.0",
     "AGPL-3.0-only",
     "GPL-3.0-only",
-    "GPL-3.0",
     "CDLA-Permissive-2.0",
     "Zlib",
     "BSL-1.0",
