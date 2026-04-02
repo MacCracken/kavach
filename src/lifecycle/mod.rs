@@ -82,6 +82,10 @@ pub struct SandboxConfig {
     pub externalization: Option<ExternalizationPolicy>,
     /// Optional inner backend for composite isolation (defense-in-depth).
     pub inner_backend: Option<Backend>,
+    /// Hostname for UTS namespace.
+    pub hostname: Option<String>,
+    /// Domain name for UTS namespace (OCI runtime-spec v1.2.0).
+    pub domainname: Option<String>,
 }
 
 impl Default for SandboxConfig {
@@ -96,6 +100,8 @@ impl Default for SandboxConfig {
             agent_id: None,
             externalization: None,
             inner_backend: None,
+            hostname: None,
+            domainname: None,
         }
     }
 }
@@ -164,6 +170,18 @@ impl SandboxConfigBuilder {
     /// The inner backend's policy is merged to tighten isolation constraints.
     pub fn inner_backend(mut self, backend: Backend) -> Self {
         self.config.inner_backend = Some(backend);
+        self
+    }
+
+    /// Set the hostname for UTS namespace.
+    pub fn hostname(mut self, name: impl Into<String>) -> Self {
+        self.config.hostname = Some(name.into());
+        self
+    }
+
+    /// Set the domain name for UTS namespace (OCI runtime-spec v1.2.0).
+    pub fn domainname(mut self, name: impl Into<String>) -> Self {
+        self.config.domainname = Some(name.into());
         self
     }
 

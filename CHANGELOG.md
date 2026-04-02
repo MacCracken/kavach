@@ -5,6 +5,33 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] — 2026-04-02
+
+### Added
+- **Firewall types in agnosys** — `TrafficDirection`, `Protocol`, `FirewallAction` enums, `FirewallRule` and `FirewallPolicy` structs with constructors, `apply_firewall_rules()` function, nftables ruleset rendering
+- **`sandbox_core` module enabled** — unblocked by agnosys firewall API; `#[cfg(feature = "agnostik")]` now compiles and links
+- **Delegation depth limit** — capability token delegation chains capped at 5 levels to prevent unbounded chains
+- **Process substitution detection** — `<(` and `>(` patterns added to code scanner shell metacharacter group
+- **`shell_words()` validation** — now returns `Result` and rejects unclosed quotes instead of silently accepting malformed input
+- **Namespace check fail-safe** — `is_in_separate_namespace()` returns `true` (assume isolated) when namespace inodes are unreadable, preventing false-negative escape verdicts
+- **Exec timeout enforcement** — `child.wait()` now bounded by remaining timeout budget; prevents zombie processes hanging indefinitely after I/O completes
+- 5 new tests: unclosed quote rejection, process substitution detection, delegation depth, cascade revocation, namespace fail-safe
+
+### Changed
+- **Dependencies updated** — hmac 0.12→0.13, sha2 0.10→0.11, nix 0.29→0.31, seccompiler 0.4→0.5, oci-spec 0.7→0.9, wasmtime 42→43, criterion 0.5→0.8, libc 0.2.183→0.2.184
+- **HMAC `KeyInit` import** — adapted `scanning::audit` for hmac 0.13 API change
+- **`deny.toml`** — added `GPL-3.0-only` and `CDLA-Permissive-2.0` to license allowlist
+- **agnos-common workspace license** — corrected from deprecated `GPL-3.0` to `GPL-3.0-only`
+- Dependency count reduced from 513 to 448 crates
+
+### Fixed
+- 6 collapsible-if clippy warnings in `v2.rs` and `credential_proxy.rs`
+- 2 collapsible-if clippy warnings in `sandbox_core.rs` teardown
+
+### Security
+- P(-1) scaffold hardening audit completed — 13 findings across security, correctness, and performance
+- 872 tests passing (up from 561 at v1.0.0)
+
 ## [1.0.0] — 2026-03-25
 
 ### Added

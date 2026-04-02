@@ -91,6 +91,8 @@ impl ProcessBackend {
             };
             let rlimit_memory = policy.memory_limit_mb;
             let rlimit_pids = policy.max_pids;
+            let uts_hostname = self._config.hostname.clone();
+            let uts_domainname = self._config.domainname.clone();
 
             // SAFETY: `CommandExt::pre_exec` requires unsafe because the closure
             // runs in the child process between fork() and exec(), where only
@@ -117,6 +119,13 @@ impl ProcessBackend {
             //    all preceding syscalls).
             unsafe {
                 cmd.pre_exec(move || {
+                    // 0. Close inherited host file descriptors (CVE-2024-21626).
+                    // Must run before any isolation step to prevent container
+                    // escape via /proc/self/fd/N pointing to host resources.
+                    for fd in 3..1024 {
+                        libc::close(fd);
+                    }
+
                     // Order matters: each step needs syscalls the next would block.
                     // 1. Namespaces (needs unshare syscall) — best-effort
                     if let Some(ref ns) = ns_config
@@ -126,6 +135,17 @@ impl ProcessBackend {
                         pre_exec_warn("kavach: namespace isolation skipped: ", &e);
                     }
 
+                    // 1b. UTS names (needs sethostname/setdomainname syscalls)
+                    // Set after namespace creation so we modify the container's UTS,
+                    // not the host's. Must run before seccomp blocks these syscalls.
+                    if let Some(ref name) = uts_hostname {
+                        let _ = libc::sethostname(name.as_ptr().cast::<libc::c_char>(), name.len());
+                    }
+                    if let Some(ref name) = uts_domainname {
+                        let _ =
+                            libc::setdomainname(name.as_ptr().cast::<libc::c_char>(), name.len());
+                    }
+
                     // 2. Landlock (needs landlock_* syscalls) — best-effort
                     if let Some(ref params) = ll_params
                         && let Err(e) = landlock_enforce::apply_landlock_params(params)
@@ -133,13 +153,16 @@ impl ProcessBackend {
                         pre_exec_warn("kavach: landlock skipped: ", &e);
                     }
 
-                    // 3. Drop capabilities (needs capset syscall) — best-effort
+                    // 3. Set NO_NEW_PRIVS (defense-in-depth, also required by seccomp FILTER)
+                    let _ = libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+
+                    // 4. Drop capabilities (needs capset syscall) — best-effort
                     let _ = namespaces::drop_capabilities();
 
-                    // 4. Apply resource limits via rlimits — best-effort
+                    // 5. Apply resource limits via rlimits — best-effort
                     let _ = cgroups::apply_rlimits_raw(rlimit_memory, rlimit_pids);
 
-                    // 5. Seccomp filter (MUST BE LAST — blocks future syscalls)
+                    // 6. Seccomp filter (MUST BE LAST — blocks future syscalls)
                     if let Some(ref program) = seccomp_program {
                         seccomp::apply_filter(program)
                             .map_err(|e| std::io::Error::other(e.to_string()))?;

@@ -150,6 +150,14 @@ pub fn merge_policies(base: &SandboxPolicy, overlay: &SandboxPolicy) -> SandboxP
                 &base.network.allowed_ports,
                 &overlay.network.allowed_ports,
             ),
+            tcp_bind_ports: intersect_or_nonempty_ports(
+                &base.network.tcp_bind_ports,
+                &overlay.network.tcp_bind_ports,
+            ),
+            tcp_connect_ports: intersect_or_nonempty_ports(
+                &base.network.tcp_connect_ports,
+                &overlay.network.tcp_connect_ports,
+            ),
         },
         read_only_rootfs: base.read_only_rootfs || overlay.read_only_rootfs,
         memory_limit_mb: match (base.memory_limit_mb, overlay.memory_limit_mb) {

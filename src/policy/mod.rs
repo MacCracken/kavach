@@ -54,6 +54,10 @@ pub struct NetworkPolicy {
     pub allowed_hosts: Vec<String>,
     /// Allowed outbound ports (empty = allow all if enabled).
     pub allowed_ports: Vec<u16>,
+    /// TCP ports allowed for bind (Landlock ABI v4). Empty = no bind restriction.
+    pub tcp_bind_ports: Vec<u16>,
+    /// TCP ports allowed for connect (Landlock ABI v4). Empty = no connect restriction.
+    pub tcp_connect_ports: Vec<u16>,
 }
 
 impl SandboxPolicy {
@@ -173,5 +177,26 @@ mod tests {
         let back: SandboxPolicy = serde_json::from_str(&json).unwrap();
         assert!(back.seccomp_enabled);
         assert!(back.read_only_rootfs);
+    }
+
+    #[test]
+    fn network_policy_tcp_ports_serde() {
+        let policy = NetworkPolicy {
+            enabled: true,
+            tcp_bind_ports: vec![8080, 9090],
+            tcp_connect_ports: vec![80, 443],
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&policy).unwrap();
+        let back: NetworkPolicy = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.tcp_bind_ports, vec![8080, 9090]);
+        assert_eq!(back.tcp_connect_ports, vec![80, 443]);
+    }
+
+    #[test]
+    fn network_policy_defaults_empty_tcp_ports() {
+        let policy = NetworkPolicy::default();
+        assert!(policy.tcp_bind_ports.is_empty());
+        assert!(policy.tcp_connect_ports.is_empty());
     }
 }

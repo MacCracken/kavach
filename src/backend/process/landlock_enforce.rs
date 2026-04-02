@@ -5,7 +5,8 @@
 
 #[cfg(target_os = "linux")]
 use landlock::{
-    ABI, Access, AccessFs, PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr,
+    ABI, Access, AccessFs, AccessNet, NetPort, PathBeneath, PathFd, Ruleset, RulesetAttr,
+    RulesetCreatedAttr,
 };
 
 use crate::policy::{LandlockRule, SandboxPolicy};
@@ -20,6 +21,10 @@ pub struct LandlockParams {
     pub read_only_rootfs: bool,
     /// Optional data directory (writable).
     pub data_dir: Option<String>,
+    /// TCP ports allowed for bind (ABI v4). Empty = no restriction.
+    pub tcp_bind_ports: Vec<u16>,
+    /// TCP ports allowed for connect (ABI v4). Empty = no restriction.
+    pub tcp_connect_ports: Vec<u16>,
 }
 
 impl LandlockParams {
@@ -30,8 +35,11 @@ impl LandlockParams {
             rules: policy.landlock_rules.clone(),
             read_only_rootfs: policy.read_only_rootfs,
             data_dir: policy.data_dir.clone(),
+            tcp_bind_ports: policy.network.tcp_bind_ports.clone(),
+            tcp_connect_ports: policy.network.tcp_connect_ports.clone(),
         }
     }
+
 }
 
 /// Build and apply Landlock rules from a sandbox policy.
@@ -44,13 +52,28 @@ pub fn apply_landlock(policy: &SandboxPolicy) -> crate::Result<()> {
 /// Apply Landlock from pre-extracted parameters (avoids full policy clone).
 #[cfg(target_os = "linux")]
 pub fn apply_landlock_params(params: &LandlockParams) -> crate::Result<()> {
-    let abi = ABI::V5;
+    let abi = ABI::V6;
     let access_all = AccessFs::from_all(abi);
     let access_read = AccessFs::from_read(abi);
 
-    let mut ruleset = Ruleset::default()
+    let mut builder = Ruleset::default()
         .handle_access(access_all)
-        .map_err(|e| crate::KavachError::ExecFailed(format!("landlock ruleset: {e}")))?
+        .map_err(|e| crate::KavachError::ExecFailed(format!("landlock ruleset: {e}")))?;
+
+    // Handle TCP bind/connect access rights (ABI v4+).
+    // By declaring these, any TCP bind/connect not explicitly allowed will be denied.
+    if !params.tcp_bind_ports.is_empty() {
+        builder = builder
+            .handle_access(AccessNet::BindTcp)
+            .map_err(|e| crate::KavachError::ExecFailed(format!("landlock net bind: {e}")))?;
+    }
+    if !params.tcp_connect_ports.is_empty() {
+        builder = builder
+            .handle_access(AccessNet::ConnectTcp)
+            .map_err(|e| crate::KavachError::ExecFailed(format!("landlock net connect: {e}")))?;
+    }
+
+    let mut ruleset = builder
         .create()
         .map_err(|e| crate::KavachError::ExecFailed(format!("landlock create: {e}")))?;
 
@@ -78,6 +101,24 @@ pub fn apply_landlock_params(params: &LandlockParams) -> crate::Result<()> {
             .map_err(|e| crate::KavachError::ExecFailed(format!("landlock add_rule: {e}")))?;
     }
 
+    // Add TCP bind port rules (ABI v4+).
+    for &port in &params.tcp_bind_ports {
+        ruleset = ruleset
+            .add_rule(NetPort::new(port, AccessNet::BindTcp))
+            .map_err(|e| {
+                crate::KavachError::ExecFailed(format!("landlock net bind port {port}: {e}"))
+            })?;
+    }
+
+    // Add TCP connect port rules (ABI v4+).
+    for &port in &params.tcp_connect_ports {
+        ruleset = ruleset
+            .add_rule(NetPort::new(port, AccessNet::ConnectTcp))
+            .map_err(|e| {
+                crate::KavachError::ExecFailed(format!("landlock net connect port {port}: {e}"))
+            })?;
+    }
+
     let status = ruleset
         .restrict_self()
         .map_err(|e| crate::KavachError::ExecFailed(format!("landlock restrict_self: {e}")))?;
@@ -93,7 +134,10 @@ pub fn apply_landlock_params(params: &LandlockParams) -> crate::Result<()> {
 #[inline]
 #[must_use]
 pub fn should_apply(policy: &SandboxPolicy) -> bool {
-    !policy.landlock_rules.is_empty() || policy.read_only_rootfs
+    !policy.landlock_rules.is_empty()
+        || policy.read_only_rootfs
+        || !policy.network.tcp_bind_ports.is_empty()
+        || !policy.network.tcp_connect_ports.is_empty()
 }
 
 /// Generate default rules when read_only_rootfs is true but no explicit rules given.
@@ -183,5 +227,40 @@ mod tests {
         assert_eq!(access_description("rw"), "read-write");
         assert_eq!(access_description("ro"), "read-only");
         assert_eq!(access_description("unknown"), "read-only");
+    }
+
+    #[test]
+    fn should_apply_with_tcp_bind_ports() {
+        let mut policy = SandboxPolicy::minimal();
+        assert!(!should_apply(&policy));
+
+        policy.network.tcp_bind_ports = vec![8080];
+        assert!(should_apply(&policy));
+    }
+
+    #[test]
+    fn should_apply_with_tcp_connect_ports() {
+        let mut policy = SandboxPolicy::minimal();
+        policy.network.tcp_connect_ports = vec![443, 80];
+        assert!(should_apply(&policy));
+    }
+
+    #[test]
+    fn params_from_policy_captures_net_rules() {
+        let mut policy = SandboxPolicy::minimal();
+        policy.network.tcp_bind_ports = vec![8080, 9090];
+        policy.network.tcp_connect_ports = vec![443];
+
+        let params = LandlockParams::from_policy(&policy);
+        assert_eq!(params.tcp_bind_ports, vec![8080, 9090]);
+        assert_eq!(params.tcp_connect_ports, vec![443]);
+    }
+
+    #[test]
+    fn params_net_rules_default_empty() {
+        let policy = SandboxPolicy::minimal();
+        let params = LandlockParams::from_policy(&policy);
+        assert!(params.tcp_bind_ports.is_empty());
+        assert!(params.tcp_connect_ports.is_empty());
     }
 }

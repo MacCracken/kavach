@@ -6,46 +6,14 @@ Completed items are in [CHANGELOG.md](../../CHANGELOG.md).
 
 ---
 
-## v1.0.0 — Released 2026-03-25
+## Ready to implement
 
-| Milestone | Summary |
-|-----------|---------|
-| Foundation | 10-variant Backend enum, SandboxBackend trait, StrengthScore (0–100), SandboxPolicy, CredentialProxy, lifecycle FSM |
-| Process Backend | Seccomp-bpf (87 allowed + 17 blocked + io_uring), Landlock v5, namespaces, cgroups v2, capability dropping |
-| gVisor & OCI | runsc/runc/crun, OCI spec generation, health monitoring, metrics, OciImageManager |
-| Firecracker & WASM | microVM (jailer, vsock, snapshot/restore, TAP networking), wasmtime WASI (fuel metering) |
-| Hardware Enclaves | SGX (Gramine, attestation, sealed data), SEV-SNP (attestation, guest policy), TDX (10th backend) |
-| SyAgnos | 3 hardening tiers, Phylax scanning, image management |
-| Scanning Pipeline | Secrets (17 patterns + entropy), code (25 groups), data/compliance (10 patterns), threat classifier, quarantine, audit chain |
-| Runtime Security | Guards (fork bomb, path blocklist, command blocklist), integrity monitoring, 4-tier escalation |
-| Credential Proxy | Direct injection (env/file/stdin) + HTTP proxy (header injection, CONNECT tunnel, host allowlist) |
-| Infrastructure | SandboxPool, backend auto-selection, 541 tests, cargo-semver-checks |
+- [x] Landlock ABI v4 — TCP bind/connect via `AccessNet` + `NetPort`
+- [ ] Landlock ABI v5 — IOCTL scoping via `AccessFs::IoctlDev` (available since `landlock` 0.4.1)
+- [ ] Landlock ABI v6 — IPC scoping via `Scope` + signal scoping (available since `landlock` 0.4.2)
 
-### Consumers
+## Requires architectural design
 
-| Consumer | Version | Status |
-|----------|---------|--------|
-| **Stiva** | `kavach >= 1.0` | Active — container isolation |
-| **Kiran** | `kavach = 1.0` | Active — WASM scripting sandbox |
-| **SecureYeoman** | sy-sandbox + kavach | Active — agent sandboxing |
-| **AgnosAI** | Planned | Sandboxed crew execution |
-| **Hoosh** | Planned | Tool sandboxing + externalization gate ([ADR-006](../../../hoosh/docs/decisions/006-kavach-tool-sandbox.md)) |
-| **Bote** | Planned | Tool handler sandboxing |
-| **Aethersafta** | Planned | Plugin isolation |
-
----
-
-## Remaining (blocked on external deps or design)
-
-### Requires crate dependency additions
-- [ ] Landlock ABI v6 — IPC scoping (`landlock` crate stuck at 0.4.x, ABI v6 not yet in upstream)
-- [ ] Landlock ABI v4 — TCP bind/connect (`landlock` crate 0.4.x lacks `AccessNet`)
-- [x] Unified attestation via EAR tokens — `Attestable` trait + `AttestationResult` + EAR conversion (`ear` v0.5)
-- [x] OCI image signature verification — `sigstore` v0.13 added as optional feature
-- [x] Cryptographic HMAC-SHA256 for audit chain — `hmac` v0.12 + `sha2` v0.10 (replaces SipHash placeholder)
-
-### Requires architectural design
-- [x] `CompositeBackend` — policy composition model: outer backend provides runtime, inner adds policy overlay, merged with stricter-wins rules, +5 scoring bonus
 - [ ] Cross-crate integration tests (stiva + kiran + kavach)
 
 ---

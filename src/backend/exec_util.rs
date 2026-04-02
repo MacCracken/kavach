@@ -31,7 +31,8 @@ pub async fn execute_with_timeout(
 ) -> crate::Result<ExecResult> {
     let start = std::time::Instant::now();
 
-    cmd.stdout(std::process::Stdio::piped())
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
 
     let mut child = cmd
@@ -264,7 +265,8 @@ pub fn spawn_process(
     cmd: &mut tokio::process::Command,
     label: &str,
 ) -> crate::Result<SpawnedProcess> {
-    cmd.stdout(std::process::Stdio::piped())
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
 
     let child = cmd
