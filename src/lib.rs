@@ -51,6 +51,10 @@ pub mod seccomp_profiles;
 /// Runtime sandbox modules (monitoring, credential proxy, egress gate, v2).
 pub mod runtime;
 
+/// Sandbox event bus — pub/sub for lifecycle, policy, and attestation events.
+#[cfg(feature = "events")]
+pub mod events;
+
 mod error;
 pub use error::KavachError;
 

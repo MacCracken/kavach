@@ -26,6 +26,7 @@ attestation = ["dep:ear"]
 agnostik = ["dep:agnos-common", "dep:agnosys"]
 nein = ["dep:nein", "agnostik"]
 gpu = ["dep:ai-hwaccel"]
+events = ["dep:majra"]
 full = ["process", "gvisor", "firecracker", "wasm", "oci", "sgx", "sev", "sy-agnos"]
 
 [dependencies]
@@ -59,7 +60,10 @@ agnosys = { path = "../agnosys", features = ["full"], optional = true }
 nein = { path = "../nein", features = ["netns", "engine"], optional = true }
 
 # GPU passthrough (optional — ai-hwaccel accelerator detection)
-ai-hwaccel = { path = "../ai-hwaccel", features = ["minimal"], optional = true }
+ai-hwaccel = { version = "1", features = ["minimal"], optional = true }
+
+# Sandbox event bus (optional — majra pub/sub for lifecycle events)
+majra = { version = "1", features = ["pubsub"], optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

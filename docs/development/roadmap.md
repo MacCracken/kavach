@@ -27,7 +27,7 @@ Completed items are in [CHANGELOG.md](../../CHANGELOG.md).
 - [ ] Deterministic execution (same input → same output, bit-for-bit)
 
 ### Integration
-- [ ] majra integration (sandbox events as pub/sub topics)
+- [x] majra integration (`SandboxEventBus` with MQTT-style wildcard pub/sub for lifecycle, policy, attestation, and scan events)
 - [x] ai-hwaccel integration (`GpuPassthrough` detection, `GpuPolicy` filtering, device path → Landlock rule generation)
 - [x] nein integration (per-sandbox firewall rules via `NamespaceFirewall` builder)
 - [x] stiva integration (runtime binary attestation via `RuntimeManifest`)
