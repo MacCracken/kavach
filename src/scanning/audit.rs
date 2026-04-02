@@ -218,7 +218,7 @@ fn sorted_json(value: &serde_json::Value) -> crate::Result<String> {
 
 /// Compute HMAC-SHA256 and return hex string.
 fn compute_hmac(key: &[u8], data: &[u8]) -> String {
-    use hmac::{Hmac, Mac};
+    use hmac::{Hmac, KeyInit, Mac};
     use sha2::Sha256;
 
     type HmacSha256 = Hmac<Sha256>;
