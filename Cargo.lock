@@ -46,7 +46,8 @@ dependencies = [
 
 [[package]]
 name = "agnosys"
-version = "0.29.3"
+version = "0.50.0"
+source = "git+https://github.com/MacCracken/agnosys?tag=0.50.0#f71cd9e50fb07dd1e95092fdfd42b46864705194"
 dependencies = [
  "bitflags",
  "chrono",
@@ -901,9 +902,9 @@ dependencies = [
 
 [[package]]
 name = "ctutils"
-version = "0.4.1"
+version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "66270f854fb5b25a21ffc0ee8c214c309ef1ce60988e448f6433a0b4736d2609"
+checksum = "7d5515a3834141de9eafb9717ad39eea8247b5674e6066c404e8c4b365d2a29e"
 dependencies = [
  "cmov",
 ]
@@ -2083,8 +2084,9 @@ dependencies = [
 [[package]]
 name = "nein"
 version = "0.90.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cc85474f173d53ff9821150775b226ef7ee1d876cd24bebae0d12081b0a526ea"
 dependencies = [
- "agnosys",
  "serde",
  "thiserror 2.0.18",
  "tokio",

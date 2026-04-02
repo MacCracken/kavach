@@ -254,14 +254,17 @@ impl Sandbox {
                 match netns::create_agent_netns(&ns_config) {
                     Ok(handle) => {
                         // Apply firewall rules from network policy.
-                        // When the `nein` feature is active, use the type-safe
-                        // nein::netns::NamespaceFirewall builder (with conntrack,
-                        // loopback, DNS defaults and validation).  Otherwise fall
-                        // back to the agnosys FirewallPolicy renderer.
+                        // When nein is active, use the engine to build a
+                        // validated Firewall, render it, and apply via agnosys.
+                        // Otherwise fall back to the agnosys FirewallPolicy.
                         #[cfg(feature = "nein")]
                         {
-                            let fw = self.build_nein_firewall(&ns_config);
-                            if let Err(e) = nein::netns::apply_to_namespace(&handle, &fw) {
+                            let fw = self.build_nein_firewall();
+                            if let Err(e) = fw.validate() {
+                                warn!("nein firewall validation failed: {e}");
+                            }
+                            let ruleset = fw.render();
+                            if let Err(e) = netns::apply_nftables_ruleset(&handle, &ruleset) {
                                 warn!(
                                     "Failed to apply nein firewall: {} (namespace created without firewall)",
                                     e
@@ -369,30 +372,59 @@ impl Sandbox {
 
     /// Build a nein `Firewall` from the sandbox's network_policy config.
     ///
-    /// Uses `nein::netns::NamespaceFirewall` which provides conntrack,
-    /// loopback, DNS defaults, input validation, and proper nftables rendering.
+    /// Uses nein's engine types (from crates.io) for type-safe rule building
+    /// with conntrack, loopback, DNS defaults. The rendered ruleset is applied
+    /// via agnosys::netns (git) — they work together on AGNOS.
     #[cfg(feature = "nein")]
-    fn build_nein_firewall(&self, ns_config: &netns::NetNamespaceConfig) -> nein::Firewall {
-        let mut builder = nein::netns::NamespaceFirewall::for_agent(ns_config);
+    fn build_nein_firewall(&self) -> nein::Firewall {
+        use nein::chain::{Chain, ChainType, Hook, Policy};
+        use nein::rule::{self, Match, Protocol, Rule, Verdict};
+        use nein::table::{Family, Table};
+
+        let mut fw = nein::Firewall::new();
+        let mut table = Table::new("kavach_agent", Family::Inet);
+
+        // Determine policies based on whether we have explicit network rules
+        let out_policy = if self.config.network_policy.is_some() {
+            Policy::Drop
+        } else {
+            Policy::Accept
+        };
+
+        // Input chain
+        let mut input = Chain::base("input", ChainType::Filter, Hook::Input, 0, Policy::Drop);
+        input.add_rule(rule::allow_established());
+        input.add_rule(Rule::new(Verdict::Accept).matching(Match::Iif("lo".to_string())));
+
+        // Output chain
+        let mut output = Chain::base("output", ChainType::Filter, Hook::Output, 0, out_policy);
+        output.add_rule(rule::allow_established());
+        output.add_rule(Rule::new(Verdict::Accept).matching(Match::Oif("lo".to_string())));
+        // DNS
+        output.add_rule(
+            Rule::new(Verdict::Accept)
+                .matching(Match::Protocol(Protocol::Udp))
+                .matching(Match::DPort(53)),
+        );
 
         if let Some(ref policy) = self.config.network_policy {
-            // Switch outbound to drop (allow-list mode)
-            builder = builder.outbound_policy(nein::chain::Policy::Drop);
-
             for &port in &policy.allowed_outbound_ports {
-                builder = builder.allow_outbound(nein::engine::PortSpec::tcp(port));
+                output.add_rule(rule::allow_tcp(port));
             }
-
             for host in &policy.allowed_outbound_hosts {
-                builder = builder.allow_outbound_host(host);
+                output.add_rule(
+                    Rule::new(Verdict::Accept).matching(Match::DestAddr(host.clone())),
+                );
             }
-
             for &port in &policy.allowed_inbound_ports {
-                builder = builder.allow_inbound(nein::engine::PortSpec::tcp(port));
+                input.add_rule(rule::allow_tcp(port));
             }
         }
 
-        builder.build()
+        table.add_chain(input);
+        table.add_chain(output);
+        fw.add_table(table);
+        fw
     }
 
     /// Apply MAC (AppArmor/SELinux) profile based on sandbox config.
@@ -492,7 +524,7 @@ impl Sandbox {
     pub async fn teardown(&mut self) {
         // Destroy network namespace
         if let Some(ref handle) = self.netns_handle
-            && let Err(e) = netns::destroy_agent_netns(handle)
+            && let Err(e) = netns::destroy_agent_netns(handle.clone())
         {
             warn!(
                 "Failed to destroy network namespace '{}': {}",
@@ -1664,11 +1696,10 @@ mod tests {
     fn test_build_nein_firewall_default() {
         let config = SandboxConfig::default();
         let sandbox = Sandbox::new(&config).unwrap();
-        let ns_config = agnosys::netns::NetNamespaceConfig::for_agent("test-nein");
-        let fw = sandbox.build_nein_firewall(&ns_config);
+        let fw = sandbox.build_nein_firewall();
         let rendered = fw.render();
         // Default: no network_policy → outbound accepts, inbound drops
-        assert!(rendered.contains("table inet agnos_agent"));
+        assert!(rendered.contains("table inet kavach_agent"));
         assert!(rendered.contains("policy drop")); // inbound
         assert!(rendered.contains("policy accept")); // outbound
         assert!(rendered.contains("ct state"));
@@ -1688,8 +1719,7 @@ mod tests {
             ..SandboxConfig::default()
         };
         let sandbox = Sandbox::new(&config).unwrap();
-        let ns_config = agnosys::netns::NetNamespaceConfig::for_agent("test-nein-policy");
-        let fw = sandbox.build_nein_firewall(&ns_config);
+        let fw = sandbox.build_nein_firewall();
         let rendered = fw.render();
         // Allowlist mode: outbound drops, specific ports/hosts allowed
         assert_eq!(rendered.matches("policy drop").count(), 2);
