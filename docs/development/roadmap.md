@@ -36,8 +36,8 @@ Completed items are in [CHANGELOG.md](../../CHANGELOG.md).
 - [x] Backend composition — N-layer stacking via `stack_layers()` + `score_layers()`
 - [x] Composite strength scoring — defense-in-depth bonus, Landlock TCP/scope modifiers
 - [x] Runtime attestation — verify binary hashes via `RuntimeManifest` + `SandboxConfig::runtime_manifest`
-- [ ] Image signature verification — reject unsigned/tampered images via ark signing
-- [ ] Veraison EAR integration — standardized attestation result encoding (IETF RATS)
+- [x] Image signature verification — `ImageVerification` + `ImageVerificationPolicy` with signer trust and pattern matching
+- [x] Veraison EAR integration — `sign_ear_jwt()`, `sign_ear_cose()`, `from_ear_jwt()`, `from_ear_cose()` for IETF RATS interop
 
 ### Cross-platform porting
 - [ ] macOS: App Sandbox / sandbox-exec
