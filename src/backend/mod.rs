@@ -23,6 +23,7 @@ pub mod oci;
 pub mod oci_spec;
 #[cfg(all(feature = "process", target_os = "linux"))]
 pub mod process;
+pub mod runtime_attestation;
 #[cfg(feature = "sev")]
 pub mod sev;
 #[cfg(feature = "sgx")]

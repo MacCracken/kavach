@@ -86,6 +86,9 @@ pub struct SandboxConfig {
     pub hostname: Option<String>,
     /// Domain name for UTS namespace (OCI runtime-spec v1.2.0).
     pub domainname: Option<String>,
+    /// Trusted binary hash manifest for runtime attestation.
+    /// When set, backend binaries are verified before execution.
+    pub runtime_manifest: Option<crate::backend::runtime_attestation::RuntimeManifest>,
 }
 
 impl Default for SandboxConfig {
@@ -102,6 +105,7 @@ impl Default for SandboxConfig {
             inner_backend: None,
             hostname: None,
             domainname: None,
+            runtime_manifest: None,
         }
     }
 }
@@ -182,6 +186,18 @@ impl SandboxConfigBuilder {
     /// Set the domain name for UTS namespace (OCI runtime-spec v1.2.0).
     pub fn domainname(mut self, name: impl Into<String>) -> Self {
         self.config.domainname = Some(name.into());
+        self
+    }
+
+    /// Set a trusted binary manifest for runtime attestation.
+    ///
+    /// When set, backend binaries (runc, runsc, firecracker, etc.) are
+    /// verified against the manifest before execution.
+    pub fn runtime_manifest(
+        mut self,
+        manifest: crate::backend::runtime_attestation::RuntimeManifest,
+    ) -> Self {
+        self.config.runtime_manifest = Some(manifest);
         self
     }
 

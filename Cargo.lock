@@ -2115,6 +2115,7 @@ dependencies = [
  "hmac 0.13.0",
  "landlock",
  "libc",
+ "nein",
  "nix",
  "oci-spec",
  "regex",
@@ -2273,6 +2274,17 @@ dependencies = [
  "libc",
  "wasi",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "nein"
+version = "0.90.0"
+dependencies = [
+ "agnosys",
+ "serde",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

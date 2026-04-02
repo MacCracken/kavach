@@ -29,13 +29,13 @@ Completed items are in [CHANGELOG.md](../../CHANGELOG.md).
 ### Integration
 - [ ] majra integration (sandbox events as pub/sub topics)
 - [ ] ai-hwaccel integration (GPU passthrough for ML sandboxes)
-- [ ] nein integration (per-sandbox firewall rules)
-- [ ] stiva integration (attested Rust-native container runtime)
+- [x] nein integration (per-sandbox firewall rules via `NamespaceFirewall` builder)
+- [x] stiva integration (runtime binary attestation via `RuntimeManifest`)
 
 ### Composable isolation stacks
-- [ ] Backend composition — stack multiple isolation layers
-- [ ] Composite strength scoring
-- [ ] Runtime attestation — verify stiva binary hash before launching containers
+- [x] Backend composition — N-layer stacking via `stack_layers()` + `score_layers()`
+- [x] Composite strength scoring — defense-in-depth bonus, Landlock TCP/scope modifiers
+- [x] Runtime attestation — verify binary hashes via `RuntimeManifest` + `SandboxConfig::runtime_manifest`
 - [ ] Image signature verification — reject unsigned/tampered images via ark signing
 - [ ] Veraison EAR integration — standardized attestation result encoding (IETF RATS)
 

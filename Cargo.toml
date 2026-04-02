@@ -24,6 +24,7 @@ sy-agnos = ["dep:tempfile"]
 sigstore = ["dep:sigstore"]
 attestation = ["dep:ear"]
 agnostik = ["dep:agnos-common", "dep:agnosys"]
+nein = ["dep:nein", "agnostik"]
 full = ["process", "gvisor", "firecracker", "wasm", "oci", "sgx", "sev", "sy-agnos"]
 
 [dependencies]
@@ -54,6 +55,7 @@ ear = { version = "0.5", optional = true }
 # AGNOS shared types (optional — for sandbox_core bridge module)
 agnos-common = { path = "../agnosticos/userland/agnos-common", optional = true }
 agnosys = { path = "../agnosys", features = ["full"], optional = true }
+nein = { path = "../nein", features = ["netns", "engine"], optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

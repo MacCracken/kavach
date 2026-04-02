@@ -68,6 +68,47 @@ impl CompositeBackend {
     pub fn inner_type(&self) -> Backend {
         self.inner_backend
     }
+
+    /// Score this composite backend.
+    #[must_use]
+    pub fn score(&self, policy: &SandboxPolicy) -> crate::scoring::StrengthScore {
+        score_composite(self.outer_backend, self.inner_backend, policy)
+    }
+
+    /// All backend layers in this composite.
+    #[must_use]
+    pub fn layers(&self) -> Vec<Backend> {
+        vec![self.outer_backend, self.inner_backend]
+    }
+}
+
+/// Stack N isolation layers with merged policies.
+///
+/// Each additional layer's policy is merged (stricter-wins) into the
+/// combined policy.  The first layer is the outermost runtime boundary.
+///
+/// Returns `None` if `layers` is empty.
+pub fn stack_layers(
+    outer: Box<dyn SandboxBackend>,
+    layers: &[(Backend, SandboxPolicy)],
+) -> Option<(CompositeBackend, SandboxPolicy)> {
+    let first = layers.first()?;
+    let outer_backend = first.0;
+
+    let mut combined_policy = first.1.clone();
+    let mut all_backends = vec![outer_backend];
+
+    for (backend, policy) in layers.iter().skip(1) {
+        combined_policy = merge_policies(&combined_policy, policy);
+        all_backends.push(*backend);
+    }
+
+    let inner_backend = layers.last().map(|(b, _)| *b).unwrap_or(outer_backend);
+
+    Some((
+        CompositeBackend::new(outer, outer_backend, inner_backend, combined_policy.clone()),
+        combined_policy,
+    ))
 }
 
 #[async_trait::async_trait]
@@ -215,10 +256,47 @@ pub fn score_composite(
     inner: Backend,
     policy: &SandboxPolicy,
 ) -> crate::scoring::StrengthScore {
-    let outer_score = crate::scoring::score_backend(outer, policy).value();
-    let inner_score = crate::scoring::score_backend(inner, policy).value();
-    let composite = outer_score.max(inner_score).saturating_add(5);
-    crate::scoring::StrengthScore(composite.min(100))
+    score_layers(&[outer, inner], policy)
+}
+
+/// Score N stacked isolation layers.
+///
+/// Each unique layer beyond the first adds a +3 defense-in-depth bonus
+/// (diminishing: +5 for 2nd layer, +3 for 3rd, +2 for 4th+).
+/// Score is clamped to 100.
+#[must_use]
+pub fn score_layers(layers: &[Backend], policy: &SandboxPolicy) -> crate::scoring::StrengthScore {
+    if layers.is_empty() {
+        return crate::scoring::StrengthScore(0);
+    }
+
+    // Start from the strongest layer's score
+    let max_score = layers
+        .iter()
+        .map(|b| crate::scoring::score_backend(*b, policy).value())
+        .max()
+        .unwrap_or(0);
+
+    // Count unique backends beyond the first (duplicates don't add value)
+    let mut seen = Vec::with_capacity(layers.len());
+    let mut unique_count = 0u8;
+    for b in layers {
+        if !seen.contains(b) {
+            seen.push(*b);
+            unique_count += 1;
+        }
+    }
+
+    // Defense-in-depth bonus: 5 for 2nd layer, 3 for 3rd, 2 for 4th+
+    let bonus: u8 = match unique_count {
+        0 | 1 => 0,
+        2 => 5,
+        3 => 8,                      // 5 + 3
+        n => 8 + (n - 3).min(4) * 2, // 5 + 3 + 2*extra, capped
+    };
+
+    let total = (max_score as u16 + bonus as u16).min(100) as u8;
+    crate::scoring::StrengthScore(total)
 }
 
 #[cfg(test)]
@@ -396,5 +474,129 @@ mod tests {
         );
         assert_eq!(composite.outer_type(), Backend::GVisor);
         assert_eq!(composite.inner_type(), Backend::Process);
+    }
+
+    #[test]
+    fn composite_layers() {
+        let outer = Box::new(NoopBackend);
+        let composite = CompositeBackend::new(
+            outer,
+            Backend::GVisor,
+            Backend::Process,
+            SandboxPolicy::default(),
+        );
+        let layers = composite.layers();
+        assert_eq!(layers.len(), 2);
+        assert_eq!(layers[0], Backend::GVisor);
+        assert_eq!(layers[1], Backend::Process);
+    }
+
+    // -- N-layer scoring --
+
+    #[test]
+    fn score_single_layer() {
+        let policy = SandboxPolicy::strict();
+        let score = score_layers(&[Backend::Process], &policy);
+        assert_eq!(
+            score.value(),
+            crate::scoring::score_backend(Backend::Process, &policy).value()
+        );
+    }
+
+    #[test]
+    fn score_two_layers_bonus() {
+        let policy = SandboxPolicy::strict();
+        let single = crate::scoring::score_backend(Backend::GVisor, &policy).value();
+        let two = score_layers(&[Backend::GVisor, Backend::Process], &policy).value();
+        assert_eq!(two, single.saturating_add(5).min(100));
+    }
+
+    #[test]
+    fn score_three_layers() {
+        let policy = SandboxPolicy::minimal();
+        let two = score_layers(&[Backend::GVisor, Backend::Process], &policy).value();
+        let three =
+            score_layers(&[Backend::GVisor, Backend::Process, Backend::Wasm], &policy).value();
+        assert!(three > two, "3 layers should score higher than 2");
+    }
+
+    #[test]
+    fn score_duplicate_layers_no_extra_bonus() {
+        let policy = SandboxPolicy::minimal();
+        let two = score_layers(&[Backend::Process, Backend::Process], &policy).value();
+        let single = score_layers(&[Backend::Process], &policy).value();
+        assert_eq!(two, single, "duplicate layers should not add bonus");
+    }
+
+    #[test]
+    fn score_empty_layers() {
+        let policy = SandboxPolicy::minimal();
+        assert_eq!(score_layers(&[], &policy).value(), 0);
+    }
+
+    #[test]
+    fn score_layers_clamped_to_100() {
+        let policy = SandboxPolicy::strict();
+        let score = score_layers(
+            &[
+                Backend::Firecracker,
+                Backend::GVisor,
+                Backend::Process,
+                Backend::Wasm,
+            ],
+            &policy,
+        );
+        assert!(score.value() <= 100);
+    }
+
+    // -- stack_layers --
+
+    #[test]
+    fn stack_layers_merges_policies() {
+        let layer1 = (
+            Backend::GVisor,
+            SandboxPolicy {
+                seccomp_enabled: true,
+                ..Default::default()
+            },
+        );
+        let layer2 = (
+            Backend::Process,
+            SandboxPolicy {
+                read_only_rootfs: true,
+                ..Default::default()
+            },
+        );
+        let (composite, merged) = stack_layers(Box::new(NoopBackend), &[layer1, layer2]).unwrap();
+        assert!(merged.seccomp_enabled);
+        assert!(merged.read_only_rootfs);
+        assert_eq!(composite.outer_type(), Backend::GVisor);
+        assert_eq!(composite.inner_type(), Backend::Process);
+    }
+
+    #[test]
+    fn stack_layers_empty() {
+        assert!(stack_layers(Box::new(NoopBackend), &[]).is_none());
+    }
+
+    // -- scoring with new policy modifiers --
+
+    #[test]
+    fn tcp_port_restrictions_increase_score() {
+        let mut policy = SandboxPolicy::minimal();
+        let base = crate::scoring::score_backend(Backend::Process, &policy);
+        policy.network.tcp_connect_ports = vec![443];
+        let with_tcp = crate::scoring::score_backend(Backend::Process, &policy);
+        assert!(with_tcp.value() > base.value());
+    }
+
+    #[test]
+    fn scope_increases_score() {
+        let mut policy = SandboxPolicy::minimal();
+        let base = crate::scoring::score_backend(Backend::Process, &policy);
+        policy.landlock_scope.abstract_unix_socket = true;
+        policy.landlock_scope.signal = true;
+        let with_scope = crate::scoring::score_backend(Backend::Process, &policy);
+        assert!(with_scope.value() >= base.value() + 4);
     }
 }

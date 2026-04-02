@@ -88,6 +88,19 @@ pub fn score_backend(backend: Backend, policy: &SandboxPolicy) -> StrengthScore 
         score += 2;
     }
 
+    // Landlock TCP port restrictions (ABI v4)
+    if !policy.network.tcp_bind_ports.is_empty() || !policy.network.tcp_connect_ports.is_empty() {
+        score += 3;
+    }
+
+    // Landlock scoping (ABI v6)
+    if policy.landlock_scope.abstract_unix_socket {
+        score += 2;
+    }
+    if policy.landlock_scope.signal {
+        score += 2;
+    }
+
     StrengthScore(score.clamp(0, 100) as u8)
 }
 
