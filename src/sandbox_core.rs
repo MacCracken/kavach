@@ -8,7 +8,7 @@ use std::collections::HashSet;
 use anyhow::{Context, Result};
 use tracing::{debug, info, warn};
 
-use agnos_common::SandboxConfig;
+use agnostik::SandboxConfig;
 use agnosys::audit;
 use agnosys::luks;
 use agnosys::mac;
@@ -52,7 +52,7 @@ impl Sandbox {
     /// produces outbound data so the gate is bypassed.
     pub fn scan_egress(&mut self, data: &[u8], agent_id: &str) -> GateDecision {
         match self.config.network_access {
-            agnos_common::NetworkAccess::None => {
+            agnostik::NetworkAccess::None => {
                 // No network — nothing can leave; allow trivially.
                 GateDecision {
                     allowed: true,
@@ -120,14 +120,15 @@ impl Sandbox {
     }
 
     /// Convert agnos-common FilesystemRule to agnos-sys FilesystemRule
-    fn convert_fs_rules(rules: &[agnos_common::FilesystemRule]) -> Vec<SysFilesystemRule> {
+    fn convert_fs_rules(rules: &[agnostik::FilesystemRule]) -> Vec<SysFilesystemRule> {
         rules
             .iter()
             .map(|r| {
                 let access = match r.access {
-                    agnos_common::FsAccess::NoAccess => SysFsAccess::NoAccess,
-                    agnos_common::FsAccess::ReadOnly => SysFsAccess::ReadOnly,
-                    agnos_common::FsAccess::ReadWrite => SysFsAccess::ReadWrite,
+                    agnostik::FsAccess::NoAccess => SysFsAccess::NoAccess,
+                    agnostik::FsAccess::ReadOnly => SysFsAccess::ReadOnly,
+                    agnostik::FsAccess::ReadWrite => SysFsAccess::ReadWrite,
+                    _ => SysFsAccess::NoAccess,
                 };
                 SysFilesystemRule::new(&r.path, access)
             })
@@ -179,12 +180,15 @@ impl Sandbox {
             for rule in &self.config.seccomp_rules {
                 if let Some(nr) = security::syscall_name_to_nr(&rule.syscall) {
                     match rule.action {
-                        agnos_common::SeccompAction::Allow => extra_allowed.push(nr),
-                        agnos_common::SeccompAction::Deny => {
+                        agnostik::SeccompAction::Allow => extra_allowed.push(nr),
+                        agnostik::SeccompAction::Deny => {
                             denied.push((nr, security::SECCOMP_RET_KILL_PROCESS))
                         }
-                        agnos_common::SeccompAction::Trap => {
+                        agnostik::SeccompAction::Trap => {
                             denied.push((nr, security::SECCOMP_RET_TRAP))
+                        }
+                        _ => {
+                            denied.push((nr, security::SECCOMP_RET_KILL_PROCESS))
                         }
                     }
                 } else {
@@ -230,19 +234,19 @@ impl Sandbox {
         debug!("Applying network isolation...");
 
         match self.config.network_access {
-            agnos_common::NetworkAccess::None => {
+            agnostik::NetworkAccess::None => {
                 // Create a new empty network namespace (no interfaces)
                 security::create_namespace(NamespaceFlags::NETWORK)
                     .context("Failed to create network namespace for full isolation")?;
                 info!("Network access: none (isolated namespace)");
             }
-            agnos_common::NetworkAccess::LocalhostOnly => {
+            agnostik::NetworkAccess::LocalhostOnly => {
                 // Create network namespace — only loopback is available by default
                 security::create_namespace(NamespaceFlags::NETWORK)
                     .context("Failed to create network namespace for localhost-only")?;
                 info!("Network access: localhost only (new namespace with loopback)");
             }
-            agnos_common::NetworkAccess::Restricted => {
+            agnostik::NetworkAccess::Restricted => {
                 // Create per-agent network namespace with veth + nftables
                 let agent_name = format!("sandbox-{}", std::process::id());
                 let ns_config = netns::NetNamespaceConfig::for_agent(&agent_name);
@@ -292,7 +296,7 @@ impl Sandbox {
                     }
                 }
             }
-            agnos_common::NetworkAccess::Full => {
+            agnostik::NetworkAccess::Full => {
                 // Full access — don't create a new namespace.
                 // S2: Egress gate is the primary outbound control for this mode.
                 info!(
@@ -300,6 +304,11 @@ impl Sandbox {
                     "Network access: full — egress gate active with {} patterns",
                     self.egress_gate.pattern_count()
                 );
+            }
+            _ => {
+                debug!("Unknown network access mode, defaulting to full isolation");
+                security::create_namespace(NamespaceFlags::NETWORK)
+                    .context("Failed to create network namespace")?;
             }
         }
 
@@ -672,17 +681,17 @@ mod tests {
     #[test]
     fn test_convert_fs_rules() {
         let rules = vec![
-            agnos_common::FilesystemRule {
+            agnostik::FilesystemRule {
                 path: "/tmp".into(),
-                access: agnos_common::FsAccess::ReadWrite,
+                access: agnostik::FsAccess::ReadWrite,
             },
-            agnos_common::FilesystemRule {
+            agnostik::FilesystemRule {
                 path: "/etc".into(),
-                access: agnos_common::FsAccess::ReadOnly,
+                access: agnostik::FsAccess::ReadOnly,
             },
-            agnos_common::FilesystemRule {
+            agnostik::FilesystemRule {
                 path: "/root".into(),
-                access: agnos_common::FsAccess::NoAccess,
+                access: agnostik::FsAccess::NoAccess,
             },
         ];
         let sys_rules = Sandbox::convert_fs_rules(&rules);
@@ -740,7 +749,7 @@ mod tests {
     #[test]
     fn test_sandbox_config_with_network_policy() {
         let config = SandboxConfig {
-            network_policy: Some(agnos_common::NetworkPolicy {
+            network_policy: Some(agnostik::NetworkPolicy {
                 allowed_outbound_ports: vec![80, 443],
                 allowed_outbound_hosts: vec!["10.0.0.0/8".to_string()],
                 allowed_inbound_ports: vec![8080],
@@ -765,7 +774,7 @@ mod tests {
     #[test]
     fn test_sandbox_config_with_encrypted_storage() {
         let config = SandboxConfig {
-            encrypted_storage: Some(agnos_common::EncryptedStorageConfig {
+            encrypted_storage: Some(agnostik::EncryptedStorageConfig {
                 enabled: true,
                 size_mb: 128,
                 filesystem: "ext4".to_string(),
@@ -788,7 +797,7 @@ mod tests {
     #[test]
     fn test_build_firewall_policy_with_rules() {
         let config = SandboxConfig {
-            network_policy: Some(agnos_common::NetworkPolicy {
+            network_policy: Some(agnostik::NetworkPolicy {
                 allowed_outbound_ports: vec![443, 8088],
                 allowed_outbound_hosts: vec![],
                 allowed_inbound_ports: vec![8080],
@@ -817,9 +826,9 @@ mod tests {
     #[test]
     fn test_sandbox_config_serialization() {
         let config = SandboxConfig {
-            network_policy: Some(agnos_common::NetworkPolicy::default()),
+            network_policy: Some(agnostik::NetworkPolicy::default()),
             mac_profile: Some("Service".to_string()),
-            encrypted_storage: Some(agnos_common::EncryptedStorageConfig::default()),
+            encrypted_storage: Some(agnostik::EncryptedStorageConfig::default()),
             ..SandboxConfig::default()
         };
         let json = serde_json::to_string(&config).unwrap();
@@ -900,7 +909,7 @@ mod tests {
 
     #[test]
     fn test_convert_fs_rules_empty() {
-        let rules: Vec<agnos_common::FilesystemRule> = vec![];
+        let rules: Vec<agnostik::FilesystemRule> = vec![];
         let sys_rules = Sandbox::convert_fs_rules(&rules);
         assert!(sys_rules.is_empty());
     }
@@ -908,17 +917,17 @@ mod tests {
     #[test]
     fn test_convert_fs_rules_all_access_types() {
         let rules = vec![
-            agnos_common::FilesystemRule {
+            agnostik::FilesystemRule {
                 path: "/a".into(),
-                access: agnos_common::FsAccess::NoAccess,
+                access: agnostik::FsAccess::NoAccess,
             },
-            agnos_common::FilesystemRule {
+            agnostik::FilesystemRule {
                 path: "/b".into(),
-                access: agnos_common::FsAccess::ReadOnly,
+                access: agnostik::FsAccess::ReadOnly,
             },
-            agnos_common::FilesystemRule {
+            agnostik::FilesystemRule {
                 path: "/c".into(),
-                access: agnos_common::FsAccess::ReadWrite,
+                access: agnostik::FsAccess::ReadWrite,
             },
         ];
         let sys_rules = Sandbox::convert_fs_rules(&rules);
@@ -931,7 +940,7 @@ mod tests {
     #[test]
     fn test_build_firewall_policy_with_outbound_hosts() {
         let config = SandboxConfig {
-            network_policy: Some(agnos_common::NetworkPolicy {
+            network_policy: Some(agnostik::NetworkPolicy {
                 allowed_outbound_ports: vec![],
                 allowed_outbound_hosts: vec!["10.0.0.1".to_string(), "192.168.1.0/24".to_string()],
                 allowed_inbound_ports: vec![],
@@ -951,7 +960,7 @@ mod tests {
     #[test]
     fn test_build_firewall_policy_mixed_rules() {
         let config = SandboxConfig {
-            network_policy: Some(agnos_common::NetworkPolicy {
+            network_policy: Some(agnostik::NetworkPolicy {
                 allowed_outbound_ports: vec![443],
                 allowed_outbound_hosts: vec!["api.example.com".to_string()],
                 allowed_inbound_ports: vec![8080, 8443],
@@ -1080,7 +1089,7 @@ mod tests {
     async fn test_sandbox_apply_network_full_access() {
         let config = SandboxConfig {
             isolate_network: true,
-            network_access: agnos_common::NetworkAccess::Full,
+            network_access: agnostik::NetworkAccess::Full,
             ..SandboxConfig::default()
         };
         let mut sandbox = Sandbox::new(&config).unwrap();
@@ -1092,7 +1101,7 @@ mod tests {
     #[tokio::test]
     async fn test_sandbox_apply_encrypted_storage_disabled() {
         let config = SandboxConfig {
-            encrypted_storage: Some(agnos_common::EncryptedStorageConfig {
+            encrypted_storage: Some(agnostik::EncryptedStorageConfig {
                 enabled: false,
                 size_mb: 100,
                 filesystem: "ext4".to_string(),
@@ -1120,7 +1129,7 @@ mod tests {
     #[test]
     fn test_build_firewall_policy_inbound_only() {
         let config = SandboxConfig {
-            network_policy: Some(agnos_common::NetworkPolicy {
+            network_policy: Some(agnostik::NetworkPolicy {
                 allowed_outbound_ports: vec![],
                 allowed_outbound_hosts: vec![],
                 allowed_inbound_ports: vec![22, 80, 443],
@@ -1141,7 +1150,7 @@ mod tests {
     #[test]
     fn test_build_firewall_rule_comments() {
         let config = SandboxConfig {
-            network_policy: Some(agnos_common::NetworkPolicy {
+            network_policy: Some(agnostik::NetworkPolicy {
                 allowed_outbound_ports: vec![8088],
                 allowed_outbound_hosts: vec!["10.0.0.1".to_string()],
                 allowed_inbound_ports: vec![9090],
@@ -1181,30 +1190,30 @@ mod tests {
     #[test]
     fn test_sandbox_new_preserves_all_config_fields() {
         let config = SandboxConfig {
-            filesystem_rules: vec![agnos_common::FilesystemRule {
+            filesystem_rules: vec![agnostik::FilesystemRule {
                 path: "/home".into(),
-                access: agnos_common::FsAccess::ReadWrite,
+                access: agnostik::FsAccess::ReadWrite,
             }],
-            network_access: agnos_common::NetworkAccess::Restricted,
+            network_access: agnostik::NetworkAccess::Restricted,
             seccomp_rules: vec![
-                agnos_common::SeccompRule {
+                agnostik::SeccompRule {
                     syscall: "read".to_string(),
-                    action: agnos_common::SeccompAction::Allow,
+                    action: agnostik::SeccompAction::Allow,
                 },
-                agnos_common::SeccompRule {
+                agnostik::SeccompRule {
                     syscall: "write".to_string(),
-                    action: agnos_common::SeccompAction::Allow,
+                    action: agnostik::SeccompAction::Allow,
                 },
             ],
             isolate_network: true,
-            network_policy: Some(agnos_common::NetworkPolicy {
+            network_policy: Some(agnostik::NetworkPolicy {
                 allowed_outbound_ports: vec![443],
                 allowed_outbound_hosts: vec!["example.com".to_string()],
                 allowed_inbound_ports: vec![8080],
                 enable_nat: true,
             }),
             mac_profile: Some("Sandbox".to_string()),
-            encrypted_storage: Some(agnos_common::EncryptedStorageConfig {
+            encrypted_storage: Some(agnostik::EncryptedStorageConfig {
                 enabled: true,
                 size_mb: 256,
                 filesystem: "btrfs".to_string(),
@@ -1215,7 +1224,7 @@ mod tests {
         assert_eq!(sandbox.config.filesystem_rules.len(), 1);
         assert_eq!(
             sandbox.config.network_access,
-            agnos_common::NetworkAccess::Restricted
+            agnostik::NetworkAccess::Restricted
         );
         assert_eq!(sandbox.config.seccomp_rules.len(), 2);
         assert!(sandbox.config.isolate_network);
@@ -1237,9 +1246,9 @@ mod tests {
 
     #[test]
     fn test_convert_fs_rules_single_rule() {
-        let rules = vec![agnos_common::FilesystemRule {
+        let rules = vec![agnostik::FilesystemRule {
             path: "/var/log".into(),
-            access: agnos_common::FsAccess::ReadOnly,
+            access: agnostik::FsAccess::ReadOnly,
         }];
         let sys_rules = Sandbox::convert_fs_rules(&rules);
         assert_eq!(sys_rules.len(), 1);
@@ -1249,9 +1258,9 @@ mod tests {
     #[test]
     fn test_convert_fs_rules_many_rules() {
         let rules: Vec<_> = (0..100)
-            .map(|i| agnos_common::FilesystemRule {
+            .map(|i| agnostik::FilesystemRule {
                 path: format!("/path/{}", i).into(),
-                access: agnos_common::FsAccess::ReadOnly,
+                access: agnostik::FsAccess::ReadOnly,
             })
             .collect();
         let sys_rules = Sandbox::convert_fs_rules(&rules);
@@ -1261,7 +1270,7 @@ mod tests {
     #[test]
     fn test_build_firewall_policy_outbound_ports_protocol() {
         let config = SandboxConfig {
-            network_policy: Some(agnos_common::NetworkPolicy {
+            network_policy: Some(agnostik::NetworkPolicy {
                 allowed_outbound_ports: vec![80, 443, 8088],
                 allowed_outbound_hosts: vec![],
                 allowed_inbound_ports: vec![],
@@ -1287,7 +1296,7 @@ mod tests {
     #[test]
     fn test_build_firewall_policy_outbound_hosts_protocol() {
         let config = SandboxConfig {
-            network_policy: Some(agnos_common::NetworkPolicy {
+            network_policy: Some(agnostik::NetworkPolicy {
                 allowed_outbound_ports: vec![],
                 allowed_outbound_hosts: vec!["host1.com".to_string()],
                 allowed_inbound_ports: vec![],
@@ -1307,7 +1316,7 @@ mod tests {
     #[test]
     fn test_build_firewall_policy_empty_policy() {
         let config = SandboxConfig {
-            network_policy: Some(agnos_common::NetworkPolicy {
+            network_policy: Some(agnostik::NetworkPolicy {
                 allowed_outbound_ports: vec![],
                 allowed_outbound_hosts: vec![],
                 allowed_inbound_ports: vec![],
@@ -1406,10 +1415,10 @@ mod tests {
     #[test]
     fn test_sandbox_config_all_network_access_types() {
         for access in [
-            agnos_common::NetworkAccess::None,
-            agnos_common::NetworkAccess::LocalhostOnly,
-            agnos_common::NetworkAccess::Restricted,
-            agnos_common::NetworkAccess::Full,
+            agnostik::NetworkAccess::None,
+            agnostik::NetworkAccess::LocalhostOnly,
+            agnostik::NetworkAccess::Restricted,
+            agnostik::NetworkAccess::Full,
         ] {
             let config = SandboxConfig {
                 network_access: access,
@@ -1461,9 +1470,9 @@ mod tests {
     #[tokio::test]
     async fn test_sandbox_apply_landlock_with_rules() {
         let config = SandboxConfig {
-            filesystem_rules: vec![agnos_common::FilesystemRule {
+            filesystem_rules: vec![agnostik::FilesystemRule {
                 path: "/tmp".into(),
-                access: agnos_common::FsAccess::ReadWrite,
+                access: agnostik::FsAccess::ReadWrite,
             }],
             ..SandboxConfig::default()
         };
@@ -1485,17 +1494,17 @@ mod tests {
     async fn test_sandbox_apply_seccomp_with_custom_rules() {
         let config = SandboxConfig {
             seccomp_rules: vec![
-                agnos_common::SeccompRule {
+                agnostik::SeccompRule {
                     syscall: "socket".to_string(),
-                    action: agnos_common::SeccompAction::Allow,
+                    action: agnostik::SeccompAction::Allow,
                 },
-                agnos_common::SeccompRule {
+                agnostik::SeccompRule {
                     syscall: "ptrace".to_string(),
-                    action: agnos_common::SeccompAction::Deny,
+                    action: agnostik::SeccompAction::Deny,
                 },
-                agnos_common::SeccompRule {
+                agnostik::SeccompRule {
                     syscall: "mount".to_string(),
-                    action: agnos_common::SeccompAction::Trap,
+                    action: agnostik::SeccompAction::Trap,
                 },
             ],
             ..SandboxConfig::default()
@@ -1509,9 +1518,9 @@ mod tests {
     #[ignore] // Seccomp filters persist per-process; run in isolation
     async fn test_sandbox_apply_seccomp_unknown_syscall_warns() {
         let config = SandboxConfig {
-            seccomp_rules: vec![agnos_common::SeccompRule {
+            seccomp_rules: vec![agnostik::SeccompRule {
                 syscall: "nonexistent_call".to_string(),
-                action: agnos_common::SeccompAction::Allow,
+                action: agnostik::SeccompAction::Allow,
             }],
             ..SandboxConfig::default()
         };
@@ -1523,7 +1532,7 @@ mod tests {
     #[test]
     fn test_build_firewall_policy_many_ports() {
         let config = SandboxConfig {
-            network_policy: Some(agnos_common::NetworkPolicy {
+            network_policy: Some(agnostik::NetworkPolicy {
                 allowed_outbound_ports: (1..=100).collect(),
                 allowed_outbound_hosts: vec![],
                 allowed_inbound_ports: (200..=210).collect(),
@@ -1603,7 +1612,7 @@ mod tests {
     #[test]
     fn test_build_firewall_policy_outbound_ports_only() {
         let config = SandboxConfig {
-            network_policy: Some(agnos_common::NetworkPolicy {
+            network_policy: Some(agnostik::NetworkPolicy {
                 allowed_outbound_ports: vec![80, 443],
                 allowed_outbound_hosts: vec![],
                 allowed_inbound_ports: vec![],
@@ -1619,7 +1628,7 @@ mod tests {
     #[test]
     fn test_build_firewall_policy_outbound_hosts() {
         let config = SandboxConfig {
-            network_policy: Some(agnos_common::NetworkPolicy {
+            network_policy: Some(agnostik::NetworkPolicy {
                 allowed_outbound_ports: vec![],
                 allowed_outbound_hosts: vec!["api.example.com".to_string()],
                 allowed_inbound_ports: vec![],
@@ -1635,7 +1644,7 @@ mod tests {
     #[test]
     fn test_build_firewall_policy_combined() {
         let config = SandboxConfig {
-            network_policy: Some(agnos_common::NetworkPolicy {
+            network_policy: Some(agnostik::NetworkPolicy {
                 allowed_outbound_ports: vec![443],
                 allowed_outbound_hosts: vec!["api.example.com".to_string()],
                 allowed_inbound_ports: vec![8080],
@@ -1670,7 +1679,7 @@ mod tests {
     #[test]
     fn test_build_nein_firewall_with_policy() {
         let config = SandboxConfig {
-            network_policy: Some(agnos_common::NetworkPolicy {
+            network_policy: Some(agnostik::NetworkPolicy {
                 allowed_outbound_ports: vec![443],
                 allowed_outbound_hosts: vec!["10.0.0.0/8".to_string()],
                 allowed_inbound_ports: vec![8080],
