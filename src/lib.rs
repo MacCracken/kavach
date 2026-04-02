@@ -41,6 +41,18 @@ pub mod policy;
 pub mod scanning;
 pub mod scoring;
 
+// Absorbed from agent-runtime sandbox_mod
+// sandbox_core requires agnostik + agnosys with full features.
+// Currently gated — needs agnosys API alignment for firewall types.
+// TODO: Enable once agnosys exports netns::FirewallRule, TrafficDirection, etc.
+// #[cfg(feature = "agnostik")]
+// pub mod sandbox_core;
+pub mod sandbox_backends;
+pub mod seccomp_profiles;
+
+/// Runtime sandbox modules (monitoring, credential proxy, egress gate, v2).
+pub mod runtime;
+
 mod error;
 pub use error::KavachError;
 

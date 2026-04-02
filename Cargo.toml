@@ -1,9 +1,9 @@
 [package]
 name = "kavach"
-version = "1.0.1"
+version = "2.0.0"
 edition = "2024"
 rust-version = "1.89"
-license = "AGPL-3.0-only"
+license = "GPL-3.0-only"
 description = "Sandbox execution framework — backend abstraction, strength scoring, policy engine, credential proxy, and audit hooks"
 homepage = "https://github.com/MacCracken/kavach"
 repository = "https://github.com/MacCracken/kavach"
@@ -23,6 +23,7 @@ sev = ["dep:tempfile"]
 sy-agnos = ["dep:tempfile"]
 sigstore = ["dep:sigstore"]
 attestation = ["dep:ear"]
+agnostik = ["dep:agnos-common", "dep:agnosys"]
 full = ["process", "gvisor", "firecracker", "wasm", "oci", "sgx", "sev", "sy-agnos"]
 
 [dependencies]
@@ -36,6 +37,10 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "ti
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
+
+# AGNOS shared types (optional — for sandbox_core bridge module)
+agnos-common = { path = "../agnosticos/userland/agnos-common", optional = true }
+agnosys = { path = "../agnosys", features = ["full"], optional = true }
 
 # Crypto — HMAC-SHA256 for audit chain
 hmac = "0.12"
