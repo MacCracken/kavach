@@ -119,7 +119,9 @@ fn is_in_separate_namespace(pid: u32, ns: &str) -> bool {
 
     match (init_ns, proc_ns) {
         (Some(init), Some(proc)) => init != proc,
-        _ => false, // Can't read — assume not isolated
+        // Can't read namespace inodes — fail-safe: assume isolated rather
+        // than reporting a false "escaped" verdict.
+        _ => true,
     }
 }
 
@@ -850,5 +852,12 @@ mod tests {
             tracker.record_violation_with_sigil("agent-3", "escape", &mut sigil);
         }
         assert_eq!(sigil.revocation_count(), 1);
+    }
+
+    #[test]
+    fn test_namespace_check_fail_safe() {
+        // When namespace inodes are unreadable (e.g. PID doesn't exist),
+        // is_in_separate_namespace should return true (fail-safe: assume isolated).
+        assert!(is_in_separate_namespace(u32::MAX, "pid"));
     }
 }

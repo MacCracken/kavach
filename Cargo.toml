@@ -23,7 +23,6 @@ sev = ["dep:tempfile"]
 sy-agnos = ["dep:tempfile"]
 sigstore = ["dep:sigstore"]
 attestation = ["dep:ear"]
-agnostik = ["dep:agnos-common", "dep:agnosys"]
 full = ["process", "gvisor", "firecracker", "wasm", "oci", "sgx", "sev", "sy-agnos"]
 
 [dependencies]
@@ -37,10 +36,6 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "ti
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
-
-# AGNOS shared types (optional — for sandbox_core bridge module)
-agnos-common = { path = "../agnosticos/userland/agnos-common", optional = true }
-agnosys = { path = "../agnosys", features = ["full"], optional = true }
 
 # Crypto — HMAC-SHA256 for audit chain
 hmac = "0.12"

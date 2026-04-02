@@ -1189,16 +1189,20 @@ mod tests {
         };
         let spec = backend.generate_oci_spec(&["test".to_string()], &config);
         let mounts = spec["mounts"].as_array().unwrap();
-        assert!(mounts.iter().any(|m| m["destination"] == "/opt/data"
-            && m["options"]
-                .as_array()
-                .unwrap()
-                .contains(&serde_json::json!("ro"))));
-        assert!(mounts.iter().any(|m| m["destination"] == "/workspace"
-            && m["options"]
-                .as_array()
-                .unwrap()
-                .contains(&serde_json::json!("rw"))));
+        assert!(mounts.iter().any(|m| {
+            m["destination"] == "/opt/data"
+                && m["options"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&serde_json::json!("ro"))
+        }));
+        assert!(mounts.iter().any(|m| {
+            m["destination"] == "/workspace"
+                && m["options"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&serde_json::json!("rw"))
+        }));
     }
 
     #[test]
@@ -1231,10 +1235,12 @@ mod tests {
 
         assert_eq!(vm_config["machine-config"]["mem_size_mib"], 256);
         assert_eq!(vm_config["machine-config"]["vcpu_count"], 2); // 50% / 25 = 2
-        assert!(vm_config["boot-source"]["boot_args"]
-            .as_str()
-            .unwrap()
-            .contains("agnos.sandbox=1"));
+        assert!(
+            vm_config["boot-source"]["boot_args"]
+                .as_str()
+                .unwrap()
+                .contains("agnos.sandbox=1")
+        );
     }
 
     #[test]
@@ -1245,10 +1251,12 @@ mod tests {
             ..Default::default()
         };
         let vm_config = backend.generate_vm_config("test-vm", &config);
-        assert!(vm_config["network-interfaces"]
-            .as_array()
-            .unwrap()
-            .is_empty());
+        assert!(
+            vm_config["network-interfaces"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1259,10 +1267,12 @@ mod tests {
             ..Default::default()
         };
         let vm_config = backend.generate_vm_config("test-vm", &config);
-        assert!(!vm_config["network-interfaces"]
-            .as_array()
-            .unwrap()
-            .is_empty());
+        assert!(
+            !vm_config["network-interfaces"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

@@ -30,7 +30,7 @@ impl ProcessBackend {
         command: &str,
         policy: &SandboxPolicy,
     ) -> crate::Result<tokio::process::Command> {
-        let parts = shell_words(command);
+        let parts = shell_words(command)?;
         if parts.is_empty() {
             return Err(crate::KavachError::ExecFailed("empty command".into()));
         }
@@ -210,7 +210,9 @@ fn pre_exec_warn(prefix: &str, _err: &dyn std::fmt::Display) {
 }
 
 /// Simple whitespace-based command splitting (no shell expansion).
-fn shell_words(input: &str) -> Vec<String> {
+///
+/// Returns `Err` if the input contains unclosed quotes.
+fn shell_words(input: &str) -> crate::Result<Vec<String>> {
     let mut words = Vec::with_capacity(8);
     let mut current = String::new();
     let mut in_single = false;
@@ -235,10 +237,15 @@ fn shell_words(input: &str) -> Vec<String> {
             _ => current.push(ch),
         }
     }
+    if in_single || in_double {
+        return Err(crate::KavachError::ExecFailed(
+            "unclosed quote in command".to_string(),
+        ));
+    }
     if !current.is_empty() {
         words.push(current);
     }
-    words
+    Ok(words)
 }
 
 #[cfg(test)]
@@ -248,32 +255,35 @@ mod tests {
 
     #[test]
     fn shell_words_basic() {
-        assert_eq!(shell_words("echo hello"), vec!["echo", "hello"]);
-        assert_eq!(shell_words("ls -la /tmp"), vec!["ls", "-la", "/tmp"]);
+        assert_eq!(shell_words("echo hello").unwrap(), vec!["echo", "hello"]);
+        assert_eq!(
+            shell_words("ls -la /tmp").unwrap(),
+            vec!["ls", "-la", "/tmp"]
+        );
     }
 
     #[test]
     fn shell_words_quoted() {
         assert_eq!(
-            shell_words(r#"echo "hello world""#),
+            shell_words(r#"echo "hello world""#).unwrap(),
             vec!["echo", "hello world"]
         );
         assert_eq!(
-            shell_words("echo 'hello world'"),
+            shell_words("echo 'hello world'").unwrap(),
             vec!["echo", "hello world"]
         );
     }
 
     #[test]
     fn shell_words_empty() {
-        assert!(shell_words("").is_empty());
-        assert!(shell_words("   ").is_empty());
+        assert!(shell_words("").unwrap().is_empty());
+        assert!(shell_words("   ").unwrap().is_empty());
     }
 
     #[test]
     fn shell_words_escaped() {
         assert_eq!(
-            shell_words(r"echo hello\ world"),
+            shell_words(r"echo hello\ world").unwrap(),
             vec!["echo", "hello world"]
         );
     }
@@ -281,7 +291,7 @@ mod tests {
     #[test]
     fn shell_words_mixed_quotes() {
         assert_eq!(
-            shell_words(r#"echo "it's" 'a "test"'"#),
+            shell_words(r#"echo "it's" 'a "test"'"#).unwrap(),
             vec!["echo", "it's", r#"a "test""#]
         );
     }
@@ -289,9 +299,15 @@ mod tests {
     #[test]
     fn shell_words_tabs() {
         assert_eq!(
-            shell_words("echo\thello\tworld"),
+            shell_words("echo\thello\tworld").unwrap(),
             vec!["echo", "hello", "world"]
         );
+    }
+
+    #[test]
+    fn shell_words_unclosed_quote() {
+        assert!(shell_words(r#"echo "unclosed"#).is_err());
+        assert!(shell_words("echo 'unclosed").is_err());
     }
 
     #[tokio::test]

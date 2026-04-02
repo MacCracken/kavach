@@ -67,19 +67,35 @@ pub async fn execute_with_timeout(
 
     match tokio::time::timeout(timeout, collect).await {
         Ok(Ok((stdout_buf, stderr_buf))) => {
-            // I/O collected — now wait for child exit
-            let status = child
-                .wait()
-                .await
-                .map_err(|e| crate::KavachError::ExecFailed(format!("{label} wait: {e}")))?;
-            let duration_ms = start.elapsed().as_millis() as u64;
-            Ok(ExecResult {
-                exit_code: status.code().unwrap_or(-1),
-                stdout: lossy_utf8(stdout_buf),
-                stderr: lossy_utf8(stderr_buf),
-                duration_ms,
-                timed_out: false,
-            })
+            // I/O collected — now wait for child exit with remaining timeout budget.
+            let elapsed = start.elapsed();
+            let remaining = timeout.saturating_sub(elapsed);
+            match tokio::time::timeout(remaining, child.wait()).await {
+                Ok(Ok(status)) => {
+                    let duration_ms = start.elapsed().as_millis() as u64;
+                    Ok(ExecResult {
+                        exit_code: status.code().unwrap_or(-1),
+                        stdout: lossy_utf8(stdout_buf),
+                        stderr: lossy_utf8(stderr_buf),
+                        duration_ms,
+                        timed_out: false,
+                    })
+                }
+                Ok(Err(e)) => Err(crate::KavachError::ExecFailed(format!("{label} wait: {e}"))),
+                Err(_) => {
+                    // Process hung on exit after I/O completed — kill it.
+                    let _ = child.kill().await;
+                    let _ = child.wait().await;
+                    let duration_ms = start.elapsed().as_millis() as u64;
+                    Ok(ExecResult {
+                        exit_code: -1,
+                        stdout: lossy_utf8(stdout_buf),
+                        stderr: lossy_utf8(stderr_buf),
+                        duration_ms,
+                        timed_out: true,
+                    })
+                }
+            }
         }
         Ok(Err(e)) => {
             // I/O error — kill the child to prevent zombie

@@ -369,10 +369,12 @@ mod tests {
         let data = b"Use this: sk-ant-api03-abcdefghijklmnopqrstuvwxyz";
         let decision = g.scan(data, "agent-1");
         assert!(!decision.allowed);
-        assert!(decision
-            .findings
-            .iter()
-            .any(|f| f.pattern_name.contains("Anthropic")));
+        assert!(
+            decision
+                .findings
+                .iter()
+                .any(|f| f.pattern_name.contains("Anthropic"))
+        );
     }
 
     #[test]
@@ -389,10 +391,12 @@ mod tests {
         let data = b"-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIB...";
         let decision = g.scan(data, "agent-1");
         assert!(!decision.allowed);
-        assert!(decision
-            .findings
-            .iter()
-            .any(|f| f.pattern_name.contains("Private Key")));
+        assert!(
+            decision
+                .findings
+                .iter()
+                .any(|f| f.pattern_name.contains("Private Key"))
+        );
     }
 
     #[test]

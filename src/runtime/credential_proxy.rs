@@ -238,17 +238,17 @@ impl CredentialProxyManager {
         }
 
         // Check payload size
-        if let Some(size) = content_length {
-            if size > self.config.max_request_body_bytes {
-                self.record_audit(
-                    agent_id,
-                    method,
-                    host,
-                    ProxyDecision::BlockedPayloadSize,
-                    None,
-                );
-                return (ProxyDecision::BlockedPayloadSize, None);
-            }
+        if let Some(size) = content_length
+            && size > self.config.max_request_body_bytes
+        {
+            self.record_audit(
+                agent_id,
+                method,
+                host,
+                ProxyDecision::BlockedPayloadSize,
+                None,
+            );
+            return (ProxyDecision::BlockedPayloadSize, None);
         }
 
         // Find matching credential rule — clone results to release borrow
