@@ -28,7 +28,7 @@ Completed items are in [CHANGELOG.md](../../CHANGELOG.md).
 
 ### Integration
 - [ ] majra integration (sandbox events as pub/sub topics)
-- [ ] ai-hwaccel integration (GPU passthrough for ML sandboxes)
+- [x] ai-hwaccel integration (`GpuPassthrough` detection, `GpuPolicy` filtering, device path → Landlock rule generation)
 - [x] nein integration (per-sandbox firewall rules via `NamespaceFirewall` builder)
 - [x] stiva integration (runtime binary attestation via `RuntimeManifest`)
 

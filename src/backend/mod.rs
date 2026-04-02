@@ -13,6 +13,8 @@ pub mod composite;
 pub mod exec_util;
 #[cfg(feature = "firecracker")]
 pub mod firecracker;
+#[cfg(feature = "gpu")]
+pub mod gpu;
 #[cfg(feature = "gvisor")]
 pub mod gvisor;
 pub mod health;

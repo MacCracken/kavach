@@ -25,6 +25,7 @@ sigstore = ["dep:sigstore"]
 attestation = ["dep:ear"]
 agnostik = ["dep:agnos-common", "dep:agnosys"]
 nein = ["dep:nein", "agnostik"]
+gpu = ["dep:ai-hwaccel"]
 full = ["process", "gvisor", "firecracker", "wasm", "oci", "sgx", "sev", "sy-agnos"]
 
 [dependencies]
@@ -56,6 +57,9 @@ ear = { version = "0.5", optional = true }
 agnos-common = { path = "../agnosticos/userland/agnos-common", optional = true }
 agnosys = { path = "../agnosys", features = ["full"], optional = true }
 nein = { path = "../nein", features = ["netns", "engine"], optional = true }
+
+# GPU passthrough (optional — ai-hwaccel accelerator detection)
+ai-hwaccel = { path = "../ai-hwaccel", features = ["minimal"], optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
