@@ -55,7 +55,7 @@ sigstore = { version = "0.13", optional = true, default-features = false }
 ear = { version = "0.5", optional = true }
 
 # AGNOS OS bindings (optional — for sandbox_core kernel interface)
-agnosys = { version = "0.50.0", git = "https://github.com/MacCracken/agnosys", tag = "0.50.0", features = ["full"], optional = true }
+agnosys = { version = "0.51.0", git = "https://github.com/MacCracken/agnosys", tag = "0.51.0", features = ["full"], optional = true }
 nein = { version = "0.90", features = ["engine"], optional = true }
 
 # GPU passthrough (optional — ai-hwaccel accelerator detection)
