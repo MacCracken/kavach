@@ -173,6 +173,10 @@ impl AttestationResult {
         let mut ear_obj = Ear {
             profile: "tag:kavach.agnos.org,2026:ear".to_string(),
             iat: chrono::Utc::now().timestamp(),
+            vid: ear::VerifierID {
+                build: format!("kavach {}", env!("CARGO_PKG_VERSION")),
+                developer: "AGNOS".to_string(),
+            },
             ..Ear::default()
         };
 
@@ -181,6 +185,10 @@ impl AttestationResult {
         let mut tv = TrustVector::default();
         tv.instance_identity.set(tier_val);
         tv.executables.set(tier_val);
+        // Hardware trust based on backend type
+        if matches!(self.backend, Backend::Sgx | Backend::Sev | Backend::Tdx) {
+            tv.hardware.set(tier_val);
+        }
 
         let mut appraisal = ear::Appraisal {
             trust_vector: tv,

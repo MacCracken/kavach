@@ -223,6 +223,63 @@ impl SandboxEventBus {
     pub fn inner(&self) -> &majra::pubsub::TypedPubSub<SandboxEvent> {
         &self.inner
     }
+
+    /// Create a tenant-scoped view of the event bus.
+    ///
+    /// All topics are automatically prefixed with the tenant namespace,
+    /// isolating events between different sandbox owners.
+    #[must_use]
+    pub fn scoped(&self, tenant_id: &str) -> ScopedEventBus {
+        ScopedEventBus {
+            bus: self.clone(),
+            ns: majra::namespace::Namespace::new(tenant_id),
+        }
+    }
+}
+
+/// A tenant-scoped view of the event bus.
+///
+/// All operations are automatically namespaced — events from one tenant
+/// cannot be seen by subscribers of another tenant.
+#[derive(Clone)]
+pub struct ScopedEventBus {
+    bus: SandboxEventBus,
+    ns: majra::namespace::Namespace,
+}
+
+impl ScopedEventBus {
+    /// Emit an event scoped to this tenant.
+    pub fn emit(&self, sandbox_id: &str, kind: EventKind, details: serde_json::Value) -> usize {
+        let topic = self
+            .ns
+            .topic(&format!("sandbox/{}/{}", sandbox_id, kind.topic_segment()));
+        self.bus.inner.publish(
+            &topic,
+            SandboxEvent {
+                sandbox_id: sandbox_id.to_string(),
+                kind,
+                details,
+            },
+        )
+    }
+
+    /// Subscribe to events within this tenant's namespace.
+    pub fn subscribe(
+        &self,
+        pattern: &str,
+    ) -> tokio::sync::broadcast::Receiver<majra::pubsub::TypedMessage<SandboxEvent>> {
+        self.bus.inner.subscribe(&self.ns.pattern(pattern))
+    }
+
+    /// Subscribe to all events for a sandbox within this tenant.
+    pub fn subscribe_sandbox(
+        &self,
+        sandbox_id: &str,
+    ) -> tokio::sync::broadcast::Receiver<majra::pubsub::TypedMessage<SandboxEvent>> {
+        self.bus
+            .inner
+            .subscribe(&self.ns.topic(&format!("sandbox/{sandbox_id}/#")))
+    }
 }
 
 impl Default for SandboxEventBus {

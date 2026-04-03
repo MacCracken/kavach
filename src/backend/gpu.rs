@@ -343,6 +343,64 @@ impl GpuPolicy {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Hardware-aware workload planning (delegates to ai-hwaccel)
+// ---------------------------------------------------------------------------
+
+/// Workload planning advice for sandboxed ML inference.
+///
+/// Wraps ai-hwaccel's quantization and sharding APIs to help consumers
+/// right-size sandboxes for model execution.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct WorkloadPlan {
+    /// Recommended quantization level for this hardware.
+    pub quantization: ai_hwaccel::QuantizationLevel,
+    /// How to distribute the model across available devices.
+    pub sharding: ai_hwaccel::ShardingPlan,
+    /// Total accelerator memory available (bytes).
+    pub total_accelerator_memory: u64,
+    /// Total device count.
+    pub device_count: usize,
+}
+
+/// Plan a workload across detected hardware.
+///
+/// Given a model's parameter count, queries ai-hwaccel for optimal
+/// quantization and sharding strategy based on available accelerators.
+#[must_use]
+pub fn plan_workload(model_params: u64) -> WorkloadPlan {
+    let registry = ai_hwaccel::AcceleratorRegistry::builder().detect();
+    let quantization = registry.suggest_quantization(model_params);
+    let sharding = registry.plan_sharding(model_params, &quantization);
+    let total_accelerator_memory = registry.total_accelerator_memory();
+    let device_count = registry.available().len();
+
+    info!(
+        params = model_params,
+        quant = ?quantization,
+        devices = device_count,
+        vram_mb = total_accelerator_memory / (1024 * 1024),
+        "Workload plan computed"
+    );
+
+    WorkloadPlan {
+        quantization,
+        sharding,
+        total_accelerator_memory,
+        device_count,
+    }
+}
+
+/// Query available accelerators by family.
+#[must_use]
+pub fn devices_by_family(
+    family: ai_hwaccel::AcceleratorFamily,
+) -> Vec<ai_hwaccel::AcceleratorProfile> {
+    let registry = ai_hwaccel::AcceleratorRegistry::builder().detect();
+    registry.by_family(family).into_iter().cloned().collect()
+}
+
 /// Enumerate DRI render nodes for a device.
 ///
 /// Scans `/dev/dri/renderD*` for the render node corresponding to `device_id`.

@@ -187,9 +187,7 @@ impl Sandbox {
                         agnostik::SeccompAction::Trap => {
                             denied.push((nr, security::SECCOMP_RET_TRAP))
                         }
-                        _ => {
-                            denied.push((nr, security::SECCOMP_RET_KILL_PROCESS))
-                        }
+                        _ => denied.push((nr, security::SECCOMP_RET_KILL_PROCESS)),
                     }
                 } else {
                     warn!(
@@ -412,9 +410,7 @@ impl Sandbox {
                 output.add_rule(rule::allow_tcp(port));
             }
             for host in &policy.allowed_outbound_hosts {
-                output.add_rule(
-                    Rule::new(Verdict::Accept).matching(Match::DestAddr(host.clone())),
-                );
+                output.add_rule(Rule::new(Verdict::Accept).matching(Match::DestAddr(host.clone())));
             }
             for &port in &policy.allowed_inbound_ports {
                 input.add_rule(rule::allow_tcp(port));

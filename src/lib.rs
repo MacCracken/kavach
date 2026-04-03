@@ -55,6 +55,10 @@ pub mod runtime;
 #[cfg(feature = "events")]
 pub mod events;
 
+/// Firewall policy builder — bridges nein's engine with kavach sandbox policy.
+#[cfg(feature = "nein")]
+pub mod firewall;
+
 mod error;
 pub use error::KavachError;
 
