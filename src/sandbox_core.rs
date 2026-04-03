@@ -8,7 +8,7 @@ use std::collections::HashSet;
 use anyhow::{Context, Result};
 use tracing::{debug, info, warn};
 
-use agnostik::SandboxConfig;
+use crate::bridge::{self as agnostik, SandboxConfig};
 use agnosys::audit;
 use agnosys::luks;
 use agnosys::mac;
@@ -128,7 +128,6 @@ impl Sandbox {
                     agnostik::FsAccess::NoAccess => SysFsAccess::NoAccess,
                     agnostik::FsAccess::ReadOnly => SysFsAccess::ReadOnly,
                     agnostik::FsAccess::ReadWrite => SysFsAccess::ReadWrite,
-                    _ => SysFsAccess::NoAccess,
                 };
                 SysFilesystemRule::new(&r.path, access)
             })
@@ -306,11 +305,6 @@ impl Sandbox {
                     "Network access: full — egress gate active with {} patterns",
                     self.egress_gate.pattern_count()
                 );
-            }
-            _ => {
-                debug!("Unknown network access mode, defaulting to full isolation");
-                security::create_namespace(NamespaceFlags::NETWORK)
-                    .context("Failed to create network namespace")?;
             }
         }
 

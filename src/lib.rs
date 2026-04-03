@@ -41,8 +41,11 @@ pub mod policy;
 pub mod scanning;
 pub mod scoring;
 
+// Bridge types — sandbox config primitives (formerly from agnostik crate).
+pub mod bridge;
+
 // Absorbed from agent-runtime sandbox_mod
-// sandbox_core requires agnostik + agnosys with full features.
+// sandbox_core requires agnosys with full features.
 pub mod sandbox_backends;
 #[cfg(feature = "agnostik")]
 pub mod sandbox_core;

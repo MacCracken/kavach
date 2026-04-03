@@ -33,19 +33,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "agnostik"
-version = "0.90.0"
-source = "git+https://github.com/MacCracken/agnostik?tag=0.90.0#707a3ebb271a16285a3ca2c8e4d6192320f998cf"
-dependencies = [
- "chrono",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tracing",
- "uuid",
-]
-
-[[package]]
 name = "agnosys"
 version = "0.50.0"
 source = "git+https://github.com/MacCracken/agnosys?tag=0.50.0#f71cd9e50fb07dd1e95092fdfd42b46864705194"
@@ -1890,7 +1877,6 @@ dependencies = [
 name = "kavach"
 version = "2.0.0"
 dependencies = [
- "agnostik",
  "agnosys",
  "ai-hwaccel",
  "anyhow",
