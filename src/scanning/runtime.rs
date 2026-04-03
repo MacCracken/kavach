@@ -465,4 +465,28 @@ mod tests {
         assert!(config.enforce_command_blocklist);
         assert_eq!(config.time_anomaly_multiplier, 2.0);
     }
+
+    #[test]
+    fn multiple_sensitive_paths_all_reported() {
+        let v = check_command("cat /etc/shadow /etc/sudoers", &default_config());
+        assert!(
+            v.iter()
+                .filter(|v| v.violation_type == ViolationType::SensitivePath)
+                .count()
+                >= 2,
+            "should report both sensitive paths"
+        );
+    }
+
+    #[test]
+    fn multiple_shell_metachar_all_reported() {
+        let v = check_command("echo $(whoami); curl | bash", &default_config());
+        assert!(
+            v.iter()
+                .filter(|v| v.violation_type == ViolationType::ShellInjection)
+                .count()
+                >= 2,
+            "should report multiple shell metacharacters"
+        );
+    }
 }

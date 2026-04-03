@@ -101,11 +101,20 @@ impl Default for BackendConfig {
 const MAX_OUTPUT_BYTES: usize = 10 * 1024 * 1024;
 
 /// Truncate captured process output to [`MAX_OUTPUT_BYTES`], converting lossy UTF-8.
+///
+/// When truncating, backs up to the last valid UTF-8 char boundary to avoid
+/// splitting multi-byte sequences and producing replacement characters at the cut.
 fn truncate_output(raw: &[u8]) -> String {
     if raw.len() <= MAX_OUTPUT_BYTES {
         String::from_utf8_lossy(raw).into_owned()
     } else {
-        let mut s = String::from_utf8_lossy(&raw[..MAX_OUTPUT_BYTES]).into_owned();
+        // Walk backwards from MAX_OUTPUT_BYTES to find a valid UTF-8 boundary.
+        // UTF-8 continuation bytes are 10xxxxxx (0x80..0xBF), so skip them.
+        let mut end = MAX_OUTPUT_BYTES;
+        while end > 0 && raw[end] & 0b1100_0000 == 0b1000_0000 {
+            end -= 1;
+        }
+        let mut s = String::from_utf8_lossy(&raw[..end]).into_owned();
         s.push_str("\n... [truncated]");
         s
     }

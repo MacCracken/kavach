@@ -214,7 +214,13 @@ impl ExternalizationGate {
         let compiled: Vec<_> = all_patterns
             .into_iter()
             .filter(|p| !config.ignored_categories.contains(&p.category))
-            .filter_map(|p| regex::Regex::new(&p.pattern).ok().map(|r| (p, r)))
+            .filter_map(|p| match regex::Regex::new(&p.pattern) {
+                Ok(r) => Some((p, r)),
+                Err(e) => {
+                    tracing::warn!(pattern = %p.name, error = %e, "egress gate: failed to compile pattern, skipping");
+                    None
+                }
+            })
             .collect();
 
         Self {
@@ -272,18 +278,27 @@ impl ExternalizationGate {
                 };
             }
         };
+        const MAX_FINDINGS: usize = 10_000;
         let mut findings = Vec::new();
         let threshold = self.config.block_threshold;
 
-        for (pattern, regex) in &self.compiled_patterns {
+        'outer: for (pattern, regex) in &self.compiled_patterns {
             for mat in regex.find_iter(text) {
+                if findings.len() >= MAX_FINDINGS {
+                    break 'outer;
+                }
                 let matched_str = mat.as_str();
                 let snippet = if matched_str.len() > 8 {
-                    format!(
-                        "{}...{}",
-                        &matched_str[..3],
-                        &matched_str[matched_str.len() - 3..]
-                    )
+                    // Find valid UTF-8 boundaries for snippet extraction
+                    let mut head = 3;
+                    while head > 0 && !matched_str.is_char_boundary(head) {
+                        head -= 1;
+                    }
+                    let mut tail = matched_str.len().saturating_sub(3);
+                    while tail < matched_str.len() && !matched_str.is_char_boundary(tail) {
+                        tail += 1;
+                    }
+                    format!("{}...{}", &matched_str[..head], &matched_str[tail..])
                 } else {
                     "***".to_string()
                 };
@@ -550,5 +565,15 @@ mod tests {
         let data = b"Contact: user@example.com";
         let decision = g.scan(data, "agent-1");
         assert!(!decision.allowed); // Low threshold blocks Medium email
+    }
+
+    #[test]
+    fn test_invalid_utf8_blocked() {
+        let mut g = gate();
+        let invalid_utf8: &[u8] = &[0xFF, 0xFE, 0xFD, 0x80, 0x81];
+        let decision = g.scan(invalid_utf8, "agent-1");
+        assert!(!decision.allowed);
+        assert_eq!(decision.findings.len(), 1);
+        assert_eq!(decision.findings[0].category, "encoding");
     }
 }

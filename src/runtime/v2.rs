@@ -348,7 +348,7 @@ impl CapabilityStore {
         const MAX_DELEGATION_DEPTH: usize = 5;
         let mut depth = 0usize;
         let mut cursor = parent.parent_token.as_deref();
-        while let Some(pid) = cursor {
+        while let Some(pid_str) = cursor {
             depth += 1;
             if depth >= MAX_DELEGATION_DEPTH {
                 bail!(
@@ -356,10 +356,10 @@ impl CapabilityStore {
                     parent_token_id
                 );
             }
-            cursor = self
-                .tokens
-                .iter()
-                .find(|t| t.token_id.to_string() == pid)
+            // Parse once to avoid allocating a String per token comparison.
+            let pid = pid_str.parse::<Uuid>().ok();
+            cursor = pid
+                .and_then(|id| self.tokens.iter().find(|t| t.token_id == id))
                 .and_then(|t| t.parent_token.as_deref());
         }
 
@@ -1014,7 +1014,6 @@ impl ComposableSandbox {
     }
 
     /// Remove a layer by name. Returns true if a layer was removed.
-    #[must_use]
     pub fn remove_layer(&mut self, name: &str) -> bool {
         let before = self.layers.len();
         self.layers.retain(|l| l.name != name);
@@ -2499,14 +2498,9 @@ mod tests {
         metrics.record_denied("file_write");
         metrics.record_denied("net_connect");
         assert_eq!(metrics.denied_count, 3);
-        assert_eq!(
-            metrics.most_denied_actions[0],
-            ("file_write".to_string(), 2)
-        );
-        assert_eq!(
-            metrics.most_denied_actions[1],
-            ("net_connect".to_string(), 1)
-        );
+        let top = metrics.top_denied_actions();
+        assert_eq!(top[0], ("file_write".to_string(), 2));
+        assert_eq!(top[1], ("net_connect".to_string(), 1));
     }
 
     #[test]

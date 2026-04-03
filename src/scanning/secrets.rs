@@ -162,9 +162,15 @@ impl SecretsScanner {
     /// Scan text for secrets. Returns findings.
     #[must_use]
     pub fn scan(&self, text: &str) -> Vec<ScanFinding> {
+        /// Maximum findings per scan to prevent DoS from crafted input.
+        const MAX_FINDINGS: usize = 1_000;
+
         let mut findings = Vec::new();
-        for pattern in &*COMPILED_PATTERNS {
+        'outer: for pattern in &*COMPILED_PATTERNS {
             for m in pattern.regex.find_iter(text) {
+                if findings.len() >= MAX_FINDINGS {
+                    break 'outer;
+                }
                 let evidence = m.as_str();
                 // Truncate evidence to avoid leaking the full secret
                 let truncated = if evidence.len() > 20 {
@@ -418,5 +424,20 @@ mod tests {
             findings.len() >= 2,
             "should detect both AWS key and GitHub token"
         );
+    }
+
+    #[test]
+    fn scan_many_matches_bounded() {
+        let scanner = SecretsScanner::new();
+        // 2000 AWS keys — should hit the MAX_FINDINGS cap
+        let input = "AKIAIOSFODNN7EXAMPLE ".repeat(2_000);
+        let start = std::time::Instant::now();
+        let findings = scanner.scan(&input);
+        let elapsed = start.elapsed();
+
+        // Should be capped at 1000 and complete quickly
+        assert!(findings.len() <= 1_000);
+        assert!(findings.len() >= 100, "should detect many keys");
+        assert!(elapsed.as_secs() < 5, "scan took too long: {elapsed:?}");
     }
 }

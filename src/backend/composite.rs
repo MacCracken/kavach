@@ -233,7 +233,11 @@ fn intersect_or_nonempty(a: &[String], b: &[String]) -> Vec<String> {
     if b.is_empty() {
         return a.to_vec();
     }
-    a.iter().filter(|h| b.contains(h)).cloned().collect()
+    let set: std::collections::HashSet<&str> = b.iter().map(|s| s.as_str()).collect();
+    a.iter()
+        .filter(|h| set.contains(h.as_str()))
+        .cloned()
+        .collect()
 }
 
 /// Intersect two port allowlists. Empty list = "allow all" in that policy.
@@ -244,7 +248,8 @@ fn intersect_or_nonempty_ports(a: &[u16], b: &[u16]) -> Vec<u16> {
     if b.is_empty() {
         return a.to_vec();
     }
-    a.iter().filter(|p| b.contains(p)).copied().collect()
+    let set: std::collections::HashSet<u16> = b.iter().copied().collect();
+    a.iter().filter(|p| set.contains(p)).copied().collect()
 }
 
 /// Score a composite backend — bonus for layered isolation.

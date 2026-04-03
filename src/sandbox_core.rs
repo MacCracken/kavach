@@ -165,18 +165,12 @@ impl Sandbox {
     async fn apply_seccomp(&self) -> Result<()> {
         debug!("Applying seccomp-bpf filters...");
 
-        let has_rules = self
+        let filter = if let Some(profile) = self
             .config
             .seccomp
             .as_ref()
-            .is_some_and(|p| !p.syscalls.is_empty());
-
-        let filter = if !has_rules {
-            // No per-agent rules — use the basic filter
-            security::create_basic_seccomp_filter().context("Failed to create seccomp filter")?
-        } else {
-            let profile = self.config.seccomp.as_ref().unwrap();
-
+            .filter(|p| !p.syscalls.is_empty())
+        {
             // Build custom filter from per-agent rules
             let base_allowed: &[u32] = &[
                 0, 1, 3, 5, 9, 10, 11, 12, 15, 60, 131, 158, 186, 202, 218, 231, 273, 318, 228, 334,
@@ -210,6 +204,9 @@ impl Sandbox {
 
             security::create_custom_seccomp_filter(base_allowed, &extra_allowed, &denied)
                 .context("Failed to create custom seccomp filter")?
+        } else {
+            // No per-agent rules — use the basic filter
+            security::create_basic_seccomp_filter().context("Failed to create seccomp filter")?
         };
 
         if filter.is_empty() {
