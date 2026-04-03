@@ -22,6 +22,7 @@ use uuid::Uuid;
 
 /// Fine-grained, object-capability style permission.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum SandboxCapability {
     /// Read files matching a glob pattern.
     FileRead { path_pattern: String },
@@ -74,6 +75,7 @@ pub struct CapabilityToken {
 
 /// Result of checking a capability.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum CapabilityVerdict {
     /// The agent holds an active token for this capability.
     Allowed,
@@ -383,6 +385,7 @@ impl CapabilityStore {
     }
 
     /// Return all tokens for a given agent.
+    #[must_use]
     pub fn tokens_for_agent(&self, agent_id: &str) -> Vec<&CapabilityToken> {
         self.tokens
             .iter()
@@ -391,6 +394,7 @@ impl CapabilityStore {
     }
 
     /// Return all active (non-revoked, non-expired) tokens.
+    #[must_use]
     pub fn active_tokens(&self) -> Vec<&CapabilityToken> {
         let now = Utc::now();
         self.tokens
@@ -436,6 +440,7 @@ impl CapabilityStore {
 
 /// Mandatory security label for taint tracking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum SecurityLabel {
     Public = 0,
     Internal = 1,
@@ -479,6 +484,7 @@ pub struct TaintedData {
 
 /// Result of an information flow check.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum FlowVerdict {
     /// The flow is permitted.
     Allowed,
@@ -626,6 +632,7 @@ impl FlowTracker {
     }
 
     /// Return the lineage (flow history) for a piece of data.
+    #[must_use]
     pub fn data_lineage(&self, data_id: &str) -> Vec<&FlowEvent> {
         self.events
             .iter()
@@ -655,6 +662,7 @@ pub struct TimeBoundedConfig {
 
 /// Status of the sandbox resource budget.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum BudgetStatus {
     /// All resources are within budget.
     WithinBudget,
@@ -754,6 +762,8 @@ impl TimeBoundedSandbox {
     }
 
     /// Check if the sandbox has expired (wall-clock time exceeded).
+    #[inline]
+    #[must_use]
     pub fn is_expired(&self) -> bool {
         let now = Utc::now();
         let elapsed = now - self.config.start_time;
@@ -845,6 +855,8 @@ impl PolicyLearner {
     }
 
     /// Return the current observations.
+    #[inline]
+    #[must_use]
     pub fn observations(&self) -> &[BehaviorObservation] {
         &self.observations
     }
@@ -928,6 +940,7 @@ impl PolicyLearner {
 
 /// Type of sandbox layer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum LayerType {
     Filesystem,
     Network,
@@ -938,7 +951,7 @@ pub enum LayerType {
 }
 
 /// Verdict for a single rule.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum RuleVerdict {
     /// Allow the action.
     Allow = 0,
@@ -970,6 +983,7 @@ pub struct SandboxLayer {
 
 /// Combined verdict from evaluating all layers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum CompositeVerdict {
     /// All layers allow.
     Allow,
@@ -1000,6 +1014,7 @@ impl ComposableSandbox {
     }
 
     /// Remove a layer by name. Returns true if a layer was removed.
+    #[must_use]
     pub fn remove_layer(&mut self, name: &str) -> bool {
         let before = self.layers.len();
         self.layers.retain(|l| l.name != name);
@@ -1024,10 +1039,10 @@ impl ComposableSandbox {
             for rule in &layer.rules {
                 if action.contains(&rule.action_pattern) {
                     most_restrictive = Some(match most_restrictive {
-                        None => rule.verdict.clone(),
+                        None => rule.verdict,
                         Some(current) => {
                             if rule.verdict > current {
-                                rule.verdict.clone()
+                                rule.verdict
                             } else {
                                 current
                             }
@@ -1103,8 +1118,14 @@ impl SandboxMetrics {
         } else {
             self.most_denied_actions.push((action.to_string(), 1));
         }
-        // Keep sorted by count descending
-        self.most_denied_actions.sort_by(|a, b| b.1.cmp(&a.1));
+    }
+
+    /// Return denied actions sorted by count descending.
+    #[must_use]
+    pub fn top_denied_actions(&self) -> Vec<(String, usize)> {
+        let mut sorted = self.most_denied_actions.clone();
+        sorted.sort_by(|a, b| b.1.cmp(&a.1));
+        sorted
     }
 
     /// Record an audit-logged action.
@@ -1131,6 +1152,7 @@ impl SandboxMetrics {
 
 /// Environment tier for sandbox configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum SandboxEnvironment {
     /// Development — permissive, all tools allowed, full network.
     Dev,
@@ -1178,6 +1200,7 @@ pub struct EnvironmentProfile {
 
 /// Network policy for an environment tier.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum EnvironmentNetworkPolicy {
     /// Unrestricted network access.
     Unrestricted,
@@ -1189,6 +1212,7 @@ pub enum EnvironmentNetworkPolicy {
 
 /// Sandbox backend preference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum SandboxBackend {
     /// Standard Landlock + seccomp + namespaces.
     Native,
@@ -1366,6 +1390,8 @@ impl EnvironmentProfile {
     }
 
     /// Check if a tool is blocked in this environment.
+    #[inline]
+    #[must_use]
     pub fn is_tool_blocked(&self, tool_name: &str) -> bool {
         self.blocked_tools.iter().any(|t| t == tool_name)
     }

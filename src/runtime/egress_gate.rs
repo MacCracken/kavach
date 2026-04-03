@@ -251,13 +251,32 @@ impl ExternalizationGate {
             };
         }
 
-        // Convert to string for regex scanning (lossy — binary data gets replaced)
-        let text = String::from_utf8_lossy(data);
+        // Reject invalid UTF-8 — lossy conversion could allow secrets to be split
+        // across replacement characters, bypassing regex patterns
+        let text = match std::str::from_utf8(data) {
+            Ok(s) => s,
+            Err(_) => {
+                self.stats.total_blocked += 1;
+                return GateDecision {
+                    allowed: false,
+                    findings: vec![GateFinding {
+                        pattern_name: "Invalid UTF-8".into(),
+                        severity: PatternSeverity::High,
+                        category: "encoding".into(),
+                        offset: 0,
+                        match_len: data.len(),
+                        redacted_snippet: "binary/invalid UTF-8 data blocked".into(),
+                    }],
+                    data_size: data.len(),
+                    scan_duration_us: start.elapsed().as_micros() as u64,
+                };
+            }
+        };
         let mut findings = Vec::new();
         let threshold = self.config.block_threshold;
 
         for (pattern, regex) in &self.compiled_patterns {
-            for mat in regex.find_iter(&text) {
+            for mat in regex.find_iter(text) {
                 let matched_str = mat.as_str();
                 let snippet = if matched_str.len() > 8 {
                     format!(

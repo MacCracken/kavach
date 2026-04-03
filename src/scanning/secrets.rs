@@ -26,7 +26,7 @@ const PATTERNS: &[SecretPattern] = &[
         name: "AWS Secret Key",
         category: "cloud_credential",
         severity: Severity::Critical,
-        regex: r#"(?i)aws.{0,20}secret.{0,20}['"][0-9a-zA-Z/+]{40}['"]"#,
+        regex: r#"(?i)aws[a-z0-9_ ]{0,20}secret[a-z0-9_ ]{0,20}['"][0-9a-zA-Z/+]{40}['"]"#,
     },
     SecretPattern {
         name: "GCP API Key",
@@ -56,13 +56,13 @@ const PATTERNS: &[SecretPattern] = &[
         name: "Generic API Key",
         category: "api_key",
         severity: Severity::Medium,
-        regex: r#"(?i)(api[_-]?key|apikey)\s*[:=]\s*['"][a-zA-Z0-9]{20,}['"]"#,
+        regex: r#"(?i)(api[_-]?key|apikey)\s{0,5}[:=]\s{0,5}['"][a-zA-Z0-9]{20,}['"]"#,
     },
     SecretPattern {
         name: "Bearer Token",
         category: "auth_token",
         severity: Severity::High,
-        regex: r"(?i)bearer\s+[a-zA-Z0-9\-._~+/]{20,}",
+        regex: r"(?i)bearer\s{1,10}[a-zA-Z0-9\-._~+/]{20,}",
     },
     SecretPattern {
         name: "JWT",
@@ -98,13 +98,13 @@ const PATTERNS: &[SecretPattern] = &[
         name: "Password Assignment",
         category: "credential",
         severity: Severity::High,
-        regex: r#"(?i)(password|passwd|pwd)\s*[:=]\s*['"][^'"]{8,}['"]"#,
+        regex: r#"(?i)(password|passwd|pwd)\s{0,5}[:=]\s{0,5}['"][^'"]{8,128}['"]"#,
     },
     SecretPattern {
         name: "Database Connection String",
         category: "connection_string",
         severity: Severity::Critical,
-        regex: r"(?i)(postgres|mysql|mongodb|redis)://[^\s]{10,}",
+        regex: r"(?i)(postgres|mysql|mongodb|redis)://[^\s]{10,256}",
     },
     SecretPattern {
         name: "Email Address",
@@ -164,7 +164,7 @@ impl SecretsScanner {
     pub fn scan(&self, text: &str) -> Vec<ScanFinding> {
         let mut findings = Vec::new();
         for pattern in &*COMPILED_PATTERNS {
-            if let Some(m) = pattern.regex.find(text) {
+            for m in pattern.regex.find_iter(text) {
                 let evidence = m.as_str();
                 // Truncate evidence to avoid leaking the full secret
                 let truncated = if evidence.len() > 20 {

@@ -165,10 +165,18 @@ impl Sandbox {
     async fn apply_seccomp(&self) -> Result<()> {
         debug!("Applying seccomp-bpf filters...");
 
-        let filter = if self.config.seccomp_rules.is_empty() {
+        let has_rules = self
+            .config
+            .seccomp
+            .as_ref()
+            .is_some_and(|p| !p.syscalls.is_empty());
+
+        let filter = if !has_rules {
             // No per-agent rules — use the basic filter
             security::create_basic_seccomp_filter().context("Failed to create seccomp filter")?
         } else {
+            let profile = self.config.seccomp.as_ref().unwrap();
+
             // Build custom filter from per-agent rules
             let base_allowed: &[u32] = &[
                 0, 1, 3, 5, 9, 10, 11, 12, 15, 60, 131, 158, 186, 202, 218, 231, 273, 318, 228, 334,
@@ -177,23 +185,19 @@ impl Sandbox {
             let mut extra_allowed = Vec::new();
             let mut denied = Vec::new();
 
-            for rule in &self.config.seccomp_rules {
-                if let Some(nr) = security::syscall_name_to_nr(&rule.syscall) {
-                    match rule.action {
-                        agnostik::SeccompAction::Allow => extra_allowed.push(nr),
-                        agnostik::SeccompAction::Deny => {
-                            denied.push((nr, security::SECCOMP_RET_KILL_PROCESS))
+            for rule in &profile.syscalls {
+                for name in &rule.names {
+                    if let Some(nr) = security::syscall_name_to_nr(name) {
+                        match rule.action {
+                            agnostik::SeccompAction::Allow => extra_allowed.push(nr),
+                            agnostik::SeccompAction::Trap => {
+                                denied.push((nr, security::SECCOMP_RET_TRAP))
+                            }
+                            _ => denied.push((nr, security::SECCOMP_RET_KILL_PROCESS)),
                         }
-                        agnostik::SeccompAction::Trap => {
-                            denied.push((nr, security::SECCOMP_RET_TRAP))
-                        }
-                        _ => denied.push((nr, security::SECCOMP_RET_KILL_PROCESS)),
+                    } else {
+                        warn!("Unknown syscall name '{}' in seccomp rules, skipping", name);
                     }
-                } else {
-                    warn!(
-                        "Unknown syscall name '{}' in seccomp rules, skipping",
-                        rule.syscall
-                    );
                 }
             }
 
@@ -425,8 +429,9 @@ impl Sandbox {
 
     /// Apply MAC (AppArmor/SELinux) profile based on sandbox config.
     async fn apply_mac_profile(&self) -> Result<()> {
-        let profile_name = match &self.config.mac_profile {
-            Some(name) if !name.is_empty() => name.clone(),
+        let profile_name = match (&self.config.apparmor_profile, &self.config.selinux_label) {
+            (Some(name), _) if !name.is_empty() => name.clone(),
+            (_, Some(label)) if !label.is_empty() => label.clone(),
             _ => {
                 debug!("No MAC profile configured, skipping");
                 return Ok(());
@@ -499,10 +504,11 @@ impl Sandbox {
     /// Emit an audit event for sandbox lifecycle actions.
     async fn emit_audit_event(&self, event: &str) {
         let msg = format!(
-            "pid={} network={:?} mac={:?} encrypted={}",
+            "pid={} network={:?} apparmor={:?} selinux={:?} encrypted={}",
             std::process::id(),
             self.config.network_access,
-            self.config.mac_profile,
+            self.config.apparmor_profile,
+            self.config.selinux_label,
             self.luks_name.is_some()
         );
 
@@ -712,14 +718,29 @@ mod tests {
             agnostik::FilesystemRule {
                 path: "/tmp".into(),
                 access: agnostik::FsAccess::ReadWrite,
+                readonly: false,
+                noexec: false,
+                nosuid: false,
+                nodev: false,
+                propagation: agnostik::MountPropagation::Private,
             },
             agnostik::FilesystemRule {
                 path: "/etc".into(),
                 access: agnostik::FsAccess::ReadOnly,
+                readonly: false,
+                noexec: false,
+                nosuid: false,
+                nodev: false,
+                propagation: agnostik::MountPropagation::Private,
             },
             agnostik::FilesystemRule {
                 path: "/root".into(),
                 access: agnostik::FsAccess::NoAccess,
+                readonly: false,
+                noexec: false,
+                nosuid: false,
+                nodev: false,
+                propagation: agnostik::MountPropagation::Private,
             },
         ];
         let sys_rules = Sandbox::convert_fs_rules(&rules);
@@ -790,13 +811,13 @@ mod tests {
     }
 
     #[test]
-    fn test_sandbox_config_with_mac_profile() {
+    fn test_sandbox_config_with_apparmor_profile() {
         let config = SandboxConfig {
-            mac_profile: Some("User".to_string()),
+            apparmor_profile: Some("User".to_string()),
             ..SandboxConfig::default()
         };
         let sandbox = Sandbox::new(&config).unwrap();
-        assert_eq!(sandbox.config.mac_profile.as_deref(), Some("User"));
+        assert_eq!(sandbox.config.apparmor_profile.as_deref(), Some("User"));
     }
 
     #[test]
@@ -855,14 +876,14 @@ mod tests {
     fn test_sandbox_config_serialization() {
         let config = SandboxConfig {
             network_policy: Some(agnostik::NetworkPolicy::default()),
-            mac_profile: Some("Service".to_string()),
+            apparmor_profile: Some("Service".to_string()),
             encrypted_storage: Some(agnostik::EncryptedStorageConfig::default()),
             ..SandboxConfig::default()
         };
         let json = serde_json::to_string(&config).unwrap();
         let deserialized: SandboxConfig = serde_json::from_str(&json).unwrap();
         assert!(deserialized.network_policy.is_some());
-        assert_eq!(deserialized.mac_profile.as_deref(), Some("Service"));
+        assert_eq!(deserialized.apparmor_profile.as_deref(), Some("Service"));
         assert!(deserialized.encrypted_storage.is_some());
     }
 
@@ -873,17 +894,17 @@ mod tests {
         let json = serde_json::to_string(&config).unwrap();
         let deserialized: SandboxConfig = serde_json::from_str(&json).unwrap();
         assert!(deserialized.network_policy.is_none());
-        assert!(deserialized.mac_profile.is_none());
+        assert!(deserialized.apparmor_profile.is_none());
         assert!(deserialized.encrypted_storage.is_none());
     }
 
     #[test]
     fn test_sandbox_config_backward_compatible_deserialization() {
         // Old configs without new fields should still deserialize (serde(default))
-        let json = r#"{"filesystem_rules":[{"path":"/tmp","access":"ReadWrite"}],"network_access":"LocalhostOnly","seccomp_rules":[],"isolate_network":true}"#;
+        let json = r#"{"filesystem_rules":[{"path":"/tmp","access":"ReadWrite"}],"network_access":"LocalhostOnly","isolate_network":true}"#;
         let config: SandboxConfig = serde_json::from_str(json).unwrap();
         assert!(config.network_policy.is_none());
-        assert!(config.mac_profile.is_none());
+        assert!(config.apparmor_profile.is_none());
         assert!(config.encrypted_storage.is_none());
     }
 
@@ -948,14 +969,29 @@ mod tests {
             agnostik::FilesystemRule {
                 path: "/a".into(),
                 access: agnostik::FsAccess::NoAccess,
+                readonly: false,
+                noexec: false,
+                nosuid: false,
+                nodev: false,
+                propagation: agnostik::MountPropagation::Private,
             },
             agnostik::FilesystemRule {
                 path: "/b".into(),
                 access: agnostik::FsAccess::ReadOnly,
+                readonly: false,
+                noexec: false,
+                nosuid: false,
+                nodev: false,
+                propagation: agnostik::MountPropagation::Private,
             },
             agnostik::FilesystemRule {
                 path: "/c".into(),
                 access: agnostik::FsAccess::ReadWrite,
+                readonly: false,
+                noexec: false,
+                nosuid: false,
+                nodev: false,
+                propagation: agnostik::MountPropagation::Private,
             },
         ];
         let sys_rules = Sandbox::convert_fs_rules(&rules);
@@ -1059,7 +1095,7 @@ mod tests {
     #[tokio::test]
     async fn test_sandbox_emit_audit_event() {
         let config = SandboxConfig {
-            mac_profile: Some("TestProfile".to_string()),
+            apparmor_profile: Some("TestProfile".to_string()),
             ..SandboxConfig::default()
         };
         let sandbox = Sandbox::new(&config).unwrap();
@@ -1082,7 +1118,7 @@ mod tests {
     #[tokio::test]
     async fn test_sandbox_apply_mac_profile_empty() {
         let config = SandboxConfig {
-            mac_profile: Some(String::new()),
+            apparmor_profile: Some(String::new()),
             ..SandboxConfig::default()
         };
         let sandbox = Sandbox::new(&config).unwrap();
@@ -1094,7 +1130,7 @@ mod tests {
     #[tokio::test]
     async fn test_sandbox_apply_mac_profile_none() {
         let config = SandboxConfig {
-            mac_profile: None,
+            apparmor_profile: None,
             ..SandboxConfig::default()
         };
         let sandbox = Sandbox::new(&config).unwrap();
@@ -1221,18 +1257,30 @@ mod tests {
             filesystem_rules: vec![agnostik::FilesystemRule {
                 path: "/home".into(),
                 access: agnostik::FsAccess::ReadWrite,
+                readonly: false,
+                noexec: false,
+                nosuid: false,
+                nodev: false,
+                propagation: agnostik::MountPropagation::Private,
             }],
             network_access: agnostik::NetworkAccess::Restricted,
-            seccomp_rules: vec![
-                agnostik::SeccompRule {
-                    syscall: "read".to_string(),
-                    action: agnostik::SeccompAction::Allow,
-                },
-                agnostik::SeccompRule {
-                    syscall: "write".to_string(),
-                    action: agnostik::SeccompAction::Allow,
-                },
-            ],
+            seccomp: Some(agnostik::SeccompProfile {
+                default_action: agnostik::SeccompAction::KillProcess,
+                architectures: vec![],
+                flags: vec![],
+                syscalls: vec![
+                    agnostik::SeccompRule {
+                        names: vec!["read".to_string()],
+                        action: agnostik::SeccompAction::Allow,
+                        args: vec![],
+                    },
+                    agnostik::SeccompRule {
+                        names: vec!["write".to_string()],
+                        action: agnostik::SeccompAction::Allow,
+                        args: vec![],
+                    },
+                ],
+            }),
             isolate_network: true,
             network_policy: Some(agnostik::NetworkPolicy {
                 allowed_outbound_ports: vec![443],
@@ -1240,12 +1288,13 @@ mod tests {
                 allowed_inbound_ports: vec![8080],
                 enable_nat: true,
             }),
-            mac_profile: Some("Sandbox".to_string()),
+            apparmor_profile: Some("Sandbox".to_string()),
             encrypted_storage: Some(agnostik::EncryptedStorageConfig {
                 enabled: true,
                 size_mb: 256,
                 filesystem: "btrfs".to_string(),
             }),
+            ..SandboxConfig::default()
         };
 
         let sandbox = Sandbox::new(&config).unwrap();
@@ -1254,10 +1303,10 @@ mod tests {
             sandbox.config.network_access,
             agnostik::NetworkAccess::Restricted
         );
-        assert_eq!(sandbox.config.seccomp_rules.len(), 2);
+        assert_eq!(sandbox.config.seccomp.as_ref().unwrap().syscalls.len(), 2);
         assert!(sandbox.config.isolate_network);
         assert!(sandbox.config.network_policy.is_some());
-        assert_eq!(sandbox.config.mac_profile.as_deref(), Some("Sandbox"));
+        assert_eq!(sandbox.config.apparmor_profile.as_deref(), Some("Sandbox"));
         let storage = sandbox.config.encrypted_storage.as_ref().unwrap();
         assert!(storage.enabled);
         assert_eq!(storage.size_mb, 256);
@@ -1277,6 +1326,11 @@ mod tests {
         let rules = vec![agnostik::FilesystemRule {
             path: "/var/log".into(),
             access: agnostik::FsAccess::ReadOnly,
+            readonly: false,
+            noexec: false,
+            nosuid: false,
+            nodev: false,
+            propagation: agnostik::MountPropagation::Private,
         }];
         let sys_rules = Sandbox::convert_fs_rules(&rules);
         assert_eq!(sys_rules.len(), 1);
@@ -1289,6 +1343,11 @@ mod tests {
             .map(|i| agnostik::FilesystemRule {
                 path: format!("/path/{}", i).into(),
                 access: agnostik::FsAccess::ReadOnly,
+                readonly: false,
+                noexec: false,
+                nosuid: false,
+                nodev: false,
+                propagation: agnostik::MountPropagation::Private,
             })
             .collect();
         let sys_rules = Sandbox::convert_fs_rules(&rules);
@@ -1460,17 +1519,17 @@ mod tests {
     #[test]
     fn test_sandbox_config_clone_independence() {
         let config = SandboxConfig {
-            mac_profile: Some("Original".to_string()),
+            apparmor_profile: Some("Original".to_string()),
             ..SandboxConfig::default()
         };
         let sandbox = Sandbox::new(&config).unwrap();
 
         // Sandbox stores a clone, so original can be modified
         let mut config2 = config.clone();
-        config2.mac_profile = Some("Modified".to_string());
+        config2.apparmor_profile = Some("Modified".to_string());
 
         // Sandbox should still have original value
-        assert_eq!(sandbox.config.mac_profile.as_deref(), Some("Original"));
+        assert_eq!(sandbox.config.apparmor_profile.as_deref(), Some("Original"));
     }
 
     #[tokio::test]
@@ -1501,6 +1560,11 @@ mod tests {
             filesystem_rules: vec![agnostik::FilesystemRule {
                 path: "/tmp".into(),
                 access: agnostik::FsAccess::ReadWrite,
+                readonly: false,
+                noexec: false,
+                nosuid: false,
+                nodev: false,
+                propagation: agnostik::MountPropagation::Private,
             }],
             ..SandboxConfig::default()
         };
@@ -1521,20 +1585,28 @@ mod tests {
     #[ignore] // Seccomp filters persist per-process; run in isolation
     async fn test_sandbox_apply_seccomp_with_custom_rules() {
         let config = SandboxConfig {
-            seccomp_rules: vec![
-                agnostik::SeccompRule {
-                    syscall: "socket".to_string(),
-                    action: agnostik::SeccompAction::Allow,
-                },
-                agnostik::SeccompRule {
-                    syscall: "ptrace".to_string(),
-                    action: agnostik::SeccompAction::Deny,
-                },
-                agnostik::SeccompRule {
-                    syscall: "mount".to_string(),
-                    action: agnostik::SeccompAction::Trap,
-                },
-            ],
+            seccomp: Some(agnostik::SeccompProfile {
+                default_action: agnostik::SeccompAction::KillProcess,
+                architectures: vec![],
+                flags: vec![],
+                syscalls: vec![
+                    agnostik::SeccompRule {
+                        names: vec!["socket".to_string()],
+                        action: agnostik::SeccompAction::Allow,
+                        args: vec![],
+                    },
+                    agnostik::SeccompRule {
+                        names: vec!["ptrace".to_string()],
+                        action: agnostik::SeccompAction::KillProcess,
+                        args: vec![],
+                    },
+                    agnostik::SeccompRule {
+                        names: vec!["mount".to_string()],
+                        action: agnostik::SeccompAction::Trap,
+                        args: vec![],
+                    },
+                ],
+            }),
             ..SandboxConfig::default()
         };
         let sandbox = Sandbox::new(&config).unwrap();
@@ -1546,10 +1618,16 @@ mod tests {
     #[ignore] // Seccomp filters persist per-process; run in isolation
     async fn test_sandbox_apply_seccomp_unknown_syscall_warns() {
         let config = SandboxConfig {
-            seccomp_rules: vec![agnostik::SeccompRule {
-                syscall: "nonexistent_call".to_string(),
-                action: agnostik::SeccompAction::Allow,
-            }],
+            seccomp: Some(agnostik::SeccompProfile {
+                default_action: agnostik::SeccompAction::KillProcess,
+                architectures: vec![],
+                flags: vec![],
+                syscalls: vec![agnostik::SeccompRule {
+                    names: vec!["nonexistent_call".to_string()],
+                    action: agnostik::SeccompAction::Allow,
+                    args: vec![],
+                }],
+            }),
             ..SandboxConfig::default()
         };
         let sandbox = Sandbox::new(&config).unwrap();

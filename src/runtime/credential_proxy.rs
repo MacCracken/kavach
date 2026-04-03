@@ -144,10 +144,10 @@ fn host_matches(host: &str, pattern: &str) -> bool {
     }
 }
 
-/// Check if a host is in an allowlist.
+/// Check if a host is in an allowlist (fail-closed: empty list = deny all).
 fn host_allowed(host: &str, allowlist: &[String]) -> bool {
     if allowlist.is_empty() {
-        return true; // empty = allow all
+        return false; // fail-closed: no allowlist entries = deny all
     }
     allowlist.iter().any(|p| host_matches(host, p))
 }
@@ -462,15 +462,16 @@ mod tests {
     }
 
     #[test]
-    fn test_empty_allowlist_permits_all() {
+    fn test_empty_allowlist_denies_all() {
         let mut config = test_config();
         config.allowed_hosts = vec![];
         config.enforce_allowlist = true;
         let mut mgr = CredentialProxyManager::new(config);
         mgr.prepare_proxy("agent-1");
 
+        // Fail-closed: empty allowlist with enforcement = deny all hosts
         let (decision, _) = mgr.evaluate_request("agent-1", "GET", "any-host.com", None);
-        assert_eq!(decision, ProxyDecision::Allowed);
+        assert_eq!(decision, ProxyDecision::BlockedHost);
     }
 
     #[test]

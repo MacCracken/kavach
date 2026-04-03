@@ -72,6 +72,7 @@ pub struct BackendConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum NetworkMode {
     /// No network access.
     None,
@@ -93,6 +94,20 @@ impl Default for BackendConfig {
             env: HashMap::new(),
             device_passthrough: Vec::new(),
         }
+    }
+}
+
+/// Maximum captured output size (10 MB). Prevents OOM from runaway processes.
+const MAX_OUTPUT_BYTES: usize = 10 * 1024 * 1024;
+
+/// Truncate captured process output to [`MAX_OUTPUT_BYTES`], converting lossy UTF-8.
+fn truncate_output(raw: &[u8]) -> String {
+    if raw.len() <= MAX_OUTPUT_BYTES {
+        String::from_utf8_lossy(raw).into_owned()
+    } else {
+        let mut s = String::from_utf8_lossy(&raw[..MAX_OUTPUT_BYTES]).into_owned();
+        s.push_str("\n... [truncated]");
+        s
     }
 }
 
@@ -249,7 +264,11 @@ impl GVisorBackend {
 
         let spec = self.generate_oci_spec(command, config);
         let spec_path = bundle_dir.join("config.json");
-        std::fs::write(&spec_path, serde_json::to_string_pretty(&spec).unwrap())?;
+        std::fs::write(
+            &spec_path,
+            serde_json::to_string_pretty(&spec)
+                .map_err(std::io::Error::other)?,
+        )?;
 
         // Create minimal rootfs
         let rootfs = bundle_dir.join("rootfs");
@@ -358,14 +377,20 @@ impl GVisorBackend {
             Err(_) => {
                 warn!(container_id = %container_id, timeout = config.timeout_secs, "gVisor: container timed out, killing");
                 // Try to kill the container
-                let _ = tokio::process::Command::new(&self.runsc_path)
+                if let Err(e) = tokio::process::Command::new(&self.runsc_path)
                     .args(["kill", &container_id, "SIGKILL"])
                     .output()
-                    .await;
-                let _ = tokio::process::Command::new(&self.runsc_path)
+                    .await
+                {
+                    warn!(container_id = %container_id, error = %e, "gVisor: failed to kill timed-out container");
+                }
+                if let Err(e) = tokio::process::Command::new(&self.runsc_path)
                     .args(["delete", &container_id])
                     .output()
-                    .await;
+                    .await
+                {
+                    warn!(container_id = %container_id, error = %e, "gVisor: failed to delete timed-out container");
+                }
 
                 Ok(BackendResult {
                     success: false,
@@ -389,8 +414,8 @@ impl GVisorBackend {
             .await?;
 
         let exit_code = output.status.code().unwrap_or(-1);
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let stdout = truncate_output(&output.stdout);
+        let stderr = truncate_output(&output.stderr);
         Ok((exit_code, stdout, stderr))
     }
 
@@ -630,7 +655,8 @@ impl FirecrackerBackend {
         let config_path = vm_dir.join("vm-config.json");
         std::fs::write(
             &config_path,
-            serde_json::to_string_pretty(&vm_config).unwrap(),
+            serde_json::to_string_pretty(&vm_config)
+                .map_err(std::io::Error::other)?,
         )?;
 
         let socket_path = self.work_dir.join(format!("{}.sock", vm_id));
@@ -660,7 +686,7 @@ impl FirecrackerBackend {
         )
         .await;
 
-        if socket_ready.is_err() {
+        if socket_ready.is_err() || socket_ready.as_ref().is_ok_and(|ready| !ready) {
             warn!(vm_id = %vm_id, "Firecracker: API socket did not appear in 5s");
             child.kill().await.ok();
             self.cleanup_vm(&vm_id)?;
@@ -711,8 +737,8 @@ impl FirecrackerBackend {
         match result {
             Ok(Ok(output)) => {
                 let exit_code = output.status.code().unwrap_or(-1);
-                let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                let stdout = truncate_output(&output.stdout);
+                let stderr = truncate_output(&output.stderr);
                 info!(vm_id = %vm_id, exit_code = exit_code, duration_ms = duration_ms, "Firecracker: VM exited");
                 Ok(BackendResult {
                     success: exit_code == 0,
@@ -750,14 +776,15 @@ impl FirecrackerBackend {
         }
     }
 
-    /// Wait for the API socket file to appear.
-    async fn wait_for_socket(path: &Path) {
-        loop {
+    /// Wait for the API socket file to appear (max 100 attempts = 5s).
+    async fn wait_for_socket(path: &Path) -> bool {
+        for _ in 0..100 {
             if path.exists() {
-                return;
+                return true;
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
+        false
     }
 
     /// Configure a Firecracker VM via its API socket.

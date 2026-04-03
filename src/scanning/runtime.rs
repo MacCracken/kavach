@@ -153,7 +153,6 @@ pub fn check_command(command: &str, config: &RuntimeGuardConfig) -> Vec<GuardVio
                     violation_type: ViolationType::SensitivePath,
                     description: format!("sensitive path access: {path}"),
                 });
-                break; // One violation per check type
             }
         }
     }
@@ -165,7 +164,6 @@ pub fn check_command(command: &str, config: &RuntimeGuardConfig) -> Vec<GuardVio
                 violation_type: ViolationType::ShellInjection,
                 description: format!("shell metacharacter: {pattern}"),
             });
-            break;
         }
     }
 

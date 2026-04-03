@@ -246,7 +246,7 @@ impl CodeScanner {
                         message: format!("{} detected", pattern.name),
                         evidence: extract_evidence(text, &text_lower, substr),
                     });
-                    break; // One finding per pattern group
+                    break; // One finding per pattern group is sufficient
                 }
             }
         }

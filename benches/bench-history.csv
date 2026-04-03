@@ -392,3 +392,399 @@ p-1-post-audit,unknown,2856700.0000,ms
 p-1-post-audit,unknown,3058400.0000,ms
 p-1-post-audit,unknown,583150.00,µs
 p-1-post-audit,unknown,2915700.0000,ms
+p-1-baseline,unknown,test runtime::credential_proxy::tests::test_audit_log ... ignored,test runtime::credential_proxy::tests::test_audit_log ... ignored
+p-1-baseline,unknown,test runtime::credential_proxy::tests::test_audit_log_ring_buffer ... ignored,test runtime::credential_proxy::tests::test_audit_log_ring_buffer ... ignored
+p-1-baseline,unknown,test runtime::credential_proxy::tests::test_default_config ... ignored,test runtime::credential_proxy::tests::test_default_config ... ignored
+p-1-baseline,unknown,test runtime::credential_proxy::tests::test_empty_allowlist_permits_all ... ignored,test runtime::credential_proxy::tests::test_empty_allowlist_permits_all ... ignored
+p-1-baseline,unknown,test runtime::credential_proxy::tests::test_evaluate_allowed_no_creds ... ignored,test runtime::credential_proxy::tests::test_evaluate_allowed_no_creds ... ignored
+p-1-baseline,unknown,test runtime::credential_proxy::tests::test_evaluate_allowed_with_credentials ... ignored,test runtime::credential_proxy::tests::test_evaluate_allowed_with_credentials ... ignored
+p-1-baseline,unknown,test runtime::credential_proxy::tests::test_evaluate_blocked_host ... ignored,test runtime::credential_proxy::tests::test_evaluate_blocked_host ... ignored
+p-1-baseline,unknown,test runtime::credential_proxy::tests::test_evaluate_blocked_payload_size ... ignored,test runtime::credential_proxy::tests::test_evaluate_blocked_payload_size ... ignored
+p-1-baseline,unknown,test runtime::credential_proxy::tests::test_host_matches_exact ... ignored,test runtime::credential_proxy::tests::test_host_matches_exact ... ignored
+p-1-baseline,unknown,test runtime::credential_proxy::tests::test_host_matches_star ... ignored,test runtime::credential_proxy::tests::test_host_matches_star ... ignored
+p-1-baseline,unknown,test runtime::credential_proxy::tests::test_host_matches_wildcard ... ignored,test runtime::credential_proxy::tests::test_host_matches_wildcard ... ignored
+p-1-baseline,unknown,test runtime::credential_proxy::tests::test_prepare_proxy_env_vars ... ignored,test runtime::credential_proxy::tests::test_prepare_proxy_env_vars ... ignored
+p-1-baseline,unknown,test runtime::credential_proxy::tests::test_proxy_decision_display ... ignored,test runtime::credential_proxy::tests::test_proxy_decision_display ... ignored
+p-1-baseline,unknown,test runtime::credential_proxy::tests::test_stop_proxy ... ignored,test runtime::credential_proxy::tests::test_stop_proxy ... ignored
+p-1-baseline,unknown,test runtime::credential_proxy::tests::test_wildcard_credential_injection ... ignored,test runtime::credential_proxy::tests::test_wildcard_credential_injection ... ignored
+p-1-baseline,unknown,test runtime::egress_gate::tests::test_anthropic_key_blocked ... ignored,test runtime::egress_gate::tests::test_anthropic_key_blocked ... ignored
+p-1-baseline,unknown,test runtime::egress_gate::tests::test_aws_key_blocked ... ignored,test runtime::egress_gate::tests::test_aws_key_blocked ... ignored
+p-1-baseline,unknown,test runtime::egress_gate::tests::test_clean_data_passes ... ignored,test runtime::egress_gate::tests::test_clean_data_passes ... ignored
+p-1-baseline,unknown,test runtime::egress_gate::tests::test_custom_pattern ... ignored,test runtime::egress_gate::tests::test_custom_pattern ... ignored
+p-1-baseline,unknown,test runtime::egress_gate::tests::test_email_below_threshold ... ignored,test runtime::egress_gate::tests::test_email_below_threshold ... ignored
+p-1-baseline,unknown,test runtime::egress_gate::tests::test_gate_decision_fields ... ignored,test runtime::egress_gate::tests::test_gate_decision_fields ... ignored
+p-1-baseline,unknown,test runtime::egress_gate::tests::test_github_token_blocked ... ignored,test runtime::egress_gate::tests::test_github_token_blocked ... ignored
+p-1-baseline,unknown,test runtime::egress_gate::tests::test_ignored_category ... ignored,test runtime::egress_gate::tests::test_ignored_category ... ignored
+p-1-baseline,unknown,test runtime::egress_gate::tests::test_low_threshold_blocks_email ... ignored,test runtime::egress_gate::tests::test_low_threshold_blocks_email ... ignored
+p-1-baseline,unknown,test runtime::egress_gate::tests::test_multiple_findings ... ignored,test runtime::egress_gate::tests::test_multiple_findings ... ignored
+p-1-baseline,unknown,test runtime::egress_gate::tests::test_openai_key_blocked ... ignored,test runtime::egress_gate::tests::test_openai_key_blocked ... ignored
+p-1-baseline,unknown,test runtime::egress_gate::tests::test_oversized_payload_blocked ... ignored,test runtime::egress_gate::tests::test_oversized_payload_blocked ... ignored
+p-1-baseline,unknown,test runtime::egress_gate::tests::test_pattern_count ... ignored,test runtime::egress_gate::tests::test_pattern_count ... ignored
+p-1-baseline,unknown,test runtime::egress_gate::tests::test_pattern_severity_display ... ignored,test runtime::egress_gate::tests::test_pattern_severity_display ... ignored
+p-1-baseline,unknown,test runtime::egress_gate::tests::test_private_key_blocked ... ignored,test runtime::egress_gate::tests::test_private_key_blocked ... ignored
+p-1-baseline,unknown,test runtime::egress_gate::tests::test_redacted_snippet ... ignored,test runtime::egress_gate::tests::test_redacted_snippet ... ignored
+p-1-baseline,unknown,test runtime::egress_gate::tests::test_ssn_blocked ... ignored,test runtime::egress_gate::tests::test_ssn_blocked ... ignored
+p-1-baseline,unknown,test runtime::egress_gate::tests::test_stats_tracking ... ignored,test runtime::egress_gate::tests::test_stats_tracking ... ignored
+p-1-baseline,unknown,test runtime::monitor::tests::test_can_access_sensitive_path ... ignored,test runtime::monitor::tests::test_can_access_sensitive_path ... ignored
+p-1-baseline,unknown,test runtime::monitor::tests::test_check_all_empty ... ignored,test runtime::monitor::tests::test_check_all_empty ... ignored
+p-1-baseline,unknown,test runtime::monitor::tests::test_check_process_self ... ignored,test runtime::monitor::tests::test_check_process_self ... ignored
+p-1-baseline,unknown,test runtime::monitor::tests::test_check_process_self_has_checks ... ignored,test runtime::monitor::tests::test_check_process_self_has_checks ... ignored
+p-1-baseline,unknown,test runtime::monitor::tests::test_check_type_display_all ... ignored,test runtime::monitor::tests::test_check_type_display_all ... ignored
+p-1-baseline,unknown,test runtime::monitor::tests::test_is_seccomp_active_self ... ignored,test runtime::monitor::tests::test_is_seccomp_active_self ... ignored
+p-1-baseline,unknown,test runtime::monitor::tests::test_monitor_failure_count ... ignored,test runtime::monitor::tests::test_monitor_failure_count ... ignored
+p-1-baseline,unknown,test runtime::monitor::tests::test_monitor_recent_reports ... ignored,test runtime::monitor::tests::test_monitor_recent_reports ... ignored
+p-1-baseline,unknown,test runtime::monitor::tests::test_monitor_register_unregister ... ignored,test runtime::monitor::tests::test_monitor_register_unregister ... ignored
+p-1-baseline,unknown,test runtime::monitor::tests::test_namespace_check_fail_safe ... ignored,test runtime::monitor::tests::test_namespace_check_fail_safe ... ignored
+p-1-baseline,unknown,test runtime::monitor::tests::test_namespace_check_types ... ignored,test runtime::monitor::tests::test_namespace_check_types ... ignored
+p-1-baseline,unknown,test runtime::monitor::tests::test_offender_counts ... ignored,test runtime::monitor::tests::test_offender_counts ... ignored
+p-1-baseline,unknown,test runtime::monitor::tests::test_offender_default ... ignored,test runtime::monitor::tests::test_offender_default ... ignored
+p-1-baseline,unknown,test runtime::monitor::tests::test_offender_record_violation ... ignored,test runtime::monitor::tests::test_offender_record_violation ... ignored
+p-1-baseline,unknown,test runtime::monitor::tests::test_offender_reinstate ... ignored,test runtime::monitor::tests::test_offender_reinstate ... ignored
+p-1-baseline,unknown,test runtime::monitor::tests::test_offender_suspension ... ignored,test runtime::monitor::tests::test_offender_suspension ... ignored
+p-1-baseline,unknown,test runtime::monitor::tests::test_offender_top_offenders ... ignored,test runtime::monitor::tests::test_offender_top_offenders ... ignored
+p-1-baseline,unknown,test runtime::monitor::tests::test_offender_unknown_agent_trusted ... ignored,test runtime::monitor::tests::test_offender_unknown_agent_trusted ... ignored
+p-1-baseline,unknown,test runtime::monitor::tests::test_offender_violation_types_tracked ... ignored,test runtime::monitor::tests::test_offender_violation_types_tracked ... ignored
+p-1-baseline,unknown,test runtime::monitor::tests::test_read_namespace_inode_self ... ignored,test runtime::monitor::tests::test_read_namespace_inode_self ... ignored
+p-1-baseline,unknown,test runtime::monitor::tests::test_read_proc_limits_self ... ignored,test runtime::monitor::tests::test_read_proc_limits_self ... ignored
+p-1-baseline,unknown,test runtime::monitor::tests::test_record_violation_with_sigil_demotion_at_threshold ... ignored,test runtime::monitor::tests::test_record_violation_with_sigil_demotion_at_threshold ... ignored
+p-1-baseline,unknown,test runtime::monitor::tests::test_record_violation_with_sigil_demotion_only_once ... ignored,test runtime::monitor::tests::test_record_violation_with_sigil_demotion_only_once ... ignored
+p-1-baseline,unknown,test runtime::monitor::tests::test_record_violation_with_sigil_no_demotion_above_threshold ... ignored,test runtime::monitor::tests::test_record_violation_with_sigil_no_demotion_above_threshold ... ignored
+p-1-baseline,unknown,test runtime::monitor::tests::test_reinstate_nonexistent ... ignored,test runtime::monitor::tests::test_reinstate_nonexistent ... ignored
+p-1-baseline,unknown,test runtime::monitor::tests::test_sigil_demotion_threshold_constant ... ignored,test runtime::monitor::tests::test_sigil_demotion_threshold_constant ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_active_tokens ... ignored,test runtime::v2::tests::test_active_tokens ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_add_layer ... ignored,test runtime::v2::tests::test_add_layer ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_capability_custom ... ignored,test runtime::v2::tests::test_capability_custom ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_capability_file_execute ... ignored,test runtime::v2::tests::test_capability_file_execute ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_capability_gpu_access ... ignored,test runtime::v2::tests::test_capability_gpu_access ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_capability_ipc_receive ... ignored,test runtime::v2::tests::test_capability_ipc_receive ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_capability_ipc_send ... ignored,test runtime::v2::tests::test_capability_ipc_send ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_capability_network_connect ... ignored,test runtime::v2::tests::test_capability_network_connect ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_capability_process_spawn ... ignored,test runtime::v2::tests::test_capability_process_spawn ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_capability_syscall ... ignored,test runtime::v2::tests::test_capability_syscall ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_cascade_revoke_revokes_children ... ignored,test runtime::v2::tests::test_cascade_revoke_revokes_children ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_check_allowed ... ignored,test runtime::v2::tests::test_check_allowed ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_check_denied ... ignored,test runtime::v2::tests::test_check_denied ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_check_expired ... ignored,test runtime::v2::tests::test_check_expired ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_check_flow_allowed ... ignored,test runtime::v2::tests::test_check_flow_allowed ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_check_flow_blocked_downward ... ignored,test runtime::v2::tests::test_check_flow_blocked_downward ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_check_flow_unlabeled_agent ... ignored,test runtime::v2::tests::test_check_flow_unlabeled_agent ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_check_flow_unlabeled_data ... ignored,test runtime::v2::tests::test_check_flow_unlabeled_data ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_check_revoked_is_denied ... ignored,test runtime::v2::tests::test_check_revoked_is_denied ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_data_lineage ... ignored,test runtime::v2::tests::test_data_lineage ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_data_lineage_empty ... ignored,test runtime::v2::tests::test_data_lineage_empty ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_delegate_expired_parent ... ignored,test runtime::v2::tests::test_delegate_expired_parent ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_delegate_non_delegatable ... ignored,test runtime::v2::tests::test_delegate_non_delegatable ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_delegate_revoked_parent ... ignored,test runtime::v2::tests::test_delegate_revoked_parent ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_delegate_token ... ignored,test runtime::v2::tests::test_delegate_token ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_delegation_chain ... ignored,test runtime::v2::tests::test_delegation_chain ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_delegation_depth_limit ... ignored,test runtime::v2::tests::test_delegation_depth_limit ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_evaluate_all_layers_allow ... ignored,test runtime::v2::tests::test_evaluate_all_layers_allow ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_evaluate_allow ... ignored,test runtime::v2::tests::test_evaluate_allow ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_evaluate_audit ... ignored,test runtime::v2::tests::test_evaluate_audit ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_evaluate_audit_over_allow ... ignored,test runtime::v2::tests::test_evaluate_audit_over_allow ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_evaluate_deny ... ignored,test runtime::v2::tests::test_evaluate_deny ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_evaluate_most_restrictive_wins ... ignored,test runtime::v2::tests::test_evaluate_most_restrictive_wins ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_evaluate_no_match ... ignored,test runtime::v2::tests::test_evaluate_no_match ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_expired_cleanup ... ignored,test runtime::v2::tests::test_expired_cleanup ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_expired_cleanup_none_expired ... ignored,test runtime::v2::tests::test_expired_cleanup_none_expired ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_flow_event_fields ... ignored,test runtime::v2::tests::test_flow_event_fields ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_flow_policy_all_levels ... ignored,test runtime::v2::tests::test_flow_policy_all_levels ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_flow_policy_downward_blocked ... ignored,test runtime::v2::tests::test_flow_policy_downward_blocked ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_flow_policy_same_level ... ignored,test runtime::v2::tests::test_flow_policy_same_level ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_flow_policy_upward_allowed ... ignored,test runtime::v2::tests::test_flow_policy_upward_allowed ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_generate_policy_allowed ... ignored,test runtime::v2::tests::test_generate_policy_allowed ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_generate_policy_confidence ... ignored,test runtime::v2::tests::test_generate_policy_confidence ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_generate_policy_denied ... ignored,test runtime::v2::tests::test_generate_policy_denied ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_generate_policy_min_observations ... ignored,test runtime::v2::tests::test_generate_policy_min_observations ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_generate_policy_mixed ... ignored,test runtime::v2::tests::test_generate_policy_mixed ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_get_layer ... ignored,test runtime::v2::tests::test_get_layer ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_grant_capability ... ignored,test runtime::v2::tests::test_grant_capability ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_grant_with_duration ... ignored,test runtime::v2::tests::test_grant_with_duration ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_label_data ... ignored,test runtime::v2::tests::test_label_data ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_merge_disjoint ... ignored,test runtime::v2::tests::test_merge_disjoint ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_merge_empty ... ignored,test runtime::v2::tests::test_merge_empty ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_merge_overlapping_layers ... ignored,test runtime::v2::tests::test_merge_overlapping_layers ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_metrics_capability_utilization ... ignored,test runtime::v2::tests::test_metrics_capability_utilization ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_metrics_record_allowed ... ignored,test runtime::v2::tests::test_metrics_record_allowed ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_metrics_record_audit ... ignored,test runtime::v2::tests::test_metrics_record_audit ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_metrics_record_denied ... ignored,test runtime::v2::tests::test_metrics_record_denied ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_observe_collects ... ignored,test runtime::v2::tests::test_observe_collects ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_propagate_taint_mixed_known_unknown ... ignored,test runtime::v2::tests::test_propagate_taint_mixed_known_unknown ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_propagate_taint_single_source ... ignored,test runtime::v2::tests::test_propagate_taint_single_source ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_propagate_taint_takes_highest_label ... ignored,test runtime::v2::tests::test_propagate_taint_takes_highest_label ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_propagate_taint_transitive_chain ... ignored,test runtime::v2::tests::test_propagate_taint_transitive_chain ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_propagate_taint_unknown_sources_default_public ... ignored,test runtime::v2::tests::test_propagate_taint_unknown_sources_default_public ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_remove_layer ... ignored,test runtime::v2::tests::test_remove_layer ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_remove_nonexistent_layer ... ignored,test runtime::v2::tests::test_remove_nonexistent_layer ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_revoke_already_revoked ... ignored,test runtime::v2::tests::test_revoke_already_revoked ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_revoke_capability ... ignored,test runtime::v2::tests::test_revoke_capability ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_revoke_nonexistent_token ... ignored,test runtime::v2::tests::test_revoke_nonexistent_token ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_security_score_all_allowed ... ignored,test runtime::v2::tests::test_security_score_all_allowed ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_security_score_all_denied ... ignored,test runtime::v2::tests::test_security_score_all_denied ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_security_score_mixed ... ignored,test runtime::v2::tests::test_security_score_mixed ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_security_score_no_actions ... ignored,test runtime::v2::tests::test_security_score_no_actions ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_self_delegation_denied ... ignored,test runtime::v2::tests::test_self_delegation_denied ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_suggest_tightening ... ignored,test runtime::v2::tests::test_suggest_tightening ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_suggest_tightening_all_frequent ... ignored,test runtime::v2::tests::test_suggest_tightening_all_frequent ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_suggest_tightening_empty_observations ... ignored,test runtime::v2::tests::test_suggest_tightening_empty_observations ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_time_bounded_cpu_exhausted ... ignored,test runtime::v2::tests::test_time_bounded_cpu_exhausted ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_time_bounded_expired ... ignored,test runtime::v2::tests::test_time_bounded_expired ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_time_bounded_ops_exhausted ... ignored,test runtime::v2::tests::test_time_bounded_ops_exhausted ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_time_bounded_record_cpu_accumulates ... ignored,test runtime::v2::tests::test_time_bounded_record_cpu_accumulates ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_time_bounded_record_operation_increments ... ignored,test runtime::v2::tests::test_time_bounded_record_operation_increments ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_time_bounded_remaining ... ignored,test runtime::v2::tests::test_time_bounded_remaining ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_time_bounded_within_budget ... ignored,test runtime::v2::tests::test_time_bounded_within_budget ... ignored
+p-1-baseline,unknown,test runtime::v2::tests::test_tokens_for_agent ... ignored,test runtime::v2::tests::test_tokens_for_agent ... ignored
+p-1-baseline,unknown,test runtime::wasm_runtime::tests::test_wasm_agent_config_clone ... ignored,test runtime::wasm_runtime::tests::test_wasm_agent_config_clone ... ignored
+p-1-baseline,unknown,test runtime::wasm_runtime::tests::test_wasm_agent_config_custom ... ignored,test runtime::wasm_runtime::tests::test_wasm_agent_config_custom ... ignored
+p-1-baseline,unknown,test runtime::wasm_runtime::tests::test_wasm_agent_config_debug ... ignored,test runtime::wasm_runtime::tests::test_wasm_agent_config_debug ... ignored
+p-1-baseline,unknown,test runtime::wasm_runtime::tests::test_wasm_agent_config_default ... ignored,test runtime::wasm_runtime::tests::test_wasm_agent_config_default ... ignored
+p-1-baseline,unknown,test runtime::wasm_runtime::tests::test_wasm_agent_config_default_module_path_empty ... ignored,test runtime::wasm_runtime::tests::test_wasm_agent_config_default_module_path_empty ... ignored
+p-1-baseline,unknown,test runtime::wasm_runtime::tests::test_wasm_agent_config_zero_fuel ... ignored,test runtime::wasm_runtime::tests::test_wasm_agent_config_zero_fuel ... ignored
+p-1-baseline,unknown,test runtime::wasm_runtime::tests::test_wasm_agent_disabled ... ignored,test runtime::wasm_runtime::tests::test_wasm_agent_disabled ... ignored
+p-1-baseline,unknown,test runtime::wasm_runtime::tests::test_wasm_agent_load_disabled_error_message ... ignored,test runtime::wasm_runtime::tests::test_wasm_agent_load_disabled_error_message ... ignored
+p-1-baseline,unknown,test runtime::wasm_runtime::tests::test_wasm_execution_result ... ignored,test runtime::wasm_runtime::tests::test_wasm_execution_result ... ignored
+p-1-baseline,unknown,test runtime::wasm_runtime::tests::test_wasm_execution_result_debug ... ignored,test runtime::wasm_runtime::tests::test_wasm_execution_result_debug ... ignored
+p-1-baseline,unknown,test runtime::wasm_runtime::tests::test_wasm_execution_result_failure ... ignored,test runtime::wasm_runtime::tests::test_wasm_execution_result_failure ... ignored
+p-1-baseline,unknown,test runtime::wasm_runtime::tests::test_wasm_execution_result_success_no_error ... ignored,test runtime::wasm_runtime::tests::test_wasm_execution_result_success_no_error ... ignored
+p-1-baseline,unknown,test scanning::runtime::tests::bash_blocked ... ignored,test scanning::runtime::tests::bash_blocked ... ignored
+p-1-baseline,unknown,test scanning::runtime::tests::blocklist_disabled ... ignored,test scanning::runtime::tests::blocklist_disabled ... ignored
+p-1-baseline,unknown,test scanning::runtime::tests::fork_bomb_detected ... ignored,test scanning::runtime::tests::fork_bomb_detected ... ignored
+p-1-baseline,unknown,test scanning::runtime::tests::full_path_blocked ... ignored,test scanning::runtime::tests::full_path_blocked ... ignored
+p-1-baseline,unknown,test scanning::runtime::tests::guard_config_default ... ignored,test scanning::runtime::tests::guard_config_default ... ignored
+p-1-baseline,unknown,test scanning::runtime::tests::integrity_check_does_not_panic ... ignored,test scanning::runtime::tests::integrity_check_does_not_panic ... ignored
+p-1-baseline,unknown,test scanning::runtime::tests::integrity_report_serde ... ignored,test scanning::runtime::tests::integrity_report_serde ... ignored
+p-1-baseline,unknown,test scanning::runtime::tests::ls_allowed ... ignored,test scanning::runtime::tests::ls_allowed ... ignored
+p-1-baseline,unknown,test scanning::runtime::tests::normal_duration ... ignored,test scanning::runtime::tests::normal_duration ... ignored
+p-1-baseline,unknown,test scanning::runtime::tests::normal_pid_count ... ignored,test scanning::runtime::tests::normal_pid_count ... ignored
+p-1-baseline,unknown,test scanning::runtime::tests::pipe_to_shell_detected ... ignored,test scanning::runtime::tests::pipe_to_shell_detected ... ignored
+p-1-baseline,unknown,test scanning::runtime::tests::python_blocked ... ignored,test scanning::runtime::tests::python_blocked ... ignored
+p-1-baseline,unknown,test scanning::runtime::tests::safe_command_passes ... ignored,test scanning::runtime::tests::safe_command_passes ... ignored
+p-1-baseline,unknown,test scanning::runtime::tests::sensitive_path_blocked ... ignored,test scanning::runtime::tests::sensitive_path_blocked ... ignored
+p-1-baseline,unknown,test scanning::runtime::tests::shell_injection_detected ... ignored,test scanning::runtime::tests::shell_injection_detected ... ignored
+p-1-baseline,unknown,test scanning::runtime::tests::ssh_dir_blocked ... ignored,test scanning::runtime::tests::ssh_dir_blocked ... ignored
+p-1-baseline,unknown,test scanning::runtime::tests::time_anomaly_detected ... ignored,test scanning::runtime::tests::time_anomaly_detected ... ignored
+p-1-baseline,unknown,test scanning::runtime::tests::violation_type_display ... ignored,test scanning::runtime::tests::violation_type_display ... ignored
+p-1-baseline,unknown,2.1404,ns
+p-1-baseline,unknown,28.366,ns
+p-1-baseline,unknown,65284.000,µs
+p-1-baseline,unknown,162460.00,µs
+p-1-baseline,unknown,27.519,ns
+p-1-baseline,unknown,388.89,ns
+p-1-baseline,unknown,500.31,ns
+p-1-baseline,unknown,62.384,ns
+p-1-baseline,unknown,678.56,ns
+p-1-baseline,unknown,908.09,ns
+p-1-baseline,unknown,8054.6000,µs
+p-1-baseline,unknown,1080.2000,µs
+p-1-baseline,unknown,665.37,ns
+p-1-baseline,unknown,2206.0000,µs
+p-1-baseline,unknown,884.70,ns
+p-1-baseline,unknown,21573.000,µs
+p-1-baseline,unknown,                        time:   [238.73 ps 240.23 ps 242.20 ps],                        time:   [238.73 ps 240.23 ps 242.20 ps]
+p-1-baseline,unknown,3343200.0000,ms
+p-1-baseline,unknown,167.74,ns
+p-1-baseline,unknown,34.268,ns
+p-1-baseline,unknown,76.559,ns
+p-1-baseline,unknown,3212800.0000,ms
+p-1-baseline,unknown,3244000.0000,ms
+p-1-baseline,unknown,609720.00,µs
+p-1-baseline,unknown,3173100.0000,ms
+p-1-hardened,unknown,test runtime::credential_proxy::tests::test_audit_log ... ignored,test runtime::credential_proxy::tests::test_audit_log ... ignored
+p-1-hardened,unknown,test runtime::credential_proxy::tests::test_audit_log_ring_buffer ... ignored,test runtime::credential_proxy::tests::test_audit_log_ring_buffer ... ignored
+p-1-hardened,unknown,test runtime::credential_proxy::tests::test_default_config ... ignored,test runtime::credential_proxy::tests::test_default_config ... ignored
+p-1-hardened,unknown,test runtime::credential_proxy::tests::test_empty_allowlist_denies_all ... ignored,test runtime::credential_proxy::tests::test_empty_allowlist_denies_all ... ignored
+p-1-hardened,unknown,test runtime::credential_proxy::tests::test_evaluate_allowed_no_creds ... ignored,test runtime::credential_proxy::tests::test_evaluate_allowed_no_creds ... ignored
+p-1-hardened,unknown,test runtime::credential_proxy::tests::test_evaluate_allowed_with_credentials ... ignored,test runtime::credential_proxy::tests::test_evaluate_allowed_with_credentials ... ignored
+p-1-hardened,unknown,test runtime::credential_proxy::tests::test_evaluate_blocked_host ... ignored,test runtime::credential_proxy::tests::test_evaluate_blocked_host ... ignored
+p-1-hardened,unknown,test runtime::credential_proxy::tests::test_evaluate_blocked_payload_size ... ignored,test runtime::credential_proxy::tests::test_evaluate_blocked_payload_size ... ignored
+p-1-hardened,unknown,test runtime::credential_proxy::tests::test_host_matches_exact ... ignored,test runtime::credential_proxy::tests::test_host_matches_exact ... ignored
+p-1-hardened,unknown,test runtime::credential_proxy::tests::test_host_matches_star ... ignored,test runtime::credential_proxy::tests::test_host_matches_star ... ignored
+p-1-hardened,unknown,test runtime::credential_proxy::tests::test_host_matches_wildcard ... ignored,test runtime::credential_proxy::tests::test_host_matches_wildcard ... ignored
+p-1-hardened,unknown,test runtime::credential_proxy::tests::test_prepare_proxy_env_vars ... ignored,test runtime::credential_proxy::tests::test_prepare_proxy_env_vars ... ignored
+p-1-hardened,unknown,test runtime::credential_proxy::tests::test_proxy_decision_display ... ignored,test runtime::credential_proxy::tests::test_proxy_decision_display ... ignored
+p-1-hardened,unknown,test runtime::credential_proxy::tests::test_stop_proxy ... ignored,test runtime::credential_proxy::tests::test_stop_proxy ... ignored
+p-1-hardened,unknown,test runtime::credential_proxy::tests::test_wildcard_credential_injection ... ignored,test runtime::credential_proxy::tests::test_wildcard_credential_injection ... ignored
+p-1-hardened,unknown,test runtime::egress_gate::tests::test_anthropic_key_blocked ... ignored,test runtime::egress_gate::tests::test_anthropic_key_blocked ... ignored
+p-1-hardened,unknown,test runtime::egress_gate::tests::test_aws_key_blocked ... ignored,test runtime::egress_gate::tests::test_aws_key_blocked ... ignored
+p-1-hardened,unknown,test runtime::egress_gate::tests::test_clean_data_passes ... ignored,test runtime::egress_gate::tests::test_clean_data_passes ... ignored
+p-1-hardened,unknown,test runtime::egress_gate::tests::test_custom_pattern ... ignored,test runtime::egress_gate::tests::test_custom_pattern ... ignored
+p-1-hardened,unknown,test runtime::egress_gate::tests::test_email_below_threshold ... ignored,test runtime::egress_gate::tests::test_email_below_threshold ... ignored
+p-1-hardened,unknown,test runtime::egress_gate::tests::test_gate_decision_fields ... ignored,test runtime::egress_gate::tests::test_gate_decision_fields ... ignored
+p-1-hardened,unknown,test runtime::egress_gate::tests::test_github_token_blocked ... ignored,test runtime::egress_gate::tests::test_github_token_blocked ... ignored
+p-1-hardened,unknown,test runtime::egress_gate::tests::test_ignored_category ... ignored,test runtime::egress_gate::tests::test_ignored_category ... ignored
+p-1-hardened,unknown,test runtime::egress_gate::tests::test_low_threshold_blocks_email ... ignored,test runtime::egress_gate::tests::test_low_threshold_blocks_email ... ignored
+p-1-hardened,unknown,test runtime::egress_gate::tests::test_multiple_findings ... ignored,test runtime::egress_gate::tests::test_multiple_findings ... ignored
+p-1-hardened,unknown,test runtime::egress_gate::tests::test_openai_key_blocked ... ignored,test runtime::egress_gate::tests::test_openai_key_blocked ... ignored
+p-1-hardened,unknown,test runtime::egress_gate::tests::test_oversized_payload_blocked ... ignored,test runtime::egress_gate::tests::test_oversized_payload_blocked ... ignored
+p-1-hardened,unknown,test runtime::egress_gate::tests::test_pattern_count ... ignored,test runtime::egress_gate::tests::test_pattern_count ... ignored
+p-1-hardened,unknown,test runtime::egress_gate::tests::test_pattern_severity_display ... ignored,test runtime::egress_gate::tests::test_pattern_severity_display ... ignored
+p-1-hardened,unknown,test runtime::egress_gate::tests::test_private_key_blocked ... ignored,test runtime::egress_gate::tests::test_private_key_blocked ... ignored
+p-1-hardened,unknown,test runtime::egress_gate::tests::test_redacted_snippet ... ignored,test runtime::egress_gate::tests::test_redacted_snippet ... ignored
+p-1-hardened,unknown,test runtime::egress_gate::tests::test_ssn_blocked ... ignored,test runtime::egress_gate::tests::test_ssn_blocked ... ignored
+p-1-hardened,unknown,test runtime::egress_gate::tests::test_stats_tracking ... ignored,test runtime::egress_gate::tests::test_stats_tracking ... ignored
+p-1-hardened,unknown,test runtime::monitor::tests::test_can_access_sensitive_path ... ignored,test runtime::monitor::tests::test_can_access_sensitive_path ... ignored
+p-1-hardened,unknown,test runtime::monitor::tests::test_check_all_empty ... ignored,test runtime::monitor::tests::test_check_all_empty ... ignored
+p-1-hardened,unknown,test runtime::monitor::tests::test_check_process_self ... ignored,test runtime::monitor::tests::test_check_process_self ... ignored
+p-1-hardened,unknown,test runtime::monitor::tests::test_check_process_self_has_checks ... ignored,test runtime::monitor::tests::test_check_process_self_has_checks ... ignored
+p-1-hardened,unknown,test runtime::monitor::tests::test_check_type_display_all ... ignored,test runtime::monitor::tests::test_check_type_display_all ... ignored
+p-1-hardened,unknown,test runtime::monitor::tests::test_is_seccomp_active_self ... ignored,test runtime::monitor::tests::test_is_seccomp_active_self ... ignored
+p-1-hardened,unknown,test runtime::monitor::tests::test_monitor_failure_count ... ignored,test runtime::monitor::tests::test_monitor_failure_count ... ignored
+p-1-hardened,unknown,test runtime::monitor::tests::test_monitor_recent_reports ... ignored,test runtime::monitor::tests::test_monitor_recent_reports ... ignored
+p-1-hardened,unknown,test runtime::monitor::tests::test_monitor_register_unregister ... ignored,test runtime::monitor::tests::test_monitor_register_unregister ... ignored
+p-1-hardened,unknown,test runtime::monitor::tests::test_namespace_check_fail_safe ... ignored,test runtime::monitor::tests::test_namespace_check_fail_safe ... ignored
+p-1-hardened,unknown,test runtime::monitor::tests::test_namespace_check_types ... ignored,test runtime::monitor::tests::test_namespace_check_types ... ignored
+p-1-hardened,unknown,test runtime::monitor::tests::test_offender_counts ... ignored,test runtime::monitor::tests::test_offender_counts ... ignored
+p-1-hardened,unknown,test runtime::monitor::tests::test_offender_default ... ignored,test runtime::monitor::tests::test_offender_default ... ignored
+p-1-hardened,unknown,test runtime::monitor::tests::test_offender_record_violation ... ignored,test runtime::monitor::tests::test_offender_record_violation ... ignored
+p-1-hardened,unknown,test runtime::monitor::tests::test_offender_reinstate ... ignored,test runtime::monitor::tests::test_offender_reinstate ... ignored
+p-1-hardened,unknown,test runtime::monitor::tests::test_offender_suspension ... ignored,test runtime::monitor::tests::test_offender_suspension ... ignored
+p-1-hardened,unknown,test runtime::monitor::tests::test_offender_top_offenders ... ignored,test runtime::monitor::tests::test_offender_top_offenders ... ignored
+p-1-hardened,unknown,test runtime::monitor::tests::test_offender_unknown_agent_trusted ... ignored,test runtime::monitor::tests::test_offender_unknown_agent_trusted ... ignored
+p-1-hardened,unknown,test runtime::monitor::tests::test_offender_violation_types_tracked ... ignored,test runtime::monitor::tests::test_offender_violation_types_tracked ... ignored
+p-1-hardened,unknown,test runtime::monitor::tests::test_read_namespace_inode_self ... ignored,test runtime::monitor::tests::test_read_namespace_inode_self ... ignored
+p-1-hardened,unknown,test runtime::monitor::tests::test_read_proc_limits_self ... ignored,test runtime::monitor::tests::test_read_proc_limits_self ... ignored
+p-1-hardened,unknown,test runtime::monitor::tests::test_record_violation_with_sigil_demotion_at_threshold ... ignored,test runtime::monitor::tests::test_record_violation_with_sigil_demotion_at_threshold ... ignored
+p-1-hardened,unknown,test runtime::monitor::tests::test_record_violation_with_sigil_demotion_only_once ... ignored,test runtime::monitor::tests::test_record_violation_with_sigil_demotion_only_once ... ignored
+p-1-hardened,unknown,test runtime::monitor::tests::test_record_violation_with_sigil_no_demotion_above_threshold ... ignored,test runtime::monitor::tests::test_record_violation_with_sigil_no_demotion_above_threshold ... ignored
+p-1-hardened,unknown,test runtime::monitor::tests::test_reinstate_nonexistent ... ignored,test runtime::monitor::tests::test_reinstate_nonexistent ... ignored
+p-1-hardened,unknown,test runtime::monitor::tests::test_sigil_demotion_threshold_constant ... ignored,test runtime::monitor::tests::test_sigil_demotion_threshold_constant ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_active_tokens ... ignored,test runtime::v2::tests::test_active_tokens ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_add_layer ... ignored,test runtime::v2::tests::test_add_layer ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_capability_custom ... ignored,test runtime::v2::tests::test_capability_custom ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_capability_file_execute ... ignored,test runtime::v2::tests::test_capability_file_execute ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_capability_gpu_access ... ignored,test runtime::v2::tests::test_capability_gpu_access ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_capability_ipc_receive ... ignored,test runtime::v2::tests::test_capability_ipc_receive ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_capability_ipc_send ... ignored,test runtime::v2::tests::test_capability_ipc_send ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_capability_network_connect ... ignored,test runtime::v2::tests::test_capability_network_connect ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_capability_process_spawn ... ignored,test runtime::v2::tests::test_capability_process_spawn ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_capability_syscall ... ignored,test runtime::v2::tests::test_capability_syscall ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_cascade_revoke_revokes_children ... ignored,test runtime::v2::tests::test_cascade_revoke_revokes_children ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_check_allowed ... ignored,test runtime::v2::tests::test_check_allowed ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_check_denied ... ignored,test runtime::v2::tests::test_check_denied ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_check_expired ... ignored,test runtime::v2::tests::test_check_expired ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_check_flow_allowed ... ignored,test runtime::v2::tests::test_check_flow_allowed ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_check_flow_blocked_downward ... ignored,test runtime::v2::tests::test_check_flow_blocked_downward ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_check_flow_unlabeled_agent ... ignored,test runtime::v2::tests::test_check_flow_unlabeled_agent ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_check_flow_unlabeled_data ... ignored,test runtime::v2::tests::test_check_flow_unlabeled_data ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_check_revoked_is_denied ... ignored,test runtime::v2::tests::test_check_revoked_is_denied ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_data_lineage ... ignored,test runtime::v2::tests::test_data_lineage ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_data_lineage_empty ... ignored,test runtime::v2::tests::test_data_lineage_empty ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_delegate_expired_parent ... ignored,test runtime::v2::tests::test_delegate_expired_parent ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_delegate_non_delegatable ... ignored,test runtime::v2::tests::test_delegate_non_delegatable ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_delegate_revoked_parent ... ignored,test runtime::v2::tests::test_delegate_revoked_parent ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_delegate_token ... ignored,test runtime::v2::tests::test_delegate_token ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_delegation_chain ... ignored,test runtime::v2::tests::test_delegation_chain ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_delegation_depth_limit ... ignored,test runtime::v2::tests::test_delegation_depth_limit ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_evaluate_all_layers_allow ... ignored,test runtime::v2::tests::test_evaluate_all_layers_allow ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_evaluate_allow ... ignored,test runtime::v2::tests::test_evaluate_allow ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_evaluate_audit ... ignored,test runtime::v2::tests::test_evaluate_audit ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_evaluate_audit_over_allow ... ignored,test runtime::v2::tests::test_evaluate_audit_over_allow ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_evaluate_deny ... ignored,test runtime::v2::tests::test_evaluate_deny ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_evaluate_most_restrictive_wins ... ignored,test runtime::v2::tests::test_evaluate_most_restrictive_wins ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_evaluate_no_match ... ignored,test runtime::v2::tests::test_evaluate_no_match ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_expired_cleanup ... ignored,test runtime::v2::tests::test_expired_cleanup ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_expired_cleanup_none_expired ... ignored,test runtime::v2::tests::test_expired_cleanup_none_expired ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_flow_event_fields ... ignored,test runtime::v2::tests::test_flow_event_fields ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_flow_policy_all_levels ... ignored,test runtime::v2::tests::test_flow_policy_all_levels ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_flow_policy_downward_blocked ... ignored,test runtime::v2::tests::test_flow_policy_downward_blocked ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_flow_policy_same_level ... ignored,test runtime::v2::tests::test_flow_policy_same_level ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_flow_policy_upward_allowed ... ignored,test runtime::v2::tests::test_flow_policy_upward_allowed ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_generate_policy_allowed ... ignored,test runtime::v2::tests::test_generate_policy_allowed ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_generate_policy_confidence ... ignored,test runtime::v2::tests::test_generate_policy_confidence ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_generate_policy_denied ... ignored,test runtime::v2::tests::test_generate_policy_denied ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_generate_policy_min_observations ... ignored,test runtime::v2::tests::test_generate_policy_min_observations ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_generate_policy_mixed ... ignored,test runtime::v2::tests::test_generate_policy_mixed ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_get_layer ... ignored,test runtime::v2::tests::test_get_layer ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_grant_capability ... ignored,test runtime::v2::tests::test_grant_capability ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_grant_with_duration ... ignored,test runtime::v2::tests::test_grant_with_duration ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_label_data ... ignored,test runtime::v2::tests::test_label_data ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_merge_disjoint ... ignored,test runtime::v2::tests::test_merge_disjoint ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_merge_empty ... ignored,test runtime::v2::tests::test_merge_empty ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_merge_overlapping_layers ... ignored,test runtime::v2::tests::test_merge_overlapping_layers ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_metrics_capability_utilization ... ignored,test runtime::v2::tests::test_metrics_capability_utilization ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_metrics_record_allowed ... ignored,test runtime::v2::tests::test_metrics_record_allowed ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_metrics_record_audit ... ignored,test runtime::v2::tests::test_metrics_record_audit ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_metrics_record_denied ... ignored,test runtime::v2::tests::test_metrics_record_denied ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_observe_collects ... ignored,test runtime::v2::tests::test_observe_collects ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_propagate_taint_mixed_known_unknown ... ignored,test runtime::v2::tests::test_propagate_taint_mixed_known_unknown ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_propagate_taint_single_source ... ignored,test runtime::v2::tests::test_propagate_taint_single_source ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_propagate_taint_takes_highest_label ... ignored,test runtime::v2::tests::test_propagate_taint_takes_highest_label ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_propagate_taint_transitive_chain ... ignored,test runtime::v2::tests::test_propagate_taint_transitive_chain ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_propagate_taint_unknown_sources_default_public ... ignored,test runtime::v2::tests::test_propagate_taint_unknown_sources_default_public ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_remove_layer ... ignored,test runtime::v2::tests::test_remove_layer ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_remove_nonexistent_layer ... ignored,test runtime::v2::tests::test_remove_nonexistent_layer ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_revoke_already_revoked ... ignored,test runtime::v2::tests::test_revoke_already_revoked ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_revoke_capability ... ignored,test runtime::v2::tests::test_revoke_capability ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_revoke_nonexistent_token ... ignored,test runtime::v2::tests::test_revoke_nonexistent_token ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_security_score_all_allowed ... ignored,test runtime::v2::tests::test_security_score_all_allowed ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_security_score_all_denied ... ignored,test runtime::v2::tests::test_security_score_all_denied ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_security_score_mixed ... ignored,test runtime::v2::tests::test_security_score_mixed ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_security_score_no_actions ... ignored,test runtime::v2::tests::test_security_score_no_actions ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_self_delegation_denied ... ignored,test runtime::v2::tests::test_self_delegation_denied ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_suggest_tightening ... ignored,test runtime::v2::tests::test_suggest_tightening ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_suggest_tightening_all_frequent ... ignored,test runtime::v2::tests::test_suggest_tightening_all_frequent ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_suggest_tightening_empty_observations ... ignored,test runtime::v2::tests::test_suggest_tightening_empty_observations ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_time_bounded_cpu_exhausted ... ignored,test runtime::v2::tests::test_time_bounded_cpu_exhausted ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_time_bounded_expired ... ignored,test runtime::v2::tests::test_time_bounded_expired ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_time_bounded_ops_exhausted ... ignored,test runtime::v2::tests::test_time_bounded_ops_exhausted ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_time_bounded_record_cpu_accumulates ... ignored,test runtime::v2::tests::test_time_bounded_record_cpu_accumulates ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_time_bounded_record_operation_increments ... ignored,test runtime::v2::tests::test_time_bounded_record_operation_increments ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_time_bounded_remaining ... ignored,test runtime::v2::tests::test_time_bounded_remaining ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_time_bounded_within_budget ... ignored,test runtime::v2::tests::test_time_bounded_within_budget ... ignored
+p-1-hardened,unknown,test runtime::v2::tests::test_tokens_for_agent ... ignored,test runtime::v2::tests::test_tokens_for_agent ... ignored
+p-1-hardened,unknown,test runtime::wasm_runtime::tests::test_wasm_agent_config_clone ... ignored,test runtime::wasm_runtime::tests::test_wasm_agent_config_clone ... ignored
+p-1-hardened,unknown,test runtime::wasm_runtime::tests::test_wasm_agent_config_custom ... ignored,test runtime::wasm_runtime::tests::test_wasm_agent_config_custom ... ignored
+p-1-hardened,unknown,test runtime::wasm_runtime::tests::test_wasm_agent_config_debug ... ignored,test runtime::wasm_runtime::tests::test_wasm_agent_config_debug ... ignored
+p-1-hardened,unknown,test runtime::wasm_runtime::tests::test_wasm_agent_config_default ... ignored,test runtime::wasm_runtime::tests::test_wasm_agent_config_default ... ignored
+p-1-hardened,unknown,test runtime::wasm_runtime::tests::test_wasm_agent_config_default_module_path_empty ... ignored,test runtime::wasm_runtime::tests::test_wasm_agent_config_default_module_path_empty ... ignored
+p-1-hardened,unknown,test runtime::wasm_runtime::tests::test_wasm_agent_config_zero_fuel ... ignored,test runtime::wasm_runtime::tests::test_wasm_agent_config_zero_fuel ... ignored
+p-1-hardened,unknown,test runtime::wasm_runtime::tests::test_wasm_agent_disabled ... ignored,test runtime::wasm_runtime::tests::test_wasm_agent_disabled ... ignored
+p-1-hardened,unknown,test runtime::wasm_runtime::tests::test_wasm_agent_load_disabled_error_message ... ignored,test runtime::wasm_runtime::tests::test_wasm_agent_load_disabled_error_message ... ignored
+p-1-hardened,unknown,test runtime::wasm_runtime::tests::test_wasm_execution_result ... ignored,test runtime::wasm_runtime::tests::test_wasm_execution_result ... ignored
+p-1-hardened,unknown,test runtime::wasm_runtime::tests::test_wasm_execution_result_debug ... ignored,test runtime::wasm_runtime::tests::test_wasm_execution_result_debug ... ignored
+p-1-hardened,unknown,test runtime::wasm_runtime::tests::test_wasm_execution_result_failure ... ignored,test runtime::wasm_runtime::tests::test_wasm_execution_result_failure ... ignored
+p-1-hardened,unknown,test runtime::wasm_runtime::tests::test_wasm_execution_result_success_no_error ... ignored,test runtime::wasm_runtime::tests::test_wasm_execution_result_success_no_error ... ignored
+p-1-hardened,unknown,test scanning::runtime::tests::bash_blocked ... ignored,test scanning::runtime::tests::bash_blocked ... ignored
+p-1-hardened,unknown,test scanning::runtime::tests::blocklist_disabled ... ignored,test scanning::runtime::tests::blocklist_disabled ... ignored
+p-1-hardened,unknown,test scanning::runtime::tests::fork_bomb_detected ... ignored,test scanning::runtime::tests::fork_bomb_detected ... ignored
+p-1-hardened,unknown,test scanning::runtime::tests::full_path_blocked ... ignored,test scanning::runtime::tests::full_path_blocked ... ignored
+p-1-hardened,unknown,test scanning::runtime::tests::guard_config_default ... ignored,test scanning::runtime::tests::guard_config_default ... ignored
+p-1-hardened,unknown,test scanning::runtime::tests::integrity_check_does_not_panic ... ignored,test scanning::runtime::tests::integrity_check_does_not_panic ... ignored
+p-1-hardened,unknown,test scanning::runtime::tests::integrity_report_serde ... ignored,test scanning::runtime::tests::integrity_report_serde ... ignored
+p-1-hardened,unknown,test scanning::runtime::tests::ls_allowed ... ignored,test scanning::runtime::tests::ls_allowed ... ignored
+p-1-hardened,unknown,test scanning::runtime::tests::normal_duration ... ignored,test scanning::runtime::tests::normal_duration ... ignored
+p-1-hardened,unknown,test scanning::runtime::tests::normal_pid_count ... ignored,test scanning::runtime::tests::normal_pid_count ... ignored
+p-1-hardened,unknown,test scanning::runtime::tests::pipe_to_shell_detected ... ignored,test scanning::runtime::tests::pipe_to_shell_detected ... ignored
+p-1-hardened,unknown,test scanning::runtime::tests::python_blocked ... ignored,test scanning::runtime::tests::python_blocked ... ignored
+p-1-hardened,unknown,test scanning::runtime::tests::safe_command_passes ... ignored,test scanning::runtime::tests::safe_command_passes ... ignored
+p-1-hardened,unknown,test scanning::runtime::tests::sensitive_path_blocked ... ignored,test scanning::runtime::tests::sensitive_path_blocked ... ignored
+p-1-hardened,unknown,test scanning::runtime::tests::shell_injection_detected ... ignored,test scanning::runtime::tests::shell_injection_detected ... ignored
+p-1-hardened,unknown,test scanning::runtime::tests::ssh_dir_blocked ... ignored,test scanning::runtime::tests::ssh_dir_blocked ... ignored
+p-1-hardened,unknown,test scanning::runtime::tests::time_anomaly_detected ... ignored,test scanning::runtime::tests::time_anomaly_detected ... ignored
+p-1-hardened,unknown,test scanning::runtime::tests::violation_type_display ... ignored,test scanning::runtime::tests::violation_type_display ... ignored
+p-1-hardened,unknown,2.4368,ns
+p-1-hardened,unknown,36.948,ns
+p-1-hardened,unknown,62687.000,µs
+p-1-hardened,unknown,161710.00,µs
+p-1-hardened,unknown,28.672,ns
+p-1-hardened,unknown,418.06,ns
+p-1-hardened,unknown,536.85,ns
+p-1-hardened,unknown,67.461,ns
+p-1-hardened,unknown,639.70,ns
+p-1-hardened,unknown,905.14,ns
+p-1-hardened,unknown,8178.5000,µs
+p-1-hardened,unknown,1111.5000,µs
+p-1-hardened,unknown,894.02,ns
+p-1-hardened,unknown,2692.0000,µs
+p-1-hardened,unknown,1029.8000,µs
+p-1-hardened,unknown,24091.000,µs
+p-1-hardened,unknown,                        time:   [251.38 ps 252.46 ps 253.64 ps],                        time:   [251.38 ps 252.46 ps 253.64 ps]
+p-1-hardened,unknown,3566000.0000,ms
+p-1-hardened,unknown,175.97,ns
+p-1-hardened,unknown,39.262,ns
+p-1-hardened,unknown,81.447,ns
+p-1-hardened,unknown,3317900.0000,ms
+p-1-hardened,unknown,3439700.0000,ms
+p-1-hardened,unknown,601650.00,µs
+p-1-hardened,unknown,3335000.0000,ms
