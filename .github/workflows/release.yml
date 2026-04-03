@@ -53,7 +53,11 @@ jobs:
           VERSION=$(cat VERSION | tr -d '[:space:]')
           ARCHIVE="kavach-${VERSION}-${{ matrix.name }}.tar.gz"
           tar czf "${ARCHIVE}" -C target/${{ matrix.target }}/release kavach
-          sha256sum "${ARCHIVE}" > "${ARCHIVE}.sha256"
+          if command -v sha256sum &>/dev/null; then
+            sha256sum "${ARCHIVE}" > "${ARCHIVE}.sha256"
+          else
+            shasum -a 256 "${ARCHIVE}" > "${ARCHIVE}.sha256"
+          fi
         shell: bash
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -63,13 +67,12 @@ jobs:
             kavach-*.tar.gz
             kavach-*.tar.gz.sha256
 
-  publish:
-    name: Publish to crates.io
+  verify:
+    name: Verify version consistency
     runs-on: ubuntu-latest
-    needs: [ci, build]
+    needs: [ci]
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
       - name: Verify version consistency
         run: |
           FILE_VERSION=$(cat VERSION | tr -d '[:space:]')
@@ -84,15 +87,11 @@ jobs:
             exit 1
           fi
           echo "Version verified: $TAG_VERSION"
-      - name: Publish
-        run: cargo publish
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
   release:
     name: Create GitHub Release
     runs-on: ubuntu-latest
-    needs: [ci, build, publish]
+    needs: [ci, build, verify]
     steps:
       - uses: actions/checkout@v4
       - name: Download artifacts
