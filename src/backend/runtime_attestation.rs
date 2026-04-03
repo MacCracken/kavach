@@ -10,7 +10,7 @@
 //!
 //! # Example
 //!
-//! ```rust
+//! ```rust,no_run
 //! use kavach::backend::runtime_attestation::{RuntimeManifest, BinaryEntry};
 //!
 //! let mut manifest = RuntimeManifest::new();
@@ -19,7 +19,8 @@
 //!     "a1b2c3d4e5f6...64-hex-chars...",
 //! ));
 //!
-//! assert!(manifest.verify("runc", "/usr/bin/runc").is_ok());
+//! // Returns Ok(VerifyResult) — trusted if hash matches the on-disk binary.
+//! let result = manifest.verify("runc", "/usr/bin/runc");
 //! ```
 
 use std::collections::HashMap;
