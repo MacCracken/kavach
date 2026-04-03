@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 
 #[cfg(target_os = "linux")]
-use nix::libc;
+use libc;
 #[cfg(target_os = "linux")]
 use seccompiler::{BpfProgram, SeccompAction, SeccompFilter, SeccompRule};
 

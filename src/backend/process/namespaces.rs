@@ -1,10 +1,10 @@
 //! Linux namespace isolation — PID, mount, network, user namespaces.
 //!
-//! Uses `nix::sched::unshare()` to create new namespaces in the child
+//! Uses `rustix::thread::unshare()` to create new namespaces in the child
 //! process's `pre_exec` hook.
 
 #[cfg(target_os = "linux")]
-use nix::sched::{CloneFlags, unshare};
+use rustix::thread::UnshareFlags;
 
 use crate::policy::SandboxPolicy;
 
@@ -51,22 +51,22 @@ impl NamespaceConfig {
         self.new_pid || self.new_mount || self.new_net || self.new_user
     }
 
-    /// Build clone flags from configuration.
+    /// Build unshare flags from configuration.
     #[cfg(target_os = "linux")]
     #[must_use]
-    pub fn clone_flags(&self) -> CloneFlags {
-        let mut flags = CloneFlags::empty();
+    pub fn unshare_flags(&self) -> UnshareFlags {
+        let mut flags = UnshareFlags::empty();
         if self.new_pid {
-            flags |= CloneFlags::CLONE_NEWPID;
+            flags |= UnshareFlags::NEWPID;
         }
         if self.new_mount {
-            flags |= CloneFlags::CLONE_NEWNS;
+            flags |= UnshareFlags::NEWNS;
         }
         if self.new_net {
-            flags |= CloneFlags::CLONE_NEWNET;
+            flags |= UnshareFlags::NEWNET;
         }
         if self.new_user {
-            flags |= CloneFlags::CLONE_NEWUSER;
+            flags |= UnshareFlags::NEWUSER;
         }
         flags
     }
@@ -84,8 +84,10 @@ pub fn apply_namespaces(config: &NamespaceConfig) -> crate::Result<()> {
         return Ok(());
     }
 
-    let flags = config.clone_flags();
-    unshare(flags)
+    let flags = config.unshare_flags();
+    // SAFETY: Called in pre_exec context (single-threaded after fork, before exec).
+    // No other threads exist in this process at this point.
+    unsafe { rustix::thread::unshare_unsafe(flags) }
         .map_err(|e| crate::KavachError::ExecFailed(format!("namespace unshare failed: {e}")))?;
 
     // Write UID/GID maps for user namespace — maps current user to root inside.
@@ -206,7 +208,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn clone_flags_all() {
+    fn unshare_flags_all() {
         let config = NamespaceConfig {
             new_pid: true,
             new_mount: true,
@@ -215,11 +217,11 @@ mod tests {
             host_uid: 1000,
             host_gid: 1000,
         };
-        let flags = config.clone_flags();
-        assert!(flags.contains(CloneFlags::CLONE_NEWPID));
-        assert!(flags.contains(CloneFlags::CLONE_NEWNS));
-        assert!(flags.contains(CloneFlags::CLONE_NEWNET));
-        assert!(flags.contains(CloneFlags::CLONE_NEWUSER));
+        let flags = config.unshare_flags();
+        assert!(flags.contains(UnshareFlags::NEWPID));
+        assert!(flags.contains(UnshareFlags::NEWNS));
+        assert!(flags.contains(UnshareFlags::NEWNET));
+        assert!(flags.contains(UnshareFlags::NEWUSER));
     }
 
     #[test]
@@ -235,7 +237,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn clone_flags_partial() {
+    fn unshare_flags_partial() {
         let config = NamespaceConfig {
             new_pid: true,
             new_mount: false,
@@ -244,10 +246,10 @@ mod tests {
             host_uid: 1000,
             host_gid: 1000,
         };
-        let flags = config.clone_flags();
-        assert!(flags.contains(CloneFlags::CLONE_NEWPID));
-        assert!(!flags.contains(CloneFlags::CLONE_NEWNS));
-        assert!(!flags.contains(CloneFlags::CLONE_NEWNET));
-        assert!(flags.contains(CloneFlags::CLONE_NEWUSER));
+        let flags = config.unshare_flags();
+        assert!(flags.contains(UnshareFlags::NEWPID));
+        assert!(!flags.contains(UnshareFlags::NEWNS));
+        assert!(!flags.contains(UnshareFlags::NEWNET));
+        assert!(flags.contains(UnshareFlags::NEWUSER));
     }
 }

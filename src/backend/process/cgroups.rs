@@ -112,11 +112,11 @@ impl CgroupScope {
         // Kill any remaining processes
         if let Ok(procs) = std::fs::read_to_string(self.path.join("cgroup.procs")) {
             for line in procs.lines() {
-                if let Ok(pid) = line.trim().parse::<i32>() {
-                    let _ = nix::sys::signal::kill(
-                        nix::unistd::Pid::from_raw(pid),
-                        nix::sys::signal::Signal::SIGKILL,
-                    );
+                if let Ok(pid) = line.trim().parse::<i32>()
+                    && let Some(target) = rustix::process::Pid::from_raw(pid)
+                    && let Some(sig) = rustix::process::Signal::from_named_raw(libc::SIGKILL)
+                {
+                    let _ = rustix::process::kill_process(target, sig);
                 }
             }
         }
@@ -161,17 +161,29 @@ pub fn apply_rlimits(policy: &SandboxPolicy) -> crate::Result<()> {
 /// Apply resource limits from raw values (avoids cloning SandboxPolicy).
 #[cfg(target_os = "linux")]
 pub fn apply_rlimits_raw(memory_limit_mb: Option<u64>, max_pids: Option<u32>) -> crate::Result<()> {
-    use nix::sys::resource::{Resource, setrlimit};
+    use rustix::process::{Resource, Rlimit, setrlimit};
 
     if let Some(mb) = memory_limit_mb {
         let bytes = mb * 1024 * 1024;
-        setrlimit(Resource::RLIMIT_AS, bytes, bytes)
-            .map_err(|e| crate::KavachError::ExecFailed(format!("setrlimit AS: {e}")))?;
+        setrlimit(
+            Resource::As,
+            Rlimit {
+                current: Some(bytes),
+                maximum: Some(bytes),
+            },
+        )
+        .map_err(|e| crate::KavachError::ExecFailed(format!("setrlimit AS: {e}")))?;
     }
 
     if let Some(pids) = max_pids {
-        setrlimit(Resource::RLIMIT_NPROC, pids as u64, pids as u64)
-            .map_err(|e| crate::KavachError::ExecFailed(format!("setrlimit NPROC: {e}")))?;
+        setrlimit(
+            Resource::Nproc,
+            Rlimit {
+                current: Some(pids as u64),
+                maximum: Some(pids as u64),
+            },
+        )
+        .map_err(|e| crate::KavachError::ExecFailed(format!("setrlimit NPROC: {e}")))?;
     }
 
     Ok(())

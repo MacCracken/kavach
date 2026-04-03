@@ -266,8 +266,7 @@ impl GVisorBackend {
         let spec_path = bundle_dir.join("config.json");
         std::fs::write(
             &spec_path,
-            serde_json::to_string_pretty(&spec)
-                .map_err(std::io::Error::other)?,
+            serde_json::to_string_pretty(&spec).map_err(std::io::Error::other)?,
         )?;
 
         // Create minimal rootfs
@@ -655,8 +654,7 @@ impl FirecrackerBackend {
         let config_path = vm_dir.join("vm-config.json");
         std::fs::write(
             &config_path,
-            serde_json::to_string_pretty(&vm_config)
-                .map_err(std::io::Error::other)?,
+            serde_json::to_string_pretty(&vm_config).map_err(std::io::Error::other)?,
         )?;
 
         let socket_path = self.work_dir.join(format!("{}.sock", vm_id));
