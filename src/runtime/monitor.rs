@@ -769,13 +769,15 @@ mod tests {
         assert!(!active);
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn test_read_namespace_inode_self() {
         let inode = read_namespace_inode(std::process::id(), "pid");
-        // Should be readable for our own process
+        // Should be readable for our own process on Linux
         assert!(inode.is_some());
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn test_read_proc_limits_self() {
         let limits = read_proc_limits(std::process::id());
