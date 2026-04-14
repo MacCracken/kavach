@@ -6,25 +6,122 @@ Completed items are in [CHANGELOG.md](../../CHANGELOG.md).
 
 ---
 
-## Advanced isolation
+## Foreign Platform Containers
+
+**Goal**: Run Windows, macOS, and Linux applications inside AGNOS without surrendering sovereignty. The foreign OS runs as a fully sandboxed guest — kavach controls every boundary.
+
+### Architecture
+
+```
+AGNOS (sovereign host — 184KB foundation)
+  └── kavach (sandbox boundary — nothing escapes)
+       └── stiva (container/VM runtime)
+            ├── Windows guest (their apps, their rules, your sandbox)
+            ├── macOS guest (their apps, their rules, your sandbox)
+            └── Linux guest (Debian, Ubuntu, etc. — contained)
+```
+
+### Sandbox Tiers
+
+| Tier | Isolation | Use Case |
+|------|-----------|----------|
+| **basic** | seccomp + Landlock | Native AGNOS apps (trusted) |
+| **standard** | + network isolation + credential proxy | Marketplace apps |
+| **strict** | + Firecracker microVM | Untrusted code, agent sandboxes |
+| **foreign** | + full VM (guest OS) | Windows/macOS/Linux applications |
+
+### Foreign Container Capabilities
+
+| Capability | Implementation | Notes |
+|------------|---------------|-------|
+| **Network** | nein firewall rules per container | Guest gets explicit allowlist, not blanket access |
+| **Filesystem** | kavach mount policy | Guest sees only what you share — explicit directory passthrough |
+| **Clipboard** | Explicit copy bridge | Data transfer audited by libro, opt-in per session |
+| **USB/devices** | Selective passthrough | Per-device, per-session, revocable |
+| **Display** | Wayland passthrough via aethersafha | Guest windows appear as native AGNOS windows |
+| **Audio** | PipeWire passthrough via dhvani | Guest audio routed through AGNOS audio stack |
+| **GPU** | GPU passthrough or virtio-gpu | For graphics-heavy apps (Photoshop, games) |
+| **Scanning** | phylax on all boundary crossings | Files entering/leaving the container are scanned |
+| **Audit** | libro logs all container events | Every file transfer, network request, device access logged |
+| **Identity** | sigil — guest never sees host keys | Container has its own identity scope |
+| **Economy** | vinimaya — container can transact if permitted | Licensed apps can phone home, metered |
+
+### What the Guest CANNOT Access
+
+- AGNOS host filesystem (only explicit mounts)
+- sigil keys or trust chain
+- mudra tokens or vinimaya accounts
+- Other containers (isolation between guests)
+- Host process list or system state
+- Hardware directly (unless explicitly passed through)
+- Any information about the host beyond what is shared
+
+### Use Cases
+
+| Scenario | Container Type | Why |
+|----------|---------------|-----|
+| Need Photoshop | macOS foreign container | Run it without macOS owning your machine |
+| Need Visual Studio | Windows foreign container | Development tools without Windows |
+| Need a specific Linux tool | Linux foreign container | Use Debian/Ubuntu packages without switching distros |
+| Gaming (Windows-only) | Windows foreign + GPU passthrough | Play without dual-booting |
+| Legacy enterprise app | Windows foreign | Corporate software doesn't dictate your OS |
+| Testing | Any foreign | Test AGNOS apps against other platforms |
+
+### Roadmap
+
+| # | Item | Priority | Notes |
+|---|------|----------|-------|
+| 1 | VM backend in kavach (QEMU/KVM) | High | SandboxBackend trait implementation for full VM isolation |
+| 2 | Windows guest support | High | QEMU + virtio drivers, SPICE/RDP display |
+| 3 | macOS guest support | Medium | Requires Apple hardware for legal compliance, or Hackintosh-style (grey area) |
+| 4 | Linux guest support | High | Simplest — same kernel family, virtio native |
+| 5 | Display integration (aethersafha) | High | Guest windows composited as native AGNOS surfaces |
+| 6 | Audio integration (dhvani/PipeWire) | Medium | Guest audio routed through host audio stack |
+| 7 | Filesystem sharing policy | High | Explicit mount points, read-only default, write requires kavach approval |
+| 8 | Clipboard bridge | Medium | Opt-in, audited, directional (guest→host requires confirmation) |
+| 9 | USB passthrough | Medium | Per-device, per-session, revocable via kavach policy |
+| 10 | GPU passthrough | Medium | VFIO for dedicated GPU, virtio-gpu for shared |
+| 11 | phylax boundary scanning | High | All files crossing container boundary scanned for threats |
+| 12 | libro container audit | High | Complete audit trail of all container activity |
+| 13 | agnoshi intents | Low | "open photoshop" → launches macOS container + app |
+| 14 | Container snapshots | Medium | Save/restore container state (kavach checkpoint) |
+| 15 | Container templates | Low | Pre-configured Windows/macOS/Linux templates in mela |
+
+### The Embassy Model
+
+Foreign containers are digital embassies. The guest OS operates under its own rules inside its allocated space. But the space is on AGNOS sovereign land, surrounded by AGNOS walls (kavach), monitored by AGNOS guards (phylax), logged by AGNOS records (libro), and subject to AGNOS law (nein firewall policy).
+
+The guest has autonomy within its borders. It has no authority beyond them.
+
+---
+
+## Advanced Isolation
 
 - [ ] Nested sandboxes (sandbox within sandbox)
 - [ ] Sandbox migration (checkpoint on node A, restore on node B)
 - [ ] Live sandbox inspection (debug attach without breaking isolation)
 - [ ] Deterministic execution (same input → same output, bit-for-bit)
 
-## Cross-platform porting
+## Cross-Platform Backend Porting
 
-- [ ] macOS: App Sandbox / sandbox-exec
-- [ ] Windows: AppContainer + Hyper-V
-- [ ] Cross-platform: platform-specific policy enforcement behind SandboxBackend trait
+- [ ] macOS: App Sandbox / sandbox-exec (for AGNOS apps on macOS — reverse direction)
+- [ ] Windows: AppContainer + Hyper-V (for AGNOS apps on Windows — reverse direction)
 - [ ] FreeBSD jails
+- [ ] Cross-platform: platform-specific policy enforcement behind SandboxBackend trait
+
+## Polymorphic Defense Integration
+
+- [ ] kavach sandbox policy includes deployment seed (from Cyrius `--poly-seed`)
+- [ ] Each sandboxed deployment runs a structurally unique binary
+- [ ] Sandbox attestation includes (binary hash + poly-seed) signed by sigil
+- [ ] See Cyrius roadmap Phase 13 for full polymorphic codegen plan
 
 ---
 
-## Non-goals
+## Non-Goals
 
-- **Container orchestration** — kavach is a sandbox primitive, not Kubernetes
-- **Image registry** — kavach doesn't store or distribute images
-- **Network proxy** — kavach sets network policy, doesn't route traffic
-- **Secret storage** — kavach injects secrets, doesn't store them
+- **Container orchestration** — kavach is a sandbox primitive, not Kubernetes. Use daimon for orchestration
+- **Image registry** — kavach doesn't store or distribute images. Use mela/ark
+- **Network proxy** — kavach sets network policy, doesn't route traffic. Use nein
+- **Secret storage** — kavach injects secrets, doesn't store them. Use sigil
+- **Replacing the guest OS** — the foreign container runs their OS unmodified. kavach controls the boundary, not the interior
