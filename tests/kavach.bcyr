@@ -1,10 +1,270 @@
-# kavach benchmarks
+# kavach benchmarks — compared against the Rust v1.x baseline at
+# benches/BENCHMARK_HISTORY.md. Each bench mirrors a Rust entry by name
+# so benchmarks-rust-v-cyrius.md can line them up.
 
-fn bench_noop() { return 0; }
+include "src/util.cyr"
+include "src/error.cyr"
+include "src/backend.cyr"
+include "src/policy.cyr"
+include "src/scoring.cyr"
+include "src/lifecycle.cyr"
+include "src/scanning_types.cyr"
+include "src/scanning_secrets.cyr"
+include "src/scanning_code.cyr"
+include "src/scanning_data.cyr"
+include "src/scanning_gate.cyr"
+include "src/scanning_runtime.cyr"
+include "src/scanning_threat.cyr"
+include "src/audit.cyr"
+include "src/credential.cyr"
+include "src/quarantine.cyr"
+include "src/oci_spec.cyr"
+include "src/backend_dispatch.cyr"
+include "src/backend_noop.cyr"
+include "src/backend_process.cyr"
+include "src/backend_gvisor.cyr"
+include "src/backend_oci.cyr"
+include "src/backend_wasm.cyr"
+include "src/backend_sy_agnos.cyr"
+include "src/backend_sgx.cyr"
+include "src/backend_sev.cyr"
+include "src/backend_tdx.cyr"
+include "src/backend_firecracker.cyr"
+include "src/composite.cyr"
+include "src/observability.cyr"
+include "src/attestation.cyr"
+include "src/sandbox_exec.cyr"
+
+var _strict_policy = 0;
+
+fn _ensure_strict() {
+    if (_strict_policy == 0) { _strict_policy = policy_strict(); }
+    return _strict_policy;
+}
+
+# Sub-µs operations use batch timing to avoid clock-overhead bias.
+
+fn bench_score_backend_process_strict() {
+    score_backend(Backend.PROCESS, _strict_policy);
+    return 0;
+}
+
+fn bench_score_all_backends_strict() {
+    var i = 0;
+    while (i < BACKEND_COUNT) {
+        score_backend(i, _strict_policy);
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn bench_policy_strict_create() {
+    var p = policy_strict();
+    return 0;
+}
+
+fn bench_config_builder_full() {
+    var c = config_new();
+    config_backend(c, Backend.GVISOR);
+    config_policy_seccomp(c, "strict");
+    config_network(c, 0);
+    config_timeout_ms(c, 60000);
+    config_agent_id(c, "bench-agent");
+    return 0;
+}
+
+fn bench_state_valid_transition_check() {
+    valid_transition(SandboxState.CREATED, SandboxState.RUNNING);
+    return 0;
+}
+
+var _proxy_100 = 0;
+var _refs_100 = 0;
+
+fn _setup_proxy_100() {
+    if (_proxy_100 != 0) { return 0; }
+    _proxy_100 = credential_proxy_new();
+    _refs_100 = vec_new();
+    var i = 0;
+    while (i < 100) {
+        var name_buf = alloc(16);
+        memcpy(name_buf, "KEY_", 4);
+        fmt_int_buf(i, name_buf + 4);
+        credential_proxy_register(_proxy_100, name_buf, "value-xxxxxxxxxxxxxxxxxx");
+        vec_push(_refs_100, secret_ref_env(name_buf, name_buf));
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn bench_credential_env_vars_100() {
+    credential_proxy_env_vars(_proxy_100, _refs_100);
+    return 0;
+}
+
+var _clean_text = "hello world, this is clean output with no secrets in it";
+var _text_with_secrets = 0;
+
+fn _setup_text_with_secrets() {
+    if (_text_with_secrets != 0) { return 0; }
+    _text_with_secrets = "prefix AKIAIOSFODNN7EXAMPLE middle ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij tail";
+    return 0;
+}
+
+fn bench_secrets_scan_clean_text() {
+    var r = scan_result_new();
+    secrets_scan(_clean_text, r);
+    return 0;
+}
+
+fn bench_secrets_scan_with_secrets() {
+    var r = scan_result_new();
+    secrets_scan(_text_with_secrets, r);
+    return 0;
+}
+
+fn bench_secrets_redact() {
+    secrets_redact(_text_with_secrets);
+    return 0;
+}
+
+var _clean_exec_result = 0;
+var _default_policy = 0;
+
+fn _setup_gate_clean() {
+    if (_clean_exec_result != 0) { return 0; }
+    _clean_exec_result = exec_result_new();
+    ExecResult_set_stdout(_clean_exec_result, "hello world");
+    _default_policy = ext_policy_default();
+    return 0;
+}
+
+fn bench_gate_clean_output() {
+    gate_apply(_clean_exec_result, _default_policy);
+    return 0;
+}
+
+fn bench_health_check_noop() {
+    var cfg = config_new();
+    config_backend(cfg, Backend.NOOP);
+    var sb = sandbox_create(cfg);
+    health_probe(sb);
+    return 0;
+}
+
+fn bench_sandbox_full_lifecycle() {
+    var cfg = config_new();
+    config_backend(cfg, Backend.NOOP);
+    var sb = sandbox_create(cfg);
+    sandbox_transition(sb, SandboxState.RUNNING);
+    sandbox_transition(sb, SandboxState.STOPPED);
+    sandbox_transition(sb, SandboxState.DESTROYED);
+    return 0;
+}
+
+# Note: audit chain bench touches disk (file_append_locked) — timing
+# will be dominated by fs I/O. Reported for completeness only.
+var _bench_chain = 0;
+
+fn _setup_chain() {
+    if (_bench_chain != 0) { return 0; }
+    _bench_chain = audit_chain_open("/tmp/kavach-bench.audit", "benchkey", 8);
+    return 0;
+}
+
+fn bench_audit_chain_record() {
+    audit_chain_record(_bench_chain, "exec", "benchpayload");
+    return 0;
+}
+
+# Constant-time HMAC verify (just the compare, not full verify path).
+fn bench_ct_streq_64() {
+    ct_streq("abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+             "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789");
+    return 0;
+}
+
+fn bench_backend_parse() {
+    backend_parse("sy-agnos");
+    return 0;
+}
 
 fn main() {
     alloc_init();
-    bench("noop", &bench_noop, 1000000);
+    sha256_global_init();
+    kavach_init();
+    _ensure_strict();
+    _setup_proxy_100();
+    _setup_text_with_secrets();
+    _setup_gate_clean();
+    _setup_chain();
+
+    var benches = vec_new();
+
+    # Fast ops (sub-µs): batch-timed for accuracy.
+    var b1 = bench_new("score_backend_process_strict");
+    bench_run_batch(b1, &bench_score_backend_process_strict, 10000, 50);
+    vec_push(benches, b1);
+
+    var b2 = bench_new("score_all_backends_strict");
+    bench_run_batch(b2, &bench_score_all_backends_strict, 2000, 50);
+    vec_push(benches, b2);
+
+    var b3 = bench_new("policy_strict_create");
+    bench_run_batch(b3, &bench_policy_strict_create, 5000, 50);
+    vec_push(benches, b3);
+
+    var b4 = bench_new("config_builder_full");
+    bench_run_batch(b4, &bench_config_builder_full, 2000, 50);
+    vec_push(benches, b4);
+
+    var b5 = bench_new("state_valid_transition_check");
+    bench_run_batch(b5, &bench_state_valid_transition_check, 100000, 100);
+    vec_push(benches, b5);
+
+    var b6 = bench_new("ct_streq_64");
+    bench_run_batch(b6, &bench_ct_streq_64, 10000, 50);
+    vec_push(benches, b6);
+
+    var b7 = bench_new("backend_parse");
+    bench_run_batch(b7, &bench_backend_parse, 10000, 50);
+    vec_push(benches, b7);
+
+    # Medium ops (µs-range): regular timing.
+    var b8 = bench_new("credential_env_vars_100");
+    bench_run(b8, &bench_credential_env_vars_100, 2000);
+    vec_push(benches, b8);
+
+    var b9 = bench_new("secrets_scan_clean_text");
+    bench_run(b9, &bench_secrets_scan_clean_text, 2000);
+    vec_push(benches, b9);
+
+    var b10 = bench_new("secrets_scan_with_secrets");
+    bench_run(b10, &bench_secrets_scan_with_secrets, 2000);
+    vec_push(benches, b10);
+
+    var b11 = bench_new("secrets_redact");
+    bench_run(b11, &bench_secrets_redact, 2000);
+    vec_push(benches, b11);
+
+    var b12 = bench_new("gate_clean_output");
+    bench_run(b12, &bench_gate_clean_output, 1000);
+    vec_push(benches, b12);
+
+    var b13 = bench_new("health_check_noop");
+    bench_run(b13, &bench_health_check_noop, 1000);
+    vec_push(benches, b13);
+
+    var b14 = bench_new("sandbox_full_lifecycle");
+    bench_run(b14, &bench_sandbox_full_lifecycle, 1000);
+    vec_push(benches, b14);
+
+    # Disk-bound (reference only)
+    var b15 = bench_new("audit_chain_record_to_tmpfs");
+    bench_run(b15, &bench_audit_chain_record, 500);
+    vec_push(benches, b15);
+
+    bench_report_all(benches);
     return 0;
 }
 

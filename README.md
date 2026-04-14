@@ -10,12 +10,17 @@ classification, credential proxy, HMAC-SHA256 audit chain — all in pure Cyrius
 
 ---
 
-## v2.0 status
+## v2.1 status
 
-Cyrius port of the Rust v1.x framework. See
-[ADR-001](docs/adr/001-cyrius-port-architecture.md) for the port philosophy
-and [ADR-004](docs/adr/004-deferred-features.md) for what's intentionally
-deferred.
+Cyrius port of the Rust v1.x framework. v2.0 shipped the full architecture
+(10 backends + scanners + audit + credential proxy) and the P(-1) security
+hardening pass ([ADR-005](docs/adr/005-v2-hardening-pass.md)); v2.1 drained
+the "ready" queue (UUID v4, WARN-verdict redaction, OffenderTracker,
+integrity monitoring, composite backends, observability types).
+
+See [ADR-001](docs/adr/001-cyrius-port-architecture.md) for the port
+philosophy and [ADR-004](docs/adr/004-deferred-features.md) for what's
+intentionally deferred.
 
 | | v1.x (Rust) | v2.0 (Cyrius) |
 |--|--|--|
@@ -23,7 +28,7 @@ deferred.
 | Backends registered | 10 | 10 — full set with real dispatch contracts |
 | Scanner pipeline | 3 scanners | 3 scanners |
 | Audit chain | HMAC-SHA256 via hmac/sha2 crates | HMAC-SHA256 via [sigil](https://github.com/MacCracken/sigil) |
-| Tests | 872 | 262 |
+| Tests | 872 | 349 |
 | Async | tokio | synchronous (ADR-004 §1) |
 
 ---
@@ -172,10 +177,14 @@ Separate paths:
 ## Docs
 
 - [Architecture overview](docs/architecture/overview.md) — module map, data flow, extension pattern
+- [Guides](docs/guides/) — getting started, composite backends, threat tracking
+- [Worked examples](docs/examples/) — four progressive walkthroughs
+- [Benchmarks — Rust v1.x vs Cyrius v2.1](benchmarks-rust-v-cyrius.md) — honest per-op comparison
 - [ADR-001](docs/adr/001-cyrius-port-architecture.md) — port architecture
 - [ADR-002](docs/adr/002-backend-dispatch-fnptr-table.md) — dispatch table
 - [ADR-003](docs/adr/003-fixed-point-threat-scoring.md) — fixed-point threat scoring
 - [ADR-004](docs/adr/004-deferred-features.md) — deferred features + unblocking
+- [ADR-005](docs/adr/005-v2-hardening-pass.md) — P(-1) security hardening pass
 
 ---
 

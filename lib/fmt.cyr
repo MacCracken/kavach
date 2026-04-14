@@ -15,6 +15,37 @@ fn fmt_int(n: i64) {
     return 0;
 }
 
+# Print decimal number to a specific fd (v4.4.3 — bote feedback item 7).
+# Use when diagnostic output must go to stderr: `fmt_int_fd(2, value)`.
+# Otherwise identical to fmt_int which always writes to fd 1.
+fn fmt_int_fd(fd, n: i64) {
+    var buf[24];
+    var bi = 23;
+    var neg: i64 = 0;
+    if (n < 0) { neg = 1; n = 0 - n; }
+    if (n == 0) { store8(&buf + bi, 48); bi = bi - 1; }
+    while (n > 0) { store8(&buf + bi, 48 + n % 10); bi = bi - 1; n = n / 10; }
+    if (neg == 1) { store8(&buf + bi, 45); bi = bi - 1; }
+    syscall(1, fd, &buf + bi + 1, 23 - bi);
+    return 0;
+}
+
+# Print decimal number to stderr (v4.4.3). Shorthand for fmt_int_fd(2, n).
+# Keeps diagnostic output atomic with adjacent `syscall(1, 2, "...", N)`
+# messages — mixing fmt_int (stdout) with stderr writes produces interleaved
+# output in logs.
+fn efmt_int(n: i64) {
+    var buf[24];
+    var bi = 23;
+    var neg: i64 = 0;
+    if (n < 0) { neg = 1; n = 0 - n; }
+    if (n == 0) { store8(&buf + bi, 48); bi = bi - 1; }
+    while (n > 0) { store8(&buf + bi, 48 + n % 10); bi = bi - 1; n = n / 10; }
+    if (neg == 1) { store8(&buf + bi, 45); bi = bi - 1; }
+    syscall(1, 2, &buf + bi + 1, 23 - bi);
+    return 0;
+}
+
 # Print hex number to stdout (no 0x prefix)
 fn fmt_hex(n: i64) {
     var buf[16];

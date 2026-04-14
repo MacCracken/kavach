@@ -3,8 +3,8 @@
 #
 # Cyrius i64 arithmetic; Rust floats are expressed as fixed-point x1000:
 #   intent_score 0..1000 represents 0.000..1.000.
-# OffenderTracker (time-decay + agent keying) is deferred until chrono +
-# hashmap coverage is wired.
+# OffenderTracker (time-decay + agent keying) landed in v2.1 using
+# chrono + rand_u64 — see bottom of file.
 
 enum KillChainStage {
     RECONNAISSANCE = 0;
@@ -157,4 +157,130 @@ fn classify_threat(findings) {
     ThreatAssessment_set_escalation(assessment, esc);
 
     return assessment;
+}
+
+# ---- Repeat-offender tracking (v2.1) -------------------------------------
+# Ported from rust-old/src/scanning/threat.rs OffenderTracker. Each
+# agent_id accumulates a weighted violation score that decays with time
+# (half-life = half the rolling window). When the agent's decayed score
+# exceeds the escalation_threshold_x1000, should_escalate() returns 1.
+#
+# Storage: three parallel vecs keyed by insertion order. A violation
+# record is (agent_id cstr, score_x1000, timestamp_secs). Pruning
+# drops records older than window_secs.
+
+#derive(accessors)
+struct OffenderTracker {
+    window_secs;
+    decay_factor_x1000;
+    escalation_threshold_x1000;
+    records;
+}
+
+#derive(accessors)
+struct ViolationRecord {
+    timestamp_secs;
+    score_x1000;
+    agent_id;
+}
+
+fn _violation_record_new(ts, score, agent_id) {
+    var r = alloc(24);
+    ViolationRecord_set_timestamp_secs(r, ts);
+    ViolationRecord_set_score_x1000(r, score);
+    ViolationRecord_set_agent_id(r, agent_id);
+    return r;
+}
+
+# Defaults match Rust:
+#   window_secs=3600 (1h), decay=0.5 per half-window, threshold=3.0 score
+fn offender_tracker_new() {
+    var t = alloc(32);
+    OffenderTracker_set_window_secs(t, 3600);
+    OffenderTracker_set_decay_factor_x1000(t, 500);
+    OffenderTracker_set_escalation_threshold_x1000(t, 3000);
+    OffenderTracker_set_records(t, vec_new());
+    return t;
+}
+
+fn offender_tracker_with_config(window_secs, decay_x1000, threshold_x1000) {
+    if (window_secs <= 0) { return 0; }
+    var t = alloc(32);
+    OffenderTracker_set_window_secs(t, window_secs);
+    OffenderTracker_set_decay_factor_x1000(t, decay_x1000);
+    OffenderTracker_set_escalation_threshold_x1000(t, threshold_x1000);
+    OffenderTracker_set_records(t, vec_new());
+    return t;
+}
+
+# Record a violation. Intent score comes from a ThreatAssessment
+# (intent_score_x1000). Duplicate agent_ids accumulate across records;
+# decay is applied at query time, not at insert.
+fn offender_tracker_record(tracker, agent_id, assessment) {
+    var now = clock_epoch_secs();
+    var score = ThreatAssessment_intent_score_x1000(assessment);
+    var rec = _violation_record_new(now, score, agent_id);
+    vec_push(OffenderTracker_records(tracker), rec);
+    return 0;
+}
+
+# Walk records, drop those older than window. Called implicitly by
+# agent_score; callers can invoke manually after a burst.
+fn offender_tracker_prune(tracker) {
+    var now = clock_epoch_secs();
+    var window = OffenderTracker_window_secs(tracker);
+    var recs = OffenderTracker_records(tracker);
+    var keep = vec_new();
+    var i = 0;
+    while (i < vec_len(recs)) {
+        var r = vec_get(recs, i);
+        if (now - ViolationRecord_timestamp_secs(r) <= window) {
+            vec_push(keep, r);
+        }
+        i = i + 1;
+    }
+    OffenderTracker_set_records(tracker, keep);
+    return 0;
+}
+
+# Compute decayed score for an agent. Each record's contribution is
+# multiplied by (decay_factor)^(age / half_window) — age is rounded to
+# half-windows to stay in i64-land without floats. After N half-lives,
+# contribution is score * (decay^N) via repeated division.
+fn offender_tracker_agent_score(tracker, agent_id) {
+    offender_tracker_prune(tracker);
+    var now = clock_epoch_secs();
+    var half_window = OffenderTracker_window_secs(tracker) / 2;
+    if (half_window <= 0) { half_window = 1; }
+    var decay = OffenderTracker_decay_factor_x1000(tracker);
+    var recs = OffenderTracker_records(tracker);
+    var total = 0;
+    var i = 0;
+    while (i < vec_len(recs)) {
+        var r = vec_get(recs, i);
+        if (streq(ViolationRecord_agent_id(r), agent_id) == 1) {
+            var age = now - ViolationRecord_timestamp_secs(r);
+            var half_lives = age / half_window;
+            var contribution = ViolationRecord_score_x1000(r);
+            var k = 0;
+            while (k < half_lives) {
+                contribution = contribution * decay / 1000;
+                if (contribution == 0) { break; }
+                k = k + 1;
+            }
+            total = total + contribution;
+        }
+        i = i + 1;
+    }
+    return total;
+}
+
+fn offender_tracker_should_escalate(tracker, agent_id) {
+    var score = offender_tracker_agent_score(tracker, agent_id);
+    if (score >= OffenderTracker_escalation_threshold_x1000(tracker)) { return 1; }
+    return 0;
+}
+
+fn offender_tracker_count(tracker) {
+    return vec_len(OffenderTracker_records(tracker));
 }

@@ -29,6 +29,9 @@ include "src/backend_sgx.cyr"
 include "src/backend_sev.cyr"
 include "src/backend_tdx.cyr"
 include "src/backend_firecracker.cyr"
+include "src/composite.cyr"
+include "src/observability.cyr"
+include "src/attestation.cyr"
 include "src/sandbox_exec.cyr"
 
 fn _print_banner() {

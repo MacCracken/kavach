@@ -1,0 +1,139 @@
+# kavach — composite backend (defense-in-depth policy layering)
+# Ported from rust-old/src/backend/composite.rs
+#
+# Merges an outer backend (runtime boundary) with an inner policy layer.
+# The outer's exec dispatches as usual; the caller's policy is merged
+# with the inner's policy before the call, always taking the stricter
+# side per field.
+#
+# Merge rules:
+#   seccomp_enabled        OR  of the two sides
+#   seccomp_profile        "strict" wins over "basic" wins over None
+#   network_enabled        AND (both must allow)
+#   read_only_rootfs       OR  (either enforces)
+#   landlock rules         additive (concat)
+#   landlock_abstract_unix OR
+#   landlock_signal        OR
+#   memory_limit_mb        min (stricter is smaller; 0 = unset)
+#   cpu_limit_tenths       min (0 = unset)
+#   max_pids               min (0 = unset)
+#   tcp_bind_len           max (more restriction signal)
+#   tcp_connect_len        max
+
+fn _stricter_profile(a, b) {
+    # a and b are cstr or 0.
+    if (a == 0) { return b; }
+    if (b == 0) { return a; }
+    if (streq(a, "strict") == 1) { return a; }
+    if (streq(b, "strict") == 1) { return b; }
+    return a;
+}
+
+fn _min_nz(a, b) {
+    if (a == 0) { return b; }
+    if (b == 0) { return a; }
+    if (a < b) { return a; }
+    return b;
+}
+
+fn _max(a, b) {
+    if (a > b) { return a; }
+    return b;
+}
+
+fn _or_bool(a, b) {
+    if (a == 1) { return 1; }
+    if (b == 1) { return 1; }
+    return 0;
+}
+
+fn _and_bool(a, b) {
+    if (a == 1) { if (b == 1) { return 1; } }
+    return 0;
+}
+
+# Merge two policies into a fresh SandboxPolicy pointer.
+# Neither input is mutated.
+fn merge_policies(base, overlay) {
+    var out = policy_new();
+    SandboxPolicy_set_seccomp_enabled(out,
+        _or_bool(SandboxPolicy_seccomp_enabled(base),
+                 SandboxPolicy_seccomp_enabled(overlay)));
+    SandboxPolicy_set_seccomp_profile(out,
+        _stricter_profile(SandboxPolicy_seccomp_profile(base),
+                          SandboxPolicy_seccomp_profile(overlay)));
+
+    # Network: both must enable. Default disabled wins.
+    SandboxPolicy_set_network_enabled(out,
+        _and_bool(SandboxPolicy_network_enabled(base),
+                  SandboxPolicy_network_enabled(overlay)));
+
+    SandboxPolicy_set_read_only_rootfs(out,
+        _or_bool(SandboxPolicy_read_only_rootfs(base),
+                 SandboxPolicy_read_only_rootfs(overlay)));
+
+    SandboxPolicy_set_landlock_rules_len(out,
+        SandboxPolicy_landlock_rules_len(base)
+      + SandboxPolicy_landlock_rules_len(overlay));
+
+    SandboxPolicy_set_landlock_abstract_unix(out,
+        _or_bool(SandboxPolicy_landlock_abstract_unix(base),
+                 SandboxPolicy_landlock_abstract_unix(overlay)));
+    SandboxPolicy_set_landlock_signal(out,
+        _or_bool(SandboxPolicy_landlock_signal(base),
+                 SandboxPolicy_landlock_signal(overlay)));
+
+    SandboxPolicy_set_memory_limit_mb(out,
+        _min_nz(SandboxPolicy_memory_limit_mb(base),
+                SandboxPolicy_memory_limit_mb(overlay)));
+    SandboxPolicy_set_cpu_limit_tenths(out,
+        _min_nz(SandboxPolicy_cpu_limit_tenths(base),
+                SandboxPolicy_cpu_limit_tenths(overlay)));
+    SandboxPolicy_set_max_pids(out,
+        _min_nz(SandboxPolicy_max_pids(base),
+                SandboxPolicy_max_pids(overlay)));
+
+    SandboxPolicy_set_network_tcp_bind_len(out,
+        _max(SandboxPolicy_network_tcp_bind_len(base),
+             SandboxPolicy_network_tcp_bind_len(overlay)));
+    SandboxPolicy_set_network_tcp_connect_len(out,
+        _max(SandboxPolicy_network_tcp_connect_len(base),
+             SandboxPolicy_network_tcp_connect_len(overlay)));
+    return out;
+}
+
+# Score a composite = max(outer_base, inner_base) + 5, clamped to 100.
+# The +5 reflects the layering bonus (both runtime boundary AND policy
+# enforcement, which is additive defense).
+fn score_composite(outer, inner, policy) {
+    var a = base_score(outer);
+    var b = base_score(inner);
+    var base = a;
+    if (b > a) { base = b; }
+    var policy_score = score_backend(outer, policy) - base_score(outer);
+    var composite = base + policy_score + 5;
+    if (composite > 100) { composite = 100; }
+    if (composite < 0) { composite = 0; }
+    return composite;
+}
+
+# Dispatcher wrapper: execute via `outer` backend with the merged policy.
+# Caller passes the outer+inner backend ids separately from the sandbox
+# so the Sandbox struct layout stays v2.0-compatible.
+#
+# Typical flow:
+#   var merged_policy = merge_policies(caller_policy, inner_policy);
+#   # swap policy on config for the dispatch, preserving the original
+#   SandboxConfig_set_policy(config, merged_policy);
+#   var result = backend_dispatch_exec_as(outer_backend, sandbox, cmd);
+fn composite_exec(outer_backend, inner_backend, sandbox, command, inner_policy) {
+    var config = Sandbox_config(sandbox);
+    var caller_policy = SandboxConfig_policy(config);
+    var merged = merge_policies(caller_policy, inner_policy);
+    var saved = caller_policy;
+    SandboxConfig_set_policy(config, merged);
+    SandboxConfig_set_backend(config, outer_backend);
+    var result = backend_dispatch_exec(sandbox, command);
+    SandboxConfig_set_policy(config, saved);
+    return result;
+}

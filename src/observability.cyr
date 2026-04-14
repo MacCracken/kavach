@@ -1,0 +1,101 @@
+# kavach — observability types (health, metrics, spawn handle)
+# Ported from rust-old/src/backend/{health,metrics,exec_util}.rs.
+#
+# These are the public data types consumers of kavach use to observe
+# sandbox state. Population of the fields is backend-specific; the v2.0
+# process/gvisor/oci/wasm backends expose health via the dispatch table
+# and leave metrics as a zeroed struct (real collection lives alongside
+# cgroup v2 readers — see roadmap v2.1 blocked items).
+
+# ---- HealthStatus --------------------------------------------------------
+
+enum HealthState {
+    HEALTHY = 0;
+    DEGRADED = 1;
+    UNHEALTHY = 2;
+    UNKNOWN = 3;
+}
+
+fn health_state_name(s) {
+    if (s == HealthState.HEALTHY) { return "healthy"; }
+    if (s == HealthState.DEGRADED) { return "degraded"; }
+    if (s == HealthState.UNHEALTHY) { return "unhealthy"; }
+    return "unknown";
+}
+
+#derive(accessors)
+struct HealthStatus {
+    state;
+    last_check_at;
+    detail;
+}
+
+fn health_status_new(state, detail) {
+    var h = alloc(24);
+    HealthStatus_set_state(h, state);
+    HealthStatus_set_last_check_at(h, clock_epoch_secs());
+    HealthStatus_set_detail(h, detail);
+    return h;
+}
+
+# Probe a sandbox's backend via the dispatch table and report a status.
+fn health_probe(sandbox) {
+    var ok = backend_dispatch_health(sandbox);
+    if (ok == 1) {
+        return health_status_new(HealthState.HEALTHY, "ok");
+    }
+    return health_status_new(HealthState.UNHEALTHY, "backend health check failed");
+}
+
+# ---- SandboxMetrics ------------------------------------------------------
+# Resource-usage snapshot. Populated by cgroup v2 readers once those
+# syscalls land in the Cyrius stdlib; until then the struct is available
+# for API compatibility with zeroed fields.
+
+#derive(accessors)
+struct SandboxMetrics {
+    cpu_time_ns;
+    memory_bytes_peak;
+    memory_bytes_current;
+    pid_count;
+    io_read_bytes;
+    io_write_bytes;
+    wall_duration_ms;
+}
+
+var SANDBOX_METRICS_SIZE = 56;
+
+fn sandbox_metrics_new() {
+    var m = alloc(SANDBOX_METRICS_SIZE);
+    var i = 0;
+    while (i < SANDBOX_METRICS_SIZE) { store64(m + i, 0); i = i + 8; }
+    return m;
+}
+
+# Populate metrics from an ExecResult's wall clock. CPU/memory/PID/IO
+# fields remain 0 until cgroup-backed collectors ship (v2.1 blocked item).
+fn sandbox_metrics_from_result(result) {
+    var m = sandbox_metrics_new();
+    SandboxMetrics_set_wall_duration_ms(m, ExecResult_duration_ms(result));
+    return m;
+}
+
+# ---- SpawnedProcess ------------------------------------------------------
+# Fire-and-forget handle for long-running workloads. Backends that do not
+# support spawning (noop, wasm per-invocation) return 0 and the caller
+# falls back to exec().
+
+#derive(accessors)
+struct SpawnedProcess {
+    pid;
+    backend;
+    started_at;
+}
+
+fn spawned_process_new(pid, backend) {
+    var s = alloc(24);
+    SpawnedProcess_set_pid(s, pid);
+    SpawnedProcess_set_backend(s, backend);
+    SpawnedProcess_set_started_at(s, clock_epoch_secs());
+    return s;
+}

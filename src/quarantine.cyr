@@ -38,6 +38,8 @@ fn quarantine_storage_new(base_dir) {
     sys_chmod(base_dir, 448);
     var q = alloc(16);
     QuarantineStorage_set_base_dir(q, base_dir);
+    # next_id field retained for API compat; actual entry IDs are 64-bit
+    # random per quarantine_store() call (v2.1).
     QuarantineStorage_set_next_id(q, 1);
     return q;
 }
@@ -48,7 +50,10 @@ fn _qpath(base_dir, id, ext) {
     var id_len = fmt_int_buf(id, &id_buf);
     var blen = strlen(base_dir);
     var elen = strlen(ext);
-    var buf = alloc(blen + 1 + id_len + 1 + elen + 1);
+    var total = checked_sum4(blen, id_len, elen, 3);
+    if (total < 0) { return 0; }
+    var buf = alloc_checked(total);
+    if (buf == 0) { return 0; }
     var pos = 0;
     memcpy(buf + pos, base_dir, blen); pos = pos + blen;
     store8(buf + pos, 47); pos = pos + 1;
@@ -72,8 +77,13 @@ fn _meta_jsonl(id, sandbox_id, verdict, status) {
     var ts_buf[24];
     var ts_len = fmt_int_buf(clock_epoch_secs(), &ts_buf);
 
-    var cap = 256 + id_len + strlen(sid) + strlen(vn) + strlen(sn) + ts_len;
-    var buf = alloc(cap);
+    var user_lens = checked_sum4(id_len, strlen(sid), strlen(vn),
+                                 strlen(sn) + ts_len);
+    if (user_lens < 0) { return 0; }
+    var cap = checked_add(user_lens, 256);
+    if (cap < 0) { return 0; }
+    var buf = alloc_checked(cap);
+    if (buf == 0) { return 0; }
     var pos = 0;
     var p1 = "{\"id\":";
     memcpy(buf + pos, p1, strlen(p1)); pos = pos + strlen(p1);
@@ -102,7 +112,9 @@ fn _meta_jsonl(id, sandbox_id, verdict, status) {
 # cannot redirect the write. Artifact writes that fail abort the op
 # instead of silently returning a fake id. See ADR-005 §C4 + §H2.
 fn quarantine_store(storage, artifact, artifact_len, scan_result, sandbox_id) {
-    var id = QuarantineStorage_next_id(storage);
+    # 64-bit random entry id; unpredictable filenames defeat the
+    # symlink-preseed vector on the base dir. See ADR-004 §8.
+    var id = rand_u64();
     var base = QuarantineStorage_base_dir(storage);
 
     var art_path = _qpath(base, id, "bin");
@@ -116,7 +128,6 @@ fn quarantine_store(storage, artifact, artifact_len, scan_result, sandbox_id) {
         sys_unlink(art_path);
         return 0 - 1;
     }
-    QuarantineStorage_set_next_id(storage, id + 1);
     return id;
 }
 

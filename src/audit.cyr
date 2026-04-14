@@ -64,7 +64,9 @@ struct AuditChain {
 }
 
 # Compute HMAC-SHA256 over a cstr message; return 65-byte hex cstr.
+# Returns 0 on null msg (propagated overflow from upstream).
 fn _hmac_hex(key, key_len, msg) {
+    if (msg == 0) { return 0; }
     var raw[32];
     hmac_sha256(key, key_len, msg, strlen(msg), &raw);
     var out = alloc(65);
@@ -73,12 +75,19 @@ fn _hmac_hex(key, key_len, msg) {
 }
 
 # Build the signing input: serial:event_type:payload:timestamp:prev_hmac
+# Sizes are checked-summed to defend against overflow — if any input
+# is malformed, returns 0 and the HMAC site will observe a null msg.
+# (All callers already guard against a null return before hashing.)
 fn _sign_input(serial, event_type, payload, timestamp, prev_hmac) {
     var serial_buf[24];
     var serial_len = fmt_int_buf(serial, &serial_buf);
-    var total = serial_len + 1 + strlen(event_type) + 1 + strlen(payload)
-              + 1 + strlen(timestamp) + 1 + strlen(prev_hmac) + 1;
-    var buf = alloc(total);
+    var user_lens = checked_sum4(strlen(event_type), strlen(payload),
+                                 strlen(timestamp), strlen(prev_hmac));
+    if (user_lens < 0) { return 0; }
+    var total = checked_add(user_lens, serial_len + 5);
+    if (total < 0) { return 0; }
+    var buf = alloc_checked(total);
+    if (buf == 0) { return 0; }
     var pos = 0;
     memcpy(buf + pos, &serial_buf, serial_len); pos = pos + serial_len;
     store8(buf + pos, 58); pos = pos + 1;
@@ -106,8 +115,13 @@ fn _entry_to_jsonl(entry) {
     var ts = AuditEntry_timestamp(entry);
     var h = AuditEntry_hmac(entry);
     var ph = AuditEntry_prev_hmac(entry);
-    var cap = 256 + slen + strlen(ev) + strlen(pl) + strlen(ts) + strlen(h) + strlen(ph);
-    var buf = alloc(cap);
+    var user_lens = checked_sum4(strlen(ev), strlen(pl), strlen(ts),
+                                 strlen(h) + strlen(ph));
+    if (user_lens < 0) { return 0; }
+    var cap = checked_add(user_lens, slen + 256);
+    if (cap < 0) { return 0; }
+    var buf = alloc_checked(cap);
+    if (buf == 0) { return 0; }
     var pos = 0;
     var prefix = "{\"serial\":";
     memcpy(buf + pos, prefix, strlen(prefix)); pos = pos + strlen(prefix);

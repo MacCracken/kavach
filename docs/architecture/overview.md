@@ -86,6 +86,9 @@ src/
 ├── backend_sev.cyr        AMD SEV-SNP via QEMU with confidential-guest
 ├── backend_tdx.cyr        Intel TDX via QEMU with tdx-guest object
 ├── backend_firecracker.cyr Firecracker microVM with config.json + `--no-api`
+├── composite.cyr          Defense-in-depth policy merging + composite score
+├── observability.cyr      HealthStatus, SandboxMetrics, SpawnedProcess types
+├── attestation.cyr        AttestationResult + AttestationTrust + SGX report
 └── sandbox_exec.cyr       End-to-end: dispatch → gate → threat → audit
 ```
 
@@ -232,6 +235,18 @@ Each backend is a plug into the dispatch table. To add `<name>`:
 | **aethersafta** | Plugin isolation |
 
 ---
+
+## Related docs
+
+- [Getting started](../guides/getting-started.md)
+- [Composite backends](../guides/composite-backends.md) — defense-in-depth patterns
+- [Threat tracking](../guides/threat-tracking.md) — intent scoring and OffenderTracker
+- [Worked examples](../examples/) — 4 progressive walkthroughs
+- [Rust v1.x vs Cyrius v2.1 benchmarks](../../benchmarks-rust-v-cyrius.md)
+- [ADR-001 port architecture](../adr/001-cyrius-port-architecture.md)
+- [ADR-002 dispatch table](../adr/002-backend-dispatch-fnptr-table.md)
+- [ADR-003 fixed-point scoring](../adr/003-fixed-point-threat-scoring.md)
+- [ADR-005 hardening pass](../adr/005-v2-hardening-pass.md)
 
 ## Deferred surface (intentional)
 

@@ -46,16 +46,11 @@ struct ScanFinding {
 
 var SCAN_FINDING_SIZE = 48;
 
-fn _finding_next_id() {
-    var id = _finding_id_counter;
-    _finding_id_counter = _finding_id_counter + 1;
-    return id;
-}
-var _finding_id_counter = 1;
-
+# Finding IDs: 64-bit random from /dev/urandom (UUID-v4-equivalent).
+# Swapped from a monotonic counter in v2.1 — see ADR-004 §8.
 fn finding_new(scanner, severity, category, message, evidence) {
     var f = alloc(SCAN_FINDING_SIZE);
-    ScanFinding_set_id(f, _finding_next_id());
+    ScanFinding_set_id(f, rand_u64());
     ScanFinding_set_scanner(f, scanner);
     ScanFinding_set_severity(f, severity);
     ScanFinding_set_category(f, category);

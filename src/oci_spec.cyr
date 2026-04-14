@@ -138,7 +138,12 @@ fn oci_generate_spec(sandbox, command) {
     var netns = "{\"type\":\"network\"},";
     if (SandboxPolicy_network_enabled(policy) == 1) { netns = ""; }
 
-    var buf = alloc(2048 + strlen(cmd_escaped) + strlen(resources));
+    var cap = checked_add(strlen(cmd_escaped), strlen(resources));
+    if (cap < 0) { return 0; }
+    cap = checked_add(cap, 2048);
+    if (cap < 0) { return 0; }
+    var buf = alloc_checked(cap);
+    if (buf == 0) { return 0; }
     var pos = 0;
     var head = "{\"ociVersion\":\"1.0.2\",\"process\":{\"terminal\":false,\"args\":[\"/bin/sh\",\"-c\",\"";
     memcpy(buf + pos, head, strlen(head)); pos = pos + strlen(head);
@@ -184,6 +189,11 @@ fn oci_prepare_bundle(container_id, sandbox, command) {
     memcpy(cfg_path + strlen(bundle), "/config.json", 13);
 
     var spec = oci_generate_spec(sandbox, command);
+    if (spec == 0) {
+        sys_rmdir(rootfs);
+        sys_rmdir(bundle);
+        return 0;
+    }
     var r = file_write_secure(cfg_path, spec, strlen(spec));
     if (r < 0) {
         sys_rmdir(rootfs);

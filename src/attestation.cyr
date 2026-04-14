@@ -1,0 +1,119 @@
+# kavach — unified attestation types
+# Ported from rust-old/src/backend/attestation.rs (types only; EAR
+# serialization + IAS / AMD-SEV / Intel-TDX quote verification are
+# deferred to v2.1, gated on sigil EAR helpers — see ADR-004 §2).
+#
+# The AttestationResult struct is backend-agnostic: callers evaluate
+# trust via `trust` + `backend` without hardware-specific parsing.
+
+# Ordering matters: Contraindicated < Warning < None < Affirming
+# (higher = more trusted). Values chosen so direct comparison works.
+enum AttestationTrust {
+    CONTRAINDICATED = 0;
+    WARNING = 1;
+    NONE = 2;
+    AFFIRMING = 3;
+}
+
+fn attestation_trust_name(t) {
+    if (t == AttestationTrust.CONTRAINDICATED) { return "contraindicated"; }
+    if (t == AttestationTrust.WARNING) { return "warning"; }
+    if (t == AttestationTrust.NONE) { return "none"; }
+    if (t == AttestationTrust.AFFIRMING) { return "affirming"; }
+    return "unknown";
+}
+
+# Backend-agnostic attestation result. Each confidential-computing
+# backend (SGX/SEV/TDX) produces one of these; consumers treat them
+# uniformly. Populated fields depend on the producer.
+#derive(accessors)
+struct AttestationResult {
+    backend;
+    trust;
+    measurement_hex;
+    signer_hex;
+    svn;
+    fresh_at;
+    details;
+}
+
+fn attestation_result_new(backend) {
+    var a = alloc(48);
+    AttestationResult_set_backend(a, backend);
+    AttestationResult_set_trust(a, AttestationTrust.NONE);
+    AttestationResult_set_measurement_hex(a, "");
+    AttestationResult_set_signer_hex(a, "");
+    AttestationResult_set_svn(a, 0);
+    AttestationResult_set_fresh_at(a, clock_epoch_secs());
+    AttestationResult_set_details(a, "");
+    return a;
+}
+
+# Evaluate whether an attestation result meets a minimum trust bar.
+# Returns 1 if `result.trust >= minimum`, 0 otherwise.
+fn attestation_is_acceptable(result, minimum_trust) {
+    if (AttestationResult_trust(result) >= minimum_trust) { return 1; }
+    return 0;
+}
+
+# ---- SGX-specific report (struct only; verify waits on sigil) ------------
+
+#derive(accessors)
+struct SgxAttestationReport {
+    mrenclave_hex;
+    mrsigner_hex;
+    isv_prod_id;
+    isv_svn;
+    report_data_len;
+    ias_signature;
+    timestamp;
+}
+
+fn sgx_report_new() {
+    var r = alloc(56);
+    SgxAttestationReport_set_mrenclave_hex(r, "");
+    SgxAttestationReport_set_mrsigner_hex(r, "");
+    SgxAttestationReport_set_isv_prod_id(r, 0);
+    SgxAttestationReport_set_isv_svn(r, 0);
+    SgxAttestationReport_set_report_data_len(r, 0);
+    SgxAttestationReport_set_ias_signature(r, "");
+    SgxAttestationReport_set_timestamp(r, 0);
+    return r;
+}
+
+# Structural verification: MRENCLAVE / MRSIGNER are 64-char lowercase
+# hex, IAS signature is non-trivial (>= 32 chars). Cryptographic
+# verification of the IAS signature against the Intel root cert is
+# deferred — needs sigil EAR helpers + cert-chain validation.
+fn sgx_report_verify_structure(report) {
+    var me = SgxAttestationReport_mrenclave_hex(report);
+    var ms = SgxAttestationReport_mrsigner_hex(report);
+    var sig = SgxAttestationReport_ias_signature(report);
+    if (strlen(me) != 64) { return 0; }
+    if (strlen(ms) != 64) { return 0; }
+    if (strlen(sig) < 32) { return 0; }
+    # Check hex-ness of measurements
+    var i = 0;
+    while (i < 64) {
+        var c = load8(me + i);
+        if (is_digit_c(c) == 0) {
+            if (c < 97) { return 0; }
+            if (c > 102) { return 0; }
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# ---- Seal key policy (SGX sealing; struct-only for now) ------------------
+
+enum SealKeyPolicy {
+    MR_ENCLAVE = 0;
+    MR_SIGNER = 1;
+}
+
+fn seal_key_policy_name(p) {
+    if (p == SealKeyPolicy.MR_ENCLAVE) { return "mrenclave"; }
+    if (p == SealKeyPolicy.MR_SIGNER) { return "mrsigner"; }
+    return "unknown";
+}

@@ -28,6 +28,9 @@ include "src/backend_sgx.cyr"
 include "src/backend_sev.cyr"
 include "src/backend_tdx.cyr"
 include "src/backend_firecracker.cyr"
+include "src/composite.cyr"
+include "src/observability.cyr"
+include "src/attestation.cyr"
 include "src/sandbox_exec.cyr"
 
 fn test_backend_parse() {
@@ -801,6 +804,247 @@ fn test_audit_chain_close_zeroes_key() {
     return 0;
 }
 
+fn test_uuid_v4_distinct() {
+    test_group("uuid_v4");
+    # Four random u64s must all differ (collision probability ~ 2^-62).
+    var a = rand_u64();
+    var b = rand_u64();
+    var c = rand_u64();
+    var d = rand_u64();
+    assert(a != b, "a != b");
+    assert(a != c, "a != c");
+    assert(a != d, "a != d");
+    assert(b != c, "b != c");
+    # A fresh sandbox + a fresh finding must have distinct ids too.
+    var cfg = config_new();
+    config_backend(cfg, Backend.NOOP);
+    var sb1 = sandbox_create(cfg);
+    var sb2 = sandbox_create(cfg);
+    assert(Sandbox_id(sb1) != Sandbox_id(sb2), "sandbox ids distinct");
+    var f1 = finding_new("s", Severity.LOW, "c", "m", 0);
+    var f2 = finding_new("s", Severity.LOW, "c", "m", 0);
+    assert(ScanFinding_id(f1) != ScanFinding_id(f2), "finding ids distinct");
+    return 0;
+}
+
+fn test_warn_verdict_redacts_stdout() {
+    test_group("warn_redact_stdout");
+    # Low-severity finding (Email) lands in WARN tier under the default
+    # policy (block=Critical, quarantine=High, anything > Info = Warn).
+    var er = exec_result_new();
+    ExecResult_set_stdout(er, "prefix AKIAIOSFODNN7EXAMPLE middle ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij tail");
+    # Manually tune the policy so the gate emits WARN instead of BLOCK
+    # (AWS key is Critical → BLOCK under defaults).
+    var pol = ext_policy_default();
+    ExternalizationPolicy_set_block_threshold(pol, Severity.CRITICAL + 1);
+    ExternalizationPolicy_set_quarantine_threshold(pol, Severity.CRITICAL + 1);
+
+    var sr = gate_apply(er, pol);
+    assert_eq(ScanResult_verdict(sr), ScanVerdict.WARN, "verdict = warn");
+    var out = ExecResult_stdout(er);
+    assert(str_contains(out, "AKIAIOSFODNN7EXAMPLE") == 0, "aws key redacted");
+    assert(str_contains(out, "[REDACTED:cloud_credential]") == 1, "marker present");
+    assert(str_contains(out, "ghp_ABCDEFGHIJKLMNOPQRST") == 0, "gh token redacted");
+    assert(str_contains(out, "[REDACTED:api_token]") == 1, "gh marker");
+    assert(str_contains(out, "prefix ") == 1, "leading context preserved");
+    assert(str_contains(out, " tail") == 1, "trailing context preserved");
+    return 0;
+}
+
+fn test_warn_verdict_redact_disabled() {
+    test_group("warn_redact_disabled");
+    var er = exec_result_new();
+    ExecResult_set_stdout(er, "prefix AKIAIOSFODNN7EXAMPLE tail");
+    var pol = ext_policy_default();
+    ExternalizationPolicy_set_block_threshold(pol, Severity.CRITICAL + 1);
+    ExternalizationPolicy_set_quarantine_threshold(pol, Severity.CRITICAL + 1);
+    ExternalizationPolicy_set_redact_secrets(pol, 0);
+    gate_apply(er, pol);
+    assert(str_contains(ExecResult_stdout(er), "AKIAIOSFODNN7EXAMPLE") == 1, "not redacted");
+    return 0;
+}
+
+fn test_secrets_redact_clean_text() {
+    test_group("secrets_redact_clean");
+    var r = secrets_redact("just some normal text with nothing spicy");
+    assert_eq(streq(r, "just some normal text with nothing spicy"), 1, "passthrough");
+    return 0;
+}
+
+fn test_secrets_redact_markers() {
+    test_group("secrets_redact_markers");
+    var r = secrets_redact("key=AKIAIOSFODNN7EXAMPLE end");
+    assert_eq(streq(r, "key=[REDACTED:cloud_credential] end"), 1, "exact marker");
+    return 0;
+}
+
+fn test_offender_tracker_basic() {
+    test_group("offender_tracker_basic");
+    var t = offender_tracker_new();
+    assert_eq(offender_tracker_count(t), 0, "empty");
+
+    var findings = vec_new();
+    vec_push(findings, finding_new("secrets", Severity.CRITICAL, "private_key", "k", 0));
+    vec_push(findings, finding_new("code", Severity.CRITICAL, "command_injection", "c", 0));
+    vec_push(findings, finding_new("code", Severity.CRITICAL, "data_exfiltration", "d", 0));
+    var assess = classify_threat(findings);
+
+    offender_tracker_record(t, "agent-A", assess);
+    offender_tracker_record(t, "agent-A", assess);
+    offender_tracker_record(t, "agent-B", assess);
+    assert_eq(offender_tracker_count(t), 3, "three records");
+
+    # agent-A accumulates: 1000 + 1000 = 2000 (fresh, no decay yet)
+    var score_a = offender_tracker_agent_score(t, "agent-A");
+    assert(score_a >= 1500, "agent-A score high");
+    var score_b = offender_tracker_agent_score(t, "agent-B");
+    assert(score_b < score_a, "agent-B below A");
+    var score_unknown = offender_tracker_agent_score(t, "agent-unknown");
+    assert_eq(score_unknown, 0, "unknown = 0");
+    return 0;
+}
+
+fn test_offender_tracker_escalation() {
+    test_group("offender_tracker_escalate");
+    # Default threshold = 3000 (x1000 = 3.0). Four MALICIOUS records at
+    # intent=1000 each sum to 4000 > 3000 → escalate.
+    var t = offender_tracker_new();
+    var findings = vec_new();
+    vec_push(findings, finding_new("secrets", Severity.CRITICAL, "private_key", "k", 0));
+    vec_push(findings, finding_new("code", Severity.CRITICAL, "command_injection", "c", 0));
+    vec_push(findings, finding_new("code", Severity.CRITICAL, "data_exfiltration", "d", 0));
+    var assess = classify_threat(findings);
+
+    offender_tracker_record(t, "spammer", assess);
+    offender_tracker_record(t, "spammer", assess);
+    offender_tracker_record(t, "spammer", assess);
+    offender_tracker_record(t, "spammer", assess);
+    assert_eq(offender_tracker_should_escalate(t, "spammer"), 1, "escalate");
+
+    assert_eq(offender_tracker_should_escalate(t, "calm"), 0, "calm passes");
+    return 0;
+}
+
+fn test_composite_merge_policies() {
+    test_group("composite_merge");
+    # minimal + strict → strict wins.
+    var merged = merge_policies(policy_minimal(), policy_strict());
+    assert_eq(SandboxPolicy_seccomp_enabled(merged), 1, "seccomp from strict");
+    assert_eq(SandboxPolicy_read_only_rootfs(merged), 1, "ro from strict");
+    assert_eq(SandboxPolicy_memory_limit_mb(merged), 512, "mem from strict");
+    assert_eq(SandboxPolicy_network_enabled(merged), 0, "network disabled (both)");
+
+    # seccomp profile: strict wins over basic
+    var p_b = policy_basic();
+    var p_s = policy_strict();
+    var merged_bs = merge_policies(p_b, p_s);
+    assert_eq(streq(SandboxPolicy_seccomp_profile(merged_bs), "strict"), 1, "strict wins");
+
+    # memory: smaller wins
+    var p1 = policy_minimal();
+    var p2 = policy_minimal();
+    SandboxPolicy_set_memory_limit_mb(p1, 1024);
+    SandboxPolicy_set_memory_limit_mb(p2, 256);
+    var m = merge_policies(p1, p2);
+    assert_eq(SandboxPolicy_memory_limit_mb(m), 256, "min wins");
+    return 0;
+}
+
+fn test_composite_score() {
+    test_group("composite_score");
+    # gVisor outer (base 70) + Process inner (base 50), strict policy
+    # gvisor strict score ≈ 89 (70+5+5+3+2+2+2), so composite = 89+5 = 94
+    var p = policy_strict();
+    var score = score_composite(Backend.GVISOR, Backend.PROCESS, p);
+    assert(score >= 80, "layered bonus");
+    assert(score <= 100, "clamped");
+    return 0;
+}
+
+fn test_health_probe() {
+    test_group("health_probe");
+    kavach_init();
+    var cfg = config_new();
+    config_backend(cfg, Backend.NOOP);
+    var sb = sandbox_create(cfg);
+    var h = health_probe(sb);
+    assert(h != 0, "status returned");
+    assert_eq(HealthStatus_state(h), HealthState.HEALTHY, "noop is healthy");
+    assert(HealthStatus_last_check_at(h) > 0, "timestamp set");
+    return 0;
+}
+
+fn test_sandbox_metrics_from_result() {
+    test_group("metrics_from_result");
+    var er = exec_result_new();
+    ExecResult_set_duration_ms(er, 42);
+    var m = sandbox_metrics_from_result(er);
+    assert_eq(SandboxMetrics_wall_duration_ms(m), 42, "wall carried over");
+    # Other fields 0 until cgroup collectors wire up
+    assert_eq(SandboxMetrics_cpu_time_ns(m), 0, "cpu stub 0");
+    assert_eq(SandboxMetrics_memory_bytes_peak(m), 0, "mem stub 0");
+    return 0;
+}
+
+fn test_attestation_trust_ordering() {
+    test_group("attestation_ordering");
+    assert(AttestationTrust.CONTRAINDICATED < AttestationTrust.WARNING, "c<w");
+    assert(AttestationTrust.WARNING < AttestationTrust.NONE, "w<n");
+    assert(AttestationTrust.NONE < AttestationTrust.AFFIRMING, "n<a");
+    return 0;
+}
+
+fn test_attestation_acceptable() {
+    test_group("attestation_acceptable");
+    var r = attestation_result_new(Backend.SGX);
+    AttestationResult_set_trust(r, AttestationTrust.AFFIRMING);
+    assert_eq(attestation_is_acceptable(r, AttestationTrust.NONE), 1, "affirming passes NONE bar");
+    assert_eq(attestation_is_acceptable(r, AttestationTrust.AFFIRMING), 1, "affirming passes AFFIRMING bar");
+
+    AttestationResult_set_trust(r, AttestationTrust.WARNING);
+    assert_eq(attestation_is_acceptable(r, AttestationTrust.NONE), 0, "warning fails NONE bar");
+    return 0;
+}
+
+fn test_sgx_report_verify_structure() {
+    test_group("sgx_report_struct");
+    var r = sgx_report_new();
+    # All-zero report fails.
+    assert_eq(sgx_report_verify_structure(r), 0, "empty report rejected");
+    # Valid measurements + signature
+    SgxAttestationReport_set_mrenclave_hex(r,
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+    SgxAttestationReport_set_mrsigner_hex(r,
+        "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210");
+    SgxAttestationReport_set_ias_signature(r, "base64signatureblobthatisatleast32chars...");
+    assert_eq(sgx_report_verify_structure(r), 1, "valid structure");
+    # Non-hex measurement fails
+    SgxAttestationReport_set_mrenclave_hex(r,
+        "XYZ456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0");
+    assert_eq(sgx_report_verify_structure(r), 0, "non-hex rejected");
+    return 0;
+}
+
+fn test_integrity_report_shape() {
+    test_group("integrity_report");
+    var r = check_integrity();
+    assert(r != 0, "report returned");
+    var checks = IntegrityReport_checks(r);
+    assert_eq(vec_len(checks), 3, "3 checks: pid+mount+user ns");
+    # Each check has a name + pass flag + detail
+    var i = 0;
+    while (i < vec_len(checks)) {
+        var c = vec_get(checks, i);
+        assert(IntegrityCheck_name(c) != 0, "name present");
+        assert(IntegrityCheck_detail(c) != 0, "detail present");
+        i = i + 1;
+    }
+    # Running from a terminal on a non-containerized host, this test
+    # MAY report intact=0 — that's a correct signal, not a bug.
+    assert(IntegrityReport_checked_at(r) > 0, "timestamp captured");
+    return 0;
+}
+
 fn test_oci_bundle_mode_0700() {
     test_group("oci_bundle_mode");
     var cfg = config_new();
@@ -933,8 +1177,11 @@ fn test_quarantine_store() {
     var sr = scan_result_new();
     ScanResult_set_verdict(sr, ScanVerdict.BLOCK);
     var id = quarantine_store(q, "blocked stdout", 14, sr, "sb-1");
-    assert(id > 0, "id assigned");
-    assert_eq(QuarantineStorage_next_id(q), id + 1, "counter advanced");
+    # -1 = write failure; rand_u64() ids may be negative (high bit set)
+    assert(id != 0 - 1, "id assigned");
+    # Entry IDs are 64-bit random (v2.1); two stores must yield distinct ids.
+    var id2 = quarantine_store(q, "second", 6, sr, "sb-2");
+    assert(id != id2, "distinct random ids");
     return 0;
 }
 
@@ -1453,6 +1700,21 @@ fn main() {
     test_redact_evidence();
     test_audit_payload_escaped();
     test_audit_chain_close_zeroes_key();
+    test_uuid_v4_distinct();
+    test_warn_verdict_redacts_stdout();
+    test_warn_verdict_redact_disabled();
+    test_secrets_redact_clean_text();
+    test_secrets_redact_markers();
+    test_offender_tracker_basic();
+    test_offender_tracker_escalation();
+    test_integrity_report_shape();
+    test_composite_merge_policies();
+    test_composite_score();
+    test_health_probe();
+    test_sandbox_metrics_from_result();
+    test_attestation_trust_ordering();
+    test_attestation_acceptable();
+    test_sgx_report_verify_structure();
     test_oci_bundle_mode_0700();
     test_gvisor_exec_without_runsc();
     test_which_exists();

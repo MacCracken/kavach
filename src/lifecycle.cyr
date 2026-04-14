@@ -143,8 +143,10 @@ struct Sandbox {
 
 var SANDBOX_SIZE = 48;
 
-# Monotonic id counter; Uuid::new_v4() not available without a crypto module.
-var _sandbox_next_id = 1;
+# Sandbox IDs: 64 bits from /dev/urandom, UUID-v4-equivalent for
+# correlation. Collision probability across 2^32 sandboxes is ~2^-32.
+# Previously a monotonic counter (deferred per ADR-004 §8); closed in
+# v2.1 now that util.cyr ships rand_u64().
 
 # Nanoseconds since boot. clock_gettime(CLOCK_MONOTONIC, &ts).
 fn now_ns() {
@@ -164,8 +166,7 @@ fn sandbox_create(config) {
         return 0;
     }
     var s = alloc(SANDBOX_SIZE);
-    Sandbox_set_id(s, _sandbox_next_id);
-    _sandbox_next_id = _sandbox_next_id + 1;
+    Sandbox_set_id(s, rand_u64());
     Sandbox_set_config(s, config);
     Sandbox_set_state(s, SandboxState.CREATED);
     Sandbox_set_created_at(s, now_ns());

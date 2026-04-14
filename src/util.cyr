@@ -33,6 +33,31 @@ fn checked_mul(a, b) {
     return r;
 }
 
+# Sum 4 non-negative sizes with overflow detection. Returns -1 on any
+# negative input or any intermediate overflow. Unused slots: pass 0.
+# Chosen arity keeps our worst alloc sites (audit/quarantine/oci_spec)
+# coverable in one call — those stitch at most 4 user-lengths plus a
+# bounded constant the caller adds separately.
+fn checked_sum4(a, b, c, d) {
+    var s = checked_add(a, b);
+    if (s < 0) { return 0 - 1; }
+    s = checked_add(s, c);
+    if (s < 0) { return 0 - 1; }
+    s = checked_add(s, d);
+    if (s < 0) { return 0 - 1; }
+    return s;
+}
+
+# Overflow-safe alloc: returns 0 (instead of aborting) if requested size
+# is negative or exceeds the attacker-defense ceiling of 64 MiB per
+# single allocation. 64 MiB is larger than any legitimate per-op buffer
+# kavach allocates (OCI spec worst case ~2 MiB, audit line < 1 MiB).
+fn alloc_checked(size) {
+    if (size < 0) { return 0; }
+    if (size > 67108864) { return 0; }
+    return alloc(size);
+}
+
 # ---- input validation ----------------------------------------------------
 
 # Reject control chars (NUL, BEL, ESC, …) while allowing tab/newline/CR.
@@ -130,6 +155,26 @@ fn rand_hex_id() {
     read_urandom(&raw, 8);
     var out = alloc(17);
     hex_encode_bytes(&raw, 8, out);
+    return out;
+}
+
+# 64-bit random from /dev/urandom. Used for UUID-v4-equivalent internal
+# IDs (sandbox, finding, quarantine entry). Collision probability across
+# 2^32 entries is ~2^-32 — sufficient for correlation IDs. Falls back
+# to 0 on failure (caller sees a duplicate, which is a visible bug
+# rather than a silent TOCTOU).
+fn rand_u64() {
+    var raw[8];
+    if (read_urandom(&raw, 8) != 8) { return 0; }
+    return load64(&raw);
+}
+
+# 32-char hex UUID-like id. Two u64 samples give 128 bits of randomness.
+fn rand_uuid_hex() {
+    var raw[16];
+    read_urandom(&raw, 16);
+    var out = alloc(33);
+    hex_encode_bytes(&raw, 16, out);
     return out;
 }
 

@@ -41,20 +41,42 @@ the remaining feature gaps. See
 - [ ] Report cyrius `deps` relative-path symlink bug upstream (workaround
       in cyrius.toml uses absolute path for sigil)
 
-### v2.1 — feature parity unblocks
+### v2.1 — feature parity unblocks (deferred from v2.0)
 
-| Feature | Blocking | Status |
-|---------|----------|--------|
-| Seccomp hooks | Cyrius syscall wrappers (`prctl`, `seccomp`) | waiting |
-| Landlock hooks | Cyrius syscall wrappers (`landlock_*`) | waiting |
-| cgroups v2 | Cyrius syscall wrappers + `/sys/fs/cgroup` writer | waiting |
-| Firecracker backend | vsock + unix-socket robustness | waiting |
-| SGX/SEV/TDX backends | `sigil` EAR/attestation helpers | waiting |
-| HTTP credential proxy | `lib/http.cyr` CONNECT tunnel | waiting |
-| OffenderTracker | nothing — mechanical port | ready |
-| Integrity monitoring | nothing — mechanical port | ready |
-| Secret redaction (WARN) | nothing — mechanical port | ready |
-| UUID v4 | `getrandom` syscall wrapper | ready |
+Consolidated internal tracker. Covers items deferred from the v2.0 port
+([ADR-004](../adr/004-deferred-features.md)) and hardening pass
+([ADR-005](../adr/005-v2-hardening-pass.md)).
+
+#### Ready — no external blockers (scheduled next)
+
+| Feature | Source | Status |
+|---------|--------|--------|
+| UUID v4 | ADR-004 §8 | **done v2.1** — `rand_u64` in util.cyr; Sandbox/ScanFinding/Quarantine ids are now 64-bit random. |
+| Secret redaction on WARN verdict | ADR-004 §7 | **done v2.1** — `secrets_redact(text)` rewrites matched spans to `[REDACTED:CATEGORY]`; called from `gate_apply` on WARN when policy opts in. |
+| OffenderTracker | ADR-004 §5 | **done v2.1** — `offender_tracker_new` + `record` + `agent_score` (exponential half-life decay) + `should_escalate`. |
+| Sandbox integrity monitoring | ADR-004 §6 | **done v2.1** — `check_integrity()` reads `/proc/1/cmdline`, `/proc/mounts`, `/proc/self/uid_map`; returns `IntegrityReport{intact, checks[3], checked_at}`. |
+| M1 remaining overflow sites | ADR-005 §M1 | **done v2.1** — `checked_sum4` + `alloc_checked` wired into audit `_sign_input`, `_entry_to_jsonl`, quarantine `_qpath`, `_meta_jsonl`, and `oci_generate_spec`. |
+| `FileInjection.mode` honoring helper | ADR-005 §M2 | `credential_inject_files(injections)` that writes via `file_write_secure` then `sys_fchmod`. |
+| `cyrius audit` clean | v2.0.x backlog | fmt / lint / vet / deny. |
+
+#### Blocked — awaiting upstream
+
+| Feature | Blocking | Notes |
+|---------|----------|-------|
+| Seccomp hooks | Cyrius `sys_prctl`, `sys_seccomp` wrappers | Post-fork async-signal-safe only. |
+| Landlock hooks | Cyrius `sys_landlock_*` wrappers | ABI v4 TCP port + v6 scoping. |
+| cgroups v2 | Cyrius `/sys/fs/cgroup` writer | resource limits wired via cgroupfs. |
+| SGX attestation + sealing | sigil EAR helpers + IAS cert chain | Enriches `backend_sgx.cyr`. |
+| SEV/TDX attestation | sigil EAR helpers | Quote fetch + verify. |
+| Firecracker jailer/vsock/snapshot | Cyrius `sys_setresuid` + unix-socket robustness | Enriches `backend_firecracker.cyr`. |
+| HTTP credential proxy | `lib/http.cyr` CONNECT tunnel + TLS | Direct env/file/stdin already ships. |
+| H4 binary-path TOCTOU | Cyrius `sys_execveat` + `O_PATH\|O_NOFOLLOW` fd-cache | ADR-005 §H4 residual. |
+| Stiva OCI backend | stiva Cyrius port | `_oci_runtime_path` prepends stiva when available. |
+
+#### Meta
+
+- [ ] Report cyrius `deps` relative-path symlink bug upstream (workaround in cyrius.toml uses absolute path for sigil).
+- [ ] Delete `rust-old/` once parity is reached in v2.1.
 
 ---
 

@@ -314,3 +314,110 @@ fn check_time_anomaly(duration_ms, expected_ms, config) {
     }
     return 0;
 }
+
+# ---- Sandbox integrity monitoring (v2.1) ---------------------------------
+# Ported from rust-old/src/scanning/runtime.rs check_integrity(). Reads
+# /proc to verify the current process is in a separate PID, mount, and
+# user namespace from the host. Used by callers that want to assert
+# isolation is actually in effect before proceeding with sensitive work.
+
+#derive(accessors)
+struct IntegrityCheck {
+    name;
+    passed;
+    detail;
+}
+
+fn _integrity_check_new(name, passed, detail) {
+    var c = alloc(24);
+    IntegrityCheck_set_name(c, name);
+    IntegrityCheck_set_passed(c, passed);
+    IntegrityCheck_set_detail(c, detail);
+    return c;
+}
+
+#derive(accessors)
+struct IntegrityReport {
+    intact;
+    checks;
+    checked_at;
+}
+
+fn integrity_report_new() {
+    var r = alloc(24);
+    IntegrityReport_set_intact(r, 0);
+    IntegrityReport_set_checks(r, vec_new());
+    IntegrityReport_set_checked_at(r, 0);
+    return r;
+}
+
+# PID namespace check: /proc/1/cmdline should not contain 'systemd' or
+# 'init'. If the read fails (e.g. /proc masked), assume isolated — the
+# caller can't see host state anyway.
+fn _integrity_check_pid_ns() {
+    var buf = alloc(512);
+    var n = file_read_all("/proc/1/cmdline", buf, 512);
+    if (n <= 0) {
+        return _integrity_check_new("pid_namespace", 1, "proc not readable (assume isolated)");
+    }
+    store8(buf + n, 0);
+    if (str_contains(buf, "systemd") == 1) {
+        return _integrity_check_new("pid_namespace", 0, "host systemd visible as PID 1");
+    }
+    if (str_contains(buf, "/init") == 1) {
+        return _integrity_check_new("pid_namespace", 0, "host init visible as PID 1");
+    }
+    return _integrity_check_new("pid_namespace", 1, "PID namespace isolated");
+}
+
+# Mount namespace check: /proc/mounts should not expose host /home
+# unless overlay-mounted (containers commonly overlay user dirs).
+fn _integrity_check_mount_ns() {
+    var buf = alloc(8192);
+    var n = file_read_all("/proc/mounts", buf, 8192);
+    if (n <= 0) {
+        return _integrity_check_new("mount_namespace", 1, "/proc/mounts not readable");
+    }
+    store8(buf + n, 0);
+    if (str_contains(buf, "/home/") == 1) {
+        if (str_contains(buf, "overlay") == 0) {
+            return _integrity_check_new("mount_namespace", 0, "host /home visible");
+        }
+    }
+    return _integrity_check_new("mount_namespace", 1, "mount namespace isolated");
+}
+
+# User namespace check: /proc/self/uid_map should be non-empty when a
+# user namespace is in effect.
+fn _integrity_check_user_ns() {
+    var buf = alloc(256);
+    var n = file_read_all("/proc/self/uid_map", buf, 256);
+    if (n <= 0) {
+        return _integrity_check_new("user_namespace", 0, "no UID mapping");
+    }
+    store8(buf + n, 0);
+    if (n < 4) {
+        return _integrity_check_new("user_namespace", 0, "UID map suspiciously small");
+    }
+    return _integrity_check_new("user_namespace", 1, "user namespace active");
+}
+
+fn check_integrity() {
+    var report = integrity_report_new();
+    IntegrityReport_set_checked_at(report, clock_epoch_secs());
+    var checks = IntegrityReport_checks(report);
+
+    var c1 = _integrity_check_pid_ns();
+    var c2 = _integrity_check_mount_ns();
+    var c3 = _integrity_check_user_ns();
+    vec_push(checks, c1);
+    vec_push(checks, c2);
+    vec_push(checks, c3);
+
+    var intact = 1;
+    if (IntegrityCheck_passed(c1) == 0) { intact = 0; }
+    if (IntegrityCheck_passed(c2) == 0) { intact = 0; }
+    if (IntegrityCheck_passed(c3) == 0) { intact = 0; }
+    IntegrityReport_set_intact(report, intact);
+    return report;
+}
