@@ -1,0 +1,261 @@
+# kavach — gVisor (runsc) backend
+# Ported from rust-old/src/backend/gvisor/mod.rs
+#
+# Creates an OCI bundle at /tmp/kavach-gvisor-<id>/ with a minimal config.json
+# + empty rootfs/, then runs `runsc --network <mode> run --bundle <dir> <id>`.
+# Cleanup via `runsc delete --force <id>` regardless of run outcome.
+
+var _gvisor_id_counter = 1;
+
+# Container id: "kavach-gvisor-<epoch_s>-<counter>"
+fn _gvisor_container_id() {
+    var prefix = "kavach-gvisor-";
+    var ts_buf[24];
+    var ts_len = fmt_int_buf(clock_epoch_secs(), &ts_buf);
+    var ctr = _gvisor_id_counter;
+    _gvisor_id_counter = _gvisor_id_counter + 1;
+    var ctr_buf[24];
+    var ctr_len = fmt_int_buf(ctr, &ctr_buf);
+
+    var out = alloc(strlen(prefix) + ts_len + 1 + ctr_len + 1);
+    var pos = 0;
+    memcpy(out + pos, prefix, strlen(prefix)); pos = pos + strlen(prefix);
+    memcpy(out + pos, &ts_buf, ts_len); pos = pos + ts_len;
+    store8(out + pos, 45); pos = pos + 1;
+    memcpy(out + pos, &ctr_buf, ctr_len); pos = pos + ctr_len;
+    store8(out + pos, 0);
+    return out;
+}
+
+# JSON-escape backslash, double-quote, newline, CR, tab. Returns allocated cstr.
+fn _gvisor_json_escape(s) {
+    var n = strlen(s);
+    var dst = alloc(n * 2 + 1);
+    var di = 0;
+    var i = 0;
+    while (i < n) {
+        var c = load8(s + i);
+        if (c == 34) {
+            store8(dst + di, 92); di = di + 1;
+            store8(dst + di, 34); di = di + 1;
+        }
+        elif (c == 92) {
+            store8(dst + di, 92); di = di + 1;
+            store8(dst + di, 92); di = di + 1;
+        }
+        elif (c == 10) {
+            store8(dst + di, 92); di = di + 1;
+            store8(dst + di, 110); di = di + 1;
+        }
+        elif (c == 13) {
+            store8(dst + di, 92); di = di + 1;
+            store8(dst + di, 114); di = di + 1;
+        }
+        elif (c == 9) {
+            store8(dst + di, 92); di = di + 1;
+            store8(dst + di, 116); di = di + 1;
+        }
+        else {
+            store8(dst + di, c); di = di + 1;
+        }
+        i = i + 1;
+    }
+    store8(dst + di, 0);
+    return dst;
+}
+
+# Build minimal OCI config.json v1.0.2. Returns heap cstr ready to write.
+fn _gvisor_oci_spec(sandbox, command) {
+    var config = Sandbox_config(sandbox);
+    var policy = SandboxConfig_policy(config);
+    var cmd_escaped = _gvisor_json_escape(command);
+
+    var mem = SandboxPolicy_memory_limit_mb(policy);
+    var pids = SandboxPolicy_max_pids(policy);
+    var readonly = "false";
+    if (SandboxPolicy_read_only_rootfs(policy) == 1) { readonly = "true"; }
+
+    # Render resources block if any limits are set.
+    var resources = "";
+    if (mem > 0) {
+        var mem_buf[32];
+        var mem_bytes = mem * 1048576;
+        var mem_len = fmt_int_buf(mem_bytes, &mem_buf);
+        var r = alloc(64 + mem_len);
+        var rpos = 0;
+        var p1 = ",\"resources\":{\"memory\":{\"limit\":";
+        memcpy(r + rpos, p1, strlen(p1)); rpos = rpos + strlen(p1);
+        memcpy(r + rpos, &mem_buf, mem_len); rpos = rpos + mem_len;
+        if (pids > 0) {
+            var pids_buf[24];
+            var pids_len = fmt_int_buf(pids, &pids_buf);
+            var p2 = "},\"pids\":{\"limit\":";
+            memcpy(r + rpos, p2, strlen(p2)); rpos = rpos + strlen(p2);
+            memcpy(r + rpos, &pids_buf, pids_len); rpos = rpos + pids_len;
+        }
+        var p3 = "}}";
+        memcpy(r + rpos, p3, strlen(p3)); rpos = rpos + strlen(p3);
+        store8(r + rpos, 0);
+        resources = r;
+    }
+
+    # Network namespace: include unless network is enabled (host-net).
+    var netns = "{\"type\":\"network\"},";
+    if (SandboxPolicy_network_enabled(policy) == 1) { netns = ""; }
+
+    var buf = alloc(2048 + strlen(cmd_escaped) + strlen(resources));
+    var pos = 0;
+    var head = "{\"ociVersion\":\"1.0.2\",\"process\":{\"terminal\":false,\"args\":[\"/bin/sh\",\"-c\",\"";
+    memcpy(buf + pos, head, strlen(head)); pos = pos + strlen(head);
+    memcpy(buf + pos, cmd_escaped, strlen(cmd_escaped)); pos = pos + strlen(cmd_escaped);
+    var mid1 = "\"],\"env\":[\"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\",\"TERM=xterm\"],\"cwd\":\"/\"},\"root\":{\"path\":\"rootfs\",\"readonly\":";
+    memcpy(buf + pos, mid1, strlen(mid1)); pos = pos + strlen(mid1);
+    memcpy(buf + pos, readonly, strlen(readonly)); pos = pos + strlen(readonly);
+    var mid2 = "},\"linux\":{\"namespaces\":[";
+    memcpy(buf + pos, mid2, strlen(mid2)); pos = pos + strlen(mid2);
+    memcpy(buf + pos, netns, strlen(netns)); pos = pos + strlen(netns);
+    var ns_rest = "{\"type\":\"pid\"},{\"type\":\"ipc\"},{\"type\":\"uts\"},{\"type\":\"mount\"}]";
+    memcpy(buf + pos, ns_rest, strlen(ns_rest)); pos = pos + strlen(ns_rest);
+    memcpy(buf + pos, resources, strlen(resources)); pos = pos + strlen(resources);
+    var tail = "}}";
+    memcpy(buf + pos, tail, strlen(tail)); pos = pos + strlen(tail);
+    store8(buf + pos, 0);
+    return buf;
+}
+
+# Prepare bundle dir + write spec. Returns bundle_dir cstr or 0 on failure.
+fn _gvisor_prepare_bundle(container_id, sandbox, command) {
+    var bundle = alloc(32 + strlen(container_id));
+    var pos = 0;
+    var prefix = "/tmp/";
+    memcpy(bundle + pos, prefix, strlen(prefix)); pos = pos + strlen(prefix);
+    memcpy(bundle + pos, container_id, strlen(container_id)); pos = pos + strlen(container_id);
+    store8(bundle + pos, 0);
+    sys_mkdir(bundle, 448);
+
+    var rootfs = alloc(strlen(bundle) + 8);
+    memcpy(rootfs, bundle, strlen(bundle));
+    memcpy(rootfs + strlen(bundle), "/rootfs", 8);
+    sys_mkdir(rootfs, 448);
+
+    var cfg_path = alloc(strlen(bundle) + 16);
+    memcpy(cfg_path, bundle, strlen(bundle));
+    memcpy(cfg_path + strlen(bundle), "/config.json", 13);
+
+    var spec = _gvisor_oci_spec(sandbox, command);
+    var r = file_write_all(cfg_path, spec, strlen(spec));
+    if (r < 0) { return 0; }
+    return bundle;
+}
+
+# Resolve the runsc binary path; 0 if not found.
+fn _gvisor_runsc_path() {
+    if (path_exists("/usr/local/bin/runsc") == 1) { return "/usr/local/bin/runsc"; }
+    if (path_exists("/usr/bin/runsc") == 1) { return "/usr/bin/runsc"; }
+    return 0;
+}
+
+fn _gvisor_network_mode(policy) {
+    if (SandboxPolicy_network_enabled(policy) == 1) { return "host"; }
+    return "none";
+}
+
+# Build runsc argv and run it, capturing stdout.
+fn _gvisor_run(runsc, bundle, container_id, network, out_buf, out_cap) {
+    var args = vec_new();
+    vec_push(args, runsc);
+    vec_push(args, "--network");
+    vec_push(args, network);
+    vec_push(args, "run");
+    vec_push(args, "--bundle");
+    vec_push(args, bundle);
+    vec_push(args, container_id);
+    return exec_capture(args, out_buf, out_cap);
+}
+
+fn _gvisor_delete(runsc, container_id) {
+    var args = vec_new();
+    vec_push(args, runsc);
+    vec_push(args, "delete");
+    vec_push(args, "--force");
+    vec_push(args, container_id);
+    var sink[32];
+    exec_capture(args, &sink, 32);
+    return 0;
+}
+
+fn _gvisor_error(msg) {
+    var r = exec_result_new();
+    ExecResult_set_exit_code(r, 1);
+    ExecResult_set_stdout(r, "");
+    ExecResult_set_stderr(r, msg);
+    ExecResult_set_duration_ms(r, 0);
+    ExecResult_set_timed_out(r, 0);
+    return r;
+}
+
+fn gvisor_exec(sandbox, command) {
+    var start_ns = now_ns();
+    var runsc = _gvisor_runsc_path();
+    if (runsc == 0) {
+        return _gvisor_error("runsc not found in PATH");
+    }
+
+    # Runtime-guard precheck — same defense-in-depth as process backend.
+    var guard_cfg = runtime_guard_config_default();
+    var violations = check_command(command, guard_cfg);
+    if (vec_len(violations) > 0) {
+        var v0 = vec_get(violations, 0);
+        var r = exec_result_new();
+        ExecResult_set_exit_code(r, 126);
+        ExecResult_set_stderr(r, GuardViolation_description(v0));
+        return r;
+    }
+
+    var container_id = _gvisor_container_id();
+    var bundle = _gvisor_prepare_bundle(container_id, sandbox, command);
+    if (bundle == 0) {
+        return _gvisor_error("failed to prepare OCI bundle");
+    }
+
+    var policy = SandboxConfig_policy(Sandbox_config(sandbox));
+    var network = _gvisor_network_mode(policy);
+
+    var out_cap = 1048576;
+    var out_buf = alloc(out_cap);
+    var n = _gvisor_run(runsc, bundle, container_id, network, out_buf, out_cap);
+    var end_ns = now_ns();
+
+    # Always attempt cleanup; ignore errors (container may have exited).
+    _gvisor_delete(runsc, container_id);
+
+    var r = exec_result_new();
+    if (n < 0) {
+        ExecResult_set_exit_code(r, 1);
+        ExecResult_set_stdout(r, "");
+        ExecResult_set_stderr(r, "runsc run failed");
+    }
+    else {
+        store8(out_buf + n, 0);
+        ExecResult_set_exit_code(r, 0);
+        ExecResult_set_stdout(r, out_buf);
+        ExecResult_set_stderr(r, "");
+    }
+    ExecResult_set_duration_ms(r, (end_ns - start_ns) / 1000000);
+    ExecResult_set_timed_out(r, 0);
+    return r;
+}
+
+fn gvisor_health(sandbox) {
+    if (_gvisor_runsc_path() == 0) { return 0; }
+    return 1;
+}
+
+fn gvisor_destroy(sandbox) { return 0; }
+
+fn backend_gvisor_register() {
+    backend_register_exec(Backend.GVISOR, &gvisor_exec);
+    backend_register_health(Backend.GVISOR, &gvisor_health);
+    backend_register_destroy(Backend.GVISOR, &gvisor_destroy);
+    return 0;
+}

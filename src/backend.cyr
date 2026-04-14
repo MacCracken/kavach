@@ -46,13 +46,38 @@ fn backend_parse(s) {
     return 0 - 1;
 }
 
-# TODO: walk $PATH and stat each candidate (requires fs module).
-fn which_exists(name) {
+# access(path, F_OK) — syscall 21 on x86_64. Returns 1 if exists, 0 otherwise.
+fn path_exists(path) {
+    var r = syscall(21, path, 0);
+    if (r == 0) { return 1; }
     return 0;
 }
 
-# TODO: fstatat-based existence check (requires fs module).
-fn path_exists(path) {
+# Check common PATH locations for a binary. Returns 1 if any exists.
+fn which_exists(name) {
+    var nlen = strlen(name);
+    var buf = alloc(nlen + 24);
+
+    var p1 = "/usr/local/bin/";
+    memcpy(buf, p1, strlen(p1));
+    memcpy(buf + strlen(p1), name, nlen + 1);
+    if (path_exists(buf) == 1) { return 1; }
+
+    var p2 = "/usr/bin/";
+    memcpy(buf, p2, strlen(p2));
+    memcpy(buf + strlen(p2), name, nlen + 1);
+    if (path_exists(buf) == 1) { return 1; }
+
+    var p3 = "/bin/";
+    memcpy(buf, p3, strlen(p3));
+    memcpy(buf + strlen(p3), name, nlen + 1);
+    if (path_exists(buf) == 1) { return 1; }
+
+    var p4 = "/usr/sbin/";
+    memcpy(buf, p4, strlen(p4));
+    memcpy(buf + strlen(p4), name, nlen + 1);
+    if (path_exists(buf) == 1) { return 1; }
+
     return 0;
 }
 

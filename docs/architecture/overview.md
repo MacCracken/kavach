@@ -76,6 +76,7 @@ src/
 ├── backend_dispatch.cyr   Function-pointer table keyed by Backend enum
 ├── backend_noop.cyr       Noop backend registration
 ├── backend_process.cyr    Process backend (fork+exec+capture + guard precheck)
+├── backend_gvisor.cyr     gVisor backend (OCI bundle + runsc orchestration)
 └── sandbox_exec.cyr       End-to-end: dispatch → gate → threat → audit
 ```
 
@@ -229,7 +230,7 @@ See [ADR-004](../adr/004-deferred-features.md) for rationale.
 
 | Feature | Blocking dep | Workaround |
 |---------|--------------|------------|
-| 8 remaining backends (gvisor/firecracker/oci/wasm/sgx/sev/tdx/syagnos) | per-backend IPC/image tooling | `backend_<name>_register()` pattern ready |
+| 7 remaining backends (firecracker/oci/wasm/sgx/sev/tdx/syagnos) | per-backend IPC/image tooling | `backend_<name>_register()` pattern ready |
 | seccomp/Landlock/cgroups hooks | syscall wrappers in Cyrius stdlib | process backend runs without them today |
 | async exec | Cyrius async story still maturing | synchronous fork+wait |
 | HTTP credential proxy | TLS + HTTP server in stdlib | direct injection (env/file/stdin) |

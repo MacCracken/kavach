@@ -102,5 +102,6 @@ fn kavach_init() {
     sha256_global_init();
     backend_noop_register();
     backend_process_register();
+    backend_gvisor_register();
     return 0;
 }

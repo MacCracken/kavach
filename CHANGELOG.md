@@ -13,7 +13,9 @@ toolchain. 25,935 lines of Rust → 20 Cyrius modules. See
 [ADR-001](docs/adr/001-cyrius-port-architecture.md) for the port rationale.
 
 ### Added
-- **20 Cyrius modules**: `error`, `util`, `backend`, `policy`, `scoring`,
+- **gVisor backend** (`src/backend_gvisor.cyr`) — OCI bundle generation + `runsc run` + auto-cleanup. Registers into the dispatch table via `backend_gvisor_register()`. Proves ADR-002's "3-line extension" pattern: same dispatch slot layout, different `exec_fn`.
+- **`path_exists` + `which_exists`** (real implementations via `access(2)` syscall) — replaces the v2.0-alpha stubs that always returned 0. Enables meaningful `backend_is_available()` probes and `resolve_best_backend()` ranking.
+- **21 Cyrius modules** (was 20): `error`, `util`, `backend`, `policy`, `scoring`,
   `lifecycle`, `scanning_types/_secrets/_code/_data/_gate/_runtime/_threat`,
   `audit`, `credential`, `quarantine`, `backend_dispatch/_noop/_process`,
   `sandbox_exec`

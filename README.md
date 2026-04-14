@@ -110,7 +110,7 @@ fn app() {
 | Process | 50 | standard | **registered** (fork+exec+capture+guard precheck) |
 | OCI | 55 | standard | slot reserved — needs `runc`/`crun` shell-out |
 | WASM | 65 | standard | slot reserved |
-| gVisor | 70 | hardened | slot reserved — needs `runsc` shell-out |
+| gVisor | 70 | hardened | **registered** (OCI bundle + `runsc run` + auto-cleanup) |
 | SGX | 80 | hardened | slot reserved |
 | SEV | 82 | hardened | slot reserved |
 | SyAgnos | 80 | hardened | slot reserved |

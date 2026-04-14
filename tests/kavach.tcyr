@@ -19,6 +19,7 @@ include "src/quarantine.cyr"
 include "src/backend_dispatch.cyr"
 include "src/backend_noop.cyr"
 include "src/backend_process.cyr"
+include "src/backend_gvisor.cyr"
 include "src/sandbox_exec.cyr"
 
 fn test_backend_parse() {
@@ -671,8 +672,10 @@ fn test_dispatch_noop_registered() {
     kavach_init();
     assert_eq(backend_is_registered(Backend.NOOP), 1, "noop registered");
     assert_eq(backend_is_registered(Backend.PROCESS), 1, "process registered");
-    # Untouched backends remain unregistered until added.
-    assert_eq(backend_is_registered(Backend.GVISOR), 0, "gvisor not yet");
+    assert_eq(backend_is_registered(Backend.GVISOR), 1, "gvisor registered");
+    # Backends still awaiting ports
+    assert_eq(backend_is_registered(Backend.FIRECRACKER), 0, "firecracker not yet");
+    assert_eq(backend_is_registered(Backend.OCI), 0, "oci not yet");
     return 0;
 }
 
@@ -717,6 +720,116 @@ fn test_quarantine_status_names() {
     assert_eq(streq(quarantine_status_name(QuarantineStatus.QUARANTINED), "quarantined"), 1, "q");
     assert_eq(streq(quarantine_status_name(QuarantineStatus.APPROVED), "approved"), 1, "a");
     assert_eq(streq(quarantine_status_name(QuarantineStatus.REJECTED), "rejected"), 1, "r");
+    return 0;
+}
+
+fn test_gvisor_registered() {
+    test_group("gvisor_registered");
+    kavach_init();
+    assert_eq(backend_is_registered(Backend.GVISOR), 1, "gvisor slot populated");
+    return 0;
+}
+
+fn test_gvisor_container_id_unique() {
+    test_group("gvisor_id_unique");
+    var a = _gvisor_container_id();
+    var b = _gvisor_container_id();
+    assert(streq(a, b) == 0, "ids differ");
+    assert(str_contains(a, "kavach-gvisor-") == 1, "prefix");
+    return 0;
+}
+
+fn test_gvisor_json_escape() {
+    test_group("gvisor_json_escape");
+    var out = _gvisor_json_escape("a\"b\\c");
+    assert_eq(streq(out, "a\\\"b\\\\c"), 1, "quote+backslash escaped");
+    var plain = _gvisor_json_escape("hello world");
+    assert_eq(streq(plain, "hello world"), 1, "clean text unchanged");
+    return 0;
+}
+
+fn test_gvisor_oci_spec_shape() {
+    test_group("gvisor_spec_shape");
+    var cfg = config_new();
+    config_backend(cfg, Backend.GVISOR);
+    # Craft sandbox directly — bypasses availability check so the test runs
+    # even when runsc isn't installed.
+    var sb = alloc(SANDBOX_SIZE);
+    Sandbox_set_config(sb, cfg);
+    var spec = _gvisor_oci_spec(sb, "echo hi");
+    assert(str_contains(spec, "\"ociVersion\":\"1.0.2\"") == 1, "version");
+    assert(str_contains(spec, "\"args\":[\"/bin/sh\",\"-c\",\"echo hi\"]") == 1, "command wrapped");
+    assert(str_contains(spec, "\"type\":\"pid\"") == 1, "pid ns");
+    # network disabled by default → network namespace should be included
+    assert(str_contains(spec, "\"type\":\"network\"") == 1, "net ns (default isolated)");
+    return 0;
+}
+
+fn test_gvisor_oci_spec_host_network() {
+    test_group("gvisor_spec_host_net");
+    var cfg = config_new();
+    config_backend(cfg, Backend.GVISOR);
+    config_network(cfg, 1);
+    var sb = alloc(SANDBOX_SIZE);
+    Sandbox_set_config(sb, cfg);
+    var spec = _gvisor_oci_spec(sb, "echo hi");
+    # host network → no network namespace entry
+    assert_eq(str_contains(spec, "\"type\":\"network\""), 0, "no net ns when enabled");
+    return 0;
+}
+
+fn test_gvisor_oci_spec_readonly() {
+    test_group("gvisor_spec_readonly");
+    var cfg = config_new();
+    config_backend(cfg, Backend.GVISOR);
+    config_policy(cfg, policy_strict());
+    var sb = alloc(SANDBOX_SIZE);
+    Sandbox_set_config(sb, cfg);
+    var spec = _gvisor_oci_spec(sb, "echo hi");
+    assert(str_contains(spec, "\"readonly\":true") == 1, "readonly rootfs");
+    assert(str_contains(spec, "\"resources\":{\"memory\":") == 1, "memory limit");
+    assert(str_contains(spec, "\"pids\":{\"limit\":64}") == 1, "pids limit");
+    return 0;
+}
+
+fn test_gvisor_network_mode() {
+    test_group("gvisor_network_mode");
+    var p = policy_minimal();
+    assert_eq(streq(_gvisor_network_mode(p), "none"), 1, "minimal=none");
+    SandboxPolicy_set_network_enabled(p, 1);
+    assert_eq(streq(_gvisor_network_mode(p), "host"), 1, "enabled=host");
+    return 0;
+}
+
+fn test_gvisor_exec_without_runsc() {
+    test_group("gvisor_no_runsc");
+    kavach_init();
+    var cfg = config_new();
+    config_backend(cfg, Backend.GVISOR);
+    var sb = alloc(SANDBOX_SIZE);
+    Sandbox_set_config(sb, cfg);
+    # If runsc is not on this machine, we should get a clean error not a crash.
+    if (_gvisor_runsc_path() == 0) {
+        var r = gvisor_exec(sb, "echo hi");
+        assert_eq(ExecResult_exit_code(r), 1, "clean failure");
+        assert(str_contains(ExecResult_stderr(r), "runsc") == 1, "mentions runsc");
+    }
+    return 0;
+}
+
+fn test_which_exists() {
+    test_group("which_exists");
+    # /bin/sh is effectively universal on Linux — must exist.
+    assert_eq(which_exists("sh"), 1, "sh present");
+    # A nonsense binary must not.
+    assert_eq(which_exists("kavach-nonexistent-zzzz"), 0, "bogus absent");
+    return 0;
+}
+
+fn test_path_exists() {
+    test_group("path_exists");
+    assert_eq(path_exists("/tmp"), 1, "/tmp exists");
+    assert_eq(path_exists("/no/such/kavach/path"), 0, "nonexistent = 0");
     return 0;
 }
 
@@ -982,6 +1095,16 @@ fn main() {
     test_quarantine_status_names();
     test_process_backend_real_exec();
     test_process_backend_rejects_bash();
+    test_gvisor_registered();
+    test_gvisor_container_id_unique();
+    test_gvisor_json_escape();
+    test_gvisor_oci_spec_shape();
+    test_gvisor_oci_spec_host_network();
+    test_gvisor_oci_spec_readonly();
+    test_gvisor_network_mode();
+    test_gvisor_exec_without_runsc();
+    test_which_exists();
+    test_path_exists();
     return assert_summary();
 }
 

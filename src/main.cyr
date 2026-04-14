@@ -20,6 +20,7 @@ include "src/quarantine.cyr"
 include "src/backend_dispatch.cyr"
 include "src/backend_noop.cyr"
 include "src/backend_process.cyr"
+include "src/backend_gvisor.cyr"
 include "src/sandbox_exec.cyr"
 
 fn _print_banner() {

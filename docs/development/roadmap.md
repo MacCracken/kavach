@@ -22,8 +22,10 @@ the remaining feature gaps. See
 - [x] HMAC-SHA256 audit chain via sigil
 - [x] End-to-end integration demo
 - [x] Architecture overview + 4 ADRs + README rewrite
+- [x] `path_exists` + `which_exists` via access(2) syscall
+- [x] gVisor backend (OCI bundle generation + `runsc run` + auto-cleanup)
 - [ ] `cyrius audit` clean (fmt/lint/vet/deny)
-- [ ] Add OCI + gVisor backends (shell-outs via `exec_capture`)
+- [ ] OCI backend (runc/crun shell-out — same pattern as gVisor)
 - [ ] Delete `rust-old/` once parity reaches v2.1
 
 ### v2.1 — feature parity unblocks
