@@ -11,7 +11,7 @@ entry = "src/main.cyr"
 output = "kavach"
 
 [deps]
-stdlib = ["string", "fmt", "alloc", "vec", "str", "syscalls", "io", "args", "assert", "bigint", "chrono", "hashmap", "freelist", "fnptr", "process"]
+stdlib = ["string", "fmt", "alloc", "vec", "str", "syscalls", "io", "args", "assert", "bigint", "chrono", "hashmap", "freelist", "fnptr", "process", "tagged"]
 
 [deps.sigil]
 path = "../sigil"

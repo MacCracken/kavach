@@ -5,7 +5,59 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2.0.0] — 2026-04-02
+## [2.0.0-cyrius] — 2026-04-13 (in progress)
+
+Full language migration — Rust v1.x → Cyrius. This is a ground-up rewrite
+preserving the public API surface but rebuilding the internals on the Cyrius
+toolchain. 25,935 lines of Rust → 20 Cyrius modules. See
+[ADR-001](docs/adr/001-cyrius-port-architecture.md) for the port rationale.
+
+### Added
+- **20 Cyrius modules**: `error`, `util`, `backend`, `policy`, `scoring`,
+  `lifecycle`, `scanning_types/_secrets/_code/_data/_gate/_runtime/_threat`,
+  `audit`, `credential`, `quarantine`, `backend_dispatch/_noop/_process`,
+  `sandbox_exec`
+- **Function-pointer dispatch table** for backends — O(1) lookup, O(3-line)
+  extension cost. See [ADR-002](docs/adr/002-backend-dispatch-fnptr-table.md).
+- **Fixed-point threat scoring** — intent_score is `_x1000` (0..1000). See
+  [ADR-003](docs/adr/003-fixed-point-threat-scoring.md).
+- **HMAC-SHA256 audit chain** via [sigil](https://github.com/MacCracken/sigil) ≥ 2.1.2
+- **End-to-end demo** (`./build/kavach`): backend dispatch → gate → threat →
+  audit, writes `/tmp/kavach-demo.audit` with linked HMAC chain.
+- **Architecture docs**: [overview](docs/architecture/overview.md) +
+  4 ADRs + README rewrite for the Cyrius edition.
+- **Integration tests**: real `/bin/echo` fork+exec via PROCESS backend;
+  full scanner pipeline validated with synthetic inputs.
+
+### Changed
+- **Language**: Rust 2021 → Cyrius 4.0.0+
+- **Async → sync**: all exec paths are synchronous in v2.0. See
+  [ADR-004 §1](docs/adr/004-deferred-features.md).
+- **Build tool**: `cargo` → `cyrius build`
+- **Dependency model**: `Cargo.toml` → `cyrius.toml`; binary deps via sigil
+- **Test runner**: `cargo test` → `cyrius test tests/kavach.tcyr`
+- **Module layout**: nested `src/<module>/mod.rs` → flat `src/<module>.cyr`
+
+### Deferred — see [ADR-004](docs/adr/004-deferred-features.md)
+- 8 of 10 backends (Noop + Process shipped; slots reserved for the other 8)
+- Seccomp / Landlock / cgroups kernel-level enforcement hooks
+- HTTP credential proxy (direct env/file/stdin injection shipped)
+- OffenderTracker (per-exec threat classification shipped)
+- Sandbox integrity monitoring (`/proc` readers)
+- Secret redaction on WARN verdict
+- UUID v4 (monotonic counters shipped — audit HMAC covers trust boundary)
+- Full PCRE regex (literal-prefix + char-class matchers shipped for all
+  distinctive secret/data patterns)
+
+### Removed
+- `rust-old/` contains the entire v1.x Rust source (25,935 lines) preserved
+  for reference. Will be deleted in v2.1 once port reaches feature parity.
+- Cargo workspace, Makefile, `deny.toml`, `rust-toolchain.toml` —
+  replaced by `cyrius.toml`.
+
+---
+
+## [2.0.0] — 2026-04-02 (Rust, superseded by 2.0.0-cyrius)
 
 ### Added
 - **Firewall types in agnosys** — `TrafficDirection`, `Protocol`, `FirewallAction` enums, `FirewallRule` and `FirewallPolicy` structs with constructors, `apply_firewall_rules()` function, nftables ruleset rendering

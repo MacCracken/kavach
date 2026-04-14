@@ -6,6 +6,43 @@ Completed items are in [CHANGELOG.md](../../CHANGELOG.md).
 
 ---
 
+## Cyrius port completion (v2.0 → v2.1)
+
+v2.0 ships the architectural skeleton: core types, scanning pipeline, threat
+classification, audit chain, credential proxy, and 2 backends. v2.1 closes
+the remaining feature gaps. See
+[ADR-004](../adr/004-deferred-features.md) for the unblocking conditions.
+
+### v2.0.x — skeleton + docs
+
+- [x] 20 modules ported (util, error, backend, policy, scoring, lifecycle,
+      7× scanning_*, audit, credential, quarantine, backend_dispatch,
+      backend_noop, backend_process, sandbox_exec)
+- [x] Dispatch table + extension pattern ([ADR-002](../adr/002-backend-dispatch-fnptr-table.md))
+- [x] HMAC-SHA256 audit chain via sigil
+- [x] End-to-end integration demo
+- [x] Architecture overview + 4 ADRs + README rewrite
+- [ ] `cyrius audit` clean (fmt/lint/vet/deny)
+- [ ] Add OCI + gVisor backends (shell-outs via `exec_capture`)
+- [ ] Delete `rust-old/` once parity reaches v2.1
+
+### v2.1 — feature parity unblocks
+
+| Feature | Blocking | Status |
+|---------|----------|--------|
+| Seccomp hooks | Cyrius syscall wrappers (`prctl`, `seccomp`) | waiting |
+| Landlock hooks | Cyrius syscall wrappers (`landlock_*`) | waiting |
+| cgroups v2 | Cyrius syscall wrappers + `/sys/fs/cgroup` writer | waiting |
+| Firecracker backend | vsock + unix-socket robustness | waiting |
+| SGX/SEV/TDX backends | `sigil` EAR/attestation helpers | waiting |
+| HTTP credential proxy | `lib/http.cyr` CONNECT tunnel | waiting |
+| OffenderTracker | nothing — mechanical port | ready |
+| Integrity monitoring | nothing — mechanical port | ready |
+| Secret redaction (WARN) | nothing — mechanical port | ready |
+| UUID v4 | `getrandom` syscall wrapper | ready |
+
+---
+
 ## Foreign Platform Containers
 
 **Goal**: Run Windows, macOS, and Linux applications inside AGNOS without surrendering sovereignty. The foreign OS runs as a fully sandboxed guest — kavach controls every boundary.
