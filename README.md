@@ -109,7 +109,7 @@ fn app() {
 | Noop | 0 | minimal | **registered** (testing only) |
 | Process | 50 | standard | **registered** (fork+exec+capture+guard precheck) |
 | OCI | 55 | standard | **registered** (`runc`/`crun` shell-out via shared OCI spec) |
-| WASM | 65 | standard | slot reserved |
+| WASM | 65 | standard | **registered** (`wasmtime` CLI shell-out with fuel + memory + preopens) |
 | gVisor | 70 | hardened | **registered** (OCI bundle + `runsc run` + auto-cleanup) |
 | SGX | 80 | hardened | slot reserved |
 | SEV | 82 | hardened | slot reserved |

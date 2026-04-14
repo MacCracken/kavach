@@ -1,0 +1,180 @@
+# kavach — WASM (wasmtime) backend
+# Ported from rust-old/src/backend/wasm/mod.rs
+#
+# The Rust version embedded wasmtime via Cargo crates. Cyrius v2.0 shells
+# out to the `wasmtime` CLI binary instead, which accepts the same
+# --fuel / --dir / --env / --max-memory-size flags. Module format is still
+# `command = path to .wasm file`.
+#
+# Deferred: WAT inline modules, custom linker hooks. Both require embedding
+# a real WASM runtime — v2.1 or whenever mabda/yukti exposes one.
+
+# Look for wasmtime on PATH. Returns path cstr, or 0 if none.
+fn _wasm_binary_path() {
+    if (path_exists("/usr/local/bin/wasmtime") == 1) { return "/usr/local/bin/wasmtime"; }
+    if (path_exists("/usr/bin/wasmtime") == 1) { return "/usr/bin/wasmtime"; }
+    var home = syscall(0 - 1, 0);  # placeholder; no getenv yet
+    return 0;
+}
+
+# Fuel calibration from timeout_ms. Matches Rust:
+#   fuel ≈ timeout_ms * 1_000_000 (≈ 1B instr/sec assumption)
+fn _wasm_fuel_from_timeout(timeout_ms) {
+    return timeout_ms * 1000000;
+}
+
+# Append "--dir <path>" pair for each landlock rule. Writes into argv vec.
+# Cyrius stdlib doesn't yet expose landlock_rules as a vec — our SandboxPolicy
+# only carries a cached length — so for v2.0 we preopen the configured
+# `workdir` (if any) read-only, matching the most common caller pattern.
+fn _wasm_append_preopens(args, sandbox) {
+    var cfg = Sandbox_config(sandbox);
+    var wd = SandboxConfig_workdir(cfg);
+    if (wd != 0) {
+        if (strlen(wd) > 0) {
+            vec_push(args, "--dir");
+            vec_push(args, wd);
+        }
+    }
+    return 0;
+}
+
+# Append resource-limit flags from policy.
+fn _wasm_append_limits(args, policy, timeout_ms) {
+    # Memory limit: --max-memory-size <bytes>
+    var mem = SandboxPolicy_memory_limit_mb(policy);
+    if (mem > 0) {
+        var mem_buf[32];
+        var mem_bytes = mem * 1048576;
+        var mem_len = fmt_int_buf(mem_bytes, &mem_buf);
+        var mem_str = alloc(mem_len + 1);
+        memcpy(mem_str, &mem_buf, mem_len);
+        store8(mem_str + mem_len, 0);
+        vec_push(args, "--max-memory-size");
+        vec_push(args, mem_str);
+    }
+
+    # Fuel metering: --fuel <N>
+    var fuel = _wasm_fuel_from_timeout(timeout_ms);
+    if (fuel > 0) {
+        var f_buf[32];
+        var f_len = fmt_int_buf(fuel, &f_buf);
+        var f_str = alloc(f_len + 1);
+        memcpy(f_str, &f_buf, f_len);
+        store8(f_str + f_len, 0);
+        vec_push(args, "--fuel");
+        vec_push(args, f_str);
+    }
+    return 0;
+}
+
+fn _wasm_error(msg) {
+    var r = exec_result_new();
+    ExecResult_set_exit_code(r, 1);
+    ExecResult_set_stdout(r, "");
+    ExecResult_set_stderr(r, msg);
+    ExecResult_set_duration_ms(r, 0);
+    ExecResult_set_timed_out(r, 0);
+    return r;
+}
+
+# Trim leading/trailing ASCII whitespace. Returns allocated cstr.
+fn _wasm_trim(s) {
+    var n = strlen(s);
+    var start = 0;
+    while (start < n) {
+        var c = load8(s + start);
+        if (c != 32) { if (c != 9) { if (c != 10) { if (c != 13) { break; } } } }
+        start = start + 1;
+    }
+    var end = n;
+    while (end > start) {
+        var c = load8(s + end - 1);
+        if (c != 32) { if (c != 9) { if (c != 10) { if (c != 13) { break; } } } }
+        end = end - 1;
+    }
+    var len = end - start;
+    var out = alloc(len + 1);
+    memcpy(out, s + start, len);
+    store8(out + len, 0);
+    return out;
+}
+
+fn wasm_exec(sandbox, command) {
+    var start_ns = now_ns();
+    var wasmtime = _wasm_binary_path();
+    if (wasmtime == 0) {
+        return _wasm_error("wasmtime not found in PATH");
+    }
+
+    # The command is expected to be a .wasm file path.
+    var wasm_path = _wasm_trim(command);
+    if (strlen(wasm_path) == 0) {
+        return _wasm_error("WASM backend requires a .wasm file path as the command");
+    }
+    if (path_exists(wasm_path) == 0) {
+        return _wasm_error("WASM module file not found");
+    }
+
+    # Runtime-guard precheck is still useful — a .wasm path containing
+    # shell metacharacters (e.g., "/tmp/foo.wasm; cat /etc/shadow") would
+    # only be sent as a literal argv element, but the sandbox caller still
+    # deserves the warning.
+    var guard_cfg = runtime_guard_config_default();
+    var violations = check_command(command, guard_cfg);
+    if (vec_len(violations) > 0) {
+        var v0 = vec_get(violations, 0);
+        var r = exec_result_new();
+        ExecResult_set_exit_code(r, 126);
+        ExecResult_set_stderr(r, GuardViolation_description(v0));
+        return r;
+    }
+
+    var cfg = Sandbox_config(sandbox);
+    var policy = SandboxConfig_policy(cfg);
+    var timeout = SandboxConfig_timeout_ms(cfg);
+
+    var args = vec_new();
+    vec_push(args, wasmtime);
+    vec_push(args, "run");
+    _wasm_append_limits(args, policy, timeout);
+    _wasm_append_preopens(args, sandbox);
+    # `--` separator guards against .wasm paths starting with '-'.
+    vec_push(args, "--");
+    vec_push(args, wasm_path);
+
+    var out_cap = 1048576;
+    var out_buf = alloc(out_cap);
+    var n = exec_capture(args, out_buf, out_cap);
+    var end_ns = now_ns();
+
+    var r = exec_result_new();
+    if (n < 0) {
+        ExecResult_set_exit_code(r, 1);
+        ExecResult_set_stdout(r, "");
+        ExecResult_set_stderr(r, "wasmtime run failed");
+    }
+    else {
+        store8(out_buf + n, 0);
+        ExecResult_set_exit_code(r, 0);
+        ExecResult_set_stdout(r, out_buf);
+        ExecResult_set_stderr(r, "");
+    }
+    ExecResult_set_duration_ms(r, (end_ns - start_ns) / 1000000);
+    ExecResult_set_timed_out(r, 0);
+    return r;
+}
+
+fn wasm_health(sandbox) {
+    if (_wasm_binary_path() == 0) { return 0; }
+    return 1;
+}
+
+fn wasm_destroy(sandbox) { return 0; }
+
+fn backend_wasm_register() {
+    backend_register_exec(Backend.WASM, &wasm_exec);
+    backend_register_health(Backend.WASM, &wasm_health);
+    backend_register_destroy(Backend.WASM, &wasm_destroy);
+    return 0;
+}

@@ -104,5 +104,6 @@ fn kavach_init() {
     backend_process_register();
     backend_gvisor_register();
     backend_oci_register();
+    backend_wasm_register();
     return 0;
 }

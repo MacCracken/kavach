@@ -22,6 +22,7 @@ include "src/backend_noop.cyr"
 include "src/backend_process.cyr"
 include "src/backend_gvisor.cyr"
 include "src/backend_oci.cyr"
+include "src/backend_wasm.cyr"
 include "src/sandbox_exec.cyr"
 
 fn test_backend_parse() {
@@ -676,9 +677,10 @@ fn test_dispatch_noop_registered() {
     assert_eq(backend_is_registered(Backend.PROCESS), 1, "process registered");
     assert_eq(backend_is_registered(Backend.GVISOR), 1, "gvisor registered");
     assert_eq(backend_is_registered(Backend.OCI), 1, "oci registered");
+    assert_eq(backend_is_registered(Backend.WASM), 1, "wasm registered");
     # Backends still awaiting ports
     assert_eq(backend_is_registered(Backend.FIRECRACKER), 0, "firecracker not yet");
-    assert_eq(backend_is_registered(Backend.WASM), 0, "wasm not yet");
+    assert_eq(backend_is_registered(Backend.SGX), 0, "sgx not yet");
     return 0;
 }
 
@@ -851,6 +853,63 @@ fn test_oci_bundle_cleanup() {
     assert_eq(path_exists(bundle), 1, "bundle dir exists");
     oci_cleanup_bundle(bundle);
     assert_eq(path_exists(bundle), 0, "bundle dir removed after cleanup");
+    return 0;
+}
+
+fn test_wasm_registered() {
+    test_group("wasm_registered");
+    kavach_init();
+    assert_eq(backend_is_registered(Backend.WASM), 1, "wasm slot populated");
+    return 0;
+}
+
+fn test_wasm_fuel_calculation() {
+    test_group("wasm_fuel");
+    # Matches Rust: fuel = timeout_ms * 1_000_000
+    assert_eq(_wasm_fuel_from_timeout(1000), 1000000000, "1s -> 1G fuel");
+    assert_eq(_wasm_fuel_from_timeout(100), 100000000, "100ms -> 100M fuel");
+    assert_eq(_wasm_fuel_from_timeout(0), 0, "0 -> 0");
+    return 0;
+}
+
+fn test_wasm_trim() {
+    test_group("wasm_trim");
+    assert_eq(streq(_wasm_trim("  /tmp/foo.wasm  "), "/tmp/foo.wasm"), 1, "strips ws");
+    assert_eq(streq(_wasm_trim("\t/foo.wasm\n"), "/foo.wasm"), 1, "strips tab+lf");
+    assert_eq(streq(_wasm_trim("/foo.wasm"), "/foo.wasm"), 1, "no change");
+    assert_eq(streq(_wasm_trim(""), ""), 1, "empty stays empty");
+    return 0;
+}
+
+fn test_wasm_exec_without_wasmtime() {
+    test_group("wasm_no_wasmtime");
+    kavach_init();
+    var cfg = config_new();
+    config_backend(cfg, Backend.WASM);
+    var sb = alloc(SANDBOX_SIZE);
+    Sandbox_set_config(sb, cfg);
+    if (_wasm_binary_path() == 0) {
+        var r = wasm_exec(sb, "/tmp/whatever.wasm");
+        assert_eq(ExecResult_exit_code(r), 1, "clean failure");
+        assert(str_contains(ExecResult_stderr(r), "wasmtime") == 1, "mentions wasmtime");
+    }
+    return 0;
+}
+
+fn test_wasm_exec_missing_file() {
+    test_group("wasm_missing_file");
+    kavach_init();
+    var cfg = config_new();
+    config_backend(cfg, Backend.WASM);
+    var sb = alloc(SANDBOX_SIZE);
+    Sandbox_set_config(sb, cfg);
+    # Only meaningful when wasmtime is present; otherwise the no-wasmtime
+    # branch above already covered the failure path.
+    if (_wasm_binary_path() != 0) {
+        var r = wasm_exec(sb, "/tmp/kavach-nonexistent-does-not-exist.wasm");
+        assert_eq(ExecResult_exit_code(r), 1, "failure on missing .wasm");
+        assert(str_contains(ExecResult_stderr(r), "not found") == 1, "err says not found");
+    }
     return 0;
 }
 
@@ -1159,6 +1218,11 @@ fn main() {
     test_oci_exec_without_runtime();
     test_oci_spec_shared_by_gvisor_and_oci();
     test_oci_bundle_cleanup();
+    test_wasm_registered();
+    test_wasm_fuel_calculation();
+    test_wasm_trim();
+    test_wasm_exec_without_wasmtime();
+    test_wasm_exec_missing_file();
     test_gvisor_exec_without_runsc();
     test_which_exists();
     test_path_exists();

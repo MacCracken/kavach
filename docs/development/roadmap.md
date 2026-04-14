@@ -26,7 +26,7 @@ the remaining feature gaps. See
 - [x] gVisor backend (OCI bundle generation + `runsc run` + auto-cleanup)
 - [x] Shared `oci_spec.cyr` module (bundle mkdir/spec/cleanup)
 - [x] OCI backend (runc/crun shell-out via shared oci_spec)
-- [ ] WASM backend (wasmtime binary or API)
+- [x] WASM backend (wasmtime CLI shell-out with --fuel / --max-memory-size / --dir)
 - [ ] `cyrius audit` clean (fmt/lint/vet/deny)
 - [ ] Delete `rust-old/` once parity reaches v2.1
 - [ ] Report cyrius `deps` relative-path symlink bug upstream (workaround

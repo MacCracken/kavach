@@ -23,6 +23,7 @@ include "src/backend_noop.cyr"
 include "src/backend_process.cyr"
 include "src/backend_gvisor.cyr"
 include "src/backend_oci.cyr"
+include "src/backend_wasm.cyr"
 include "src/sandbox_exec.cyr"
 
 fn _print_banner() {
