@@ -64,7 +64,7 @@ fn gate_apply(result, policy) {
 
     # WARN-verdict redaction: replace every secret span in stdout/stderr
     # with [REDACTED:CATEGORY] so the caller can release the artifact
-    # without leaking. Closed in v2.1 per ADR-004 §7; only fires when
+    # without leaking. Closed in v3.0 per ADR-004 §7; only fires when
     # the policy opts in (ExternalizationPolicy.redact_secrets == 1).
     if (verdict == ScanVerdict.WARN) {
         if (ExternalizationPolicy_redact_secrets(policy) == 1) {

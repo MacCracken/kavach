@@ -1,13 +1,13 @@
 # kavach — WASM (wasmtime) backend
 # Ported from rust-old/src/backend/wasm/mod.rs
 #
-# The Rust version embedded wasmtime via Cargo crates. Cyrius v2.0 shells
+# The Rust version embedded wasmtime via Cargo crates. Cyrius v3.0 shells
 # out to the `wasmtime` CLI binary instead, which accepts the same
 # --fuel / --dir / --env / --max-memory-size flags. Module format is still
 # `command = path to .wasm file`.
 #
 # Deferred: WAT inline modules, custom linker hooks. Both require embedding
-# a real WASM runtime — v2.1 or whenever mabda/yukti exposes one.
+# a real WASM runtime — v3.0 or whenever mabda/yukti exposes one.
 
 # Look for wasmtime on PATH. Returns path cstr, or 0 if none.
 fn _wasm_binary_path() {
@@ -25,7 +25,7 @@ fn _wasm_fuel_from_timeout(timeout_ms) {
 
 # Append "--dir <path>" pair for each landlock rule. Writes into argv vec.
 # Cyrius stdlib doesn't yet expose landlock_rules as a vec — our SandboxPolicy
-# only carries a cached length — so for v2.0 we preopen the configured
+# only carries a cached length — so for v3.0 we preopen the configured
 # `workdir` (if any) read-only, matching the most common caller pattern.
 fn _wasm_append_preopens(args, sandbox) {
     var cfg = Sandbox_config(sandbox);

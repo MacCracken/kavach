@@ -1,7 +1,7 @@
 # kavach — Process backend (minimum-viable fork+exec+wait via lib/process.cyr)
 # Ported from rust-old/src/backend/process/mod.rs
 #
-# This is the v2.0 skeleton: fork+exec+wait + runtime-guard precheck.
+# This is the v3.0 skeleton: fork+exec+wait + runtime-guard precheck.
 # Seccomp/Landlock/cgroups/namespaces are separate modules that will hook
 # into pre_exec once their syscall wrappers land.
 

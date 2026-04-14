@@ -1,4 +1,4 @@
-# Kavach Architecture (v2.0 — Cyrius port)
+# Kavach Architecture (v3.0 — Cyrius port)
 
 > Sandbox execution framework with quantitative strength scoring, a three-scanner
 > externalization gate, credential proxy, runtime guards, threat classification,
@@ -242,7 +242,7 @@ Each backend is a plug into the dispatch table. To add `<name>`:
 - [Composite backends](../guides/composite-backends.md) — defense-in-depth patterns
 - [Threat tracking](../guides/threat-tracking.md) — intent scoring and OffenderTracker
 - [Worked examples](../examples/) — 4 progressive walkthroughs
-- [Rust v1.x vs Cyrius v2.1 benchmarks](../../benchmarks-rust-v-cyrius.md)
+- [Rust v1.x vs Cyrius v3.0 benchmarks](../../benchmarks-rust-v-cyrius.md)
 - [ADR-001 port architecture](../adr/001-cyrius-port-architecture.md)
 - [ADR-002 dispatch table](../adr/002-backend-dispatch-fnptr-table.md)
 - [ADR-003 fixed-point scoring](../adr/003-fixed-point-threat-scoring.md)

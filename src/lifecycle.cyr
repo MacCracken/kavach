@@ -146,7 +146,7 @@ var SANDBOX_SIZE = 48;
 # Sandbox IDs: 64 bits from /dev/urandom, UUID-v4-equivalent for
 # correlation. Collision probability across 2^32 sandboxes is ~2^-32.
 # Previously a monotonic counter (deferred per ADR-004 §8); closed in
-# v2.1 now that util.cyr ships rand_u64().
+# v3.0 now that util.cyr ships rand_u64().
 
 # Nanoseconds since boot. clock_gettime(CLOCK_MONOTONIC, &ts).
 fn now_ns() {

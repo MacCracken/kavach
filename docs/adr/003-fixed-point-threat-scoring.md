@@ -2,7 +2,7 @@
 
 **Status**: Accepted
 **Date**: 2026-04-13
-**Version**: v2.0.0
+**Version**: v3.0.0
 
 ## Context
 
@@ -75,7 +75,7 @@ should divide by 10 for a "0..100%" presentation.
 
 **Neutral**
 - The API changes: `intent_score: f64` becomes `intent_score_x1000: i64`.
-  Since v2.0 is a clean port, consumers re-write their call sites anyway.
+  Since v3.0 is a clean port, consumers re-write their call sites anyway.
 
 ## Alternatives considered
 

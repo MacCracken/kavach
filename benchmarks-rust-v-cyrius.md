@@ -1,4 +1,4 @@
-# Rust v1.x vs Cyrius v2.1 — Honest benchmark comparison
+# Rust v1.x vs Cyrius v3.0 — Honest benchmark comparison
 
 > The kavach port from Rust to Cyrius changes a lot of tradeoffs. This is the
 > apples-to-apples view: same operation, same CPU, same OS. No cherry-picking,
@@ -6,7 +6,7 @@
 
 **Hardware**: Linux x86_64, identical host for both runs.
 **Rust baseline**: v0.21.3 pre-audit (`rust-old/benches/BENCHMARK_HISTORY.md`), `criterion` harness, release build.
-**Cyrius**: v2.1 on Cyrius toolchain 4.4.3, `lib/bench.cyr` harness, default codegen (no LASE / no regalloc / no DCE).
+**Cyrius**: v3.0 on Cyrius toolchain 4.4.3, `lib/bench.cyr` harness, default codegen (no LASE / no regalloc / no DCE).
 
 ---
 
@@ -30,7 +30,7 @@
 All times are median-of-N where N is the iteration count in the right column.
 `ps`/`ns`/`µs` are literal, not suffixed SI multiples of something else.
 
-| Benchmark | Rust v1.x | Cyrius v2.1 | Ratio | Notes |
+| Benchmark | Rust v1.x | Cyrius v3.0 | Ratio | Notes |
 |-----------|----------:|------------:|------:|-------|
 | `score_backend_process_strict` | 1.70 ns | 29 ns | 17× | Integer arithmetic on SandboxPolicy fields. |
 | `score_all_backends_strict` | 20.9 ns | 323 ns | 15× | Loops the 10-element Backend enum. |
@@ -76,14 +76,14 @@ just shows how much overhead async imposes on a cold-path operation.
 |------------|-------------------|--------|
 | `policy_serialize` / `policy_deserialize` | — | No JSON serde in Cyrius port; `#derive(Serialize)` + `lib/json.cyr` pending wiring. |
 | `config_serialize` / `config_deserialize` | — | Same. |
-| `seccomp_build_basic` / `seccomp_build_strict` | — | Seccomp BPF build waits on Cyrius `sys_seccomp` wrapper (v2.1 blocked). |
+| `seccomp_build_basic` / `seccomp_build_strict` | — | Seccomp BPF build waits on Cyrius `sys_seccomp` wrapper (v3.0 blocked). |
 | `detect_capabilities` | — | `prctl`/`capget` wrappers not yet in Cyrius stdlib. |
 | `backend_available_all` | measured implicitly in `sandbox_full_lifecycle` | Skipped as standalone to avoid network variance. |
 | `process_exec_echo` | skipped | Fork+exec+wait dominates at millisecond scale; run-to-run variance swamps any language diff. |
 
 ## Footprint comparison
 
-| Metric | Rust v1.x release | Cyrius v2.1 |
+| Metric | Rust v1.x release | Cyrius v3.0 |
 |--------|------------------:|------------:|
 | Stripped binary size | ~2.4 MB (with `full` feature set) | **~170 KB** (all 10 backends) |
 | Runtime dependencies | tokio, wasmtime, regex, async-trait, serde, hmac, sha2, uuid, tracing, oci-spec, landlock, seccompiler, nix, etc. (448 crates) | sigil 2.1.2 (one dep) + Cyrius stdlib |

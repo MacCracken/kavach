@@ -6,58 +6,46 @@ Completed items are in [CHANGELOG.md](../../CHANGELOG.md).
 
 ---
 
-## Cyrius port completion (v2.0 → v2.1)
+## v3.0 Cyrius port — shipped
 
-v2.0 ships the architectural skeleton: core types, scanning pipeline, threat
-classification, audit chain, credential proxy, and 2 backends. v2.1 closes
-the remaining feature gaps. See
-[ADR-004](../adr/004-deferred-features.md) for the unblocking conditions.
+All of these landed in v3.0.0 (see CHANGELOG for full detail).
 
-### v2.0.x — skeleton + docs
-
-- [x] 20 modules ported (util, error, backend, policy, scoring, lifecycle,
-      7× scanning_*, audit, credential, quarantine, backend_dispatch,
-      backend_noop, backend_process, sandbox_exec)
+- [x] 33 Cyrius modules ported (util, error, backend, policy, scoring,
+      lifecycle, 7× scanning_*, audit, credential, quarantine, oci_spec,
+      composite, observability, attestation, backend_dispatch + 10
+      per-backend modules, sandbox_exec, main)
 - [x] Dispatch table + extension pattern ([ADR-002](../adr/002-backend-dispatch-fnptr-table.md))
+- [x] All 10 backends registered (Noop, Process, gVisor, OCI, WASM,
+      SyAgnos, SGX, SEV, TDX, Firecracker)
 - [x] HMAC-SHA256 audit chain via sigil
-- [x] End-to-end integration demo
-- [x] Architecture overview + 4 ADRs + README rewrite
-- [x] `path_exists` + `which_exists` via access(2) syscall
-- [x] gVisor backend (OCI bundle generation + `runsc run` + auto-cleanup)
-- [x] Shared `oci_spec.cyr` module (bundle mkdir/spec/cleanup)
-- [x] OCI backend (runc/crun shell-out via shared oci_spec)
-- [x] WASM backend (wasmtime CLI shell-out with --fuel / --max-memory-size / --dir)
-- [x] SyAgnos backend (docker/podman + hardened AGNOS image + Phylax scanner)
-- [x] SGX backend (gramine-sgx + auto-generated manifest)
-- [x] SEV backend (qemu-system-x86_64 with SEV-SNP confidential-guest)
-- [x] TDX backend (qemu-system-x86_64 with tdx-guest object)
-- [x] Firecracker backend (microVM config.json + firecracker --no-api)
-- [x] **All 10 backends registered** — v2.0 core complete
-- [ ] `cyrius audit` clean (fmt/lint/vet/deny)
-- [ ] Enrich SGX backend with attestation + sealing (sigil EAR)
-- [ ] Enrich Firecracker backend with vsock + snapshot + jailer
-- [ ] Switch OCI backend to stiva once stiva's Cyrius port lands
-- [ ] Delete `rust-old/` once enrichments land
-- [ ] Report cyrius `deps` relative-path symlink bug upstream (workaround
-      in cyrius.toml uses absolute path for sigil)
+- [x] 3-scanner externalization gate (secrets + code + data)
+- [x] Runtime guards (fork bomb, command blocklist, sensitive paths, shell
+      metacharacters, time anomaly)
+- [x] Threat classification (intent scoring, kill-chain, escalation)
+- [x] OffenderTracker with integer half-life decay
+- [x] Sandbox integrity monitoring (/proc readers)
+- [x] UUID-v4-equivalent IDs from /dev/urandom
+- [x] WARN-verdict secret redaction
+- [x] Composite backend with policy merging + +5 layered scoring bonus
+- [x] Observability types (HealthStatus, SandboxMetrics, SpawnedProcess)
+- [x] Attestation types (AttestationResult, SgxAttestationReport)
+- [x] P(-1) hardening pass — 9 CWE-class findings fixed ([ADR-005](../adr/005-v3-hardening-pass.md))
+- [x] Architecture overview + 5 ADRs + 3 guides + 4 examples
+- [x] Benchmark comparison Rust v2.0 ↔ Cyrius v3.0
 
-### v2.1 — feature parity unblocks (deferred from v2.0)
+## v3.1 — unblocking queue
 
-Consolidated internal tracker. Covers items deferred from the v2.0 port
-([ADR-004](../adr/004-deferred-features.md)) and hardening pass
-([ADR-005](../adr/005-v2-hardening-pass.md)).
+Items deferred from v3.0 ([ADR-004](../adr/004-deferred-features.md),
+[ADR-005](../adr/005-v2-hardening-pass.md)), plus operational cleanups.
 
-#### Ready — no external blockers (scheduled next)
+#### Ready — no external blockers
 
-| Feature | Source | Status |
-|---------|--------|--------|
-| UUID v4 | ADR-004 §8 | **done v2.1** — `rand_u64` in util.cyr; Sandbox/ScanFinding/Quarantine ids are now 64-bit random. |
-| Secret redaction on WARN verdict | ADR-004 §7 | **done v2.1** — `secrets_redact(text)` rewrites matched spans to `[REDACTED:CATEGORY]`; called from `gate_apply` on WARN when policy opts in. |
-| OffenderTracker | ADR-004 §5 | **done v2.1** — `offender_tracker_new` + `record` + `agent_score` (exponential half-life decay) + `should_escalate`. |
-| Sandbox integrity monitoring | ADR-004 §6 | **done v2.1** — `check_integrity()` reads `/proc/1/cmdline`, `/proc/mounts`, `/proc/self/uid_map`; returns `IntegrityReport{intact, checks[3], checked_at}`. |
-| M1 remaining overflow sites | ADR-005 §M1 | **done v2.1** — `checked_sum4` + `alloc_checked` wired into audit `_sign_input`, `_entry_to_jsonl`, quarantine `_qpath`, `_meta_jsonl`, and `oci_generate_spec`. |
+| Feature | Source | Notes |
+|---------|--------|-------|
 | `FileInjection.mode` honoring helper | ADR-005 §M2 | `credential_inject_files(injections)` that writes via `file_write_secure` then `sys_fchmod`. |
-| `cyrius audit` clean | v2.0.x backlog | fmt / lint / vet / deny. |
+| `cyrius audit` clean | v3.0 backlog | fmt / lint / vet / deny. |
+| Delete `rust-old/` | v3.0 backlog | Fully captured per `rust-old-removal.md`. |
+| Report cyrius `deps` symlink bug upstream | v3.0 backlog | Workaround: absolute path for sigil in cyrius.toml. |
 
 #### Blocked — awaiting upstream
 
@@ -76,7 +64,7 @@ Consolidated internal tracker. Covers items deferred from the v2.0 port
 #### Meta
 
 - [ ] Report cyrius `deps` relative-path symlink bug upstream (workaround in cyrius.toml uses absolute path for sigil).
-- [ ] Delete `rust-old/` once parity is reached in v2.1.
+- [ ] Delete `rust-old/` once parity is reached in v3.0.
 
 ---
 

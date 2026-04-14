@@ -1,7 +1,7 @@
 # kavach — unified attestation types
 # Ported from rust-old/src/backend/attestation.rs (types only; EAR
 # serialization + IAS / AMD-SEV / Intel-TDX quote verification are
-# deferred to v2.1, gated on sigil EAR helpers — see ADR-004 §2).
+# deferred to v3.1, gated on sigil EAR helpers — see ADR-004 §2).
 #
 # The AttestationResult struct is backend-agnostic: callers evaluate
 # trust via `trust` + `backend` without hardware-specific parsing.

@@ -2,7 +2,7 @@
 
 **Status**: Accepted
 **Date**: 2026-04-13
-**Version**: v2.0.0
+**Version**: v3.0.0
 
 ## Context
 
@@ -39,7 +39,7 @@ Layer the system in three tiers:
 
 Defer everything that depends on unlanded Cyrius stdlib features, but stub them
 with clear TODO markers and **do not let the deferred surface leak into the
-public API**. A consumer using kavach v2.0 today should not see `async` ghosts
+public API**. A consumer using kavach v3.0 today should not see `async` ghosts
 or `Option<Uuid>` fields that are permanently `None`.
 
 ## Consequences

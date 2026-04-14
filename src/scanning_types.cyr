@@ -47,7 +47,7 @@ struct ScanFinding {
 var SCAN_FINDING_SIZE = 48;
 
 # Finding IDs: 64-bit random from /dev/urandom (UUID-v4-equivalent).
-# Swapped from a monotonic counter in v2.1 — see ADR-004 §8.
+# Swapped from a monotonic counter in v3.0 — see ADR-004 §8.
 fn finding_new(scanner, severity, category, message, evidence) {
     var f = alloc(SCAN_FINDING_SIZE);
     ScanFinding_set_id(f, rand_u64());

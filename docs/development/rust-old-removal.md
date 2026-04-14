@@ -6,7 +6,7 @@ information not yet captured in the Cyrius port.
 ## Summary
 
 **Ready for removal.** All public API surface from the Rust v1.x tree is
-represented in the Cyrius v2.1 port with functionally equivalent types and
+represented in the Cyrius v3.0 port with functionally equivalent types and
 behaviors. Feature-gated modules that depend on other AGNOS crates not yet
 ported are tracked in the internal roadmap.
 
@@ -59,7 +59,7 @@ Every public item from the Rust crate has a Cyrius equivalent:
 |-------------|---------|--------|
 | `firewall.rs` | `nein` | Deferred — depends on nein Cyrius port |
 | `events.rs` | `events` | Deferred — depends on majra (pub/sub) Cyrius port |
-| `sandbox_core.rs` | `agnostik` | **Superseded** — v1.x monolithic sandbox replaced by `src/lifecycle.cyr` + per-backend modules in v2.0 |
+| `sandbox_core.rs` | `agnostik` | **Superseded** — v1.x monolithic sandbox replaced by `src/lifecycle.cyr` + per-backend modules in v3.0 |
 | `sandbox_backends.rs` | always | **Superseded** — v1.x legacy; replaced by the backend dispatch table (ADR-002) |
 | `runtime/{credential_proxy,egress_gate,monitor,v2,wasm_runtime}.rs` | mixed | **Superseded** — v1.x runtime layer replaced by `src/sandbox_exec.cyr` orchestration |
 | `bridge.rs` | always | **Superseded** — was adapter for agnostik sandbox types; the Cyrius port uses native types throughout |
@@ -77,7 +77,7 @@ Every public item from the Rust crate has a Cyrius equivalent:
 
 - Rust: 872 tests across 35 source files
 - Cyrius: 349 tests across 1 file (denser per-test)
-- Coverage equivalent for the v2.1 feature set. Tests for non-ported items
+- Coverage equivalent for the v3.0 feature set. Tests for non-ported items
   (seccomp builds, landlock syscalls, capability detection) are
   legitimately absent.
 
@@ -112,8 +112,8 @@ git tag kavach-pre-rust-removal HEAD
 # Delete
 git rm -r rust-old/
 # Update the grep-friendly remaining lines:
-sed -i 's/25935 lines of Rust/25935 lines of Rust (archived v2.0.0-cyrius-b1)/' cyrius.toml src/main.cyr
-git commit -m "chore: remove rust-old tree; Cyrius port v2.1 is source of truth"
+sed -i 's/25935 lines of Rust/25935 lines of Rust (archived pre-v3.0.0)/' cyrius.toml src/main.cyr
+git commit -m "chore: remove rust-old tree; Cyrius port v3.0 is source of truth"
 ```
 
 ## Post-removal

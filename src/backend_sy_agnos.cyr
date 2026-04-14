@@ -9,7 +9,7 @@
 # scanner on output.
 #
 # Deferred vs Rust:
-#   - Image manager (pull/build/list) — skipped for v2.0
+#   - Image manager (pull/build/list) — skipped for v3.0
 #   - Tier detection from /etc/sy-agnos-release — needs JSON parse
 #   - AttestationReport + PCR verify — wait for sigil TPM helpers
 

@@ -2,7 +2,7 @@
 
 **Status**: Accepted
 **Date**: 2026-04-13
-**Version**: v2.0.0
+**Version**: v3.0.0
 
 ## Context
 
@@ -14,7 +14,7 @@ to either (a) think the gaps were oversights and fill them poorly, or (b)
 not realise a feature was intentional and re-implement something already in
 flight.
 
-This ADR is the single source of truth for what's missing in v2.0 and what
+This ADR is the single source of truth for what's missing in v3.0 and what
 unblocks each item.
 
 ## Deferred features
@@ -22,7 +22,7 @@ unblocks each item.
 ### 1. Async exec
 
 **Rust shape**: `async fn exec(&self, ...) -> Result<ExecResult>`.
-**Cyrius v2.0**: synchronous `fn <backend>_exec(sandbox, command) → ExecResult*`.
+**Cyrius v3.0**: synchronous `fn <backend>_exec(sandbox, command) → ExecResult*`.
 
 **Unblocking**: Cyrius async primitives are maturing (`lib/async.cyr`
 exists). When the ecosystem converges on a stable async convention and
@@ -37,7 +37,7 @@ sandbox is not impacted.
 
 **Rust shape**: 10 backends, each ~500-2000 LOC of IPC/config/attestation.
 
-**Cyrius v2.0**: NOOP + PROCESS. Extension pattern (ADR-002) in place; each
+**Cyrius v3.0**: NOOP + PROCESS. Extension pattern (ADR-002) in place; each
 backend is a self-contained file that calls `backend_register_exec/health/
 destroy`. Dispatch table has slots for all 10.
 
@@ -58,7 +58,7 @@ explicit `BACKEND_UNAVAILABLE` error.
 Landlock ruleset v4, set cgroup v2 limits — all async-signal-safe after
 fork.
 
-**Cyrius v2.0**: `process_exec` runs without these hooks. The runtime
+**Cyrius v3.0**: `process_exec` runs without these hooks. The runtime
 guard precheck (`check_command`) provides a string-level blocklist, but
 the kernel-level isolation is not yet applied.
 
@@ -77,7 +77,7 @@ correct; the kernel enforcement just isn't there yet.
 **Rust shape**: listens on 127.0.0.1, intercepts sandbox HTTP/HTTPS,
 injects `Authorization: Bearer ...` for allowlisted hosts, blocks others.
 
-**Cyrius v2.0**: direct injection only (env, file, stdin). The
+**Cyrius v3.0**: direct injection only (env, file, stdin). The
 `credential.cyr` module handles the three direct methods.
 
 **Unblocking**: Cyrius `lib/http.cyr` + `lib/tls.cyr` + `lib/net.cyr` are
@@ -95,12 +95,12 @@ available at the policy level.
 **Rust shape**: rolling 1h window, 0.5 decay factor, per-agent HashMap,
 threshold triggers escalation.
 
-**Cyrius v2.0**: `classify_threat(findings)` runs per-exec; assessment is
+**Cyrius v3.0**: `classify_threat(findings)` runs per-exec; assessment is
 not persisted across execs. There's no per-agent history.
 
 **Unblocking**: needs agent-keyed hashmap persistence + chrono + a prune
 policy. `lib/hashmap.cyr` + `lib/chrono.cyr` are both present. Work is
-mechanical; deferred to keep v2.0 scope focused.
+mechanical; deferred to keep v3.0 scope focused.
 
 **Mitigation today**: each exec is independently classified; audit chain
 records every exec so external tooling can compute rolling scores from the
@@ -111,7 +111,7 @@ log.
 **Rust shape**: reads `/proc/1/cmdline`, `/proc/mounts`, `/proc/self/uid_map`
 to verify namespace isolation.
 
-**Cyrius v2.0**: not ported. `scanning_runtime.cyr` covers command + path
+**Cyrius v3.0**: not ported. `scanning_runtime.cyr` covers command + path
 + shell-metacharacter checks; the `/proc` readers are missing.
 
 **Unblocking**: needs `file_read_to_string`-style helper in `lib/io.cyr`.
@@ -125,7 +125,7 @@ before fork; policy-level isolation still applies.
 **Rust shape**: `SecretsScanner::redact()` does a single-pass range merger
 on all regex matches, replacing with `[REDACTED:CATEGORY]`.
 
-**Cyrius v2.0**: gate treats WARN as pass-through. No in-place redaction.
+**Cyrius v3.0**: gate treats WARN as pass-through. No in-place redaction.
 
 **Unblocking**: needs a single-pass range-merge helper + cstr rebuild. No
 external dependencies — just mechanical porting.
@@ -138,7 +138,7 @@ BLOCKed or QUARANTINEd, so true secrets don't leak.
 
 **Rust shape**: `uuid::Uuid::new_v4()` everywhere.
 
-**Cyrius v2.0**: monotonic counters (`_sandbox_next_id`,
+**Cyrius v3.0**: monotonic counters (`_sandbox_next_id`,
 `_finding_id_counter`, `QuarantineStorage.next_id`).
 
 **Unblocking**: needs a random-bytes provider in Cyrius
@@ -154,7 +154,7 @@ forgery even if IDs collide — the trust boundary does not depend on UUIDs.
 **Rust shape**: PCRE-style patterns with character classes, lookahead,
 case-insensitive flags.
 
-**Cyrius v2.0**: hand-rolled literal-prefix + char-class matchers. Patterns
+**Cyrius v3.0**: hand-rolled literal-prefix + char-class matchers. Patterns
 that rely on case-insensitive substring OR anchored word boundaries are
 approximated; the most specific patterns (AWS key prefix, GitHub token
 prefix, private-key PEM headers, SSN, connection-string schemes) match
@@ -178,4 +178,4 @@ which are TODO.
    what the Rust version did. If a test would check for behavior that was
    deferred, it doesn't ship either.
 4. **Rollouts are per-feature**, not per-module. Adding real seccomp support
-   is a v2.1 unblock, not a v3.0 rewrite.
+   is a v3.0 unblock, not a v3.0 rewrite.

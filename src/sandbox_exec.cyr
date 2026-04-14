@@ -17,10 +17,10 @@
 #   - last_assessment:  ThreatAssessment* from the last classification
 #   - audit_chain:      optional AuditChain*
 # These are stored in a parallel SandboxRuntime struct keyed by sandbox id.
-# For v2.0 port we carry them on the Sandbox pointer via appended fields.
+# For v3.0 port we carry them on the Sandbox pointer via appended fields.
 
 # ---- Global scan / audit context -----------------------------------------
-# One global ext policy, one global audit chain for the v2.0 skeleton.
+# One global ext policy, one global audit chain for the v3.0 skeleton.
 # Consumers can swap these via sandbox_exec_set_policy / ...set_audit.
 var _default_ext_policy = 0;
 var _global_audit_chain = 0;
@@ -96,7 +96,7 @@ fn sandbox_exec(sandbox, command) {
 }
 
 # ---- Initialization -------------------------------------------------------
-# Call once at startup to register the v2.0 skeleton backends.
+# Call once at startup to register the v3.0 skeleton backends.
 fn kavach_init() {
     alloc_init();
     sha256_global_init();

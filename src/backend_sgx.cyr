@@ -22,7 +22,7 @@ fn _sgx_device_present() {
 
 # Generate a minimal Gramine manifest. Writes to <workdir>/app.manifest
 # and returns the path. NOTE: real-world SGX deployments sign the manifest
-# with gramine-sgx-sign; for v2.0 we produce an unsigned template that
+# with gramine-sgx-sign; for v3.0 we produce an unsigned template that
 # consumers must post-process. Path returned is the `.manifest.sgx` prefix
 # that `gramine-sgx` expects.
 fn _sgx_manifest_path(workdir) {

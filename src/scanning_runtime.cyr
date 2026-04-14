@@ -315,7 +315,7 @@ fn check_time_anomaly(duration_ms, expected_ms, config) {
     return 0;
 }
 
-# ---- Sandbox integrity monitoring (v2.1) ---------------------------------
+# ---- Sandbox integrity monitoring ---------------------------------------
 # Ported from rust-old/src/scanning/runtime.rs check_integrity(). Reads
 # /proc to verify the current process is in a separate PID, mount, and
 # user namespace from the host. Used by callers that want to assert

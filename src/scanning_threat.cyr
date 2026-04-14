@@ -3,7 +3,7 @@
 #
 # Cyrius i64 arithmetic; Rust floats are expressed as fixed-point x1000:
 #   intent_score 0..1000 represents 0.000..1.000.
-# OffenderTracker (time-decay + agent keying) landed in v2.1 using
+# OffenderTracker (time-decay + agent keying) landed in v3.0 using
 # chrono + rand_u64 — see bottom of file.
 
 enum KillChainStage {
@@ -159,7 +159,7 @@ fn classify_threat(findings) {
     return assessment;
 }
 
-# ---- Repeat-offender tracking (v2.1) -------------------------------------
+# ---- Repeat-offender tracking --------------------------------------------
 # Ported from rust-old/src/scanning/threat.rs OffenderTracker. Each
 # agent_id accumulates a weighted violation score that decays with time
 # (half-life = half the rolling window). When the agent's decayed score

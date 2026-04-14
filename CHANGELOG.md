@@ -5,26 +5,43 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2.1.0-cyrius] — 2026-04-13 (in progress)
+## [3.0.0] — 2026-04-13
+
+Complete language migration — **Rust → Cyrius**. First release of kavach in
+Cyrius; supersedes the Rust v2.0.0 line. Major version bump reflects the
+language/ABI change and the intentional API refinements (async → sync,
+monotonic IDs → UUID-v4-equivalent random, field consolidations). 25,935
+lines of Rust → 33 Cyrius modules, ~7K lines. See
+[ADR-001](docs/adr/001-cyrius-port-architecture.md) for the port rationale.
+
+The v3.0.0 release bundles three internal waves of work:
+
+1. **Port skeleton** — all 10 backends, scanner pipeline, threat classifier,
+   lifecycle FSM, credential proxy, audit chain, quarantine storage.
+2. **P(-1) hardening pass** — see [ADR-005](docs/adr/005-v2-hardening-pass.md).
+   9 CWE-class findings fixed in-tree (CWE-208, CWE-116, CWE-59, CWE-276,
+   CWE-532, CWE-88, CWE-316, CWE-190, CWE-252).
+3. **Feature closeout** — UUID v4 IDs, WARN-verdict redaction, OffenderTracker,
+   integrity monitoring, composite backend, observability + attestation types.
 
 ### Added (gap-close wave)
 - **CompositeBackend port** (`src/composite.cyr`) — `merge_policies(base, overlay)` with stricter-wins semantics, `score_composite(outer, inner, policy)` returning the layered score with +5 defense-in-depth bonus, and `composite_exec(...)` for executing through an outer backend with a merged inner policy.
 - **Observability types** (`src/observability.cyr`) — `HealthStatus`, `HealthState` enum, `health_probe(sandbox)`, `SandboxMetrics` struct (CPU/memory/PID/IO/wall fields; cgroup-backed populator pending), `sandbox_metrics_from_result`, `SpawnedProcess` handle for fire-and-forget execs.
-- **Attestation types** (`src/attestation.cyr`) — `AttestationResult` + `AttestationTrust` enum (Contraindicated < Warning < None < Affirming), `attestation_is_acceptable(result, min_trust)`, `SgxAttestationReport` with `sgx_report_verify_structure` (MRENCLAVE/MRSIGNER hex + IAS signature length check; full cryptographic verify deferred to v2.1 sigil EAR helpers).
+- **Attestation types** (`src/attestation.cyr`) — `AttestationResult` + `AttestationTrust` enum (Contraindicated < Warning < None < Affirming), `attestation_is_acceptable(result, min_trust)`, `SgxAttestationReport` with `sgx_report_verify_structure` (MRENCLAVE/MRSIGNER hex + IAS signature length check; full cryptographic verify deferred to v3.0 sigil EAR helpers).
 - **33 Cyrius modules total** — added composite.cyr + observability.cyr + attestation.cyr.
 
 ### Documentation
-- **Benchmarks — Rust v1.x vs Cyrius v2.1** (`benchmarks-rust-v-cyrius.md`) — apples-to-apples per-op comparison with honest commentary on where Cyrius is slower (unoptimized codegen tax) and where it's faster (no tokio startup on sandbox lifecycle).
+- **Benchmarks — Rust v2.0 vs Cyrius v3.0** (`benchmarks-rust-v-cyrius.md`) — apples-to-apples per-op comparison with honest commentary on where Cyrius is slower (unoptimized codegen tax) and where it's faster (no tokio startup on sandbox lifecycle).
 - **Guides** (`docs/guides/`): getting-started (build → configure → execute), composite-backends (defense-in-depth merge rules), threat-tracking (intent scoring + OffenderTracker + decay tuning).
 - **Worked examples** (`docs/examples/`): 4 progressive walkthroughs covering Noop, Process+audit, scanner verdicts with WARN redaction, offender tracking across execs.
 - **rust-old removal readiness** (`docs/development/rust-old-removal.md`) — per-symbol audit confirming Cyrius coverage, pre-removal checklist, removal command.
 - **Benchmark harness** (`tests/kavach.bcyr`) — 15 benches via `lib/bench.cyr` covering scoring, policy build, credentials, scanners, gate, lifecycle, audit.
 - **349 tests** (was 326) — 23 new tests for composite merge + score, health probe, metrics, attestation trust ordering, SGX report structure.
 
-### Feature closeout wave (v2.0 → v2.1 ready queue)
+### Feature closeout wave
 
 Drains 5 of the 7 "ready" items from the internal roadmap; leaves
-`FileInjection.mode` helper and `cyrius audit` for future sweep.
+`FileInjection.mode` helper and `cyrius audit` for a future release.
 
 - **UUID v4 IDs** — Sandbox, ScanFinding, and Quarantine entry ids are now 64-bit random values from `/dev/urandom` via new `util.cyr::rand_u64`. Monotonic counters removed. Collision probability across 2^32 entries is ~2^-32.
 - **Secret redaction on WARN verdict** — `secrets_redact(text)` walks the text once, rewrites every secret-pattern span to `[REDACTED:CATEGORY]`, returns the cleaned cstr. `gate_apply` now invokes it on `stdout`/`stderr` when the verdict is WARN and `policy.redact_secrets == 1`.
@@ -34,17 +51,8 @@ Drains 5 of the 7 "ready" items from the internal roadmap; leaves
 
 ### Changed
 - **`QuarantineStorage.next_id` field retained for ABI** but no longer incremented. Entry IDs come from `rand_u64()` per `quarantine_store()` call.
-- **349 tests passing, 0 failing** (was 262 at start of v2.1 cycle).
-- **33 Cyrius modules** (v2.0 shipped 30, v2.1 added composite + observability + attestation).
-
----
-
-## [2.0.0-cyrius] — 2026-04-13
-
-Full language migration — Rust v1.x → Cyrius. This is a ground-up rewrite
-preserving the public API surface but rebuilding the internals on the Cyrius
-toolchain. 25,935 lines of Rust → 20 Cyrius modules. See
-[ADR-001](docs/adr/001-cyrius-port-architecture.md) for the port rationale.
+- **349 tests passing, 0 failing**.
+- **33 Cyrius modules**.
 
 ### Security
 - **P(-1) hardening pass completed** — see [ADR-005](docs/adr/005-v2-hardening-pass.md). Fixes applied, with CWE/CVE analogs:
@@ -70,8 +78,7 @@ toolchain. 25,935 lines of Rust → 20 Cyrius modules. See
 - **Shared OCI spec module** (`src/oci_spec.cyr`) — extracted from the gVisor backend: container-id generation, JSON escape, minimal runtime spec v1.0.2, bundle mkdir, and cleanup (unlink config.json, rmdir rootfs/, rmdir bundle/). Both gVisor and OCI backends call into this.
 - **Bundle cleanup on exit** — `oci_cleanup_bundle(bundle)` called after every exec regardless of outcome. Prevents `/tmp/kavach-gvisor-*` and `/tmp/kavach-oci-*` accumulation.
 - **gVisor backend** (`src/backend_gvisor.cyr`) — OCI bundle generation + `runsc run` + auto-cleanup. Registers into the dispatch table via `backend_gvisor_register()`. Proves ADR-002's "3-line extension" pattern: same dispatch slot layout, different `exec_fn`.
-- **`path_exists` + `which_exists`** (real implementations via `access(2)` syscall) — replaces the v2.0-alpha stubs that always returned 0. Enables meaningful `backend_is_available()` probes and `resolve_best_backend()` ranking.
-- **30 Cyrius modules** (was 20)
+- **`path_exists` + `which_exists`** — real implementations via `access(2)` syscall. Enables meaningful `backend_is_available()` probes and `resolve_best_backend()` ranking.
 
 ### Fixed
 - **`cyrius.toml` sigil path** — switched from `path = "../sigil"` to
@@ -96,7 +103,7 @@ toolchain. 25,935 lines of Rust → 20 Cyrius modules. See
 
 ### Changed
 - **Language**: Rust 2021 → Cyrius 4.0.0+
-- **Async → sync**: all exec paths are synchronous in v2.0. See
+- **Async → sync**: all exec paths are synchronous in v3.0. See
   [ADR-004 §1](docs/adr/004-deferred-features.md).
 - **Build tool**: `cargo` → `cyrius build`
 - **Dependency model**: `Cargo.toml` → `cyrius.toml`; binary deps via sigil
@@ -116,13 +123,13 @@ toolchain. 25,935 lines of Rust → 20 Cyrius modules. See
 
 ### Removed
 - `rust-old/` contains the entire v1.x Rust source (25,935 lines) preserved
-  for reference. Will be deleted in v2.1 once port reaches feature parity.
+  for reference. Will be deleted in v3.0 once port reaches feature parity.
 - Cargo workspace, Makefile, `deny.toml`, `rust-toolchain.toml` —
   replaced by `cyrius.toml`.
 
 ---
 
-## [2.0.0] — 2026-04-02 (Rust, superseded by 2.0.0-cyrius)
+## [2.0.0] — 2026-04-02 (Rust, superseded by 3.0.0 Cyrius port)
 
 ### Added
 - **Firewall types in agnosys** — `TrafficDirection`, `Protocol`, `FirewallAction` enums, `FirewallRule` and `FirewallPolicy` structs with constructors, `apply_firewall_rules()` function, nftables ruleset rendering

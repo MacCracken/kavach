@@ -5,7 +5,7 @@
 #   <base_dir>/<id>.bin        raw artifact bytes
 #   <base_dir>/<id>.meta       JSON sidecar (sandbox_id, verdict, status, ts)
 #
-# UUID is replaced with a monotonic counter (padded decimal) for v2.0;
+# UUID is replaced with a monotonic counter (padded decimal) for v3.0;
 # full UUIDv4 waits on a random-bytes provider.
 
 enum QuarantineStatus {
@@ -39,7 +39,7 @@ fn quarantine_storage_new(base_dir) {
     var q = alloc(16);
     QuarantineStorage_set_base_dir(q, base_dir);
     # next_id field retained for API compat; actual entry IDs are 64-bit
-    # random per quarantine_store() call (v2.1).
+    # random per quarantine_store() call.
     QuarantineStorage_set_next_id(q, 1);
     return q;
 }
@@ -136,7 +136,7 @@ fn quarantine_store(storage, artifact, artifact_len, scan_result, sandbox_id) {
 fn quarantine_update_status(storage, id, status) {
     var base = QuarantineStorage_base_dir(storage);
     var meta_path = _qpath(base, id, "meta");
-    # For v2.0 we just drop a new meta — readers see the latest. Parsing the
+    # For v3.0 we just drop a new meta — readers see the latest. Parsing the
     # previous file requires a JSON parser and is deferred.
     var placeholder = _meta_jsonl(id, 0, ScanVerdict.QUARANTINE, status);
     file_write_all(meta_path, placeholder, strlen(placeholder));

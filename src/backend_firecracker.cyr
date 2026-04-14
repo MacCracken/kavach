@@ -8,10 +8,10 @@
 # generated config and re-run.
 #
 # Deferred vs Rust:
-#   - jailer wrapping — v2.1; needs uid/gid/cgroup plumbing
+#   - jailer wrapping — v3.1; needs uid/gid/cgroup plumbing
 #   - vsock + snapshot + network/TAP — require networking syscalls
 #     that aren't yet in the kavach stdlib surface
-#   - `--log-path` wiring — replaced with /dev/null for v2.0
+#   - `--log-path` wiring — replaced with /dev/null for v3.0
 
 fn _fc_binary_path() {
     if (path_exists("/usr/local/bin/firecracker") == 1) { return "/usr/local/bin/firecracker"; }

@@ -1,12 +1,12 @@
-# ADR-005 — v2.0 P(-1) hardening pass
+# ADR-005 — v3.0 P(-1) hardening pass
 
 **Status**: Accepted
 **Date**: 2026-04-13
-**Version**: v2.0.0
+**Version**: v3.0.0
 
 ## Context
 
-After completing the v2.0 Cyrius port (30 modules, 10 registered
+After completing the v3.0 Cyrius port (30 modules, 10 registered
 backends, 262 tests green), a focused security audit was run with
 emphasis on 0-day and CVE-class defects. The audit identified four
 CRITICAL, five HIGH, four MEDIUM, and three LOW issues across the trust
@@ -17,7 +17,7 @@ carry.
 ## Decision
 
 Apply the fixes in priority order (CRITICAL first, HIGH next, MEDIUM
-where low-cost). Four MEDIUM items and all LOW items defer to v2.1
+where low-cost). Four MEDIUM items and all LOW items defer to v3.0
 where they require Cyrius stdlib additions outside this project's
 scope.
 
@@ -33,15 +33,15 @@ scope.
 | **H2** | Error-code mishandling (CWE-252 / CWE-703) | n/a | `oci_prepare_bundle` checks every `sys_mkdir` + `file_write_secure` return, aborts + cleans up on any failure. `quarantine_store` returns `-1` on write failure instead of a valid-looking id. `audit_chain_record` prints a structured `IO_ERROR` and returns 0 on append failure. |
 | **H3** | Argument smuggling (CWE-88) | n/a | `backend_process.cyr` rejects commands containing any byte < 0x20 other than tab (via `is_safe_argument`). Newline, CR, NUL, ESC, bell cannot smuggle extra argv tokens past the runtime guard. |
 | **H5** | Key material lifetime (CWE-316) | CVE-2019-1559 class | `audit_chain_close(chain)` exposed; calls sigil `zeroize_key(key, len)` (barrier-protected) and clears the struct's pointer. Callers that release their chain before process exit should invoke this. |
-| **M1** (partial) | Integer overflow (CWE-190) | n/a | `util.cyr::checked_add` + `checked_mul` available. `oci_json_escape` hard-caps input at 1 MiB before multiplying by 6 (the new worst-case expansion factor). Other call sites scheduled for v2.1 sweep. |
+| **M1** (partial) | Integer overflow (CWE-190) | n/a | `util.cyr::checked_add` + `checked_mul` available. `oci_json_escape` hard-caps input at 1 MiB before multiplying by 6 (the new worst-case expansion factor). Other call sites scheduled for v3.0 sweep. |
 
 ### Deferred (documented, not fixed)
 
 | ID | Reason |
 |----|--------|
-| **H4** — TOCTOU on binary-path discovery | Fix requires `execveat` + `O_PATH\|O_NOFOLLOW` fd-cache in the Cyrius stdlib. Residual risk: a local attacker who can swap binaries between `path_exists` and `exec_capture` can redirect execution. Mitigations today: kavach is installed in a hardened path (operator-controlled); backends already bind exact absolute paths. Scheduled for v2.1 alongside Cyrius 4.5+ syscall additions. |
-| **M1** (remaining sites) | `alloc(N1 + N2)` calls in audit `_sign_input`, `_entry_to_jsonl`, `_meta_jsonl`. Every summand is bounded by the prior `strlen` + a constant; the entire input already passes `oci_json_escape`'s 1 MiB cap, so sums stay well under i64 headroom. Mechanical tightening can happen in v2.1. |
-| **M2** — `FileInjection.mode` unused | No first-party writer ships in v2.0; consumers applying injections must honor `mode` themselves. A `credential_inject_files(injections)` helper in `credential.cyr` is scheduled for v2.1 once `sys_fchmod` wrapper lands. |
+| **H4** — TOCTOU on binary-path discovery | Fix requires `execveat` + `O_PATH\|O_NOFOLLOW` fd-cache in the Cyrius stdlib. Residual risk: a local attacker who can swap binaries between `path_exists` and `exec_capture` can redirect execution. Mitigations today: kavach is installed in a hardened path (operator-controlled); backends already bind exact absolute paths. Scheduled for v3.0 alongside Cyrius 4.5+ syscall additions. |
+| **M1** (remaining sites) | `alloc(N1 + N2)` calls in audit `_sign_input`, `_entry_to_jsonl`, `_meta_jsonl`. Every summand is bounded by the prior `strlen` + a constant; the entire input already passes `oci_json_escape`'s 1 MiB cap, so sums stay well under i64 headroom. Mechanical tightening can happen in v3.0. |
+| **M2** — `FileInjection.mode` unused | No first-party writer ships in v3.0; consumers applying injections must honor `mode` themselves. A `credential_inject_files(injections)` helper in `credential.cyr` is scheduled for v3.0 once `sys_fchmod` wrapper lands. |
 | **M3** — `prev_hmac` length assertion | Cosmetic; in practice `prev_hmac` comes from a previous `AuditEntry.hmac` (always 64 chars) or `""` on genesis. Hardening `#assert` directive added. |
 | **M4** — Path-join double-slash | `bundle` paths never carry trailing slashes in-project; caller-provided `workdir` is user's contract. |
 | **L1** — Uptime info-leak via counter | Random suffix in C3 renders counter semantically irrelevant. |
@@ -71,7 +71,7 @@ scope.
 - Redacted evidence means operators debugging a false-positive can no
   longer see the matched secret without re-running with a debug policy.
   The trade is correct for at-rest artifacts; an in-memory debug mode
-  is a v2.1 UX addition.
+  is a v3.0 UX addition.
 
 **Neutral**
 - All hardening tests pass alongside the original 262 — no regressions.

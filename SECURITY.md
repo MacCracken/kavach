@@ -32,7 +32,7 @@ point. Security-relevant areas:
 - **On-disk artifacts** — audit log, quarantine files, OCI/FC/SGX bundle
   configs: permission bits, symlink attacks, race conditions.
 
-For the v2.0 hardening pass (P(-1)) findings already fixed + deferred items
+For the v3.0 hardening pass (P(-1)) findings already fixed + deferred items
 with residual risk, see [ADR-005](docs/adr/005-v2-hardening-pass.md).
 
 ## Supported Versions

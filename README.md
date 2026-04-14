@@ -10,11 +10,11 @@ classification, credential proxy, HMAC-SHA256 audit chain — all in pure Cyrius
 
 ---
 
-## v2.1 status
+## v3.0 status
 
-Cyrius port of the Rust v1.x framework. v2.0 shipped the full architecture
+Cyrius port of the Rust v1.x framework. v3.0 shipped the full architecture
 (10 backends + scanners + audit + credential proxy) and the P(-1) security
-hardening pass ([ADR-005](docs/adr/005-v2-hardening-pass.md)); v2.1 drained
+hardening pass ([ADR-005](docs/adr/005-v2-hardening-pass.md)); v3.0 drained
 the "ready" queue (UUID v4, WARN-verdict redaction, OffenderTracker,
 integrity monitoring, composite backends, observability types).
 
@@ -22,7 +22,7 @@ See [ADR-001](docs/adr/001-cyrius-port-architecture.md) for the port
 philosophy and [ADR-004](docs/adr/004-deferred-features.md) for what's
 intentionally deferred.
 
-| | v1.x (Rust) | v2.0 (Cyrius) |
+| | v1.x (Rust) | v3.0 (Cyrius) |
 |--|--|--|
 | Lines | ~26K | ~3K |
 | Backends registered | 10 | 10 — full set with real dispatch contracts |
@@ -109,7 +109,7 @@ fn app() {
 
 ## Backend scoreboard
 
-| Backend | Base score | Tier | v2.0 status |
+| Backend | Base score | Tier | v3.0 status |
 |---------|-----------:|------|-------------|
 | Noop | 0 | minimal | **registered** (testing only) |
 | Process | 50 | standard | **registered** (fork+exec+capture + guard precheck) |
@@ -179,7 +179,7 @@ Separate paths:
 - [Architecture overview](docs/architecture/overview.md) — module map, data flow, extension pattern
 - [Guides](docs/guides/) — getting started, composite backends, threat tracking
 - [Worked examples](docs/examples/) — four progressive walkthroughs
-- [Benchmarks — Rust v1.x vs Cyrius v2.1](benchmarks-rust-v-cyrius.md) — honest per-op comparison
+- [Benchmarks — Rust v1.x vs Cyrius v3.0](benchmarks-rust-v-cyrius.md) — honest per-op comparison
 - [ADR-001](docs/adr/001-cyrius-port-architecture.md) — port architecture
 - [ADR-002](docs/adr/002-backend-dispatch-fnptr-table.md) — dispatch table
 - [ADR-003](docs/adr/003-fixed-point-threat-scoring.md) — fixed-point threat scoring

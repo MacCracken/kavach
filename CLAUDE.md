@@ -7,7 +7,7 @@
 - **Type**: Flat crate with binary
 - **License**: GPL-3.0-only
 - **MSRV**: 1.89
-- **Version**: SemVer, v2.0.0
+- **Version**: SemVer, v3.0.0 (Cyrius port; Rust v1.x/v2.x archived in git history)
 - **Genesis repo**: [agnosticos](https://github.com/MacCracken/agnosticos)
 - **Philosophy**: [AGNOS Philosophy & Intention](https://github.com/MacCracken/agnosticos/blob/main/docs/philosophy.md)
 - **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md)

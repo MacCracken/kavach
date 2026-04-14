@@ -7,7 +7,7 @@
 #
 # Deferred vs Rust:
 #   - Attestation report fetching (SevAttestationReport) — needs sigil EAR
-#   - Guest policy bit flags (SevGuestPolicy) — fold into v2.1 sigil
+#   - Guest policy bit flags (SevGuestPolicy) — fold into v3.0 sigil
 #     attestation helpers
 #   - Live snapshots / migration
 

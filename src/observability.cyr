@@ -5,7 +5,7 @@
 # sandbox state. Population of the fields is backend-specific; the v2.0
 # process/gvisor/oci/wasm backends expose health via the dispatch table
 # and leave metrics as a zeroed struct (real collection lives alongside
-# cgroup v2 readers — see roadmap v2.1 blocked items).
+# cgroup v2 readers — see roadmap v3.0 blocked items).
 
 # ---- HealthStatus --------------------------------------------------------
 
@@ -73,7 +73,7 @@ fn sandbox_metrics_new() {
 }
 
 # Populate metrics from an ExecResult's wall clock. CPU/memory/PID/IO
-# fields remain 0 until cgroup-backed collectors ship (v2.1 blocked item).
+# fields remain 0 until cgroup-backed collectors ship (v3.0 blocked item).
 fn sandbox_metrics_from_result(result) {
     var m = sandbox_metrics_new();
     SandboxMetrics_set_wall_duration_ms(m, ExecResult_duration_ms(result));
