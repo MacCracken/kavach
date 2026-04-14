@@ -30,8 +30,12 @@ struct QuarantineStorage {
 }
 
 fn quarantine_storage_new(base_dir) {
-    # Best-effort mkdir; ignores EEXIST.
+    # Mode 0700 — only owner may enter. EEXIST is acceptable for the
+    # storage dir (unlike per-entry files) since operators intentionally
+    # reuse the location across runs.
     sys_mkdir(base_dir, 448);
+    # Best-effort tighten in case a pre-existing dir was wider.
+    sys_chmod(base_dir, 448);
     var q = alloc(16);
     QuarantineStorage_set_base_dir(q, base_dir);
     QuarantineStorage_set_next_id(q, 1);
@@ -55,12 +59,14 @@ fn _qpath(base_dir, id, ext) {
     return buf;
 }
 
-# Serialize metadata as simple JSON.
+# Serialize metadata as simple JSON. sandbox_id is user-controllable so
+# it must be JSON-escaped (ADR-005 §C2).
 fn _meta_jsonl(id, sandbox_id, verdict, status) {
     var id_buf[24];
     var id_len = fmt_int_buf(id, &id_buf);
-    var sid = sandbox_id;
-    if (sid == 0) { sid = ""; }
+    var sid_raw = sandbox_id;
+    if (sid_raw == 0) { sid_raw = ""; }
+    var sid = oci_json_escape(sid_raw);
     var vn = verdict_name(verdict);
     var sn = quarantine_status_name(status);
     var ts_buf[24];
@@ -90,20 +96,27 @@ fn _meta_jsonl(id, sandbox_id, verdict, status) {
     return buf;
 }
 
-# Store artifact + metadata. Returns assigned id.
+# Store artifact + metadata. Returns the assigned id on success, -1 on
+# failure. Both files are created with O_EXCL|O_NOFOLLOW + mode 0600
+# (file_write_secure) — attacker-staged symlinks at the target paths
+# cannot redirect the write. Artifact writes that fail abort the op
+# instead of silently returning a fake id. See ADR-005 §C4 + §H2.
 fn quarantine_store(storage, artifact, artifact_len, scan_result, sandbox_id) {
     var id = QuarantineStorage_next_id(storage);
-    QuarantineStorage_set_next_id(storage, id + 1);
     var base = QuarantineStorage_base_dir(storage);
 
     var art_path = _qpath(base, id, "bin");
-    file_write_all(art_path, artifact, artifact_len);
+    if (file_write_secure(art_path, artifact, artifact_len) < 0) { return 0 - 1; }
 
     var meta_path = _qpath(base, id, "meta");
     var meta = _meta_jsonl(id, sandbox_id,
                            ScanResult_verdict(scan_result),
                            QuarantineStatus.QUARANTINED);
-    file_write_all(meta_path, meta, strlen(meta));
+    if (file_write_secure(meta_path, meta, strlen(meta)) < 0) {
+        sys_unlink(art_path);
+        return 0 - 1;
+    }
+    QuarantineStorage_set_next_id(storage, id + 1);
     return id;
 }
 

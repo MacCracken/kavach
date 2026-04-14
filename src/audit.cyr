@@ -93,14 +93,16 @@ fn _sign_input(serial, event_type, payload, timestamp, prev_hmac) {
     return buf;
 }
 
-# Build a JSON line (simplified): {"serial":N,"event_type":"...","payload":"...",
-# "timestamp":"...","hmac":"...","prev_hmac":"..."} + "\n"
-# NOTE: payload and event_type are not escaped here — callers pass safe strings.
+# JSONL serializer. Event_type and payload are user-controllable, so both
+# pass through oci_json_escape (full RFC-8259 control-char escaping).
+# Timestamp is epoch-seconds decimal (digits-only; no escape needed).
+# Hmac + prev_hmac are hex (64 chars or empty; no escape needed).
+# See ADR-005 §C2.
 fn _entry_to_jsonl(entry) {
     var serial_buf[24];
     var slen = fmt_int_buf(AuditEntry_serial(entry), &serial_buf);
-    var ev = AuditEntry_event_type(entry);
-    var pl = AuditEntry_payload(entry);
+    var ev = oci_json_escape(AuditEntry_event_type(entry));
+    var pl = oci_json_escape(AuditEntry_payload(entry));
     var ts = AuditEntry_timestamp(entry);
     var h = AuditEntry_hmac(entry);
     var ph = AuditEntry_prev_hmac(entry);
@@ -172,7 +174,15 @@ fn audit_chain_record(chain, event_type, payload) {
     AuditEntry_set_prev_hmac(entry, prev);
 
     var line = _entry_to_jsonl(entry);
-    file_append_locked(AuditChain_log_path(chain), line, strlen(line));
+    # file_append_locked creates the file at 0644 on first write; tighten
+    # to 0600 immediately afterward. (A wider `file_append_locked_mode`
+    # wrapper is scheduled for Cyrius stdlib 4.4.0; until then this
+    # best-effort chmod is the hardening path — see ADR-005 §C4.)
+    if (file_append_locked(AuditChain_log_path(chain), line, strlen(line)) < 0) {
+        kavach_err_print(KavachError.IO_ERROR, "audit chain write failed");
+        return 0;
+    }
+    file_restrict_mode(AuditChain_log_path(chain));
 
     AuditChain_set_last_hmac(chain, hmac_hex);
     AuditChain_set_next_serial(chain, serial + 1);
@@ -184,6 +194,8 @@ fn audit_chain_len(chain) {
 }
 
 # Recompute hmac for an AuditEntry using `key` and compare to entry.hmac.
+# Uses constant-time comparison (ct_streq → sigil ct_eq) to prevent timing
+# side-channel attacks on the signing key. See ADR-005 §C1.
 # Returns 1 if valid, 0 otherwise.
 fn audit_entry_verify(entry, key, key_len) {
     var msg = _sign_input(AuditEntry_serial(entry),
@@ -192,5 +204,20 @@ fn audit_entry_verify(entry, key, key_len) {
                           AuditEntry_timestamp(entry),
                           AuditEntry_prev_hmac(entry));
     var expected = _hmac_hex(key, key_len, msg);
-    return streq(expected, AuditEntry_hmac(entry));
+    return ct_streq(expected, AuditEntry_hmac(entry));
+}
+
+# Zero the HMAC key buffer. Callers that no longer need a chain should
+# invoke this to minimize key-material exposure in core dumps or swap.
+# Uses sigil's zeroize_key (sigil/dist/sigil.cyr:2834) which is compiler
+# barrier-protected against dead-store elimination.
+fn audit_chain_close(chain) {
+    var key = AuditChain_hmac_key(chain);
+    var key_len = AuditChain_hmac_key_len(chain);
+    if (key != 0) {
+        if (key_len > 0) { zeroize_key(key, key_len); }
+    }
+    AuditChain_set_hmac_key(chain, 0);
+    AuditChain_set_hmac_key_len(chain, 0);
+    return 0;
 }

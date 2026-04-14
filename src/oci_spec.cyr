@@ -7,6 +7,9 @@
 
 var _oci_id_counter = 1;
 
+# Container id = <prefix>-<epoch>-<counter>-<16 hex chars from /dev/urandom>.
+# Randomness breaks the predictable-id vector that let a local attacker
+# pre-create /tmp/<id> as a symlink. See ADR-005 §C3.
 fn oci_container_id(prefix) {
     var ts_buf[24];
     var ts_len = fmt_int_buf(clock_epoch_secs(), &ts_buf);
@@ -14,23 +17,36 @@ fn oci_container_id(prefix) {
     _oci_id_counter = _oci_id_counter + 1;
     var ctr_buf[24];
     var ctr_len = fmt_int_buf(ctr, &ctr_buf);
+    var rand_id = rand_hex_id();
 
-    var out = alloc(strlen(prefix) + 1 + ts_len + 1 + ctr_len + 1);
+    var out = alloc(strlen(prefix) + 1 + ts_len + 1 + ctr_len + 1 + 17);
     var pos = 0;
     memcpy(out + pos, prefix, strlen(prefix)); pos = pos + strlen(prefix);
     store8(out + pos, 45); pos = pos + 1;
     memcpy(out + pos, &ts_buf, ts_len); pos = pos + ts_len;
     store8(out + pos, 45); pos = pos + 1;
     memcpy(out + pos, &ctr_buf, ctr_len); pos = pos + ctr_len;
+    store8(out + pos, 45); pos = pos + 1;
+    memcpy(out + pos, rand_id, strlen(rand_id)); pos = pos + strlen(rand_id);
     store8(out + pos, 0);
     return out;
 }
 
-# JSON-escape: \ " \n \r \t. Returns allocated cstr.
+# RFC 8259 §7 compliant JSON string escape. Worst-case expansion is 6×
+# (e.g. 0x01 → \u0001). Returns allocated null-terminated cstr.
+# Protects the audit log + OCI configs against log forgery and JSON
+# injection via control chars / ANSI escape sequences (ADR-005 §C2).
 fn oci_json_escape(s) {
     var n = strlen(s);
-    var dst = alloc(n * 2 + 1);
+    # Overflow guard: reject absurd inputs early (see util.cyr checked_mul).
+    if (n > 1048576) {
+        var tr = alloc(4);
+        memcpy(tr, "...", 4);
+        return tr;
+    }
+    var dst = alloc(n * 6 + 1);
     var di = 0;
+    var hex = "0123456789abcdef";
     var i = 0;
     while (i < n) {
         var c = load8(s + i);
@@ -53,6 +69,23 @@ fn oci_json_escape(s) {
         elif (c == 9) {
             store8(dst + di, 92); di = di + 1;
             store8(dst + di, 116); di = di + 1;
+        }
+        elif (c == 8) {
+            store8(dst + di, 92); di = di + 1;
+            store8(dst + di, 98); di = di + 1;
+        }
+        elif (c == 12) {
+            store8(dst + di, 92); di = di + 1;
+            store8(dst + di, 102); di = di + 1;
+        }
+        elif (c < 32) {
+            # Generic control char: \u00XX
+            store8(dst + di, 92); di = di + 1;
+            store8(dst + di, 117); di = di + 1;
+            store8(dst + di, 48); di = di + 1;
+            store8(dst + di, 48); di = di + 1;
+            store8(dst + di, load8(hex + ((c >> 4) & 15))); di = di + 1;
+            store8(dst + di, load8(hex + (c & 15))); di = di + 1;
         }
         else {
             store8(dst + di, c); di = di + 1;
@@ -126,6 +159,9 @@ fn oci_generate_spec(sandbox, command) {
 }
 
 # Create bundle dir under /tmp with an empty rootfs and a config.json.
+# Mode 0700 on both dirs; file_write_secure opens with O_CREAT|O_EXCL|
+# O_NOFOLLOW, mode 0600. Any mkdir failure aborts — no "silently clobber
+# an attacker-staged symlink" path. See ADR-005 §C3 + §C4.
 # Returns the bundle path, or 0 on failure.
 fn oci_prepare_bundle(container_id, sandbox, command) {
     var bundle = alloc(32 + strlen(container_id));
@@ -134,20 +170,26 @@ fn oci_prepare_bundle(container_id, sandbox, command) {
     memcpy(bundle + pos, prefix, strlen(prefix)); pos = pos + strlen(prefix);
     memcpy(bundle + pos, container_id, strlen(container_id)); pos = pos + strlen(container_id);
     store8(bundle + pos, 0);
-    sys_mkdir(bundle, 448);
+    # Mode 0700 = 448. EEXIST aborts (random id, so collision is attack-
+    # signal, not natural occurrence).
+    if (sys_mkdir(bundle, 448) < 0) { return 0; }
 
     var rootfs = alloc(strlen(bundle) + 8);
     memcpy(rootfs, bundle, strlen(bundle));
     memcpy(rootfs + strlen(bundle), "/rootfs", 8);
-    sys_mkdir(rootfs, 448);
+    if (sys_mkdir(rootfs, 448) < 0) { sys_rmdir(bundle); return 0; }
 
     var cfg_path = alloc(strlen(bundle) + 16);
     memcpy(cfg_path, bundle, strlen(bundle));
     memcpy(cfg_path + strlen(bundle), "/config.json", 13);
 
     var spec = oci_generate_spec(sandbox, command);
-    var r = file_write_all(cfg_path, spec, strlen(spec));
-    if (r < 0) { return 0; }
+    var r = file_write_secure(cfg_path, spec, strlen(spec));
+    if (r < 0) {
+        sys_rmdir(rootfs);
+        sys_rmdir(bundle);
+        return 0;
+    }
     return bundle;
 }
 

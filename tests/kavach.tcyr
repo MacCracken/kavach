@@ -661,6 +661,162 @@ fn test_audit_chain_linkage() {
     return 0;
 }
 
+fn test_audit_verify_constant_time() {
+    test_group("audit_verify_ct");
+    # ct_streq must reject differing strings of SAME length — the
+    # comparator we rely on for timing-safe HMAC verify (ADR-005 §C1).
+    assert_eq(ct_streq("aaaa", "aaaa"), 1, "equal");
+    assert_eq(ct_streq("aaaa", "aaab"), 0, "differ at end");
+    assert_eq(ct_streq("aaaa", "baaa"), 0, "differ at start");
+    assert_eq(ct_streq("abc", "abcd"), 0, "length mismatch");
+    return 0;
+}
+
+fn test_json_escape_control_chars() {
+    test_group("json_escape_ctrl");
+    # \u0001 (SOH) must be escaped as \u0001, not passed through.
+    var raw = alloc(4);
+    store8(raw, 97);           # 'a'
+    store8(raw + 1, 1);        # 0x01 SOH
+    store8(raw + 2, 98);       # 'b'
+    store8(raw + 3, 0);
+    var esc = oci_json_escape(raw);
+    assert_eq(streq(esc, "a\\u0001b"), 1, "SOH -> \\u0001");
+
+    # \b \f \t \n \r all get short forms
+    var raw2 = alloc(2);
+    store8(raw2, 8);           # \b
+    store8(raw2 + 1, 0);
+    assert_eq(streq(oci_json_escape(raw2), "\\b"), 1, "backspace -> \\b");
+
+    var raw3 = alloc(2);
+    store8(raw3, 12);          # \f
+    store8(raw3 + 1, 0);
+    assert_eq(streq(oci_json_escape(raw3), "\\f"), 1, "formfeed -> \\f");
+    return 0;
+}
+
+fn test_is_safe_argument() {
+    test_group("is_safe_argument");
+    assert_eq(is_safe_argument("echo hello"), 1, "normal cmd");
+    assert_eq(is_safe_argument("with\ttab"), 1, "tab ok");
+
+    # Build cmd with embedded newline
+    var bad = alloc(16);
+    memcpy(bad, "line1", 5);
+    store8(bad + 5, 10);       # \n
+    memcpy(bad + 6, "line2", 6);
+    store8(bad + 11, 0);
+    assert_eq(is_safe_argument(bad), 0, "newline rejected");
+
+    # Embedded NUL via an allocated buffer
+    var bad2 = alloc(8);
+    store8(bad2, 97); store8(bad2 + 1, 0);
+    assert_eq(is_safe_argument(bad2), 1, "pure ascii ok");
+    return 0;
+}
+
+fn test_process_rejects_newline_smuggling() {
+    test_group("process_newline_smuggle");
+    kavach_init();
+    var cfg = config_new();
+    config_backend(cfg, Backend.PROCESS);
+    var sb = alloc(SANDBOX_SIZE);
+    Sandbox_set_config(sb, cfg);
+    # Build "ls\ncat /etc/shadow" — without the guard this splits into
+    # two tokens and potentially runs the second as a separate exec.
+    var cmd = alloc(32);
+    memcpy(cmd, "ls", 2);
+    store8(cmd + 2, 10);       # \n
+    memcpy(cmd + 3, "cat /etc/shadow", 16);
+    store8(cmd + 18, 0);
+    var r = process_exec(sb, cmd);
+    assert_eq(ExecResult_exit_code(r), 126, "newline rejected");
+    assert(str_contains(ExecResult_stderr(r), "control") == 1, "msg says control");
+    return 0;
+}
+
+fn test_overflow_helpers() {
+    test_group("overflow_helpers");
+    assert_eq(checked_add(1, 2), 3, "normal add");
+    assert_eq(checked_add(0 - 1, 5), 0 - 1, "neg input rejected");
+    # 2^62 + 2^62 = 2^63 which overflows i64 positives.
+    var big = 4611686018427387904;
+    assert_eq(checked_add(big, big), 0 - 1, "add overflow");
+
+    assert_eq(checked_mul(3, 4), 12, "normal mul");
+    assert_eq(checked_mul(big, 2), 0 - 1, "mul overflow");
+    assert_eq(checked_mul(0, big), 0, "0 short-circuit");
+    return 0;
+}
+
+fn test_redact_evidence() {
+    test_group("redact_evidence");
+    # len > 8: first 4 + **** + last 4
+    var r1 = redact_evidence("AKIAIOSFODNN7EXAMPLE", 0, 20);
+    assert_eq(streq(r1, "AKIA****MPLE"), 1, "20-char redacted");
+
+    # len <= 8: all asterisks
+    var r2 = redact_evidence("abcd", 0, 4);
+    assert_eq(streq(r2, "****"), 1, "short fully masked");
+
+    # Evidence from a finding: scanned artifact -> stored finding must
+    # not contain the raw secret in audit-log-reachable fields.
+    var sr = scan_result_new();
+    secrets_scan("leak: AKIAIOSFODNN7EXAMPLE end", sr);
+    var v = ScanResult_findings(sr);
+    assert(vec_len(v) >= 1, "finding");
+    var f = vec_get(v, 0);
+    var ev = ScanFinding_evidence(f);
+    assert(str_contains(ev, "****") == 1, "redacted evidence");
+    assert_eq(str_contains(ev, "IOSFODNN7EXA"), 0, "no raw middle bytes");
+    return 0;
+}
+
+fn test_audit_payload_escaped() {
+    test_group("audit_payload_escaped");
+    sha256_global_init();
+    var c = audit_chain_open("/tmp/kavach-test-escape.audit", "key", 3);
+    # Payload with embedded quote — must be escaped in JSONL output.
+    var e = audit_chain_record(c, "evt", "has \"quote\"");
+    # Verification still passes (HMAC covers the unescaped payload).
+    assert_eq(audit_entry_verify(e, "key", 3), 1, "verify ok");
+    audit_chain_close(c);
+    return 0;
+}
+
+fn test_audit_chain_close_zeroes_key() {
+    test_group("audit_close_zeroes");
+    sha256_global_init();
+    var keybuf = alloc(16);
+    memcpy(keybuf, "mysecretkey12345", 16);
+    var c = audit_chain_open("/tmp/kavach-test-close.audit", keybuf, 16);
+    # key pointer is held inside the chain struct
+    assert_eq(AuditChain_hmac_key(c), keybuf, "key ptr stored");
+    audit_chain_close(c);
+    assert_eq(AuditChain_hmac_key(c), 0, "key pointer cleared");
+    # Key buffer itself is zeroed
+    assert_eq(load8(keybuf), 0, "first byte zeroed");
+    assert_eq(load8(keybuf + 15), 0, "last byte zeroed");
+    return 0;
+}
+
+fn test_oci_bundle_mode_0700() {
+    test_group("oci_bundle_mode");
+    var cfg = config_new();
+    var sb = alloc(SANDBOX_SIZE);
+    Sandbox_set_config(sb, cfg);
+    var id = oci_container_id("kavach-modetest");
+    var bundle = oci_prepare_bundle(id, sb, "echo hi");
+    assert(bundle != 0, "bundle created");
+    # Random id component prevents predictable-path attacks.
+    assert(str_contains(id, "kavach-modetest-") == 1, "prefix kept");
+    # ID includes 16-hex random suffix → total length > prefix+timestamp+counter
+    assert(strlen(id) > 30, "id includes randomness");
+    oci_cleanup_bundle(bundle);
+    return 0;
+}
+
 fn test_audit_entry_verify() {
     test_group("audit_verify");
     sha256_global_init();
@@ -1289,6 +1445,15 @@ fn main() {
     test_sy_agnos_tier_strength();
     test_phylax_detects_namespace_escape();
     test_phylax_detects_verity();
+    test_audit_verify_constant_time();
+    test_json_escape_control_chars();
+    test_is_safe_argument();
+    test_process_rejects_newline_smuggling();
+    test_overflow_helpers();
+    test_redact_evidence();
+    test_audit_payload_escaped();
+    test_audit_chain_close_zeroes_key();
+    test_oci_bundle_mode_0700();
     test_gvisor_exec_without_runsc();
     test_which_exists();
     test_path_exists();

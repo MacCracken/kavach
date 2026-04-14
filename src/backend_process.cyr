@@ -39,6 +39,17 @@ fn _split_command(cmdline) {
 fn process_exec(sandbox, command) {
     var start_ns = now_ns();
 
+    # Reject control chars before tokenizing. A NUL/CR/newline in `command`
+    # would otherwise split into multiple argv tokens and smuggle extra
+    # arguments past the runtime guard. Tab is allowed as a whitespace
+    # separator; newline/CR/NUL/ESC are not. See ADR-005 §H3.
+    if (is_safe_argument(command) == 0) {
+        var er = exec_result_new();
+        ExecResult_set_exit_code(er, 126);
+        ExecResult_set_stderr(er, "command contains illegal control chars");
+        return er;
+    }
+
     # Runtime-guard precheck — policy-violating commands never hit fork.
     var guard_cfg = runtime_guard_config_default();
     var violations = check_command(command, guard_cfg);

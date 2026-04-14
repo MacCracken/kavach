@@ -1,4 +1,160 @@
-# kavach — shared string helpers
+# kavach — shared string helpers + security hardening primitives
+
+# ---- constant-time ops ---------------------------------------------------
+# Delegates to sigil's ct_eq, which XORs byte-by-byte into an accumulator
+# without early exit. Prevents timing side channels on HMAC/signature
+# verification (ADR-005 §C1).
+
+fn ct_streq(a, b) {
+    var la = strlen(a);
+    var lb = strlen(b);
+    if (la != lb) { return 0; }
+    return ct_eq(a, la, b, lb);
+}
+
+# ---- overflow-checked arithmetic -----------------------------------------
+# Return -1 on overflow instead of wrapping. Use for sizes fed to alloc().
+
+fn checked_add(a, b) {
+    if (a < 0) { return 0 - 1; }
+    if (b < 0) { return 0 - 1; }
+    var r = a + b;
+    if (r < a) { return 0 - 1; }
+    return r;
+}
+
+fn checked_mul(a, b) {
+    if (a < 0) { return 0 - 1; }
+    if (b < 0) { return 0 - 1; }
+    if (a == 0) { return 0; }
+    if (b == 0) { return 0; }
+    var r = a * b;
+    if (r / a != b) { return 0 - 1; }
+    return r;
+}
+
+# ---- input validation ----------------------------------------------------
+
+# Reject control chars (NUL, BEL, ESC, …) while allowing tab/newline/CR.
+# Prevents JSON injection, log forgery, and terminal escape smuggling.
+# Returns 1 if safe, 0 otherwise.
+fn is_safe_text(s) {
+    var n = strlen(s);
+    var i = 0;
+    while (i < n) {
+        var c = load8(s + i);
+        if (c < 32) {
+            if (c != 9) {
+                if (c != 10) {
+                    if (c != 13) { return 0; }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# Stricter: reject newlines + CR too (used for command arguments where
+# each line becomes a token and could smuggle extra args).
+fn is_safe_argument(s) {
+    var n = strlen(s);
+    var i = 0;
+    while (i < n) {
+        var c = load8(s + i);
+        if (c < 32) {
+            if (c != 9) { return 0; }
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# ---- secure file I/O -----------------------------------------------------
+# O_WRONLY=1, O_CREAT=0x40, O_TRUNC=0x200, O_EXCL=0x80, O_NOFOLLOW=0x20000
+# Mode 0600 = 384.
+
+fn file_write_secure(path, buf, len) {
+    var flags = 1 + 64 + 512 + 128 + 131072;
+    var fd = sys_open(path, flags, 384);
+    if (fd < 0) { return 0 - 1; }
+    var n = sys_write(fd, buf, len);
+    sys_close(fd);
+    if (n < 0) { return 0 - 1; }
+    if (n != len) { return 0 - 1; }
+    return n;
+}
+
+# Restrict an existing file to owner-only (best-effort; ignores errors so
+# that failing platforms don't break the exec path — caller still wrote).
+fn file_restrict_mode(path) {
+    sys_chmod(path, 384);
+    return 0;
+}
+
+# ---- random bytes --------------------------------------------------------
+# Read `count` bytes from /dev/urandom into buf. Returns bytes read, or
+# -1 on failure. Used for unpredictable container ids — breaks the
+# /tmp-symlink-precreate attack (ADR-005 §C3).
+
+fn read_urandom(buf, count) {
+    var fd = file_open("/dev/urandom", 0, 0);
+    if (fd < 0) { return 0 - 1; }
+    var got = 0;
+    while (got < count) {
+        var n = file_read(fd, buf + got, count - got);
+        if (n <= 0) { file_close(fd); return 0 - 1; }
+        got = got + n;
+    }
+    file_close(fd);
+    return got;
+}
+
+# Hex-encode `len` bytes from src into dst. dst must fit len*2 + 1 bytes.
+fn hex_encode_bytes(src, len, dst) {
+    var hex = "0123456789abcdef";
+    var i = 0;
+    while (i < len) {
+        var b = load8(src + i);
+        store8(dst + i * 2, load8(hex + ((b >> 4) & 15)));
+        store8(dst + i * 2 + 1, load8(hex + (b & 15)));
+        i = i + 1;
+    }
+    store8(dst + len * 2, 0);
+    return 0;
+}
+
+# 16-char hex id from /dev/urandom (8 random bytes × 2). Returns heap cstr.
+fn rand_hex_id() {
+    var raw[8];
+    read_urandom(&raw, 8);
+    var out = alloc(17);
+    hex_encode_bytes(&raw, 8, out);
+    return out;
+}
+
+# ---- secret redaction ----------------------------------------------------
+# For evidence snippets that may contain an actual secret. Policy: show
+# first 4 + '****' + last 4 if len > 8; otherwise full mask. Preserves
+# signal (prefix identifies key type, e.g. 'AKIA****') without leaking
+# the secret content.
+
+fn redact_evidence(text, start, len) {
+    if (len <= 8) {
+        var mask = alloc(len + 1);
+        memset(mask, 42, len);
+        store8(mask + len, 0);
+        return mask;
+    }
+    var buf = alloc(13);
+    memcpy(buf, text + start, 4);
+    memcpy(buf + 4, "****", 4);
+    memcpy(buf + 8, text + start + len - 4, 4);
+    store8(buf + 12, 0);
+    return buf;
+}
+
+# ---- existing helpers ----------------------------------------------------
 
 fn ch_ascii_lower(c) {
     if (c >= 65) {
