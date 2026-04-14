@@ -13,9 +13,19 @@ toolchain. 25,935 lines of Rust → 20 Cyrius modules. See
 [ADR-001](docs/adr/001-cyrius-port-architecture.md) for the port rationale.
 
 ### Added
+- **OCI backend** (`src/backend_oci.cyr`) — `runc`/`crun` shell-out against the shared OCI bundle. Picks first available runtime from PATH. Same dispatch registration pattern as gVisor.
+- **Shared OCI spec module** (`src/oci_spec.cyr`) — extracted from the gVisor backend: container-id generation, JSON escape, minimal runtime spec v1.0.2, bundle mkdir, and cleanup (unlink config.json, rmdir rootfs/, rmdir bundle/). Both gVisor and OCI backends call into this.
+- **Bundle cleanup on exit** — `oci_cleanup_bundle(bundle)` called after every exec regardless of outcome. Prevents `/tmp/kavach-gvisor-*` and `/tmp/kavach-oci-*` accumulation.
 - **gVisor backend** (`src/backend_gvisor.cyr`) — OCI bundle generation + `runsc run` + auto-cleanup. Registers into the dispatch table via `backend_gvisor_register()`. Proves ADR-002's "3-line extension" pattern: same dispatch slot layout, different `exec_fn`.
 - **`path_exists` + `which_exists`** (real implementations via `access(2)` syscall) — replaces the v2.0-alpha stubs that always returned 0. Enables meaningful `backend_is_available()` probes and `resolve_best_backend()` ranking.
-- **21 Cyrius modules** (was 20): `error`, `util`, `backend`, `policy`, `scoring`,
+- **23 Cyrius modules** (was 20)
+
+### Fixed
+- **`cyrius.toml` sigil path** — switched from `path = "../sigil"` to
+  absolute path to work around a `cyrius deps` bug where relative `path`
+  entries produce broken symlinks in `lib/`. Symptom was
+  `undefined function 'hmac_sha256'` despite successful dep resolution.
+  Fix is temporary; file upstream for cyrius 4.4.0.: `error`, `util`, `backend`, `policy`, `scoring`,
   `lifecycle`, `scanning_types/_secrets/_code/_data/_gate/_runtime/_threat`,
   `audit`, `credential`, `quarantine`, `backend_dispatch/_noop/_process`,
   `sandbox_exec`

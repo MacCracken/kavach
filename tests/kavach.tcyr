@@ -16,10 +16,12 @@ include "src/scanning_threat.cyr"
 include "src/audit.cyr"
 include "src/credential.cyr"
 include "src/quarantine.cyr"
+include "src/oci_spec.cyr"
 include "src/backend_dispatch.cyr"
 include "src/backend_noop.cyr"
 include "src/backend_process.cyr"
 include "src/backend_gvisor.cyr"
+include "src/backend_oci.cyr"
 include "src/sandbox_exec.cyr"
 
 fn test_backend_parse() {
@@ -673,9 +675,10 @@ fn test_dispatch_noop_registered() {
     assert_eq(backend_is_registered(Backend.NOOP), 1, "noop registered");
     assert_eq(backend_is_registered(Backend.PROCESS), 1, "process registered");
     assert_eq(backend_is_registered(Backend.GVISOR), 1, "gvisor registered");
+    assert_eq(backend_is_registered(Backend.OCI), 1, "oci registered");
     # Backends still awaiting ports
     assert_eq(backend_is_registered(Backend.FIRECRACKER), 0, "firecracker not yet");
-    assert_eq(backend_is_registered(Backend.OCI), 0, "oci not yet");
+    assert_eq(backend_is_registered(Backend.WASM), 0, "wasm not yet");
     return 0;
 }
 
@@ -732,8 +735,8 @@ fn test_gvisor_registered() {
 
 fn test_gvisor_container_id_unique() {
     test_group("gvisor_id_unique");
-    var a = _gvisor_container_id();
-    var b = _gvisor_container_id();
+    var a = oci_container_id("kavach-gvisor");
+    var b = oci_container_id("kavach-gvisor");
     assert(streq(a, b) == 0, "ids differ");
     assert(str_contains(a, "kavach-gvisor-") == 1, "prefix");
     return 0;
@@ -741,9 +744,9 @@ fn test_gvisor_container_id_unique() {
 
 fn test_gvisor_json_escape() {
     test_group("gvisor_json_escape");
-    var out = _gvisor_json_escape("a\"b\\c");
+    var out = oci_json_escape("a\"b\\c");
     assert_eq(streq(out, "a\\\"b\\\\c"), 1, "quote+backslash escaped");
-    var plain = _gvisor_json_escape("hello world");
+    var plain = oci_json_escape("hello world");
     assert_eq(streq(plain, "hello world"), 1, "clean text unchanged");
     return 0;
 }
@@ -756,7 +759,7 @@ fn test_gvisor_oci_spec_shape() {
     # even when runsc isn't installed.
     var sb = alloc(SANDBOX_SIZE);
     Sandbox_set_config(sb, cfg);
-    var spec = _gvisor_oci_spec(sb, "echo hi");
+    var spec = oci_generate_spec(sb, "echo hi");
     assert(str_contains(spec, "\"ociVersion\":\"1.0.2\"") == 1, "version");
     assert(str_contains(spec, "\"args\":[\"/bin/sh\",\"-c\",\"echo hi\"]") == 1, "command wrapped");
     assert(str_contains(spec, "\"type\":\"pid\"") == 1, "pid ns");
@@ -772,7 +775,7 @@ fn test_gvisor_oci_spec_host_network() {
     config_network(cfg, 1);
     var sb = alloc(SANDBOX_SIZE);
     Sandbox_set_config(sb, cfg);
-    var spec = _gvisor_oci_spec(sb, "echo hi");
+    var spec = oci_generate_spec(sb, "echo hi");
     # host network → no network namespace entry
     assert_eq(str_contains(spec, "\"type\":\"network\""), 0, "no net ns when enabled");
     return 0;
@@ -785,19 +788,69 @@ fn test_gvisor_oci_spec_readonly() {
     config_policy(cfg, policy_strict());
     var sb = alloc(SANDBOX_SIZE);
     Sandbox_set_config(sb, cfg);
-    var spec = _gvisor_oci_spec(sb, "echo hi");
+    var spec = oci_generate_spec(sb, "echo hi");
     assert(str_contains(spec, "\"readonly\":true") == 1, "readonly rootfs");
     assert(str_contains(spec, "\"resources\":{\"memory\":") == 1, "memory limit");
     assert(str_contains(spec, "\"pids\":{\"limit\":64}") == 1, "pids limit");
     return 0;
 }
 
-fn test_gvisor_network_mode() {
-    test_group("gvisor_network_mode");
+fn test_oci_network_mode() {
+    test_group("oci_network_mode");
     var p = policy_minimal();
-    assert_eq(streq(_gvisor_network_mode(p), "none"), 1, "minimal=none");
+    assert_eq(streq(oci_network_mode(p), "none"), 1, "minimal=none");
     SandboxPolicy_set_network_enabled(p, 1);
-    assert_eq(streq(_gvisor_network_mode(p), "host"), 1, "enabled=host");
+    assert_eq(streq(oci_network_mode(p), "host"), 1, "enabled=host");
+    return 0;
+}
+
+fn test_oci_registered() {
+    test_group("oci_registered");
+    kavach_init();
+    assert_eq(backend_is_registered(Backend.OCI), 1, "oci slot populated");
+    return 0;
+}
+
+fn test_oci_exec_without_runtime() {
+    test_group("oci_no_runtime");
+    kavach_init();
+    var cfg = config_new();
+    config_backend(cfg, Backend.OCI);
+    var sb = alloc(SANDBOX_SIZE);
+    Sandbox_set_config(sb, cfg);
+    # If no runc/crun on this machine, we expect a clean error.
+    if (_oci_runtime_path() == 0) {
+        var r = oci_exec(sb, "echo hi");
+        assert_eq(ExecResult_exit_code(r), 1, "clean failure");
+        assert(str_contains(ExecResult_stderr(r), "OCI runtime") == 1, "mentions oci");
+    }
+    return 0;
+}
+
+fn test_oci_spec_shared_by_gvisor_and_oci() {
+    test_group("oci_spec_shared");
+    # Same container command should produce identical specs regardless of
+    # which backend the caller intends to run it under.
+    var cfg = config_new();
+    var sb = alloc(SANDBOX_SIZE);
+    Sandbox_set_config(sb, cfg);
+    var spec1 = oci_generate_spec(sb, "echo hi");
+    var spec2 = oci_generate_spec(sb, "echo hi");
+    assert_eq(streq(spec1, spec2), 1, "deterministic spec");
+    return 0;
+}
+
+fn test_oci_bundle_cleanup() {
+    test_group("oci_bundle_cleanup");
+    var cfg = config_new();
+    var sb = alloc(SANDBOX_SIZE);
+    Sandbox_set_config(sb, cfg);
+    var id = oci_container_id("kavach-cleanup-test");
+    var bundle = oci_prepare_bundle(id, sb, "echo hi");
+    assert(bundle != 0, "bundle created");
+    assert_eq(path_exists(bundle), 1, "bundle dir exists");
+    oci_cleanup_bundle(bundle);
+    assert_eq(path_exists(bundle), 0, "bundle dir removed after cleanup");
     return 0;
 }
 
@@ -1101,7 +1154,11 @@ fn main() {
     test_gvisor_oci_spec_shape();
     test_gvisor_oci_spec_host_network();
     test_gvisor_oci_spec_readonly();
-    test_gvisor_network_mode();
+    test_oci_network_mode();
+    test_oci_registered();
+    test_oci_exec_without_runtime();
+    test_oci_spec_shared_by_gvisor_and_oci();
+    test_oci_bundle_cleanup();
     test_gvisor_exec_without_runsc();
     test_which_exists();
     test_path_exists();

@@ -25,18 +25,30 @@ fn memeq(a, b, n) {
     return 1;
 }
 
-# Copy n bytes from src to dst
+# Copy n bytes from src to dst (rep movsb — hardware-optimized on modern x86)
 fn memcpy(dst, src, n) {
-    for (var i = 0; i < n; i = i + 1) {
-        store8(dst + i, load8(src + i));
+    if (n == 0) { return dst; }
+    # rdi=dst, rsi=src, rcx=n → cld; rep movsb
+    asm {
+        0xFC;                       # cld (clear direction flag — CVE-08)
+        0x48; 0x8B; 0x7D; 0xF8;    # mov rdi, [rbp-8]  (dst)
+        0x48; 0x8B; 0x75; 0xF0;    # mov rsi, [rbp-16] (src)
+        0x48; 0x8B; 0x4D; 0xE8;    # mov rcx, [rbp-24] (n)
+        0xF3; 0xA4;                 # rep movsb
     }
     return dst;
 }
 
-# Fill n bytes at dst with val
+# Fill n bytes at dst with val (rep stosb — hardware-optimized on modern x86)
 fn memset(dst, val, n) {
-    for (var i = 0; i < n; i = i + 1) {
-        store8(dst + i, val);
+    if (n == 0) { return dst; }
+    # rdi=dst, al=val, rcx=n → cld; rep stosb
+    asm {
+        0xFC;                       # cld (clear direction flag — CVE-08)
+        0x48; 0x8B; 0x7D; 0xF8;    # mov rdi, [rbp-8]  (dst)
+        0x48; 0x8B; 0x45; 0xF0;    # mov rax, [rbp-16] (val)
+        0x48; 0x8B; 0x4D; 0xE8;    # mov rcx, [rbp-24] (n)
+        0xF3; 0xAA;                 # rep stosb
     }
     return dst;
 }

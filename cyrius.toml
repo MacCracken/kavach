@@ -14,5 +14,5 @@ output = "kavach"
 stdlib = ["string", "fmt", "alloc", "vec", "str", "syscalls", "io", "args", "assert", "bigint", "chrono", "hashmap", "freelist", "fnptr", "process", "tagged"]
 
 [deps.sigil]
-path = "../sigil"
+path = "/home/macro/Repos/sigil"
 modules = ["dist/sigil.cyr"]

@@ -24,9 +24,13 @@ the remaining feature gaps. See
 - [x] Architecture overview + 4 ADRs + README rewrite
 - [x] `path_exists` + `which_exists` via access(2) syscall
 - [x] gVisor backend (OCI bundle generation + `runsc run` + auto-cleanup)
+- [x] Shared `oci_spec.cyr` module (bundle mkdir/spec/cleanup)
+- [x] OCI backend (runc/crun shell-out via shared oci_spec)
+- [ ] WASM backend (wasmtime binary or API)
 - [ ] `cyrius audit` clean (fmt/lint/vet/deny)
-- [ ] OCI backend (runc/crun shell-out — same pattern as gVisor)
 - [ ] Delete `rust-old/` once parity reaches v2.1
+- [ ] Report cyrius `deps` relative-path symlink bug upstream (workaround
+      in cyrius.toml uses absolute path for sigil)
 
 ### v2.1 — feature parity unblocks
 

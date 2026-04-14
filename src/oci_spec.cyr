@@ -1,0 +1,168 @@
+# kavach — OCI runtime spec (v1.0.2) generator shared by gVisor + OCI backends.
+# Ported from rust-old/src/backend/oci_spec.rs.
+#
+# Minimal spec: pid/ipc/uts/mount namespaces always included, network
+# namespace conditional on policy, resource limits applied when set, readonly
+# rootfs per policy, command wrapped in `/bin/sh -c`.
+
+var _oci_id_counter = 1;
+
+fn oci_container_id(prefix) {
+    var ts_buf[24];
+    var ts_len = fmt_int_buf(clock_epoch_secs(), &ts_buf);
+    var ctr = _oci_id_counter;
+    _oci_id_counter = _oci_id_counter + 1;
+    var ctr_buf[24];
+    var ctr_len = fmt_int_buf(ctr, &ctr_buf);
+
+    var out = alloc(strlen(prefix) + 1 + ts_len + 1 + ctr_len + 1);
+    var pos = 0;
+    memcpy(out + pos, prefix, strlen(prefix)); pos = pos + strlen(prefix);
+    store8(out + pos, 45); pos = pos + 1;
+    memcpy(out + pos, &ts_buf, ts_len); pos = pos + ts_len;
+    store8(out + pos, 45); pos = pos + 1;
+    memcpy(out + pos, &ctr_buf, ctr_len); pos = pos + ctr_len;
+    store8(out + pos, 0);
+    return out;
+}
+
+# JSON-escape: \ " \n \r \t. Returns allocated cstr.
+fn oci_json_escape(s) {
+    var n = strlen(s);
+    var dst = alloc(n * 2 + 1);
+    var di = 0;
+    var i = 0;
+    while (i < n) {
+        var c = load8(s + i);
+        if (c == 34) {
+            store8(dst + di, 92); di = di + 1;
+            store8(dst + di, 34); di = di + 1;
+        }
+        elif (c == 92) {
+            store8(dst + di, 92); di = di + 1;
+            store8(dst + di, 92); di = di + 1;
+        }
+        elif (c == 10) {
+            store8(dst + di, 92); di = di + 1;
+            store8(dst + di, 110); di = di + 1;
+        }
+        elif (c == 13) {
+            store8(dst + di, 92); di = di + 1;
+            store8(dst + di, 114); di = di + 1;
+        }
+        elif (c == 9) {
+            store8(dst + di, 92); di = di + 1;
+            store8(dst + di, 116); di = di + 1;
+        }
+        else {
+            store8(dst + di, c); di = di + 1;
+        }
+        i = i + 1;
+    }
+    store8(dst + di, 0);
+    return dst;
+}
+
+fn oci_network_mode(policy) {
+    if (SandboxPolicy_network_enabled(policy) == 1) { return "host"; }
+    return "none";
+}
+
+# Render OCI runtime config.json v1.0.2. Returns allocated cstr.
+fn oci_generate_spec(sandbox, command) {
+    var config = Sandbox_config(sandbox);
+    var policy = SandboxConfig_policy(config);
+    var cmd_escaped = oci_json_escape(command);
+
+    var mem = SandboxPolicy_memory_limit_mb(policy);
+    var pids = SandboxPolicy_max_pids(policy);
+    var readonly = "false";
+    if (SandboxPolicy_read_only_rootfs(policy) == 1) { readonly = "true"; }
+
+    var resources = "";
+    if (mem > 0) {
+        var mem_buf[32];
+        var mem_bytes = mem * 1048576;
+        var mem_len = fmt_int_buf(mem_bytes, &mem_buf);
+        var r = alloc(64 + mem_len);
+        var rpos = 0;
+        var p1 = ",\"resources\":{\"memory\":{\"limit\":";
+        memcpy(r + rpos, p1, strlen(p1)); rpos = rpos + strlen(p1);
+        memcpy(r + rpos, &mem_buf, mem_len); rpos = rpos + mem_len;
+        if (pids > 0) {
+            var pids_buf[24];
+            var pids_len = fmt_int_buf(pids, &pids_buf);
+            var p2 = "},\"pids\":{\"limit\":";
+            memcpy(r + rpos, p2, strlen(p2)); rpos = rpos + strlen(p2);
+            memcpy(r + rpos, &pids_buf, pids_len); rpos = rpos + pids_len;
+        }
+        var p3 = "}}";
+        memcpy(r + rpos, p3, strlen(p3)); rpos = rpos + strlen(p3);
+        store8(r + rpos, 0);
+        resources = r;
+    }
+
+    var netns = "{\"type\":\"network\"},";
+    if (SandboxPolicy_network_enabled(policy) == 1) { netns = ""; }
+
+    var buf = alloc(2048 + strlen(cmd_escaped) + strlen(resources));
+    var pos = 0;
+    var head = "{\"ociVersion\":\"1.0.2\",\"process\":{\"terminal\":false,\"args\":[\"/bin/sh\",\"-c\",\"";
+    memcpy(buf + pos, head, strlen(head)); pos = pos + strlen(head);
+    memcpy(buf + pos, cmd_escaped, strlen(cmd_escaped)); pos = pos + strlen(cmd_escaped);
+    var mid1 = "\"],\"env\":[\"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\",\"TERM=xterm\"],\"cwd\":\"/\"},\"root\":{\"path\":\"rootfs\",\"readonly\":";
+    memcpy(buf + pos, mid1, strlen(mid1)); pos = pos + strlen(mid1);
+    memcpy(buf + pos, readonly, strlen(readonly)); pos = pos + strlen(readonly);
+    var mid2 = "},\"linux\":{\"namespaces\":[";
+    memcpy(buf + pos, mid2, strlen(mid2)); pos = pos + strlen(mid2);
+    memcpy(buf + pos, netns, strlen(netns)); pos = pos + strlen(netns);
+    var ns_rest = "{\"type\":\"pid\"},{\"type\":\"ipc\"},{\"type\":\"uts\"},{\"type\":\"mount\"}]";
+    memcpy(buf + pos, ns_rest, strlen(ns_rest)); pos = pos + strlen(ns_rest);
+    memcpy(buf + pos, resources, strlen(resources)); pos = pos + strlen(resources);
+    var tail = "}}";
+    memcpy(buf + pos, tail, strlen(tail)); pos = pos + strlen(tail);
+    store8(buf + pos, 0);
+    return buf;
+}
+
+# Create bundle dir under /tmp with an empty rootfs and a config.json.
+# Returns the bundle path, or 0 on failure.
+fn oci_prepare_bundle(container_id, sandbox, command) {
+    var bundle = alloc(32 + strlen(container_id));
+    var pos = 0;
+    var prefix = "/tmp/";
+    memcpy(bundle + pos, prefix, strlen(prefix)); pos = pos + strlen(prefix);
+    memcpy(bundle + pos, container_id, strlen(container_id)); pos = pos + strlen(container_id);
+    store8(bundle + pos, 0);
+    sys_mkdir(bundle, 448);
+
+    var rootfs = alloc(strlen(bundle) + 8);
+    memcpy(rootfs, bundle, strlen(bundle));
+    memcpy(rootfs + strlen(bundle), "/rootfs", 8);
+    sys_mkdir(rootfs, 448);
+
+    var cfg_path = alloc(strlen(bundle) + 16);
+    memcpy(cfg_path, bundle, strlen(bundle));
+    memcpy(cfg_path + strlen(bundle), "/config.json", 13);
+
+    var spec = oci_generate_spec(sandbox, command);
+    var r = file_write_all(cfg_path, spec, strlen(spec));
+    if (r < 0) { return 0; }
+    return bundle;
+}
+
+# Best-effort cleanup: unlink config.json, rmdir rootfs/, rmdir bundle/.
+fn oci_cleanup_bundle(bundle) {
+    var cfg_path = alloc(strlen(bundle) + 16);
+    memcpy(cfg_path, bundle, strlen(bundle));
+    memcpy(cfg_path + strlen(bundle), "/config.json", 13);
+    sys_unlink(cfg_path);
+
+    var rootfs = alloc(strlen(bundle) + 8);
+    memcpy(rootfs, bundle, strlen(bundle));
+    memcpy(rootfs + strlen(bundle), "/rootfs", 8);
+    sys_rmdir(rootfs);
+
+    sys_rmdir(bundle);
+    return 0;
+}

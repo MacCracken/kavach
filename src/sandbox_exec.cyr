@@ -103,5 +103,6 @@ fn kavach_init() {
     backend_noop_register();
     backend_process_register();
     backend_gvisor_register();
+    backend_oci_register();
     return 0;
 }
