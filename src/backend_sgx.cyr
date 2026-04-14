@@ -1,0 +1,157 @@
+# kavach — Intel SGX (Gramine-SGX) backend
+# Ported from rust-old/src/backend/sgx/mod.rs
+#
+# Generates a minimal Gramine manifest and runs `gramine-sgx <prefix>`.
+# Requires /dev/sgx_enclave and the gramine-sgx binary.
+#
+# Deferred vs Rust:
+#   - Remote attestation (SgxAttestationReport + IAS quote fetch) —
+#     needs sigil HTTPS + IAS certificate handling
+#   - Sealing / unsealing (SealedData, SealKeyPolicy) — needs gramine-sgx-seal
+#     wrapper and AES-GCM support in sigil
+
+fn _sgx_gramine_path() {
+    if (path_exists("/usr/local/bin/gramine-sgx") == 1) { return "/usr/local/bin/gramine-sgx"; }
+    if (path_exists("/usr/bin/gramine-sgx") == 1) { return "/usr/bin/gramine-sgx"; }
+    return 0;
+}
+
+fn _sgx_device_present() {
+    return path_exists("/dev/sgx_enclave");
+}
+
+# Generate a minimal Gramine manifest. Writes to <workdir>/app.manifest
+# and returns the path. NOTE: real-world SGX deployments sign the manifest
+# with gramine-sgx-sign; for v2.0 we produce an unsigned template that
+# consumers must post-process. Path returned is the `.manifest.sgx` prefix
+# that `gramine-sgx` expects.
+fn _sgx_manifest_path(workdir) {
+    var buf = alloc(strlen(workdir) + 32);
+    memcpy(buf, workdir, strlen(workdir));
+    memcpy(buf + strlen(workdir), "/app", 5);
+    return buf;
+}
+
+fn _sgx_manifest_file(workdir) {
+    var buf = alloc(strlen(workdir) + 32);
+    memcpy(buf, workdir, strlen(workdir));
+    memcpy(buf + strlen(workdir), "/app.manifest", 14);
+    return buf;
+}
+
+fn _sgx_write_manifest(workdir, sandbox, command) {
+    var cfg = Sandbox_config(sandbox);
+    var policy = SandboxConfig_policy(cfg);
+    var mem = SandboxPolicy_memory_limit_mb(policy);
+    if (mem == 0) { mem = 256; }
+
+    var cmd_escaped = oci_json_escape(command);
+    var mem_buf[32];
+    var mem_len = fmt_int_buf(mem, &mem_buf);
+
+    var buf = alloc(2048 + strlen(cmd_escaped));
+    var pos = 0;
+
+    var p1 = "# kavach SGX enclave manifest (auto-generated)\n[libos]\nentrypoint = \"/bin/sh\"\n\n[loader]\nentrypoint = \"file:{{ gramine.libos }}\"\nargv = [\"/bin/sh\", \"-c\", \"";
+    memcpy(buf + pos, p1, strlen(p1)); pos = pos + strlen(p1);
+    memcpy(buf + pos, cmd_escaped, strlen(cmd_escaped)); pos = pos + strlen(cmd_escaped);
+
+    var p2 = "\"]\nloader.env.PATH = \"/usr/local/bin:/usr/bin:/bin\"\nloader.env.HOME = \"/tmp\"\n\n[sgx]\nenclave_size = \"";
+    memcpy(buf + pos, p2, strlen(p2)); pos = pos + strlen(p2);
+    memcpy(buf + pos, &mem_buf, mem_len); pos = pos + mem_len;
+
+    var p3 = "M\"\nmax_threads = 4\nedmm_enable = false\n\n[fs]\nmounts = [\n  { path = \"/lib\", uri = \"file:{{ gramine.runtimedir() }}\" },\n  { path = \"/usr\", uri = \"file:/usr\" },\n  { path = \"/bin\", uri = \"file:/bin\" },\n  { path = \"/tmp\", uri = \"file:/tmp\", type = \"tmpfs\" },\n]\n\n[[fs.trusted_files]]\nuri = \"file:{{ gramine.libos }}\"\n\n[[fs.trusted_files]]\nuri = \"file:/bin/sh\"\n";
+    memcpy(buf + pos, p3, strlen(p3)); pos = pos + strlen(p3);
+    store8(buf + pos, 0);
+
+    var path = _sgx_manifest_file(workdir);
+    file_write_all(path, buf, pos);
+    return path;
+}
+
+fn _sgx_error(msg) {
+    var r = exec_result_new();
+    ExecResult_set_exit_code(r, 1);
+    ExecResult_set_stdout(r, "");
+    ExecResult_set_stderr(r, msg);
+    ExecResult_set_duration_ms(r, 0);
+    ExecResult_set_timed_out(r, 0);
+    return r;
+}
+
+fn sgx_exec(sandbox, command) {
+    var start_ns = now_ns();
+    var gramine = _sgx_gramine_path();
+    if (gramine == 0) {
+        return _sgx_error("gramine-sgx not found in PATH");
+    }
+    if (_sgx_device_present() == 0) {
+        return _sgx_error("SGX device /dev/sgx_enclave not found");
+    }
+
+    var guard_cfg = runtime_guard_config_default();
+    var violations = check_command(command, guard_cfg);
+    if (vec_len(violations) > 0) {
+        var v0 = vec_get(violations, 0);
+        var r = exec_result_new();
+        ExecResult_set_exit_code(r, 126);
+        ExecResult_set_stderr(r, GuardViolation_description(v0));
+        return r;
+    }
+
+    var workdir = alloc(48);
+    var prefix = "/tmp/kavach-sgx-";
+    memcpy(workdir, prefix, strlen(prefix));
+    var ts_buf[24];
+    var ts_len = fmt_int_buf(clock_epoch_secs(), &ts_buf);
+    memcpy(workdir + strlen(prefix), &ts_buf, ts_len);
+    store8(workdir + strlen(prefix) + ts_len, 0);
+    sys_mkdir(workdir, 448);
+
+    _sgx_write_manifest(workdir, sandbox, command);
+
+    var args = vec_new();
+    vec_push(args, gramine);
+    vec_push(args, _sgx_manifest_path(workdir));
+
+    var out_cap = 1048576;
+    var out_buf = alloc(out_cap);
+    var n = exec_capture(args, out_buf, out_cap);
+    var end_ns = now_ns();
+
+    # Cleanup: unlink manifest, rmdir workdir.
+    var manifest = _sgx_manifest_file(workdir);
+    sys_unlink(manifest);
+    sys_rmdir(workdir);
+
+    var r = exec_result_new();
+    if (n < 0) {
+        ExecResult_set_exit_code(r, 1);
+        ExecResult_set_stdout(r, "");
+        ExecResult_set_stderr(r, "gramine-sgx run failed");
+    }
+    else {
+        store8(out_buf + n, 0);
+        ExecResult_set_exit_code(r, 0);
+        ExecResult_set_stdout(r, out_buf);
+        ExecResult_set_stderr(r, "");
+    }
+    ExecResult_set_duration_ms(r, (end_ns - start_ns) / 1000000);
+    ExecResult_set_timed_out(r, 0);
+    return r;
+}
+
+fn sgx_health(sandbox) {
+    if (_sgx_gramine_path() == 0) { return 0; }
+    if (_sgx_device_present() == 0) { return 0; }
+    return 1;
+}
+
+fn sgx_destroy(sandbox) { return 0; }
+
+fn backend_sgx_register() {
+    backend_register_exec(Backend.SGX, &sgx_exec);
+    backend_register_health(Backend.SGX, &sgx_health);
+    backend_register_destroy(Backend.SGX, &sgx_destroy);
+    return 0;
+}

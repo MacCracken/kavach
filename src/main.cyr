@@ -24,6 +24,11 @@ include "src/backend_process.cyr"
 include "src/backend_gvisor.cyr"
 include "src/backend_oci.cyr"
 include "src/backend_wasm.cyr"
+include "src/backend_sy_agnos.cyr"
+include "src/backend_sgx.cyr"
+include "src/backend_sev.cyr"
+include "src/backend_tdx.cyr"
+include "src/backend_firecracker.cyr"
 include "src/sandbox_exec.cyr"
 
 fn _print_banner() {

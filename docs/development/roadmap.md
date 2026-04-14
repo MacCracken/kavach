@@ -27,8 +27,17 @@ the remaining feature gaps. See
 - [x] Shared `oci_spec.cyr` module (bundle mkdir/spec/cleanup)
 - [x] OCI backend (runc/crun shell-out via shared oci_spec)
 - [x] WASM backend (wasmtime CLI shell-out with --fuel / --max-memory-size / --dir)
+- [x] SyAgnos backend (docker/podman + hardened AGNOS image + Phylax scanner)
+- [x] SGX backend (gramine-sgx + auto-generated manifest)
+- [x] SEV backend (qemu-system-x86_64 with SEV-SNP confidential-guest)
+- [x] TDX backend (qemu-system-x86_64 with tdx-guest object)
+- [x] Firecracker backend (microVM config.json + firecracker --no-api)
+- [x] **All 10 backends registered** — v2.0 core complete
 - [ ] `cyrius audit` clean (fmt/lint/vet/deny)
-- [ ] Delete `rust-old/` once parity reaches v2.1
+- [ ] Enrich SGX backend with attestation + sealing (sigil EAR)
+- [ ] Enrich Firecracker backend with vsock + snapshot + jailer
+- [ ] Switch OCI backend to stiva once stiva's Cyrius port lands
+- [ ] Delete `rust-old/` once enrichments land
 - [ ] Report cyrius `deps` relative-path symlink bug upstream (workaround
       in cyrius.toml uses absolute path for sigil)
 

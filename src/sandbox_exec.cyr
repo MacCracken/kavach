@@ -105,5 +105,10 @@ fn kavach_init() {
     backend_gvisor_register();
     backend_oci_register();
     backend_wasm_register();
+    backend_sy_agnos_register();
+    backend_sgx_register();
+    backend_sev_register();
+    backend_tdx_register();
+    backend_firecracker_register();
     return 0;
 }

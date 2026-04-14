@@ -1,0 +1,117 @@
+# kavach — AMD SEV-SNP backend (encrypted VM via QEMU)
+# Ported from rust-old/src/backend/sev/mod.rs
+#
+# Launches a QEMU-KVM VM with SEV-SNP enabled. The command is expected to
+# be a guest-kernel path (bzImage) passed via -kernel. The guest agent
+# inside the image is responsible for running the actual workload.
+#
+# Deferred vs Rust:
+#   - Attestation report fetching (SevAttestationReport) — needs sigil EAR
+#   - Guest policy bit flags (SevGuestPolicy) — fold into v2.1 sigil
+#     attestation helpers
+#   - Live snapshots / migration
+
+fn _sev_qemu_path() {
+    if (path_exists("/usr/local/bin/qemu-system-x86_64") == 1) { return "/usr/local/bin/qemu-system-x86_64"; }
+    if (path_exists("/usr/bin/qemu-system-x86_64") == 1) { return "/usr/bin/qemu-system-x86_64"; }
+    return 0;
+}
+
+fn _sev_device_present() {
+    return path_exists("/dev/sev");
+}
+
+fn _sev_error(msg) {
+    var r = exec_result_new();
+    ExecResult_set_exit_code(r, 1);
+    ExecResult_set_stdout(r, "");
+    ExecResult_set_stderr(r, msg);
+    ExecResult_set_duration_ms(r, 0);
+    ExecResult_set_timed_out(r, 0);
+    return r;
+}
+
+fn sev_exec(sandbox, command) {
+    var start_ns = now_ns();
+    var qemu = _sev_qemu_path();
+    if (qemu == 0) {
+        return _sev_error("qemu-system-x86_64 not found in PATH");
+    }
+    if (_sev_device_present() == 0) {
+        return _sev_error("SEV device /dev/sev not found");
+    }
+
+    var guard_cfg = runtime_guard_config_default();
+    var violations = check_command(command, guard_cfg);
+    if (vec_len(violations) > 0) {
+        var v0 = vec_get(violations, 0);
+        var r = exec_result_new();
+        ExecResult_set_exit_code(r, 126);
+        ExecResult_set_stderr(r, GuardViolation_description(v0));
+        return r;
+    }
+
+    var cfg = Sandbox_config(sandbox);
+    var policy = SandboxConfig_policy(cfg);
+
+    var args = vec_new();
+    vec_push(args, qemu);
+    vec_push(args, "-machine");
+    vec_push(args, "q35,confidential-guest-support=sev0");
+    vec_push(args, "-object");
+    vec_push(args, "sev-snp-guest,id=sev0,cbitpos=51,reduced-phys-bits=1");
+    vec_push(args, "-cpu");
+    vec_push(args, "EPYC-v4");
+
+    var mem = SandboxPolicy_memory_limit_mb(policy);
+    if (mem == 0) { mem = 512; }
+    var mem_buf[32];
+    var mem_len = fmt_int_buf(mem, &mem_buf);
+    var mem_str = alloc(mem_len + 2);
+    memcpy(mem_str, &mem_buf, mem_len);
+    memcpy(mem_str + mem_len, "M", 2);
+    vec_push(args, "-m");
+    vec_push(args, mem_str);
+
+    vec_push(args, "-nographic");
+    vec_push(args, "-serial");
+    vec_push(args, "stdio");
+    vec_push(args, "-kernel");
+    vec_push(args, command);
+
+    var out_cap = 1048576;
+    var out_buf = alloc(out_cap);
+    var n = exec_capture(args, out_buf, out_cap);
+    var end_ns = now_ns();
+
+    var r = exec_result_new();
+    if (n < 0) {
+        ExecResult_set_exit_code(r, 1);
+        ExecResult_set_stdout(r, "");
+        ExecResult_set_stderr(r, "qemu SEV run failed");
+    }
+    else {
+        store8(out_buf + n, 0);
+        ExecResult_set_exit_code(r, 0);
+        ExecResult_set_stdout(r, out_buf);
+        ExecResult_set_stderr(r, "");
+    }
+    ExecResult_set_duration_ms(r, (end_ns - start_ns) / 1000000);
+    ExecResult_set_timed_out(r, 0);
+    return r;
+}
+
+fn sev_health(sandbox) {
+    if (_sev_qemu_path() == 0) { return 0; }
+    if (_sev_device_present() == 0) { return 0; }
+    return 1;
+}
+
+fn sev_destroy(sandbox) { return 0; }
+
+fn backend_sev_register() {
+    backend_register_exec(Backend.SEV, &sev_exec);
+    backend_register_health(Backend.SEV, &sev_health);
+    backend_register_destroy(Backend.SEV, &sev_destroy);
+    return 0;
+}

@@ -81,6 +81,11 @@ src/
 ├── backend_gvisor.cyr     gVisor backend (shared oci_spec + `runsc run`)
 ├── backend_oci.cyr        OCI backend (shared oci_spec + `runc`/`crun`)
 ├── backend_wasm.cyr       WASM backend (`wasmtime` CLI shell-out)
+├── backend_sy_agnos.cyr   Hardened AGNOS image + Phylax scanner
+├── backend_sgx.cyr        Intel SGX via `gramine-sgx` + generated manifest
+├── backend_sev.cyr        AMD SEV-SNP via QEMU with confidential-guest
+├── backend_tdx.cyr        Intel TDX via QEMU with tdx-guest object
+├── backend_firecracker.cyr Firecracker microVM with config.json + `--no-api`
 └── sandbox_exec.cyr       End-to-end: dispatch → gate → threat → audit
 ```
 
@@ -234,7 +239,7 @@ See [ADR-004](../adr/004-deferred-features.md) for rationale.
 
 | Feature | Blocking dep | Workaround |
 |---------|--------------|------------|
-| 5 remaining backends (firecracker/sgx/sev/tdx/syagnos) | per-backend IPC/image tooling | `backend_<name>_register()` pattern ready |
+| Enriched per-backend features (SGX attestation + sealing, SEV attestation, Firecracker vsock/snapshot/jailer, SyAgnos image manager) | per-feature: sigil EAR helpers, net.cyr Unix sockets, uid/gid syscalls | dispatch slots live — enrichment happens in-place |
 | seccomp/Landlock/cgroups hooks | syscall wrappers in Cyrius stdlib | process backend runs without them today |
 | async exec | Cyrius async story still maturing | synchronous fork+wait |
 | HTTP credential proxy | TLS + HTTP server in stdlib | direct injection (env/file/stdin) |

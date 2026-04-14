@@ -23,6 +23,11 @@ include "src/backend_process.cyr"
 include "src/backend_gvisor.cyr"
 include "src/backend_oci.cyr"
 include "src/backend_wasm.cyr"
+include "src/backend_sy_agnos.cyr"
+include "src/backend_sgx.cyr"
+include "src/backend_sev.cyr"
+include "src/backend_tdx.cyr"
+include "src/backend_firecracker.cyr"
 include "src/sandbox_exec.cyr"
 
 fn test_backend_parse() {
@@ -678,9 +683,66 @@ fn test_dispatch_noop_registered() {
     assert_eq(backend_is_registered(Backend.GVISOR), 1, "gvisor registered");
     assert_eq(backend_is_registered(Backend.OCI), 1, "oci registered");
     assert_eq(backend_is_registered(Backend.WASM), 1, "wasm registered");
-    # Backends still awaiting ports
-    assert_eq(backend_is_registered(Backend.FIRECRACKER), 0, "firecracker not yet");
-    assert_eq(backend_is_registered(Backend.SGX), 0, "sgx not yet");
+    assert_eq(backend_is_registered(Backend.SY_AGNOS), 1, "sy_agnos registered");
+    assert_eq(backend_is_registered(Backend.SGX), 1, "sgx registered");
+    assert_eq(backend_is_registered(Backend.SEV), 1, "sev registered");
+    assert_eq(backend_is_registered(Backend.TDX), 1, "tdx registered");
+    assert_eq(backend_is_registered(Backend.FIRECRACKER), 1, "firecracker registered");
+    # All 10 backends now populated
+    return 0;
+}
+
+fn test_all_ten_backends_registered() {
+    test_group("all_ten_backends");
+    kavach_init();
+    var i = 0;
+    while (i < BACKEND_COUNT) {
+        assert_eq(backend_is_registered(i), 1, "slot populated");
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn test_sy_agnos_tier_strength() {
+    test_group("sy_agnos_tier_strength");
+    assert_eq(sy_agnos_tier_strength(SyAgnosTier.MINIMAL), 80, "minimal=80");
+    assert_eq(sy_agnos_tier_strength(SyAgnosTier.DMVERITY), 85, "dmverity=85");
+    assert_eq(sy_agnos_tier_strength(SyAgnosTier.TPM_MEASURED), 88, "tpm=88");
+    assert_eq(sy_agnos_tier_parse("tpm_measured"), SyAgnosTier.TPM_MEASURED, "parse tpm");
+    assert_eq(sy_agnos_tier_parse("dmverity"), SyAgnosTier.DMVERITY, "parse dmverity");
+    assert_eq(sy_agnos_tier_parse("anything-else"), SyAgnosTier.MINIMAL, "default minimal");
+    return 0;
+}
+
+fn test_phylax_detects_namespace_escape() {
+    test_group("phylax_namespace_escape");
+    var r = scan_result_new();
+    phylax_scan("running nsenter --target 1 --mount --pid --net", r);
+    var v = ScanResult_findings(r);
+    var found = 0;
+    var i = 0;
+    while (i < vec_len(v)) {
+        var f = vec_get(v, i);
+        if (streq(ScanFinding_category(f), "NAMESPACE_ESCAPE") == 1) { found = 1; }
+        i = i + 1;
+    }
+    assert_eq(found, 1, "phylax caught nsenter");
+    return 0;
+}
+
+fn test_phylax_detects_verity() {
+    test_group("phylax_verity");
+    var r = scan_result_new();
+    phylax_scan("device-mapper: verity: verity validation failed", r);
+    var v = ScanResult_findings(r);
+    var found = 0;
+    var i = 0;
+    while (i < vec_len(v)) {
+        var f = vec_get(v, i);
+        if (streq(ScanFinding_category(f), "VERITY") == 1) { found = 1; }
+        i = i + 1;
+    }
+    assert_eq(found, 1, "phylax caught verity");
     return 0;
 }
 
@@ -1223,6 +1285,10 @@ fn main() {
     test_wasm_trim();
     test_wasm_exec_without_wasmtime();
     test_wasm_exec_missing_file();
+    test_all_ten_backends_registered();
+    test_sy_agnos_tier_strength();
+    test_phylax_detects_namespace_escape();
+    test_phylax_detects_verity();
     test_gvisor_exec_without_runsc();
     test_which_exists();
     test_path_exists();

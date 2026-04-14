@@ -1,0 +1,237 @@
+# kavach — SyAgnos backend (hardened AGNOS OS image as container sandbox)
+# Ported from rust-old/src/backend/sy_agnos/mod.rs
+#
+# Shells out to docker/podman running the `ghcr.io/maccracken/sy-agnos`
+# image. The image carries its own baked hardening (immutable squashfs
+# rootfs, seccomp-BPF, default-deny nftables); this backend translates
+# SandboxPolicy into the runtime flags (--memory, --cpus, --pids-limit,
+# --read-only, --network none|bridge) and optionally runs the Phylax
+# scanner on output.
+#
+# Deferred vs Rust:
+#   - Image manager (pull/build/list) — skipped for v2.0
+#   - Tier detection from /etc/sy-agnos-release — needs JSON parse
+#   - AttestationReport + PCR verify — wait for sigil TPM helpers
+
+var SY_AGNOS_DEFAULT_IMAGE = "ghcr.io/maccracken/agnos:latest";
+
+enum SyAgnosTier {
+    MINIMAL = 0;
+    DMVERITY = 1;
+    TPM_MEASURED = 2;
+}
+
+fn sy_agnos_tier_name(t) {
+    if (t == SyAgnosTier.MINIMAL) { return "minimal"; }
+    if (t == SyAgnosTier.DMVERITY) { return "dmverity"; }
+    if (t == SyAgnosTier.TPM_MEASURED) { return "tpm_measured"; }
+    return "unknown";
+}
+
+fn sy_agnos_tier_strength(t) {
+    if (t == SyAgnosTier.MINIMAL) { return 80; }
+    if (t == SyAgnosTier.DMVERITY) { return 85; }
+    if (t == SyAgnosTier.TPM_MEASURED) { return 88; }
+    return 80;
+}
+
+fn sy_agnos_tier_parse(s) {
+    if (streq(s, "tpm_measured") == 1) { return SyAgnosTier.TPM_MEASURED; }
+    if (streq(s, "dmverity") == 1) { return SyAgnosTier.DMVERITY; }
+    return SyAgnosTier.MINIMAL;
+}
+
+# ---- Runtime detection ---------------------------------------------------
+
+fn _sy_agnos_runtime() {
+    if (path_exists("/usr/local/bin/docker") == 1) { return "/usr/local/bin/docker"; }
+    if (path_exists("/usr/bin/docker") == 1) { return "/usr/bin/docker"; }
+    if (path_exists("/usr/local/bin/podman") == 1) { return "/usr/local/bin/podman"; }
+    if (path_exists("/usr/bin/podman") == 1) { return "/usr/bin/podman"; }
+    return 0;
+}
+
+# ---- Phylax scanner (sy-agnos-specific patterns) -------------------------
+# Extends the normal secrets scanner with container-escape indicators.
+# Each hit is tagged with one of: VERITY / NFTABLES_BYPASS /
+# NAMESPACE_ESCAPE / MOUNT_ESCAPE.
+
+fn _phylax_emit(text, lower, result, category, matched) {
+    return code_emit(text, lower, result, Severity.CRITICAL, category,
+        "Phylax indicator", matched);
+}
+
+fn phylax_scan(text, result) {
+    # Run the standard secrets scanner first.
+    secrets_scan(text, result);
+
+    var n = strlen(text);
+    var lower = alloc(n + 1);
+    str_to_lower_into(text, lower);
+
+    if (str_contains(lower, "dm-verity") == 1) {
+        _phylax_emit(text, lower, result, "VERITY", "dm-verity");
+    }
+    if (str_contains(lower, "verity validation failed") == 1) {
+        _phylax_emit(text, lower, result, "VERITY", "verity validation failed");
+    }
+    if (str_contains(lower, "device-mapper: verity") == 1) {
+        _phylax_emit(text, lower, result, "VERITY", "device-mapper: verity");
+    }
+    if (str_contains(lower, "nft ") == 1) {
+        _phylax_emit(text, lower, result, "NFTABLES_BYPASS", "nft ");
+    }
+    if (str_contains(lower, "nftables") == 1) {
+        _phylax_emit(text, lower, result, "NFTABLES_BYPASS", "nftables");
+    }
+    if (str_contains(lower, "iptables") == 1) {
+        _phylax_emit(text, lower, result, "NFTABLES_BYPASS", "iptables");
+    }
+    if (str_contains(lower, "nsenter") == 1) {
+        _phylax_emit(text, lower, result, "NAMESPACE_ESCAPE", "nsenter");
+    }
+    if (str_contains(lower, "setns(") == 1) {
+        _phylax_emit(text, lower, result, "NAMESPACE_ESCAPE", "setns(");
+    }
+    if (str_contains(lower, "unshare(") == 1) {
+        _phylax_emit(text, lower, result, "NAMESPACE_ESCAPE", "unshare(");
+    }
+    if (str_contains(lower, "/proc/1/ns/") == 1) {
+        _phylax_emit(text, lower, result, "NAMESPACE_ESCAPE", "/proc/1/ns/");
+    }
+    if (str_contains(lower, "mount -t proc") == 1) {
+        _phylax_emit(text, lower, result, "MOUNT_ESCAPE", "mount -t proc");
+    }
+    if (str_contains(lower, "mount -o remount,rw") == 1) {
+        _phylax_emit(text, lower, result, "MOUNT_ESCAPE", "mount -o remount,rw");
+    }
+    if (str_contains(lower, "pivot_root") == 1) {
+        _phylax_emit(text, lower, result, "MOUNT_ESCAPE", "pivot_root");
+    }
+    if (str_contains(lower, "chroot") == 1) {
+        _phylax_emit(text, lower, result, "MOUNT_ESCAPE", "chroot");
+    }
+    return 0;
+}
+
+# ---- Arg building --------------------------------------------------------
+
+fn _sy_agnos_append_int_flag(args, flag, value, suffix) {
+    var buf[32];
+    var n = fmt_int_buf(value, &buf);
+    var s = alloc(n + strlen(suffix) + 1);
+    memcpy(s, &buf, n);
+    memcpy(s + n, suffix, strlen(suffix));
+    store8(s + n + strlen(suffix), 0);
+    vec_push(args, flag);
+    vec_push(args, s);
+    return 0;
+}
+
+# ---- Exec ----------------------------------------------------------------
+
+fn _sy_agnos_error(msg) {
+    var r = exec_result_new();
+    ExecResult_set_exit_code(r, 1);
+    ExecResult_set_stdout(r, "");
+    ExecResult_set_stderr(r, msg);
+    ExecResult_set_duration_ms(r, 0);
+    ExecResult_set_timed_out(r, 0);
+    return r;
+}
+
+fn sy_agnos_exec(sandbox, command) {
+    var start_ns = now_ns();
+    var runtime = _sy_agnos_runtime();
+    if (runtime == 0) {
+        return _sy_agnos_error("no container runtime (docker/podman) found");
+    }
+
+    # Runtime-guard precheck — same defense-in-depth as other backends.
+    var guard_cfg = runtime_guard_config_default();
+    var violations = check_command(command, guard_cfg);
+    if (vec_len(violations) > 0) {
+        var v0 = vec_get(violations, 0);
+        var r = exec_result_new();
+        ExecResult_set_exit_code(r, 126);
+        ExecResult_set_stderr(r, GuardViolation_description(v0));
+        return r;
+    }
+
+    var config = Sandbox_config(sandbox);
+    var policy = SandboxConfig_policy(config);
+
+    var args = vec_new();
+    vec_push(args, runtime);
+    vec_push(args, "run");
+    vec_push(args, "--rm");
+
+    vec_push(args, "--network");
+    if (SandboxPolicy_network_enabled(policy) == 1) {
+        vec_push(args, "bridge");
+    }
+    else {
+        vec_push(args, "none");
+    }
+
+    var mem = SandboxPolicy_memory_limit_mb(policy);
+    if (mem > 0) {
+        _sy_agnos_append_int_flag(args, "--memory", mem, "m");
+    }
+
+    # cpu limit is tenths × 10 → whole cores as string. Example: 10 -> "1".
+    var cpu_x10 = SandboxPolicy_cpu_limit_tenths(policy);
+    if (cpu_x10 > 0) {
+        _sy_agnos_append_int_flag(args, "--cpus", cpu_x10 / 10, "");
+    }
+
+    var max_pids = SandboxPolicy_max_pids(policy);
+    if (max_pids > 0) {
+        _sy_agnos_append_int_flag(args, "--pids-limit", max_pids, "");
+    }
+
+    if (SandboxPolicy_read_only_rootfs(policy) == 1) {
+        vec_push(args, "--read-only");
+    }
+
+    vec_push(args, "--entrypoint");
+    vec_push(args, "/bin/sh");
+    vec_push(args, SY_AGNOS_DEFAULT_IMAGE);
+    vec_push(args, "-c");
+    vec_push(args, command);
+
+    var out_cap = 1048576;
+    var out_buf = alloc(out_cap);
+    var n = exec_capture(args, out_buf, out_cap);
+    var end_ns = now_ns();
+
+    var r = exec_result_new();
+    if (n < 0) {
+        ExecResult_set_exit_code(r, 1);
+        ExecResult_set_stdout(r, "");
+        ExecResult_set_stderr(r, "sy-agnos container run failed");
+    }
+    else {
+        store8(out_buf + n, 0);
+        ExecResult_set_exit_code(r, 0);
+        ExecResult_set_stdout(r, out_buf);
+        ExecResult_set_stderr(r, "");
+    }
+    ExecResult_set_duration_ms(r, (end_ns - start_ns) / 1000000);
+    ExecResult_set_timed_out(r, 0);
+    return r;
+}
+
+fn sy_agnos_health(sandbox) {
+    if (_sy_agnos_runtime() == 0) { return 0; }
+    return 1;
+}
+
+fn sy_agnos_destroy(sandbox) { return 0; }
+
+fn backend_sy_agnos_register() {
+    backend_register_exec(Backend.SY_AGNOS, &sy_agnos_exec);
+    backend_register_health(Backend.SY_AGNOS, &sy_agnos_health);
+    backend_register_destroy(Backend.SY_AGNOS, &sy_agnos_destroy);
+    return 0;
+}

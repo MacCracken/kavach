@@ -1,0 +1,112 @@
+# kavach — Intel TDX backend (Trust Domain Extensions via QEMU)
+# Skeleton port — no dedicated Rust tdx/ module existed in v1.x; this
+# backend shares the QEMU code path with SEV, differentiated by guest
+# object + CPU flags. Command is a guest-kernel path (bzImage).
+#
+# Deferred: TDX attestation (quote fetch + verify via sigil EAR), guest
+# measurement. Waits on sigil TDX helpers.
+
+fn _tdx_qemu_path() {
+    if (path_exists("/usr/local/bin/qemu-system-x86_64") == 1) { return "/usr/local/bin/qemu-system-x86_64"; }
+    if (path_exists("/usr/bin/qemu-system-x86_64") == 1) { return "/usr/bin/qemu-system-x86_64"; }
+    return 0;
+}
+
+fn _tdx_device_present() {
+    return path_exists("/dev/tdx_guest");
+}
+
+fn _tdx_error(msg) {
+    var r = exec_result_new();
+    ExecResult_set_exit_code(r, 1);
+    ExecResult_set_stdout(r, "");
+    ExecResult_set_stderr(r, msg);
+    ExecResult_set_duration_ms(r, 0);
+    ExecResult_set_timed_out(r, 0);
+    return r;
+}
+
+fn tdx_exec(sandbox, command) {
+    var start_ns = now_ns();
+    var qemu = _tdx_qemu_path();
+    if (qemu == 0) {
+        return _tdx_error("qemu-system-x86_64 not found in PATH");
+    }
+    if (_tdx_device_present() == 0) {
+        return _tdx_error("TDX device /dev/tdx_guest not found");
+    }
+
+    var guard_cfg = runtime_guard_config_default();
+    var violations = check_command(command, guard_cfg);
+    if (vec_len(violations) > 0) {
+        var v0 = vec_get(violations, 0);
+        var r = exec_result_new();
+        ExecResult_set_exit_code(r, 126);
+        ExecResult_set_stderr(r, GuardViolation_description(v0));
+        return r;
+    }
+
+    var cfg = Sandbox_config(sandbox);
+    var policy = SandboxConfig_policy(cfg);
+
+    var args = vec_new();
+    vec_push(args, qemu);
+    vec_push(args, "-machine");
+    vec_push(args, "q35,kernel_irqchip=split,confidential-guest-support=tdx0");
+    vec_push(args, "-object");
+    vec_push(args, "tdx-guest,id=tdx0,sept-ve-disable=off");
+    vec_push(args, "-cpu");
+    vec_push(args, "host,-kvm-steal-time,pmu=off");
+
+    var mem = SandboxPolicy_memory_limit_mb(policy);
+    if (mem == 0) { mem = 512; }
+    var mem_buf[32];
+    var mem_len = fmt_int_buf(mem, &mem_buf);
+    var mem_str = alloc(mem_len + 2);
+    memcpy(mem_str, &mem_buf, mem_len);
+    memcpy(mem_str + mem_len, "M", 2);
+    vec_push(args, "-m");
+    vec_push(args, mem_str);
+
+    vec_push(args, "-nographic");
+    vec_push(args, "-serial");
+    vec_push(args, "stdio");
+    vec_push(args, "-kernel");
+    vec_push(args, command);
+
+    var out_cap = 1048576;
+    var out_buf = alloc(out_cap);
+    var n = exec_capture(args, out_buf, out_cap);
+    var end_ns = now_ns();
+
+    var r = exec_result_new();
+    if (n < 0) {
+        ExecResult_set_exit_code(r, 1);
+        ExecResult_set_stdout(r, "");
+        ExecResult_set_stderr(r, "qemu TDX run failed");
+    }
+    else {
+        store8(out_buf + n, 0);
+        ExecResult_set_exit_code(r, 0);
+        ExecResult_set_stdout(r, out_buf);
+        ExecResult_set_stderr(r, "");
+    }
+    ExecResult_set_duration_ms(r, (end_ns - start_ns) / 1000000);
+    ExecResult_set_timed_out(r, 0);
+    return r;
+}
+
+fn tdx_health(sandbox) {
+    if (_tdx_qemu_path() == 0) { return 0; }
+    if (_tdx_device_present() == 0) { return 0; }
+    return 1;
+}
+
+fn tdx_destroy(sandbox) { return 0; }
+
+fn backend_tdx_register() {
+    backend_register_exec(Backend.TDX, &tdx_exec);
+    backend_register_health(Backend.TDX, &tdx_health);
+    backend_register_destroy(Backend.TDX, &tdx_destroy);
+    return 0;
+}

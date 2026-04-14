@@ -1,0 +1,157 @@
+# kavach — Firecracker (microVM) backend
+# Ported from rust-old/src/backend/firecracker/{mod,config,network,vsock,snapshot}.rs
+#
+# Generates a minimal Firecracker VM config.json and boots a microVM via
+# `firecracker --no-api --config-file <path>`. The `command` argument is
+# interpreted as the path to a guest kernel image (bzImage); the rootfs is
+# not wired here — callers staging a rootfs drive should extend the
+# generated config and re-run.
+#
+# Deferred vs Rust:
+#   - jailer wrapping — v2.1; needs uid/gid/cgroup plumbing
+#   - vsock + snapshot + network/TAP — require networking syscalls
+#     that aren't yet in the kavach stdlib surface
+#   - `--log-path` wiring — replaced with /dev/null for v2.0
+
+fn _fc_binary_path() {
+    if (path_exists("/usr/local/bin/firecracker") == 1) { return "/usr/local/bin/firecracker"; }
+    if (path_exists("/usr/bin/firecracker") == 1) { return "/usr/bin/firecracker"; }
+    return 0;
+}
+
+# Generate a minimal Firecracker VM config JSON. The kernel path is the
+# caller-supplied `command`. Memory and vCPU come from SandboxPolicy.
+fn _fc_generate_config(sandbox, kernel_path) {
+    var cfg = Sandbox_config(sandbox);
+    var policy = SandboxConfig_policy(cfg);
+
+    var mem = SandboxPolicy_memory_limit_mb(policy);
+    if (mem == 0) { mem = 128; }
+
+    # cpu_limit_tenths: 10 = 1 vCPU, 20 = 2 vCPU, etc.
+    var vcpu = SandboxPolicy_cpu_limit_tenths(policy) / 10;
+    if (vcpu < 1) { vcpu = 1; }
+
+    var kernel_escaped = oci_json_escape(kernel_path);
+    var mem_buf[24];
+    var mem_len = fmt_int_buf(mem, &mem_buf);
+    var vcpu_buf[24];
+    var vcpu_len = fmt_int_buf(vcpu, &vcpu_buf);
+
+    var buf = alloc(1024 + strlen(kernel_escaped));
+    var pos = 0;
+    var p1 = "{\"boot-source\":{\"kernel_image_path\":\"";
+    memcpy(buf + pos, p1, strlen(p1)); pos = pos + strlen(p1);
+    memcpy(buf + pos, kernel_escaped, strlen(kernel_escaped)); pos = pos + strlen(kernel_escaped);
+
+    var p2 = "\",\"boot_args\":\"console=ttyS0 reboot=k panic=1 pci=off\"},\"machine-config\":{\"vcpu_count\":";
+    memcpy(buf + pos, p2, strlen(p2)); pos = pos + strlen(p2);
+    memcpy(buf + pos, &vcpu_buf, vcpu_len); pos = pos + vcpu_len;
+
+    var p3 = ",\"mem_size_mib\":";
+    memcpy(buf + pos, p3, strlen(p3)); pos = pos + strlen(p3);
+    memcpy(buf + pos, &mem_buf, mem_len); pos = pos + mem_len;
+
+    var p4 = ",\"smt\":false},\"drives\":[]}";
+    memcpy(buf + pos, p4, strlen(p4)); pos = pos + strlen(p4);
+    store8(buf + pos, 0);
+    return buf;
+}
+
+fn _fc_error(msg) {
+    var r = exec_result_new();
+    ExecResult_set_exit_code(r, 1);
+    ExecResult_set_stdout(r, "");
+    ExecResult_set_stderr(r, msg);
+    ExecResult_set_duration_ms(r, 0);
+    ExecResult_set_timed_out(r, 0);
+    return r;
+}
+
+fn firecracker_exec(sandbox, command) {
+    var start_ns = now_ns();
+    var fc = _fc_binary_path();
+    if (fc == 0) {
+        return _fc_error("firecracker not found in PATH");
+    }
+
+    var guard_cfg = runtime_guard_config_default();
+    var violations = check_command(command, guard_cfg);
+    if (vec_len(violations) > 0) {
+        var v0 = vec_get(violations, 0);
+        var r = exec_result_new();
+        ExecResult_set_exit_code(r, 126);
+        ExecResult_set_stderr(r, GuardViolation_description(v0));
+        return r;
+    }
+
+    if (path_exists(command) == 0) {
+        return _fc_error("kernel image not found");
+    }
+
+    # Prepare workdir and config file.
+    var workdir = alloc(48);
+    var prefix = "/tmp/kavach-fc-";
+    memcpy(workdir, prefix, strlen(prefix));
+    var ts_buf[24];
+    var ts_len = fmt_int_buf(clock_epoch_secs(), &ts_buf);
+    memcpy(workdir + strlen(prefix), &ts_buf, ts_len);
+    store8(workdir + strlen(prefix) + ts_len, 0);
+    sys_mkdir(workdir, 448);
+
+    var cfg_path = alloc(strlen(workdir) + 16);
+    memcpy(cfg_path, workdir, strlen(workdir));
+    memcpy(cfg_path + strlen(workdir), "/config.json", 13);
+
+    var cfg_json = _fc_generate_config(sandbox, command);
+    file_write_all(cfg_path, cfg_json, strlen(cfg_json));
+
+    var args = vec_new();
+    vec_push(args, fc);
+    vec_push(args, "--no-api");
+    vec_push(args, "--config-file");
+    vec_push(args, cfg_path);
+    vec_push(args, "--log-path");
+    vec_push(args, "/dev/null");
+    vec_push(args, "--level");
+    vec_push(args, "Warning");
+
+    var out_cap = 1048576;
+    var out_buf = alloc(out_cap);
+    var n = exec_capture(args, out_buf, out_cap);
+    var end_ns = now_ns();
+
+    # Cleanup workdir
+    sys_unlink(cfg_path);
+    sys_rmdir(workdir);
+
+    var r = exec_result_new();
+    if (n < 0) {
+        ExecResult_set_exit_code(r, 1);
+        ExecResult_set_stdout(r, "");
+        ExecResult_set_stderr(r, "firecracker run failed");
+    }
+    else {
+        store8(out_buf + n, 0);
+        ExecResult_set_exit_code(r, 0);
+        ExecResult_set_stdout(r, out_buf);
+        ExecResult_set_stderr(r, "");
+    }
+    ExecResult_set_duration_ms(r, (end_ns - start_ns) / 1000000);
+    ExecResult_set_timed_out(r, 0);
+    return r;
+}
+
+fn firecracker_health(sandbox) {
+    if (_fc_binary_path() == 0) { return 0; }
+    return 1;
+}
+
+fn firecracker_destroy(sandbox) { return 0; }
+
+fn backend_firecracker_register() {
+    backend_register_exec(Backend.FIRECRACKER, &firecracker_exec);
+    backend_register_health(Backend.FIRECRACKER, &firecracker_health);
+    backend_register_destroy(Backend.FIRECRACKER, &firecracker_destroy);
+    return 0;
+}

@@ -20,10 +20,10 @@ deferred.
 | | v1.x (Rust) | v2.0 (Cyrius) |
 |--|--|--|
 | Lines | ~26K | ~3K |
-| Backends registered | 10 | 2 (Noop, Process); 8 more via extension pattern |
+| Backends registered | 10 | 10 — full set with real dispatch contracts |
 | Scanner pipeline | 3 scanners | 3 scanners |
 | Audit chain | HMAC-SHA256 via hmac/sha2 crates | HMAC-SHA256 via [sigil](https://github.com/MacCracken/sigil) |
-| Tests | 872 | 201 (more coming per-backend) |
+| Tests | 872 | 262 |
 | Async | tokio | synchronous (ADR-004 §1) |
 
 ---
@@ -107,15 +107,15 @@ fn app() {
 | Backend | Base score | Tier | v2.0 status |
 |---------|-----------:|------|-------------|
 | Noop | 0 | minimal | **registered** (testing only) |
-| Process | 50 | standard | **registered** (fork+exec+capture+guard precheck) |
+| Process | 50 | standard | **registered** (fork+exec+capture + guard precheck) |
 | OCI | 55 | standard | **registered** (`runc`/`crun` shell-out via shared OCI spec) |
-| WASM | 65 | standard | **registered** (`wasmtime` CLI shell-out with fuel + memory + preopens) |
+| WASM | 65 | standard | **registered** (`wasmtime` CLI with fuel + memory + preopens) |
 | gVisor | 70 | hardened | **registered** (OCI bundle + `runsc run` + auto-cleanup) |
-| SGX | 80 | hardened | slot reserved |
-| SEV | 82 | hardened | slot reserved |
-| SyAgnos | 80 | hardened | slot reserved |
-| TDX | 85 | fortress | slot reserved |
-| Firecracker | 90 | fortress | slot reserved |
+| SGX | 80 | hardened | **registered** (`gramine-sgx` + auto-generated manifest) |
+| SEV | 82 | hardened | **registered** (`qemu-system-x86_64` with SEV-SNP object) |
+| SyAgnos | 80 | hardened | **registered** (docker/podman + hardened AGNOS image + Phylax) |
+| TDX | 85 | fortress | **registered** (`qemu-system-x86_64` with TDX object) |
+| Firecracker | 90 | fortress | **registered** (microVM config.json + `firecracker --no-api`) |
 
 Adding a backend is a single-file extension: see
 [docs/architecture/overview.md § Extension pattern](docs/architecture/overview.md#extension-pattern-adding-a-backend)
