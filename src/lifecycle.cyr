@@ -1,0 +1,252 @@
+# kavach — sandbox lifecycle (state machine, config, exec result, Sandbox)
+# Ported from rust-old/src/lifecycle/mod.rs
+#
+# Deferred vs Rust: async is synchronous here, UUID is a monotonic counter,
+# timestamps are nanoseconds from CLOCK_MONOTONIC (0 = unset), SecretRef/
+# ExternalizationPolicy/RuntimeManifest plumbing omitted until those modules land.
+
+# ---- SandboxState ---------------------------------------------------------
+
+enum SandboxState {
+    CREATED = 0;
+    RUNNING = 1;
+    PAUSED = 2;
+    STOPPED = 3;
+    DESTROYED = 4;
+}
+
+fn state_name(s) {
+    if (s == SandboxState.CREATED) { return "created"; }
+    if (s == SandboxState.RUNNING) { return "running"; }
+    if (s == SandboxState.PAUSED) { return "paused"; }
+    if (s == SandboxState.STOPPED) { return "stopped"; }
+    if (s == SandboxState.DESTROYED) { return "destroyed"; }
+    return "unknown";
+}
+
+# Valid FSM edges, mirroring the Rust matches!(...) table:
+#   Created  -> Running
+#   Running  -> Paused | Stopped | Destroyed
+#   Paused   -> Running | Stopped | Destroyed
+#   Stopped  -> Destroyed
+fn valid_transition(from, to) {
+    if (from == SandboxState.CREATED) {
+        if (to == SandboxState.RUNNING) { return 1; }
+        return 0;
+    }
+    if (from == SandboxState.RUNNING) {
+        if (to == SandboxState.PAUSED) { return 1; }
+        if (to == SandboxState.STOPPED) { return 1; }
+        if (to == SandboxState.DESTROYED) { return 1; }
+        return 0;
+    }
+    if (from == SandboxState.PAUSED) {
+        if (to == SandboxState.RUNNING) { return 1; }
+        if (to == SandboxState.STOPPED) { return 1; }
+        if (to == SandboxState.DESTROYED) { return 1; }
+        return 0;
+    }
+    if (from == SandboxState.STOPPED) {
+        if (to == SandboxState.DESTROYED) { return 1; }
+        return 0;
+    }
+    return 0;
+}
+
+# ---- ExecResult -----------------------------------------------------------
+
+#derive(accessors)
+struct ExecResult {
+    exit_code;
+    stdout;
+    stderr;
+    duration_ms;
+    timed_out;
+}
+
+var EXEC_RESULT_SIZE = 40;
+
+fn exec_result_new() {
+    var r = alloc(EXEC_RESULT_SIZE);
+    var i = 0;
+    while (i < EXEC_RESULT_SIZE) { store64(r + i, 0); i = i + 8; }
+    ExecResult_set_stdout(r, "");
+    ExecResult_set_stderr(r, "");
+    return r;
+}
+
+# ---- SandboxConfig --------------------------------------------------------
+
+#derive(accessors)
+struct SandboxConfig {
+    backend;
+    policy;
+    timeout_ms;
+    inner_backend;
+    agent_id;
+    hostname;
+    domainname;
+    workdir;
+}
+
+var SANDBOX_CONFIG_SIZE = 64;
+
+# Defaults match Rust's SandboxConfig::default():
+#   backend=Process, policy=basic(), timeout_ms=30000, inner_backend=-1 (none)
+fn config_new() {
+    var c = alloc(SANDBOX_CONFIG_SIZE);
+    var i = 0;
+    while (i < SANDBOX_CONFIG_SIZE) { store64(c + i, 0); i = i + 8; }
+    SandboxConfig_set_backend(c, Backend.PROCESS);
+    SandboxConfig_set_policy(c, policy_basic());
+    SandboxConfig_set_timeout_ms(c, 30000);
+    SandboxConfig_set_inner_backend(c, 0 - 1);
+    return c;
+}
+
+# Fluent-ish setters: mutate in place and return the config pointer so
+# callers may chain if they wish.
+fn config_backend(c, b)        { SandboxConfig_set_backend(c, b); return c; }
+fn config_policy(c, p)         { SandboxConfig_set_policy(c, p); return c; }
+fn config_timeout_ms(c, ms)    { SandboxConfig_set_timeout_ms(c, ms); return c; }
+fn config_inner_backend(c, b)  { SandboxConfig_set_inner_backend(c, b); return c; }
+fn config_agent_id(c, s)       { SandboxConfig_set_agent_id(c, s); return c; }
+fn config_hostname(c, s)       { SandboxConfig_set_hostname(c, s); return c; }
+fn config_domainname(c, s)     { SandboxConfig_set_domainname(c, s); return c; }
+fn config_workdir(c, s)        { SandboxConfig_set_workdir(c, s); return c; }
+
+# Convenience: enable seccomp with a profile name on the config's policy.
+fn config_policy_seccomp(c, profile) {
+    var p = SandboxConfig_policy(c);
+    SandboxPolicy_set_seccomp_enabled(p, 1);
+    SandboxPolicy_set_seccomp_profile(p, profile);
+    return c;
+}
+
+fn config_network(c, enabled) {
+    var p = SandboxConfig_policy(c);
+    SandboxPolicy_set_network_enabled(p, enabled);
+    return c;
+}
+
+# ---- Sandbox --------------------------------------------------------------
+
+#derive(accessors)
+struct Sandbox {
+    id;
+    config;
+    state;
+    created_at;
+    started_at;
+    stopped_at;
+}
+
+var SANDBOX_SIZE = 48;
+
+# Monotonic id counter; Uuid::new_v4() not available without a crypto module.
+var _sandbox_next_id = 1;
+
+# Nanoseconds since boot. clock_gettime(CLOCK_MONOTONIC, &ts).
+fn now_ns() {
+    var ts[16];
+    syscall(228, 1, &ts);
+    var sec = load64(&ts);
+    var nsec = load64(&ts + 8);
+    return sec * 1000000000 + nsec;
+}
+
+# Create a sandbox from config. Fails with BACKEND_UNAVAILABLE if the
+# selected backend is not present on this system.
+fn sandbox_create(config) {
+    var b = SandboxConfig_backend(config);
+    if (backend_is_available(b) == 0) {
+        kavach_err_print(KavachError.BACKEND_UNAVAILABLE, backend_name(b));
+        return 0;
+    }
+    var s = alloc(SANDBOX_SIZE);
+    Sandbox_set_id(s, _sandbox_next_id);
+    _sandbox_next_id = _sandbox_next_id + 1;
+    Sandbox_set_config(s, config);
+    Sandbox_set_state(s, SandboxState.CREATED);
+    Sandbox_set_created_at(s, now_ns());
+    Sandbox_set_started_at(s, 0);
+    Sandbox_set_stopped_at(s, 0);
+    return s;
+}
+
+# Transition to a new state. Returns KavachError.OK on success,
+# KavachError.INVALID_TRANSITION otherwise.
+fn sandbox_transition(s, to) {
+    var from = Sandbox_state(s);
+    if (valid_transition(from, to) == 0) {
+        return KavachError.INVALID_TRANSITION;
+    }
+    Sandbox_set_state(s, to);
+    if (to == SandboxState.RUNNING) {
+        Sandbox_set_started_at(s, now_ns());
+    }
+    if (to == SandboxState.STOPPED) { Sandbox_set_stopped_at(s, now_ns()); }
+    if (to == SandboxState.DESTROYED) { Sandbox_set_stopped_at(s, now_ns()); }
+    return KavachError.OK;
+}
+
+# Destroy the sandbox. Transitions through STOPPED if still running.
+fn sandbox_destroy(s) {
+    var st = Sandbox_state(s);
+    if (st == SandboxState.RUNNING) {
+        sandbox_transition(s, SandboxState.STOPPED);
+    }
+    if (st == SandboxState.PAUSED) {
+        sandbox_transition(s, SandboxState.STOPPED);
+    }
+    return sandbox_transition(s, SandboxState.DESTROYED);
+}
+
+# ---- SandboxPool ----------------------------------------------------------
+
+#derive(accessors)
+struct SandboxPool {
+    template;
+    warm_count;
+    pool_vec;
+}
+
+fn sandbox_pool_new(template, warm_count) {
+    var p = alloc(24);
+    SandboxPool_set_template(p, template);
+    SandboxPool_set_warm_count(p, warm_count);
+    var v = vec_new();
+    var i = 0;
+    while (i < warm_count) {
+        var sb = sandbox_create(template);
+        if (sb == 0) { return 0; }
+        vec_push(v, sb);
+        i = i + 1;
+    }
+    SandboxPool_set_pool_vec(p, v);
+    return p;
+}
+
+# Pop a pre-created sandbox from the pool; cold-start one on miss.
+fn sandbox_pool_claim(p) {
+    var v = SandboxPool_pool_vec(p);
+    if (vec_len(v) > 0) {
+        return vec_pop(v);
+    }
+    return sandbox_create(SandboxPool_template(p));
+}
+
+fn sandbox_pool_replenish(p) {
+    var v = SandboxPool_pool_vec(p);
+    var target = SandboxPool_warm_count(p);
+    while (vec_len(v) < target) {
+        var sb = sandbox_create(SandboxPool_template(p));
+        if (sb == 0) { return KavachError.CREATION_FAILED; }
+        vec_push(v, sb);
+    }
+    return KavachError.OK;
+}
+
+fn sandbox_pool_available(p) {
+    return vec_len(SandboxPool_pool_vec(p));
+}

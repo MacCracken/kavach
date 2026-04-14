@@ -9,6 +9,9 @@ include "src/error.cyr"
 include "src/backend.cyr"
 include "src/policy.cyr"
 include "src/scoring.cyr"
+include "src/lifecycle.cyr"
+include "src/scanning_types.cyr"
+include "src/scanning_secrets.cyr"
 
 fn main() {
     alloc_init();

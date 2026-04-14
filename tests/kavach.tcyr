@@ -5,6 +5,9 @@ include "src/error.cyr"
 include "src/backend.cyr"
 include "src/policy.cyr"
 include "src/scoring.cyr"
+include "src/lifecycle.cyr"
+include "src/scanning_types.cyr"
+include "src/scanning_secrets.cyr"
 
 fn test_backend_parse() {
     test_group("backend_parse");
@@ -107,6 +110,227 @@ fn test_err_names() {
     return 0;
 }
 
+fn test_state_transitions() {
+    test_group("state_transitions");
+    assert_eq(valid_transition(SandboxState.CREATED, SandboxState.RUNNING), 1, "created->running");
+    assert_eq(valid_transition(SandboxState.RUNNING, SandboxState.PAUSED), 1, "running->paused");
+    assert_eq(valid_transition(SandboxState.RUNNING, SandboxState.STOPPED), 1, "running->stopped");
+    assert_eq(valid_transition(SandboxState.RUNNING, SandboxState.DESTROYED), 1, "running->destroyed");
+    assert_eq(valid_transition(SandboxState.PAUSED, SandboxState.RUNNING), 1, "paused->running");
+    assert_eq(valid_transition(SandboxState.PAUSED, SandboxState.DESTROYED), 1, "paused->destroyed");
+    assert_eq(valid_transition(SandboxState.STOPPED, SandboxState.DESTROYED), 1, "stopped->destroyed");
+
+    # Invalid edges
+    assert_eq(valid_transition(SandboxState.CREATED, SandboxState.STOPPED), 0, "created->stopped bad");
+    assert_eq(valid_transition(SandboxState.CREATED, SandboxState.DESTROYED), 0, "created->destroyed bad");
+    assert_eq(valid_transition(SandboxState.DESTROYED, SandboxState.RUNNING), 0, "destroyed->running bad");
+    assert_eq(valid_transition(SandboxState.STOPPED, SandboxState.RUNNING), 0, "stopped->running bad");
+    return 0;
+}
+
+fn test_state_names() {
+    test_group("state_names");
+    assert_eq(streq(state_name(SandboxState.CREATED), "created"), 1, "created");
+    assert_eq(streq(state_name(SandboxState.RUNNING), "running"), 1, "running");
+    assert_eq(streq(state_name(SandboxState.DESTROYED), "destroyed"), 1, "destroyed");
+    return 0;
+}
+
+fn test_config_defaults() {
+    test_group("config_defaults");
+    var c = config_new();
+    assert_eq(SandboxConfig_backend(c), Backend.PROCESS, "default backend process");
+    assert_eq(SandboxConfig_timeout_ms(c), 30000, "default timeout 30s");
+    assert_eq(SandboxConfig_inner_backend(c), 0 - 1, "no inner backend");
+    var p = SandboxConfig_policy(c);
+    assert_eq(SandboxPolicy_seccomp_enabled(p), 1, "default policy basic (seccomp on)");
+    return 0;
+}
+
+fn test_config_builder() {
+    test_group("config_builder");
+    var c = config_new();
+    config_backend(c, Backend.GVISOR);
+    config_policy_seccomp(c, "strict");
+    config_network(c, 0);
+    config_timeout_ms(c, 60000);
+    config_agent_id(c, "agent-123");
+
+    assert_eq(SandboxConfig_backend(c), Backend.GVISOR, "backend gvisor");
+    assert_eq(SandboxConfig_timeout_ms(c), 60000, "timeout 60s");
+    var p = SandboxConfig_policy(c);
+    assert_eq(SandboxPolicy_seccomp_enabled(p), 1, "seccomp on");
+    assert_eq(SandboxPolicy_network_enabled(p), 0, "network off");
+    assert_eq(streq(SandboxConfig_agent_id(c), "agent-123"), 1, "agent id");
+    return 0;
+}
+
+fn test_sandbox_create_and_transition() {
+    test_group("sandbox_lifecycle");
+    var c = config_new();
+    config_backend(c, Backend.NOOP);
+    var sb = sandbox_create(c);
+    assert(sb != 0, "sandbox created");
+    assert_eq(Sandbox_state(sb), SandboxState.CREATED, "initial state created");
+    assert_eq(Sandbox_started_at(sb), 0, "started_at unset");
+
+    assert_eq(sandbox_transition(sb, SandboxState.RUNNING), KavachError.OK, "start");
+    assert_eq(Sandbox_state(sb), SandboxState.RUNNING, "state running");
+    assert(Sandbox_started_at(sb) != 0, "started_at set");
+
+    # Invalid jump running -> created
+    assert_eq(sandbox_transition(sb, SandboxState.CREATED), KavachError.INVALID_TRANSITION, "running->created rejected");
+    assert_eq(Sandbox_state(sb), SandboxState.RUNNING, "state unchanged on reject");
+
+    assert_eq(sandbox_transition(sb, SandboxState.STOPPED), KavachError.OK, "stop");
+    assert(Sandbox_stopped_at(sb) != 0, "stopped_at set");
+
+    assert_eq(sandbox_transition(sb, SandboxState.DESTROYED), KavachError.OK, "destroy");
+    assert_eq(Sandbox_state(sb), SandboxState.DESTROYED, "state destroyed");
+    return 0;
+}
+
+fn test_sandbox_destroy_from_running() {
+    test_group("sandbox_destroy");
+    var c = config_new();
+    config_backend(c, Backend.NOOP);
+    var sb = sandbox_create(c);
+    sandbox_transition(sb, SandboxState.RUNNING);
+    assert_eq(sandbox_destroy(sb), KavachError.OK, "destroy from running");
+    assert_eq(Sandbox_state(sb), SandboxState.DESTROYED, "destroyed");
+    return 0;
+}
+
+fn test_sandbox_pool() {
+    test_group("sandbox_pool");
+    var c = config_new();
+    config_backend(c, Backend.NOOP);
+    var pool = sandbox_pool_new(c, 3);
+    assert(pool != 0, "pool created");
+    assert_eq(sandbox_pool_available(pool), 3, "3 warm");
+
+    var s1 = sandbox_pool_claim(pool);
+    assert(s1 != 0, "claim 1");
+    assert_eq(sandbox_pool_available(pool), 2, "2 left");
+
+    assert_eq(sandbox_pool_replenish(pool), KavachError.OK, "replenish");
+    assert_eq(sandbox_pool_available(pool), 3, "refilled to 3");
+    return 0;
+}
+
+fn test_severity_ordering() {
+    test_group("severity_ordering");
+    assert(Severity.INFO < Severity.LOW, "info < low");
+    assert(Severity.LOW < Severity.MEDIUM, "low < medium");
+    assert(Severity.MEDIUM < Severity.HIGH, "medium < high");
+    assert(Severity.HIGH < Severity.CRITICAL, "high < critical");
+    return 0;
+}
+
+fn test_verdict_names() {
+    test_group("verdict_names");
+    assert_eq(streq(verdict_name(ScanVerdict.PASS), "pass"), 1, "pass");
+    assert_eq(streq(verdict_name(ScanVerdict.WARN), "warn"), 1, "warn");
+    assert_eq(streq(verdict_name(ScanVerdict.BLOCK), "block"), 1, "block");
+    assert_eq(streq(severity_name(Severity.CRITICAL), "critical"), 1, "critical");
+    return 0;
+}
+
+fn test_ext_policy_defaults() {
+    test_group("ext_policy_defaults");
+    var p = ext_policy_default();
+    assert_eq(ExternalizationPolicy_enabled(p), 1, "enabled");
+    assert_eq(ExternalizationPolicy_redact_secrets(p), 1, "redact");
+    assert_eq(ExternalizationPolicy_block_threshold(p), Severity.CRITICAL, "block=critical");
+    assert_eq(ExternalizationPolicy_quarantine_threshold(p), Severity.HIGH, "quar=high");
+    return 0;
+}
+
+fn test_scan_clean() {
+    test_group("scan_clean");
+    var r = scan_result_new();
+    secrets_scan("hello world, this is clean output", r);
+    assert_eq(vec_len(ScanResult_findings(r)), 0, "no findings");
+    assert_eq(ScanResult_worst_severity(r), Severity.INFO, "worst stays info");
+    return 0;
+}
+
+fn test_scan_aws_key() {
+    test_group("scan_aws_key");
+    var r = scan_result_new();
+    secrets_scan("my key is AKIAIOSFODNN7EXAMPLE rest", r);
+    var v = ScanResult_findings(r);
+    assert(vec_len(v) >= 1, "at least one finding");
+    var f = vec_get(v, 0);
+    assert_eq(streq(ScanFinding_category(f), "cloud_credential"), 1, "cat cloud_credential");
+    assert_eq(ScanFinding_severity(f), Severity.CRITICAL, "critical");
+    assert_eq(ScanResult_worst_severity(r), Severity.CRITICAL, "worst=critical");
+    return 0;
+}
+
+fn test_scan_github_token() {
+    test_group("scan_github_token");
+    var r = scan_result_new();
+    secrets_scan("token: ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij X", r);
+    var v = ScanResult_findings(r);
+    assert(vec_len(v) >= 1, "gh token found");
+    var f = vec_get(v, 0);
+    assert_eq(streq(ScanFinding_category(f), "api_token"), 1, "cat api_token");
+    return 0;
+}
+
+fn test_scan_private_key() {
+    test_group("scan_private_key");
+    var r = scan_result_new();
+    secrets_scan("-----BEGIN RSA PRIVATE KEY-----\nMIIE", r);
+    var v = ScanResult_findings(r);
+    assert(vec_len(v) >= 1, "priv key found");
+    var f = vec_get(v, 0);
+    assert_eq(ScanFinding_severity(f), Severity.CRITICAL, "critical");
+    return 0;
+}
+
+fn test_scan_jwt() {
+    test_group("scan_jwt");
+    var r = scan_result_new();
+    secrets_scan("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefghijklmnop", r);
+    var v = ScanResult_findings(r);
+    assert(vec_len(v) >= 1, "jwt found");
+    var f = vec_get(v, 0);
+    assert_eq(streq(ScanFinding_category(f), "auth_token"), 1, "auth_token");
+    return 0;
+}
+
+fn test_scan_connection_string() {
+    test_group("scan_connection_string");
+    var r = scan_result_new();
+    secrets_scan("DATABASE_URL=postgres://user:pass@localhost/db X", r);
+    var v = ScanResult_findings(r);
+    assert(vec_len(v) >= 1, "conn string found");
+    var f = vec_get(v, 0);
+    assert_eq(streq(ScanFinding_category(f), "connection_string"), 1, "connection_string");
+    return 0;
+}
+
+fn test_scan_ssn() {
+    test_group("scan_ssn");
+    var r = scan_result_new();
+    secrets_scan("ssn: 123-45-6789 end", r);
+    var v = ScanResult_findings(r);
+    assert(vec_len(v) >= 1, "ssn found");
+    var f = vec_get(v, 0);
+    assert_eq(streq(ScanFinding_category(f), "pii"), 1, "pii");
+    return 0;
+}
+
+fn test_scan_multiple() {
+    test_group("scan_multiple");
+    var r = scan_result_new();
+    secrets_scan("key=AKIAIOSFODNN7EXAMPLE token=ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij", r);
+    assert(vec_len(ScanResult_findings(r)) >= 2, "both found");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_backend_parse();
@@ -116,6 +340,24 @@ fn main() {
     test_policy_from_preset();
     test_score_modifiers();
     test_err_names();
+    test_state_transitions();
+    test_state_names();
+    test_config_defaults();
+    test_config_builder();
+    test_sandbox_create_and_transition();
+    test_sandbox_destroy_from_running();
+    test_sandbox_pool();
+    test_severity_ordering();
+    test_verdict_names();
+    test_ext_policy_defaults();
+    test_scan_clean();
+    test_scan_aws_key();
+    test_scan_github_token();
+    test_scan_private_key();
+    test_scan_jwt();
+    test_scan_connection_string();
+    test_scan_ssn();
+    test_scan_multiple();
     return assert_summary();
 }
 

@@ -1,0 +1,115 @@
+# kavach — scanning types
+# Ported from rust-old/src/scanning/types.rs
+
+enum Severity {
+    INFO = 0;
+    LOW = 1;
+    MEDIUM = 2;
+    HIGH = 3;
+    CRITICAL = 4;
+}
+
+enum ScanVerdict {
+    PASS = 0;
+    WARN = 1;
+    QUARANTINE = 2;
+    BLOCK = 3;
+}
+
+fn severity_name(s) {
+    if (s == Severity.INFO) { return "info"; }
+    if (s == Severity.LOW) { return "low"; }
+    if (s == Severity.MEDIUM) { return "medium"; }
+    if (s == Severity.HIGH) { return "high"; }
+    if (s == Severity.CRITICAL) { return "critical"; }
+    return "unknown";
+}
+
+fn verdict_name(v) {
+    if (v == ScanVerdict.PASS) { return "pass"; }
+    if (v == ScanVerdict.WARN) { return "warn"; }
+    if (v == ScanVerdict.QUARANTINE) { return "quarantine"; }
+    if (v == ScanVerdict.BLOCK) { return "block"; }
+    return "unknown";
+}
+
+# A single finding from a scanner.
+#derive(accessors)
+struct ScanFinding {
+    id;
+    scanner;
+    severity;
+    category;
+    message;
+    evidence;
+}
+
+var SCAN_FINDING_SIZE = 48;
+
+fn _finding_next_id() {
+    var id = _finding_id_counter;
+    _finding_id_counter = _finding_id_counter + 1;
+    return id;
+}
+var _finding_id_counter = 1;
+
+fn finding_new(scanner, severity, category, message, evidence) {
+    var f = alloc(SCAN_FINDING_SIZE);
+    ScanFinding_set_id(f, _finding_next_id());
+    ScanFinding_set_scanner(f, scanner);
+    ScanFinding_set_severity(f, severity);
+    ScanFinding_set_category(f, category);
+    ScanFinding_set_message(f, message);
+    ScanFinding_set_evidence(f, evidence);
+    return f;
+}
+
+#derive(accessors)
+struct ScanResult {
+    verdict;
+    findings;
+    worst_severity;
+}
+
+var SCAN_RESULT_SIZE = 24;
+
+fn scan_result_new() {
+    var r = alloc(SCAN_RESULT_SIZE);
+    ScanResult_set_verdict(r, ScanVerdict.PASS);
+    ScanResult_set_findings(r, vec_new());
+    ScanResult_set_worst_severity(r, Severity.INFO);
+    return r;
+}
+
+fn scan_result_push(r, finding) {
+    var v = ScanResult_findings(r);
+    vec_push(v, finding);
+    var sev = ScanFinding_severity(finding);
+    if (sev > ScanResult_worst_severity(r)) {
+        ScanResult_set_worst_severity(r, sev);
+    }
+    return 0;
+}
+
+# Externalization gate policy.
+#derive(accessors)
+struct ExternalizationPolicy {
+    enabled;
+    max_artifact_size_bytes;
+    block_threshold;
+    quarantine_threshold;
+    redact_secrets;
+}
+
+var EXT_POLICY_SIZE = 40;
+
+fn ext_policy_default() {
+    var p = alloc(EXT_POLICY_SIZE);
+    ExternalizationPolicy_set_enabled(p, 1);
+    # 50 MiB
+    ExternalizationPolicy_set_max_artifact_size_bytes(p, 52428800);
+    ExternalizationPolicy_set_block_threshold(p, Severity.CRITICAL);
+    ExternalizationPolicy_set_quarantine_threshold(p, Severity.HIGH);
+    ExternalizationPolicy_set_redact_secrets(p, 1);
+    return p;
+}
