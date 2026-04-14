@@ -1,0 +1,22 @@
+# kavach — Noop backend (no isolation, testing only)
+# Matches Rust's NoopBackend: returns a clean ExecResult with exit_code=0.
+
+fn noop_exec(sandbox, command) {
+    var r = exec_result_new();
+    ExecResult_set_exit_code(r, 0);
+    ExecResult_set_stdout(r, "");
+    ExecResult_set_stderr(r, "");
+    ExecResult_set_duration_ms(r, 0);
+    ExecResult_set_timed_out(r, 0);
+    return r;
+}
+
+fn noop_health(sandbox) { return 1; }
+fn noop_destroy(sandbox) { return 0; }
+
+fn backend_noop_register() {
+    backend_register_exec(Backend.NOOP, &noop_exec);
+    backend_register_health(Backend.NOOP, &noop_health);
+    backend_register_destroy(Backend.NOOP, &noop_destroy);
+    return 0;
+}

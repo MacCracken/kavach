@@ -1,0 +1,196 @@
+# kavach — HMAC-SHA256 audit chain (append-only, tamper-evident)
+# Ported from rust-old/src/scanning/audit.rs
+#
+# Each entry:
+#   serial (u64) | event_type (cstr) | payload (cstr) | timestamp | hmac | prev_hmac
+# HMAC is computed over "serial:event_type:payload:timestamp:prev_hmac"
+# using a caller-supplied key. File format is JSONL; verify walks linearly.
+#
+# Deferred vs Rust:
+#   - payload is pre-serialized cstr, not serde_json::Value (cleaner anyway)
+#   - timestamp is epoch-seconds decimal, not ISO 8601 rfc3339
+#   - reopen/verify-on-open is stubbed until fs line-read is wired
+
+# ---- Hex encoding --------------------------------------------------------
+
+var _HEX_CHARS = "0123456789abcdef";
+
+# Hex-encode 32 bytes into a 65-byte output buffer (64 hex + NUL).
+fn hex_encode32(bytes, out) {
+    var i = 0;
+    while (i < 32) {
+        var b = load8(bytes + i);
+        var hi = (b >> 4) & 15;
+        var lo = b & 15;
+        store8(out + i * 2, load8(_HEX_CHARS + hi));
+        store8(out + i * 2 + 1, load8(_HEX_CHARS + lo));
+        i = i + 1;
+    }
+    store8(out + 64, 0);
+    return 0;
+}
+
+# ---- AuditEntry ----------------------------------------------------------
+
+#derive(accessors)
+struct AuditEntry {
+    serial;
+    event_type;
+    payload;
+    timestamp;
+    hmac;
+    prev_hmac;
+}
+
+fn audit_entry_new() {
+    var e = alloc(48);
+    AuditEntry_set_event_type(e, "");
+    AuditEntry_set_payload(e, "");
+    AuditEntry_set_timestamp(e, "");
+    AuditEntry_set_hmac(e, "");
+    AuditEntry_set_prev_hmac(e, "");
+    return e;
+}
+
+# ---- AuditChain ----------------------------------------------------------
+
+#derive(accessors)
+struct AuditChain {
+    log_path;
+    hmac_key;
+    hmac_key_len;
+    last_hmac;
+    next_serial;
+}
+
+# Compute HMAC-SHA256 over a cstr message; return 65-byte hex cstr.
+fn _hmac_hex(key, key_len, msg) {
+    var raw[32];
+    hmac_sha256(key, key_len, msg, strlen(msg), &raw);
+    var out = alloc(65);
+    hex_encode32(&raw, out);
+    return out;
+}
+
+# Build the signing input: serial:event_type:payload:timestamp:prev_hmac
+fn _sign_input(serial, event_type, payload, timestamp, prev_hmac) {
+    var serial_buf[24];
+    var serial_len = fmt_int_buf(serial, &serial_buf);
+    var total = serial_len + 1 + strlen(event_type) + 1 + strlen(payload)
+              + 1 + strlen(timestamp) + 1 + strlen(prev_hmac) + 1;
+    var buf = alloc(total);
+    var pos = 0;
+    memcpy(buf + pos, &serial_buf, serial_len); pos = pos + serial_len;
+    store8(buf + pos, 58); pos = pos + 1;
+    memcpy(buf + pos, event_type, strlen(event_type)); pos = pos + strlen(event_type);
+    store8(buf + pos, 58); pos = pos + 1;
+    memcpy(buf + pos, payload, strlen(payload)); pos = pos + strlen(payload);
+    store8(buf + pos, 58); pos = pos + 1;
+    memcpy(buf + pos, timestamp, strlen(timestamp)); pos = pos + strlen(timestamp);
+    store8(buf + pos, 58); pos = pos + 1;
+    memcpy(buf + pos, prev_hmac, strlen(prev_hmac)); pos = pos + strlen(prev_hmac);
+    store8(buf + pos, 0);
+    return buf;
+}
+
+# Build a JSON line (simplified): {"serial":N,"event_type":"...","payload":"...",
+# "timestamp":"...","hmac":"...","prev_hmac":"..."} + "\n"
+# NOTE: payload and event_type are not escaped here — callers pass safe strings.
+fn _entry_to_jsonl(entry) {
+    var serial_buf[24];
+    var slen = fmt_int_buf(AuditEntry_serial(entry), &serial_buf);
+    var ev = AuditEntry_event_type(entry);
+    var pl = AuditEntry_payload(entry);
+    var ts = AuditEntry_timestamp(entry);
+    var h = AuditEntry_hmac(entry);
+    var ph = AuditEntry_prev_hmac(entry);
+    var cap = 256 + slen + strlen(ev) + strlen(pl) + strlen(ts) + strlen(h) + strlen(ph);
+    var buf = alloc(cap);
+    var pos = 0;
+    var prefix = "{\"serial\":";
+    memcpy(buf + pos, prefix, strlen(prefix)); pos = pos + strlen(prefix);
+    memcpy(buf + pos, &serial_buf, slen); pos = pos + slen;
+    var k1 = ",\"event_type\":\"";
+    memcpy(buf + pos, k1, strlen(k1)); pos = pos + strlen(k1);
+    memcpy(buf + pos, ev, strlen(ev)); pos = pos + strlen(ev);
+    var k2 = "\",\"payload\":\"";
+    memcpy(buf + pos, k2, strlen(k2)); pos = pos + strlen(k2);
+    memcpy(buf + pos, pl, strlen(pl)); pos = pos + strlen(pl);
+    var k3 = "\",\"timestamp\":\"";
+    memcpy(buf + pos, k3, strlen(k3)); pos = pos + strlen(k3);
+    memcpy(buf + pos, ts, strlen(ts)); pos = pos + strlen(ts);
+    var k4 = "\",\"hmac\":\"";
+    memcpy(buf + pos, k4, strlen(k4)); pos = pos + strlen(k4);
+    memcpy(buf + pos, h, strlen(h)); pos = pos + strlen(h);
+    var k5 = "\",\"prev_hmac\":\"";
+    memcpy(buf + pos, k5, strlen(k5)); pos = pos + strlen(k5);
+    memcpy(buf + pos, ph, strlen(ph)); pos = pos + strlen(ph);
+    var k6 = "\"}\n";
+    memcpy(buf + pos, k6, strlen(k6)); pos = pos + strlen(k6);
+    store8(buf + pos, 0);
+    return buf;
+}
+
+# Open (or create) an audit chain at log_path with the given HMAC key.
+# If the path exists, the file is left in place and the chain resumes from
+# wherever the caller last recorded — file-based reload/verify is a TODO.
+fn audit_chain_open(log_path, hmac_key, hmac_key_len) {
+    sha256_global_init();
+    var c = alloc(40);
+    AuditChain_set_log_path(c, log_path);
+    AuditChain_set_hmac_key(c, hmac_key);
+    AuditChain_set_hmac_key_len(c, hmac_key_len);
+    AuditChain_set_last_hmac(c, "");
+    AuditChain_set_next_serial(c, 0);
+
+    # Emit genesis entry
+    audit_chain_record(c, "genesis", "audit chain initialized");
+    return c;
+}
+
+# Record an event. event_type and payload must be cstrs; payload should be
+# pre-serialized (no escape handling here).
+fn audit_chain_record(chain, event_type, payload) {
+    var serial = AuditChain_next_serial(chain);
+    var ts_buf[24];
+    var ts_len = fmt_int_buf(clock_epoch_secs(), &ts_buf);
+    var timestamp = alloc(ts_len + 1);
+    memcpy(timestamp, &ts_buf, ts_len);
+    store8(timestamp + ts_len, 0);
+
+    var prev = AuditChain_last_hmac(chain);
+    var msg = _sign_input(serial, event_type, payload, timestamp, prev);
+    var hmac_hex = _hmac_hex(AuditChain_hmac_key(chain),
+                             AuditChain_hmac_key_len(chain), msg);
+
+    var entry = audit_entry_new();
+    AuditEntry_set_serial(entry, serial);
+    AuditEntry_set_event_type(entry, event_type);
+    AuditEntry_set_payload(entry, payload);
+    AuditEntry_set_timestamp(entry, timestamp);
+    AuditEntry_set_hmac(entry, hmac_hex);
+    AuditEntry_set_prev_hmac(entry, prev);
+
+    var line = _entry_to_jsonl(entry);
+    file_append_locked(AuditChain_log_path(chain), line, strlen(line));
+
+    AuditChain_set_last_hmac(chain, hmac_hex);
+    AuditChain_set_next_serial(chain, serial + 1);
+    return entry;
+}
+
+fn audit_chain_len(chain) {
+    return AuditChain_next_serial(chain);
+}
+
+# Recompute hmac for an AuditEntry using `key` and compare to entry.hmac.
+# Returns 1 if valid, 0 otherwise.
+fn audit_entry_verify(entry, key, key_len) {
+    var msg = _sign_input(AuditEntry_serial(entry),
+                          AuditEntry_event_type(entry),
+                          AuditEntry_payload(entry),
+                          AuditEntry_timestamp(entry),
+                          AuditEntry_prev_hmac(entry));
+    var expected = _hmac_hex(key, key_len, msg);
+    return streq(expected, AuditEntry_hmac(entry));
+}

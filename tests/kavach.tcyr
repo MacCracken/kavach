@@ -13,6 +13,13 @@ include "src/scanning_data.cyr"
 include "src/scanning_gate.cyr"
 include "src/scanning_runtime.cyr"
 include "src/scanning_threat.cyr"
+include "src/audit.cyr"
+include "src/credential.cyr"
+include "src/quarantine.cyr"
+include "src/backend_dispatch.cyr"
+include "src/backend_noop.cyr"
+include "src/backend_process.cyr"
+include "src/sandbox_exec.cyr"
 
 fn test_backend_parse() {
     test_group("backend_parse");
@@ -560,6 +567,211 @@ fn test_gate_stderr() {
     return 0;
 }
 
+fn test_credential_register_resolve() {
+    test_group("credential_register");
+    var p = credential_proxy_new();
+    credential_proxy_register(p, "API_KEY", "sk-12345");
+    var r = secret_ref_env("API_KEY", "OPENAI_API_KEY");
+    var v = credential_proxy_resolve(p, r);
+    assert(v != 0, "resolved");
+    assert_eq(streq(v, "sk-12345"), 1, "value matches");
+
+    var missing = secret_ref_stdin("NOPE");
+    assert_eq(credential_proxy_resolve(p, missing), 0, "unknown returns 0");
+    return 0;
+}
+
+fn test_credential_env_vars() {
+    test_group("credential_env_vars");
+    var p = credential_proxy_new();
+    credential_proxy_register(p, "K1", "v1");
+    credential_proxy_register(p, "K2", "v2");
+    var refs = vec_new();
+    vec_push(refs, secret_ref_env("K1", "MY_K1"));
+    vec_push(refs, secret_ref_file("K2", "/tmp/secret", 384));
+    var env = credential_proxy_env_vars(p, refs);
+    assert_eq(vec_len(env), 2, "only ENV refs emitted (name+value)");
+    assert_eq(streq(vec_get(env, 0), "MY_K1"), 1, "var name");
+    assert_eq(streq(vec_get(env, 1), "v1"), 1, "var value");
+    return 0;
+}
+
+fn test_credential_file_injections() {
+    test_group("credential_file_injections");
+    var p = credential_proxy_new();
+    credential_proxy_register(p, "TLS_CERT", "-----CERT-----");
+    var refs = vec_new();
+    vec_push(refs, secret_ref_file("TLS_CERT", "/etc/ssl/cert.pem", 384));
+    var files = credential_proxy_file_injections(p, refs);
+    assert_eq(vec_len(files), 1, "one file injection");
+    var f = vec_get(files, 0);
+    assert_eq(streq(FileInjection_path(f), "/etc/ssl/cert.pem"), 1, "path");
+    assert_eq(streq(FileInjection_content(f), "-----CERT-----"), 1, "content");
+    assert_eq(FileInjection_mode(f), 384, "mode 0o600");
+    return 0;
+}
+
+fn test_credential_stdin_payload() {
+    test_group("credential_stdin_payload");
+    var p = credential_proxy_new();
+    credential_proxy_register(p, "PART1", "hello");
+    credential_proxy_register(p, "PART2", "world");
+    var refs = vec_new();
+    vec_push(refs, secret_ref_stdin("PART1"));
+    vec_push(refs, secret_ref_stdin("PART2"));
+    var s = credential_proxy_stdin_payload(p, refs);
+    assert(s != 0, "payload built");
+    assert_eq(streq(s, "hello\nworld"), 1, "joined with newline");
+
+    var empty_refs = vec_new();
+    assert_eq(credential_proxy_stdin_payload(p, empty_refs), 0, "no refs -> 0");
+    return 0;
+}
+
+fn test_audit_chain_record() {
+    test_group("audit_chain_record");
+    sha256_global_init();
+    var c = audit_chain_open("/tmp/kavach-test-record.audit", "key-a", 5);
+    assert_eq(audit_chain_len(c), 1, "genesis auto-recorded");
+    audit_chain_record(c, "event1", "payload1");
+    assert_eq(audit_chain_len(c), 2, "one more");
+    audit_chain_record(c, "event2", "payload2");
+    assert_eq(audit_chain_len(c), 3, "three total");
+    return 0;
+}
+
+fn test_audit_chain_linkage() {
+    test_group("audit_chain_linkage");
+    sha256_global_init();
+    var c = audit_chain_open("/tmp/kavach-test-link.audit", "key-b", 5);
+    var e1 = audit_chain_record(c, "a", "p1");
+    var e2 = audit_chain_record(c, "b", "p2");
+    # e2.prev_hmac should equal e1.hmac
+    assert_eq(streq(AuditEntry_prev_hmac(e2), AuditEntry_hmac(e1)), 1, "linked");
+    assert(streq(AuditEntry_hmac(e1), AuditEntry_hmac(e2)) == 0, "distinct hmacs");
+    return 0;
+}
+
+fn test_audit_entry_verify() {
+    test_group("audit_verify");
+    sha256_global_init();
+    var c = audit_chain_open("/tmp/kavach-test-verify.audit", "mykey", 5);
+    var e = audit_chain_record(c, "good", "clean payload");
+    assert_eq(audit_entry_verify(e, "mykey", 5), 1, "correct key verifies");
+    assert_eq(audit_entry_verify(e, "wrong", 5), 0, "wrong key fails");
+
+    # Tamper the payload in place; verification must fail with original key.
+    AuditEntry_set_payload(e, "tampered payload");
+    assert_eq(audit_entry_verify(e, "mykey", 5), 0, "tamper detected");
+    return 0;
+}
+
+fn test_dispatch_noop_registered() {
+    test_group("dispatch_noop");
+    kavach_init();
+    assert_eq(backend_is_registered(Backend.NOOP), 1, "noop registered");
+    assert_eq(backend_is_registered(Backend.PROCESS), 1, "process registered");
+    # Untouched backends remain unregistered until added.
+    assert_eq(backend_is_registered(Backend.GVISOR), 0, "gvisor not yet");
+    return 0;
+}
+
+fn test_sandbox_exec_noop() {
+    test_group("sandbox_exec_noop");
+    kavach_init();
+    var cfg = config_new();
+    config_backend(cfg, Backend.NOOP);
+    var sb = sandbox_create(cfg);
+    sandbox_transition(sb, SandboxState.RUNNING);
+    var r = sandbox_exec(sb, "echo hi");
+    assert(r != 0, "noop pass verdict");
+    assert_eq(ExecResult_exit_code(r), 0, "exit 0");
+    return 0;
+}
+
+fn test_sandbox_exec_not_running_rejected() {
+    test_group("sandbox_exec_state_guard");
+    kavach_init();
+    var cfg = config_new();
+    config_backend(cfg, Backend.NOOP);
+    var sb = sandbox_create(cfg);
+    # Intentionally skip transition to RUNNING
+    var r = sandbox_exec(sb, "echo hi");
+    assert_eq(r, 0, "exec refused in CREATED state");
+    return 0;
+}
+
+fn test_quarantine_store() {
+    test_group("quarantine_store");
+    var q = quarantine_storage_new("/tmp/kavach-test-quar");
+    var sr = scan_result_new();
+    ScanResult_set_verdict(sr, ScanVerdict.BLOCK);
+    var id = quarantine_store(q, "blocked stdout", 14, sr, "sb-1");
+    assert(id > 0, "id assigned");
+    assert_eq(QuarantineStorage_next_id(q), id + 1, "counter advanced");
+    return 0;
+}
+
+fn test_quarantine_status_names() {
+    test_group("quarantine_status_names");
+    assert_eq(streq(quarantine_status_name(QuarantineStatus.QUARANTINED), "quarantined"), 1, "q");
+    assert_eq(streq(quarantine_status_name(QuarantineStatus.APPROVED), "approved"), 1, "a");
+    assert_eq(streq(quarantine_status_name(QuarantineStatus.REJECTED), "rejected"), 1, "r");
+    return 0;
+}
+
+fn test_process_backend_real_exec() {
+    test_group("process_real_exec");
+    kavach_init();
+    var cfg = config_new();
+    config_backend(cfg, Backend.NOOP);
+    var sb = sandbox_create(cfg);
+    # Directly call process_exec with /bin/echo (bypassing sandbox state guard)
+    # to prove the fork+exec+capture pipeline actually runs.
+    var r = process_exec(sb, "/bin/echo hello_from_process_backend");
+    assert(r != 0, "exec returned a result");
+    assert_eq(ExecResult_exit_code(r), 0, "exit 0");
+    var out = ExecResult_stdout(r);
+    assert(str_contains(out, "hello_from_process_backend") == 1, "stdout captured");
+    return 0;
+}
+
+fn test_process_backend_rejects_bash() {
+    test_group("process_rejects_bash");
+    kavach_init();
+    var cfg = config_new();
+    config_backend(cfg, Backend.PROCESS);
+    var sb = sandbox_create(cfg);
+    var r = process_exec(sb, "/bin/bash -c whoami");
+    assert(r != 0, "result returned");
+    assert_eq(ExecResult_exit_code(r), 126, "blocklist exit code");
+    var err = ExecResult_stderr(r);
+    assert(str_contains(err, "blocked command") == 1, "blocklist message");
+    return 0;
+}
+
+fn test_end_to_end_with_audit() {
+    test_group("end_to_end_audit");
+    kavach_init();
+    sha256_global_init();
+    var chain = audit_chain_open("/tmp/kavach-test-e2e.audit", "e2e-key", 7);
+    sandbox_exec_set_audit_chain(chain);
+
+    var cfg = config_new();
+    config_backend(cfg, Backend.NOOP);
+    var sb = sandbox_create(cfg);
+    sandbox_transition(sb, SandboxState.RUNNING);
+
+    var before = audit_chain_len(chain);
+    sandbox_exec(sb, "ls /tmp");
+    var after = audit_chain_len(chain);
+    # Two audit entries per exec: exec_begin + exec_complete
+    assert_eq(after - before, 2, "two audit entries per exec");
+
+    sandbox_exec_set_audit_chain(0);
+    return 0;
+}
+
 fn test_runtime_blocked_command() {
     test_group("runtime_blocked_cmd");
     var cfg = runtime_guard_config_default();
@@ -755,6 +967,21 @@ fn main() {
     test_threat_suspicious();
     test_threat_malicious_coord();
     test_kill_chain_stage_names();
+    test_credential_register_resolve();
+    test_credential_env_vars();
+    test_credential_file_injections();
+    test_credential_stdin_payload();
+    test_audit_chain_record();
+    test_audit_chain_linkage();
+    test_audit_entry_verify();
+    test_dispatch_noop_registered();
+    test_sandbox_exec_noop();
+    test_sandbox_exec_not_running_rejected();
+    test_end_to_end_with_audit();
+    test_quarantine_store();
+    test_quarantine_status_names();
+    test_process_backend_real_exec();
+    test_process_backend_rejects_bash();
     return assert_summary();
 }
 

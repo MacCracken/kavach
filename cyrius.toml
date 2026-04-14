@@ -11,4 +11,8 @@ entry = "src/main.cyr"
 output = "kavach"
 
 [deps]
-stdlib = ["string", "fmt", "alloc", "vec", "str", "syscalls", "io", "args", "assert"]
+stdlib = ["string", "fmt", "alloc", "vec", "str", "syscalls", "io", "args", "assert", "bigint", "chrono", "hashmap", "freelist", "fnptr", "process"]
+
+[deps.sigil]
+path = "../sigil"
+modules = ["dist/sigil.cyr"]

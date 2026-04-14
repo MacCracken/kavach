@@ -1,0 +1,106 @@
+# kavach — end-to-end exec flow
+# sandbox_exec() is the primary entry point for running a command
+# through the full kavach pipeline:
+#
+#   1. Verify sandbox is in RUNNING state
+#   2. Backend dispatch (backend.exec)
+#   3. Externalization gate (secrets + code + data + verdict)
+#   4. Threat classification (intent score + kill chain)
+#   5. Audit record (HMAC-SHA256 chain)
+#
+# On BLOCK/QUARANTINE verdicts, returns 0 and logs via audit; caller
+# inspects the sandbox's last_scan_result for details.
+
+# ---- Sandbox runtime wrapper ---------------------------------------------
+# We extend the lifecycle Sandbox with post-exec observations:
+#   - last_scan_result: ScanResult* from the last gate run
+#   - last_assessment:  ThreatAssessment* from the last classification
+#   - audit_chain:      optional AuditChain*
+# These are stored in a parallel SandboxRuntime struct keyed by sandbox id.
+# For v2.0 port we carry them on the Sandbox pointer via appended fields.
+
+# ---- Global scan / audit context -----------------------------------------
+# One global ext policy, one global audit chain for the v2.0 skeleton.
+# Consumers can swap these via sandbox_exec_set_policy / ...set_audit.
+var _default_ext_policy = 0;
+var _global_audit_chain = 0;
+var _last_scan_result = 0;
+var _last_assessment = 0;
+
+fn sandbox_exec_set_ext_policy(p) { _default_ext_policy = p; return 0; }
+fn sandbox_exec_set_audit_chain(c) { _global_audit_chain = c; return 0; }
+fn sandbox_exec_last_scan_result() { return _last_scan_result; }
+fn sandbox_exec_last_assessment() { return _last_assessment; }
+
+fn _ensure_default_ext_policy() {
+    if (_default_ext_policy == 0) {
+        _default_ext_policy = ext_policy_default();
+    }
+    return _default_ext_policy;
+}
+
+# ---- Audit payload builders ----------------------------------------------
+
+fn _audit_record_if(chain, event_type, payload) {
+    if (chain != 0) { audit_chain_record(chain, event_type, payload); }
+    return 0;
+}
+
+# ---- Main entry -----------------------------------------------------------
+
+# Execute a command through the full pipeline.
+# Returns ExecResult* on PASS/WARN, 0 on BLOCK/QUARANTINE/error.
+fn sandbox_exec(sandbox, command) {
+    if (Sandbox_state(sandbox) != SandboxState.RUNNING) {
+        kavach_err_print(KavachError.EXEC_FAILED, "sandbox not running");
+        return 0;
+    }
+
+    var policy = _ensure_default_ext_policy();
+    var audit = _global_audit_chain;
+
+    _audit_record_if(audit, "exec_begin", command);
+
+    # 1. Backend dispatch
+    var result = backend_dispatch_exec(sandbox, command);
+    if (result == 0) {
+        _audit_record_if(audit, "exec_error", "backend dispatch failed");
+        return 0;
+    }
+
+    # 2. Externalization gate
+    var scan = gate_apply(result, policy);
+    _last_scan_result = scan;
+
+    # 3. Threat classification
+    var assessment = classify_threat(ScanResult_findings(scan));
+    _last_assessment = assessment;
+
+    var verdict = ScanResult_verdict(scan);
+
+    # 4. Audit record — one entry per exec with verdict payload
+    if (audit != 0) {
+        var vname = verdict_name(verdict);
+        audit_chain_record(audit, "exec_complete", vname);
+    }
+
+    if (verdict == ScanVerdict.BLOCK) {
+        kavach_err_print(KavachError.EXTERNALIZATION_BLOCKED, "blocked by gate");
+        return 0;
+    }
+    if (verdict == ScanVerdict.QUARANTINE) {
+        kavach_err_print(KavachError.EXTERNALIZATION_BLOCKED, "quarantined");
+        return 0;
+    }
+    return result;
+}
+
+# ---- Initialization -------------------------------------------------------
+# Call once at startup to register the v2.0 skeleton backends.
+fn kavach_init() {
+    alloc_init();
+    sha256_global_init();
+    backend_noop_register();
+    backend_process_register();
+    return 0;
+}

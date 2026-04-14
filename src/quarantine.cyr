@@ -1,0 +1,120 @@
+# kavach — file-based quarantine storage
+# Ported from rust-old/src/scanning/quarantine.rs
+#
+# Layout:
+#   <base_dir>/<id>.bin        raw artifact bytes
+#   <base_dir>/<id>.meta       JSON sidecar (sandbox_id, verdict, status, ts)
+#
+# UUID is replaced with a monotonic counter (padded decimal) for v2.0;
+# full UUIDv4 waits on a random-bytes provider.
+
+enum QuarantineStatus {
+    QUARANTINED = 0;
+    APPROVED = 1;
+    RELEASED = 2;
+    REJECTED = 3;
+}
+
+fn quarantine_status_name(s) {
+    if (s == QuarantineStatus.QUARANTINED) { return "quarantined"; }
+    if (s == QuarantineStatus.APPROVED) { return "approved"; }
+    if (s == QuarantineStatus.RELEASED) { return "released"; }
+    if (s == QuarantineStatus.REJECTED) { return "rejected"; }
+    return "unknown";
+}
+
+#derive(accessors)
+struct QuarantineStorage {
+    base_dir;
+    next_id;
+}
+
+fn quarantine_storage_new(base_dir) {
+    # Best-effort mkdir; ignores EEXIST.
+    sys_mkdir(base_dir, 448);
+    var q = alloc(16);
+    QuarantineStorage_set_base_dir(q, base_dir);
+    QuarantineStorage_set_next_id(q, 1);
+    return q;
+}
+
+# Build "<base_dir>/<id>.<ext>"
+fn _qpath(base_dir, id, ext) {
+    var id_buf[24];
+    var id_len = fmt_int_buf(id, &id_buf);
+    var blen = strlen(base_dir);
+    var elen = strlen(ext);
+    var buf = alloc(blen + 1 + id_len + 1 + elen + 1);
+    var pos = 0;
+    memcpy(buf + pos, base_dir, blen); pos = pos + blen;
+    store8(buf + pos, 47); pos = pos + 1;
+    memcpy(buf + pos, &id_buf, id_len); pos = pos + id_len;
+    store8(buf + pos, 46); pos = pos + 1;
+    memcpy(buf + pos, ext, elen); pos = pos + elen;
+    store8(buf + pos, 0);
+    return buf;
+}
+
+# Serialize metadata as simple JSON.
+fn _meta_jsonl(id, sandbox_id, verdict, status) {
+    var id_buf[24];
+    var id_len = fmt_int_buf(id, &id_buf);
+    var sid = sandbox_id;
+    if (sid == 0) { sid = ""; }
+    var vn = verdict_name(verdict);
+    var sn = quarantine_status_name(status);
+    var ts_buf[24];
+    var ts_len = fmt_int_buf(clock_epoch_secs(), &ts_buf);
+
+    var cap = 256 + id_len + strlen(sid) + strlen(vn) + strlen(sn) + ts_len;
+    var buf = alloc(cap);
+    var pos = 0;
+    var p1 = "{\"id\":";
+    memcpy(buf + pos, p1, strlen(p1)); pos = pos + strlen(p1);
+    memcpy(buf + pos, &id_buf, id_len); pos = pos + id_len;
+    var p2 = ",\"sandbox_id\":\"";
+    memcpy(buf + pos, p2, strlen(p2)); pos = pos + strlen(p2);
+    memcpy(buf + pos, sid, strlen(sid)); pos = pos + strlen(sid);
+    var p3 = "\",\"verdict\":\"";
+    memcpy(buf + pos, p3, strlen(p3)); pos = pos + strlen(p3);
+    memcpy(buf + pos, vn, strlen(vn)); pos = pos + strlen(vn);
+    var p4 = "\",\"status\":\"";
+    memcpy(buf + pos, p4, strlen(p4)); pos = pos + strlen(p4);
+    memcpy(buf + pos, sn, strlen(sn)); pos = pos + strlen(sn);
+    var p5 = "\",\"quarantined_at\":";
+    memcpy(buf + pos, p5, strlen(p5)); pos = pos + strlen(p5);
+    memcpy(buf + pos, &ts_buf, ts_len); pos = pos + ts_len;
+    store8(buf + pos, 125); pos = pos + 1;
+    store8(buf + pos, 10); pos = pos + 1;
+    store8(buf + pos, 0);
+    return buf;
+}
+
+# Store artifact + metadata. Returns assigned id.
+fn quarantine_store(storage, artifact, artifact_len, scan_result, sandbox_id) {
+    var id = QuarantineStorage_next_id(storage);
+    QuarantineStorage_set_next_id(storage, id + 1);
+    var base = QuarantineStorage_base_dir(storage);
+
+    var art_path = _qpath(base, id, "bin");
+    file_write_all(art_path, artifact, artifact_len);
+
+    var meta_path = _qpath(base, id, "meta");
+    var meta = _meta_jsonl(id, sandbox_id,
+                           ScanResult_verdict(scan_result),
+                           QuarantineStatus.QUARANTINED);
+    file_write_all(meta_path, meta, strlen(meta));
+    return id;
+}
+
+# Approve or reject an entry by rewriting its metadata with new status.
+# Callers must re-read the artifact separately.
+fn quarantine_update_status(storage, id, status) {
+    var base = QuarantineStorage_base_dir(storage);
+    var meta_path = _qpath(base, id, "meta");
+    # For v2.0 we just drop a new meta — readers see the latest. Parsing the
+    # previous file requires a JSON parser and is deferred.
+    var placeholder = _meta_jsonl(id, 0, ScanVerdict.QUARANTINE, status);
+    file_write_all(meta_path, placeholder, strlen(placeholder));
+    return KavachError.OK;
+}

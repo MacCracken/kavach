@@ -1,8 +1,5 @@
 # kavach — sandbox execution framework
 # Cyrius port from rust-old/ (25935 lines of Rust)
-#
-# Stdlib auto-included via cyrius.toml: string, fmt, alloc, vec, str,
-# syscalls, io, args, assert.
 
 include "src/util.cyr"
 include "src/error.cyr"
@@ -17,25 +14,64 @@ include "src/scanning_data.cyr"
 include "src/scanning_gate.cyr"
 include "src/scanning_runtime.cyr"
 include "src/scanning_threat.cyr"
+include "src/audit.cyr"
+include "src/credential.cyr"
+include "src/quarantine.cyr"
+include "src/backend_dispatch.cyr"
+include "src/backend_noop.cyr"
+include "src/backend_process.cyr"
+include "src/sandbox_exec.cyr"
 
-fn main() {
-    alloc_init();
+fn _print_banner() {
+    var banner = "kavach v2.0.0 — Cyrius port\n";
+    syscall(1, 1, banner, strlen(banner));
+    return 0;
+}
+
+fn _print_scoreboard() {
     var p = policy_strict();
     var best = resolve_best_backend(p);
     var score = score_backend(best, p);
-    println("kavach ready");
-    var prefix1 = "  best backend: ";
-    syscall(1, 1, prefix1, strlen(prefix1));
+    var prefix = "  best backend: ";
+    syscall(1, 1, prefix, strlen(prefix));
     var name = backend_name(best);
     syscall(1, 1, name, strlen(name));
     syscall(1, 1, "\n", 1);
-    var prefix2 = "  score: ";
-    syscall(1, 1, prefix2, strlen(prefix2));
+    var sp = "  score: ";
+    syscall(1, 1, sp, strlen(sp));
     print_num(score);
     syscall(1, 1, " (", 2);
     var label = score_label(score);
     syscall(1, 1, label, strlen(label));
     syscall(1, 1, ")\n", 2);
+    return 0;
+}
+
+fn main() {
+    kavach_init();
+    _print_banner();
+    _print_scoreboard();
+
+    # End-to-end demo: noop sandbox + safe exec + audit chain
+    var cfg = config_new();
+    config_backend(cfg, Backend.NOOP);
+    var sb = sandbox_create(cfg);
+    if (sb == 0) { return 1; }
+
+    var chain = audit_chain_open("/tmp/kavach-demo.audit", "kavach-demo-key", 15);
+    sandbox_exec_set_audit_chain(chain);
+
+    sandbox_transition(sb, SandboxState.RUNNING);
+    var r = sandbox_exec(sb, "echo hello");
+    if (r == 0) {
+        var msg = "  exec: blocked\n";
+        syscall(1, 1, msg, strlen(msg));
+    }
+    else {
+        var msg = "  exec: passed\n";
+        syscall(1, 1, msg, strlen(msg));
+    }
+    sandbox_destroy(sb);
     return 0;
 }
 

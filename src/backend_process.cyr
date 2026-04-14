@@ -1,0 +1,92 @@
+# kavach — Process backend (minimum-viable fork+exec+wait via lib/process.cyr)
+# Ported from rust-old/src/backend/process/mod.rs
+#
+# This is the v2.0 skeleton: fork+exec+wait + runtime-guard precheck.
+# Seccomp/Landlock/cgroups/namespaces are separate modules that will hook
+# into pre_exec once their syscall wrappers land.
+
+var PROCESS_MAX_OUTPUT = 1048576;
+
+# Whitespace-split command into a vec of cstrs. No quote handling —
+# callers with quoted args should build the vec themselves and bypass.
+fn _split_command(cmdline) {
+    var args = vec_new();
+    var n = strlen(cmdline);
+    var i = 0;
+    while (i < n) {
+        while (i < n) {
+            var c = load8(cmdline + i);
+            if (c != 32) { if (c != 9) { break; } }
+            i = i + 1;
+        }
+        if (i >= n) { break; }
+        var start = i;
+        while (i < n) {
+            var c = load8(cmdline + i);
+            if (c == 32) { break; }
+            if (c == 9) { break; }
+            i = i + 1;
+        }
+        var len = i - start;
+        var tok = alloc(len + 1);
+        memcpy(tok, cmdline + start, len);
+        store8(tok + len, 0);
+        vec_push(args, tok);
+    }
+    return args;
+}
+
+fn process_exec(sandbox, command) {
+    var start_ns = now_ns();
+
+    # Runtime-guard precheck — policy-violating commands never hit fork.
+    var guard_cfg = runtime_guard_config_default();
+    var violations = check_command(command, guard_cfg);
+    if (vec_len(violations) > 0) {
+        var rr = exec_result_new();
+        ExecResult_set_exit_code(rr, 126);
+        var v0 = vec_get(violations, 0);
+        ExecResult_set_stderr(rr, GuardViolation_description(v0));
+        ExecResult_set_duration_ms(rr, 0);
+        ExecResult_set_timed_out(rr, 0);
+        return rr;
+    }
+
+    var args = _split_command(command);
+    if (vec_len(args) == 0) {
+        var r = exec_result_new();
+        ExecResult_set_exit_code(r, 1);
+        ExecResult_set_stderr(r, "empty command");
+        return r;
+    }
+
+    var buf = alloc(PROCESS_MAX_OUTPUT);
+    var n = exec_capture(args, buf, PROCESS_MAX_OUTPUT);
+    var end_ns = now_ns();
+
+    var r = exec_result_new();
+    if (n < 0) {
+        ExecResult_set_exit_code(r, 1);
+        ExecResult_set_stderr(r, "exec failed");
+        ExecResult_set_stdout(r, "");
+    }
+    else {
+        store8(buf + n, 0);
+        ExecResult_set_exit_code(r, 0);
+        ExecResult_set_stdout(r, buf);
+        ExecResult_set_stderr(r, "");
+    }
+    ExecResult_set_duration_ms(r, (end_ns - start_ns) / 1000000);
+    ExecResult_set_timed_out(r, 0);
+    return r;
+}
+
+fn process_health(sandbox) { return 1; }
+fn process_destroy(sandbox) { return 0; }
+
+fn backend_process_register() {
+    backend_register_exec(Backend.PROCESS, &process_exec);
+    backend_register_health(Backend.PROCESS, &process_health);
+    backend_register_destroy(Backend.PROCESS, &process_destroy);
+    return 0;
+}

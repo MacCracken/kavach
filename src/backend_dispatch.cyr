@@ -1,0 +1,61 @@
+# kavach — backend dispatch table
+# Each backend registers function pointers for exec/health/destroy.
+# Lookup is O(1) via Backend enum index.
+
+# Slot layout (per backend, 32 bytes):
+#   0: exec_fn(sandbox, command) -> ExecResult*
+#   8: health_fn(sandbox) -> 1/0
+#  16: destroy_fn(sandbox) -> 0 ok, nonzero err
+#  24: reserved
+var _backend_table[320];
+var BACKEND_SLOT_SIZE = 32;
+
+fn _backend_slot(backend_id) {
+    return &_backend_table + backend_id * BACKEND_SLOT_SIZE;
+}
+
+fn backend_register_exec(backend_id, fp) {
+    store64(_backend_slot(backend_id) + 0, fp);
+    return 0;
+}
+
+fn backend_register_health(backend_id, fp) {
+    store64(_backend_slot(backend_id) + 8, fp);
+    return 0;
+}
+
+fn backend_register_destroy(backend_id, fp) {
+    store64(_backend_slot(backend_id) + 16, fp);
+    return 0;
+}
+
+# Dispatch entry points. Callers pass sandbox pointer (contains config).
+# Returns 0 on missing implementation, after logging an error.
+fn backend_dispatch_exec(sandbox, command) {
+    var bid = SandboxConfig_backend(Sandbox_config(sandbox));
+    var fp = load64(_backend_slot(bid) + 0);
+    if (fp == 0) {
+        kavach_err_print(KavachError.BACKEND_UNAVAILABLE, backend_name(bid));
+        return 0;
+    }
+    return fncall2(fp, sandbox, command);
+}
+
+fn backend_dispatch_health(sandbox) {
+    var bid = SandboxConfig_backend(Sandbox_config(sandbox));
+    var fp = load64(_backend_slot(bid) + 8);
+    if (fp == 0) { return 0; }
+    return fncall1(fp, sandbox);
+}
+
+fn backend_dispatch_destroy(sandbox) {
+    var bid = SandboxConfig_backend(Sandbox_config(sandbox));
+    var fp = load64(_backend_slot(bid) + 16);
+    if (fp == 0) { return 0; }
+    return fncall1(fp, sandbox);
+}
+
+fn backend_is_registered(backend_id) {
+    if (load64(_backend_slot(backend_id) + 0) != 0) { return 1; }
+    return 0;
+}
