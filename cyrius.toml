@@ -1,0 +1,14 @@
+[package]
+name = "kavach"
+version = "0.1.0"
+description = "kavach — Cyrius port (from 25935 lines of Rust)"
+license = "GPL-3.0-only"
+language = "cyrius"
+cyrius = "4.0.0"
+
+[build]
+entry = "src/main.cyr"
+output = "kavach"
+
+[deps]
+stdlib = ["string", "fmt", "alloc", "vec", "str", "syscalls", "io", "args", "assert"]

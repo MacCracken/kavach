@@ -1,0 +1,13 @@
+# kavach — Cyrius port
+# Ported from 25935 lines of Rust
+
+# Stdlib auto-included via cyrius.toml
+
+fn main() {
+    alloc_init();
+    println("kavach ready");
+    return 0;
+}
+
+var r = main();
+syscall(SYS_EXIT, r);

@@ -1,5 +1,7 @@
 # Build artifacts
 /target/
+/build/
+rust-old/target/
 
 # Editor / IDE
 *.swp
