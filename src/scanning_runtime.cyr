@@ -1,0 +1,316 @@
+# kavach — runtime guards (fork bomb, paths, commands, shell injection)
+# Ported from rust-old/src/scanning/runtime.rs
+#
+# Integrity monitoring (PID/mount/user namespace checks) is deferred —
+# needs /proc file reads which aren't in the current stdlib stub.
+
+# ---- Violation types -----------------------------------------------------
+
+enum ViolationType {
+    FORK_BOMB = 0;
+    SENSITIVE_PATH = 1;
+    BLOCKED_COMMAND = 2;
+    SHELL_INJECTION = 3;
+    TIME_ANOMALY = 4;
+}
+
+fn violation_type_name(t) {
+    if (t == ViolationType.FORK_BOMB) { return "fork_bomb"; }
+    if (t == ViolationType.SENSITIVE_PATH) { return "sensitive_path"; }
+    if (t == ViolationType.BLOCKED_COMMAND) { return "blocked_command"; }
+    if (t == ViolationType.SHELL_INJECTION) { return "shell_injection"; }
+    if (t == ViolationType.TIME_ANOMALY) { return "time_anomaly"; }
+    return "unknown";
+}
+
+#derive(accessors)
+struct GuardViolation {
+    violation_type;
+    description;
+}
+
+fn guard_violation_new(t, desc) {
+    var v = alloc(16);
+    GuardViolation_set_violation_type(v, t);
+    GuardViolation_set_description(v, desc);
+    return v;
+}
+
+# ---- Guard config --------------------------------------------------------
+
+#derive(accessors)
+struct RuntimeGuardConfig {
+    max_pids;
+    block_sensitive_paths;
+    enforce_command_blocklist;
+    time_anomaly_multiplier_x100;
+}
+
+fn runtime_guard_config_default() {
+    var c = alloc(32);
+    RuntimeGuardConfig_set_max_pids(c, 64);
+    RuntimeGuardConfig_set_block_sensitive_paths(c, 1);
+    RuntimeGuardConfig_set_enforce_command_blocklist(c, 1);
+    RuntimeGuardConfig_set_time_anomaly_multiplier_x100(c, 200);
+    return c;
+}
+
+# ---- Command parsing -----------------------------------------------------
+
+# Return heap cstr of base command name (first whitespace-separated token,
+# stripped of path prefix). "ls -la" -> "ls"; "/bin/bash -c" -> "bash".
+fn _base_command(cmd) {
+    var n = strlen(cmd);
+    # Skip leading whitespace
+    var start = 0;
+    while (start < n) {
+        var c = load8(cmd + start);
+        if (c != 32) { if (c != 9) { break; } }
+        start = start + 1;
+    }
+    # End at whitespace
+    var end = start;
+    while (end < n) {
+        var c = load8(cmd + end);
+        if (c == 32) { break; }
+        if (c == 9) { break; }
+        if (c == 10) { break; }
+        end = end + 1;
+    }
+    # Last slash in [start, end) — chars after it are the base name
+    var base_start = start;
+    var i = start;
+    while (i < end) {
+        if (load8(cmd + i) == 47) { base_start = i + 1; }
+        i = i + 1;
+    }
+    var len = end - base_start;
+    var buf = alloc(len + 1);
+    memcpy(buf, cmd + base_start, len);
+    store8(buf + len, 0);
+    return buf;
+}
+
+# ---- Blocklist checks ----------------------------------------------------
+
+fn _is_blocked_command(base) {
+    if (streq(base, "bash") == 1) { return 1; }
+    if (streq(base, "sh") == 1) { return 1; }
+    if (streq(base, "zsh") == 1) { return 1; }
+    if (streq(base, "fish") == 1) { return 1; }
+    if (streq(base, "dash") == 1) { return 1; }
+    if (streq(base, "csh") == 1) { return 1; }
+    if (streq(base, "tcsh") == 1) { return 1; }
+    if (streq(base, "python") == 1) { return 1; }
+    if (streq(base, "python3") == 1) { return 1; }
+    if (streq(base, "perl") == 1) { return 1; }
+    if (streq(base, "ruby") == 1) { return 1; }
+    if (streq(base, "php") == 1) { return 1; }
+    if (streq(base, "lua") == 1) { return 1; }
+    if (streq(base, "node") == 1) { return 1; }
+    if (streq(base, "deno") == 1) { return 1; }
+    if (streq(base, "bun") == 1) { return 1; }
+    if (streq(base, "gcc") == 1) { return 1; }
+    if (streq(base, "cc") == 1) { return 1; }
+    if (streq(base, "g++") == 1) { return 1; }
+    if (streq(base, "clang") == 1) { return 1; }
+    if (streq(base, "make") == 1) { return 1; }
+    if (streq(base, "cmake") == 1) { return 1; }
+    if (streq(base, "cargo") == 1) { return 1; }
+    if (streq(base, "go") == 1) { return 1; }
+    if (streq(base, "rustc") == 1) { return 1; }
+    if (streq(base, "javac") == 1) { return 1; }
+    return 0;
+}
+
+fn is_allowed_command(base) {
+    if (streq(base, "ls") == 1) { return 1; }
+    if (streq(base, "cat") == 1) { return 1; }
+    if (streq(base, "head") == 1) { return 1; }
+    if (streq(base, "tail") == 1) { return 1; }
+    if (streq(base, "wc") == 1) { return 1; }
+    if (streq(base, "grep") == 1) { return 1; }
+    if (streq(base, "find") == 1) { return 1; }
+    if (streq(base, "df") == 1) { return 1; }
+    if (streq(base, "du") == 1) { return 1; }
+    if (streq(base, "uname") == 1) { return 1; }
+    if (streq(base, "hostname") == 1) { return 1; }
+    if (streq(base, "ip") == 1) { return 1; }
+    if (streq(base, "ss") == 1) { return 1; }
+    if (streq(base, "ps") == 1) { return 1; }
+    if (streq(base, "top") == 1) { return 1; }
+    if (streq(base, "free") == 1) { return 1; }
+    if (streq(base, "lsblk") == 1) { return 1; }
+    if (streq(base, "lscpu") == 1) { return 1; }
+    if (streq(base, "date") == 1) { return 1; }
+    if (streq(base, "whoami") == 1) { return 1; }
+    if (streq(base, "id") == 1) { return 1; }
+    if (streq(base, "env") == 1) { return 1; }
+    if (streq(base, "printenv") == 1) { return 1; }
+    if (streq(base, "echo") == 1) { return 1; }
+    if (streq(base, "true") == 1) { return 1; }
+    if (streq(base, "false") == 1) { return 1; }
+    if (streq(base, "test") == 1) { return 1; }
+    return 0;
+}
+
+fn _check_sensitive_paths(cmd_lower, out_vec) {
+    var n = 0;
+    if (str_contains(cmd_lower, "/etc/shadow") == 1) {
+        vec_push(out_vec, guard_violation_new(ViolationType.SENSITIVE_PATH, "sensitive path access: /etc/shadow"));
+        n = n + 1;
+    }
+    if (str_contains(cmd_lower, "/etc/gshadow") == 1) {
+        vec_push(out_vec, guard_violation_new(ViolationType.SENSITIVE_PATH, "sensitive path access: /etc/gshadow"));
+        n = n + 1;
+    }
+    if (str_contains(cmd_lower, "/etc/sudoers") == 1) {
+        vec_push(out_vec, guard_violation_new(ViolationType.SENSITIVE_PATH, "sensitive path access: /etc/sudoers"));
+        n = n + 1;
+    }
+    if (str_contains(cmd_lower, "/root/") == 1) {
+        vec_push(out_vec, guard_violation_new(ViolationType.SENSITIVE_PATH, "sensitive path access: /root/"));
+        n = n + 1;
+    }
+    if (str_contains(cmd_lower, "/.ssh/") == 1) {
+        vec_push(out_vec, guard_violation_new(ViolationType.SENSITIVE_PATH, "sensitive path access: /.ssh/"));
+        n = n + 1;
+    }
+    if (str_contains(cmd_lower, "/.gnupg/") == 1) {
+        vec_push(out_vec, guard_violation_new(ViolationType.SENSITIVE_PATH, "sensitive path access: /.gnupg/"));
+        n = n + 1;
+    }
+    if (str_contains(cmd_lower, "/.aws/") == 1) {
+        vec_push(out_vec, guard_violation_new(ViolationType.SENSITIVE_PATH, "sensitive path access: /.aws/"));
+        n = n + 1;
+    }
+    if (str_contains(cmd_lower, "/.kube/") == 1) {
+        vec_push(out_vec, guard_violation_new(ViolationType.SENSITIVE_PATH, "sensitive path access: /.kube/"));
+        n = n + 1;
+    }
+    if (str_contains(cmd_lower, "/.docker/") == 1) {
+        vec_push(out_vec, guard_violation_new(ViolationType.SENSITIVE_PATH, "sensitive path access: /.docker/"));
+        n = n + 1;
+    }
+    if (str_contains(cmd_lower, "/dev/mem") == 1) {
+        vec_push(out_vec, guard_violation_new(ViolationType.SENSITIVE_PATH, "sensitive path access: /dev/mem"));
+        n = n + 1;
+    }
+    if (str_contains(cmd_lower, "/dev/kmem") == 1) {
+        vec_push(out_vec, guard_violation_new(ViolationType.SENSITIVE_PATH, "sensitive path access: /dev/kmem"));
+        n = n + 1;
+    }
+    if (str_contains(cmd_lower, "/dev/port") == 1) {
+        vec_push(out_vec, guard_violation_new(ViolationType.SENSITIVE_PATH, "sensitive path access: /dev/port"));
+        n = n + 1;
+    }
+    if (str_contains(cmd_lower, "/proc/kcore") == 1) {
+        vec_push(out_vec, guard_violation_new(ViolationType.SENSITIVE_PATH, "sensitive path access: /proc/kcore"));
+        n = n + 1;
+    }
+    if (str_contains(cmd_lower, "/proc/sysrq-trigger") == 1) {
+        vec_push(out_vec, guard_violation_new(ViolationType.SENSITIVE_PATH, "sensitive path access: /proc/sysrq-trigger"));
+        n = n + 1;
+    }
+    if (str_contains(cmd_lower, "/sys/firmware/efi/efivars") == 1) {
+        vec_push(out_vec, guard_violation_new(ViolationType.SENSITIVE_PATH, "sensitive path access: efivars"));
+        n = n + 1;
+    }
+    return n;
+}
+
+fn _check_shell_meta(cmd_lower, out_vec) {
+    var n = 0;
+    if (str_contains(cmd_lower, "| sh") == 1) {
+        vec_push(out_vec, guard_violation_new(ViolationType.SHELL_INJECTION, "shell metacharacter: | sh"));
+        n = n + 1;
+    }
+    if (str_contains(cmd_lower, "| bash") == 1) {
+        vec_push(out_vec, guard_violation_new(ViolationType.SHELL_INJECTION, "shell metacharacter: | bash"));
+        n = n + 1;
+    }
+    if (str_contains(cmd_lower, "; sh") == 1) {
+        vec_push(out_vec, guard_violation_new(ViolationType.SHELL_INJECTION, "shell metacharacter: ; sh"));
+        n = n + 1;
+    }
+    if (str_contains(cmd_lower, "; bash") == 1) {
+        vec_push(out_vec, guard_violation_new(ViolationType.SHELL_INJECTION, "shell metacharacter: ; bash"));
+        n = n + 1;
+    }
+    if (str_contains(cmd_lower, "| /bin/sh") == 1) {
+        vec_push(out_vec, guard_violation_new(ViolationType.SHELL_INJECTION, "shell metacharacter: | /bin/sh"));
+        n = n + 1;
+    }
+    if (str_contains(cmd_lower, "| /bin/bash") == 1) {
+        vec_push(out_vec, guard_violation_new(ViolationType.SHELL_INJECTION, "shell metacharacter: | /bin/bash"));
+        n = n + 1;
+    }
+    if (str_contains(cmd_lower, "$(") == 1) {
+        vec_push(out_vec, guard_violation_new(ViolationType.SHELL_INJECTION, "shell metacharacter: $("));
+        n = n + 1;
+    }
+    if (str_contains(cmd_lower, "${") == 1) {
+        vec_push(out_vec, guard_violation_new(ViolationType.SHELL_INJECTION, "shell metacharacter: ${"));
+        n = n + 1;
+    }
+    if (str_contains(cmd_lower, "/dev/tcp") == 1) {
+        vec_push(out_vec, guard_violation_new(ViolationType.SHELL_INJECTION, "shell metacharacter: /dev/tcp"));
+        n = n + 1;
+    }
+    if (str_contains(cmd_lower, "mkfifo") == 1) {
+        vec_push(out_vec, guard_violation_new(ViolationType.SHELL_INJECTION, "shell metacharacter: mkfifo"));
+        n = n + 1;
+    }
+    if (str_contains(cmd_lower, "`") == 1) {
+        vec_push(out_vec, guard_violation_new(ViolationType.SHELL_INJECTION, "shell metacharacter: backtick"));
+        n = n + 1;
+    }
+    return n;
+}
+
+# ---- Main entry points ---------------------------------------------------
+
+# Returns a vec of GuardViolation pointers (empty = safe).
+fn check_command(command, config) {
+    var violations = vec_new();
+    var n = strlen(command);
+    var lower = alloc(n + 1);
+    str_to_lower_into(command, lower);
+
+    if (RuntimeGuardConfig_enforce_command_blocklist(config) == 1) {
+        var base = _base_command(command);
+        if (_is_blocked_command(base) == 1) {
+            var msg_len = strlen(base) + 18;
+            var msg = alloc(msg_len + 1);
+            memcpy(msg, "blocked command: ", 17);
+            memcpy(msg + 17, base, strlen(base));
+            store8(msg + 17 + strlen(base), 0);
+            vec_push(violations, guard_violation_new(ViolationType.BLOCKED_COMMAND, msg));
+        }
+    }
+
+    if (RuntimeGuardConfig_block_sensitive_paths(config) == 1) {
+        _check_sensitive_paths(lower, violations);
+    }
+
+    _check_shell_meta(lower, violations);
+    return violations;
+}
+
+# Returns GuardViolation ptr if fork bomb detected, 0 otherwise.
+fn check_fork_bomb(current_pids, config) {
+    if (current_pids > RuntimeGuardConfig_max_pids(config)) {
+        return guard_violation_new(ViolationType.FORK_BOMB, "process count exceeds limit");
+    }
+    return 0;
+}
+
+# Returns GuardViolation ptr if duration is anomalous, 0 otherwise.
+# multiplier_x100 = 200 means "2.0x expected".
+fn check_time_anomaly(duration_ms, expected_ms, config) {
+    var threshold = expected_ms * RuntimeGuardConfig_time_anomaly_multiplier_x100(config) / 100;
+    if (duration_ms > threshold) {
+        return guard_violation_new(ViolationType.TIME_ANOMALY, "execution duration anomalous");
+    }
+    return 0;
+}

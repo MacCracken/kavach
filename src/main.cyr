@@ -12,6 +12,11 @@ include "src/scoring.cyr"
 include "src/lifecycle.cyr"
 include "src/scanning_types.cyr"
 include "src/scanning_secrets.cyr"
+include "src/scanning_code.cyr"
+include "src/scanning_data.cyr"
+include "src/scanning_gate.cyr"
+include "src/scanning_runtime.cyr"
+include "src/scanning_threat.cyr"
 
 fn main() {
     alloc_init();

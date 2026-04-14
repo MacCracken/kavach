@@ -1,0 +1,65 @@
+# kavach — externalization gate (orchestrates 3 scanners into a verdict)
+# Ported from rust-old/src/scanning/gate.rs
+#
+# Secrets redaction on WARN verdict is stubbed — TODO once a single-pass
+# redactor is ported (Rust Cow-based impl needs reworking for Cyrius).
+
+fn determine_verdict(worst, policy) {
+    if (worst >= ExternalizationPolicy_block_threshold(policy)) {
+        return ScanVerdict.BLOCK;
+    }
+    if (worst >= ExternalizationPolicy_quarantine_threshold(policy)) {
+        return ScanVerdict.QUARANTINE;
+    }
+    if (worst > Severity.INFO) {
+        return ScanVerdict.WARN;
+    }
+    return ScanVerdict.PASS;
+}
+
+# Combine stdout + "\n" + stderr into a fresh heap cstr. Newline separator
+# prevents false positives at the stdout/stderr boundary.
+fn _concat_with_nl(a, b) {
+    var alen = strlen(a);
+    var blen = strlen(b);
+    var buf = alloc(alen + blen + 2);
+    memcpy(buf, a, alen);
+    store8(buf + alen, 10);
+    memcpy(buf + alen + 1, b, blen);
+    store8(buf + alen + 1 + blen, 0);
+    return buf;
+}
+
+# Apply the externalization gate. Returns a ScanResult with verdict set.
+# Callers use verdict to decide whether to release the artifact:
+#   PASS       → release as-is
+#   WARN       → release (optionally redacted)
+#   QUARANTINE → hold, require approval
+#   BLOCK      → reject
+fn gate_apply(result, policy) {
+    var sr = scan_result_new();
+
+    if (ExternalizationPolicy_enabled(policy) == 0) {
+        ScanResult_set_verdict(sr, ScanVerdict.PASS);
+        return sr;
+    }
+
+    var stdout = ExecResult_stdout(result);
+    var stderr = ExecResult_stderr(result);
+    var total = strlen(stdout) + strlen(stderr);
+    if (total > ExternalizationPolicy_max_artifact_size_bytes(policy)) {
+        scan_result_push(sr, finding_new("gate", Severity.CRITICAL,
+            "size_limit", "output size exceeds limit", 0));
+        ScanResult_set_verdict(sr, ScanVerdict.BLOCK);
+        return sr;
+    }
+
+    var combined = _concat_with_nl(stdout, stderr);
+    secrets_scan(combined, sr);
+    code_scan(combined, sr);
+    data_scan(combined, sr);
+
+    var verdict = determine_verdict(ScanResult_worst_severity(sr), policy);
+    ScanResult_set_verdict(sr, verdict);
+    return sr;
+}

@@ -1,0 +1,557 @@
+# kavach — code violation scanner
+# Ported from rust-old/src/scanning/code.rs
+#
+# Rust used &str substring match against a pre-lowered copy of the text.
+# Same strategy here: lowercase once, then scan 25 pattern groups.
+
+# ---- helpers -------------------------------------------------------------
+
+# Copy src (null-terminated) into dst, ascii-lowered. dst must be sized.
+fn str_to_lower_into(src, dst) {
+    var i = 0;
+    while (1 == 1) {
+        var c = load8(src + i);
+        store8(dst + i, ch_ascii_lower(c));
+        if (c == 0) { return 0; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# 1 if haystack contains needle (both null-terminated cstrs). Linear search.
+fn str_contains(haystack, needle) {
+    var hlen = strlen(haystack);
+    var nlen = strlen(needle);
+    if (nlen == 0) { return 1; }
+    if (nlen > hlen) { return 0; }
+    var i = 0;
+    while (i + nlen <= hlen) {
+        var j = 0;
+        while (j < nlen) {
+            if (load8(haystack + i + j) != load8(needle + j)) { break; }
+            j = j + 1;
+        }
+        if (j == nlen) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Find position of needle in haystack, or -1.
+fn str_index_of(haystack, needle) {
+    var hlen = strlen(haystack);
+    var nlen = strlen(needle);
+    if (nlen == 0) { return 0; }
+    if (nlen > hlen) { return 0 - 1; }
+    var i = 0;
+    while (i + nlen <= hlen) {
+        var j = 0;
+        while (j < nlen) {
+            if (load8(haystack + i + j) != load8(needle + j)) { break; }
+            j = j + 1;
+        }
+        if (j == nlen) { return i; }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+# Extract up to 20 bytes on each side of the match, from the ORIGINAL
+# (case-preserved) text. Returns a heap copy (null-terminated).
+fn code_extract_evidence(text, lower, pattern) {
+    var pos = str_index_of(lower, pattern);
+    if (pos < 0) { return 0; }
+    var plen = strlen(pattern);
+    var tlen = strlen(text);
+    var start = pos - 20;
+    if (start < 0) { start = 0; }
+    var end = pos + plen + 20;
+    if (end > tlen) { end = tlen; }
+    var n = end - start;
+    var buf = alloc(n + 1);
+    memcpy(buf, text + start, n);
+    store8(buf + n, 0);
+    return buf;
+}
+
+fn code_emit(text, lower, result, severity, category, name, matched) {
+    var msg_buf = alloc(strlen(name) + 10);
+    var offset = 0;
+    memcpy(msg_buf, name, strlen(name));
+    offset = strlen(name);
+    memcpy(msg_buf + offset, " detected", 9);
+    store8(msg_buf + offset + 9, 0);
+    scan_result_push(result, finding_new("code", severity, category,
+        msg_buf, code_extract_evidence(text, lower, matched)));
+    return 1;
+}
+
+# ---- pattern groups -------------------------------------------------------
+# Each returns 1 if any pattern matched (one finding emitted per group).
+
+fn _cg_shell_exec(text, lower, result) {
+    if (str_contains(lower, "exec(") == 1) {
+        return code_emit(text, lower, result, Severity.CRITICAL, "command_injection", "Shell exec", "exec(");
+    }
+    if (str_contains(lower, "execsync(") == 1) {
+        return code_emit(text, lower, result, Severity.CRITICAL, "command_injection", "Shell exec", "execsync(");
+    }
+    if (str_contains(lower, "child_process") == 1) {
+        return code_emit(text, lower, result, Severity.CRITICAL, "command_injection", "Shell exec", "child_process");
+    }
+    return 0;
+}
+
+fn _cg_process_spawn(text, lower, result) {
+    if (str_contains(lower, "spawn(") == 1) {
+        return code_emit(text, lower, result, Severity.CRITICAL, "command_injection", "Process spawn", "spawn(");
+    }
+    if (str_contains(lower, "spawnsync(") == 1) {
+        return code_emit(text, lower, result, Severity.CRITICAL, "command_injection", "Process spawn", "spawnsync(");
+    }
+    return 0;
+}
+
+fn _cg_eval_exec(text, lower, result) {
+    if (str_contains(lower, "eval(") == 1) {
+        return code_emit(text, lower, result, Severity.CRITICAL, "command_injection", "Eval execution", "eval(");
+    }
+    if (str_contains(lower, "function(") == 1) {
+        return code_emit(text, lower, result, Severity.CRITICAL, "command_injection", "Eval execution", "function(");
+    }
+    return 0;
+}
+
+fn _cg_shell_invoc(text, lower, result) {
+    if (str_contains(lower, "/bin/sh") == 1) {
+        return code_emit(text, lower, result, Severity.HIGH, "command_injection", "Shell invocation", "/bin/sh");
+    }
+    if (str_contains(lower, "/bin/bash") == 1) {
+        return code_emit(text, lower, result, Severity.HIGH, "command_injection", "Shell invocation", "/bin/bash");
+    }
+    if (str_contains(lower, "/bin/zsh") == 1) {
+        return code_emit(text, lower, result, Severity.HIGH, "command_injection", "Shell invocation", "/bin/zsh");
+    }
+    if (str_contains(lower, "cmd.exe") == 1) {
+        return code_emit(text, lower, result, Severity.HIGH, "command_injection", "Shell invocation", "cmd.exe");
+    }
+    if (str_contains(lower, "powershell") == 1) {
+        return code_emit(text, lower, result, Severity.HIGH, "command_injection", "Shell invocation", "powershell");
+    }
+    return 0;
+}
+
+fn _cg_shell_meta(text, lower, result) {
+    if (str_contains(lower, "$(") == 1) {
+        return code_emit(text, lower, result, Severity.HIGH, "command_injection", "Shell metacharacters", "$(");
+    }
+    if (str_contains(lower, "${") == 1) {
+        return code_emit(text, lower, result, Severity.HIGH, "command_injection", "Shell metacharacters", "${");
+    }
+    if (str_contains(lower, "| sh") == 1) {
+        return code_emit(text, lower, result, Severity.HIGH, "command_injection", "Shell metacharacters", "| sh");
+    }
+    if (str_contains(lower, "| bash") == 1) {
+        return code_emit(text, lower, result, Severity.HIGH, "command_injection", "Shell metacharacters", "| bash");
+    }
+    if (str_contains(lower, "; sh") == 1) {
+        return code_emit(text, lower, result, Severity.HIGH, "command_injection", "Shell metacharacters", "; sh");
+    }
+    if (str_contains(lower, "; bash") == 1) {
+        return code_emit(text, lower, result, Severity.HIGH, "command_injection", "Shell metacharacters", "; bash");
+    }
+    if (str_contains(lower, "/dev/tcp") == 1) {
+        return code_emit(text, lower, result, Severity.HIGH, "command_injection", "Shell metacharacters", "/dev/tcp");
+    }
+    if (str_contains(lower, "<(") == 1) {
+        return code_emit(text, lower, result, Severity.HIGH, "command_injection", "Shell metacharacters", "<(");
+    }
+    if (str_contains(lower, ">(") == 1) {
+        return code_emit(text, lower, result, Severity.HIGH, "command_injection", "Shell metacharacters", ">(");
+    }
+    return 0;
+}
+
+fn _cg_pipe_shell(text, lower, result) {
+    if (str_contains(lower, "curl | sh") == 1) {
+        return code_emit(text, lower, result, Severity.CRITICAL, "command_injection", "Pipe to shell", "curl | sh");
+    }
+    if (str_contains(lower, "curl | bash") == 1) {
+        return code_emit(text, lower, result, Severity.CRITICAL, "command_injection", "Pipe to shell", "curl | bash");
+    }
+    if (str_contains(lower, "wget | sh") == 1) {
+        return code_emit(text, lower, result, Severity.CRITICAL, "command_injection", "Pipe to shell", "wget | sh");
+    }
+    if (str_contains(lower, "wget | bash") == 1) {
+        return code_emit(text, lower, result, Severity.CRITICAL, "command_injection", "Pipe to shell", "wget | bash");
+    }
+    return 0;
+}
+
+fn _cg_http_req(text, lower, result) {
+    if (str_contains(lower, "fetch(") == 1) {
+        return code_emit(text, lower, result, Severity.MEDIUM, "data_exfiltration", "HTTP request", "fetch(");
+    }
+    if (str_contains(lower, "axios.") == 1) {
+        return code_emit(text, lower, result, Severity.MEDIUM, "data_exfiltration", "HTTP request", "axios.");
+    }
+    if (str_contains(lower, "http.request(") == 1) {
+        return code_emit(text, lower, result, Severity.MEDIUM, "data_exfiltration", "HTTP request", "http.request(");
+    }
+    if (str_contains(lower, "https.request(") == 1) {
+        return code_emit(text, lower, result, Severity.MEDIUM, "data_exfiltration", "HTTP request", "https.request(");
+    }
+    return 0;
+}
+
+fn _cg_dns_exfil(text, lower, result) {
+    if (str_contains(lower, "dns.resolve") == 1) {
+        return code_emit(text, lower, result, Severity.HIGH, "data_exfiltration", "DNS exfil", "dns.resolve");
+    }
+    if (str_contains(lower, "dns.lookup") == 1) {
+        return code_emit(text, lower, result, Severity.HIGH, "data_exfiltration", "DNS exfil", "dns.lookup");
+    }
+    if (str_contains(lower, "nslookup") == 1) {
+        return code_emit(text, lower, result, Severity.HIGH, "data_exfiltration", "DNS exfil", "nslookup");
+    }
+    if (str_contains(lower, "dig ") == 1) {
+        return code_emit(text, lower, result, Severity.HIGH, "data_exfiltration", "DNS exfil", "dig ");
+    }
+    return 0;
+}
+
+fn _cg_reverse_shell(text, lower, result) {
+    if (str_contains(lower, "mkfifo") == 1) {
+        return code_emit(text, lower, result, Severity.CRITICAL, "data_exfiltration", "Reverse shell", "mkfifo");
+    }
+    if (str_contains(lower, "/dev/tcp/") == 1) {
+        return code_emit(text, lower, result, Severity.CRITICAL, "data_exfiltration", "Reverse shell", "/dev/tcp/");
+    }
+    if (str_contains(lower, "nc -e") == 1) {
+        return code_emit(text, lower, result, Severity.CRITICAL, "data_exfiltration", "Reverse shell", "nc -e");
+    }
+    if (str_contains(lower, "ncat -e") == 1) {
+        return code_emit(text, lower, result, Severity.CRITICAL, "data_exfiltration", "Reverse shell", "ncat -e");
+    }
+    if (str_contains(lower, "socat exec:") == 1) {
+        return code_emit(text, lower, result, Severity.CRITICAL, "data_exfiltration", "Reverse shell", "socat exec:");
+    }
+    if (str_contains(lower, "bash -i >& /dev/tcp") == 1) {
+        return code_emit(text, lower, result, Severity.CRITICAL, "data_exfiltration", "Reverse shell", "bash -i >& /dev/tcp");
+    }
+    return 0;
+}
+
+fn _cg_net_tools(text, lower, result) {
+    if (str_contains(lower, "nc ") == 1) {
+        return code_emit(text, lower, result, Severity.HIGH, "data_exfiltration", "Network tools", "nc ");
+    }
+    if (str_contains(lower, "ncat ") == 1) {
+        return code_emit(text, lower, result, Severity.HIGH, "data_exfiltration", "Network tools", "ncat ");
+    }
+    if (str_contains(lower, "socat ") == 1) {
+        return code_emit(text, lower, result, Severity.HIGH, "data_exfiltration", "Network tools", "socat ");
+    }
+    if (str_contains(lower, "telnet ") == 1) {
+        return code_emit(text, lower, result, Severity.HIGH, "data_exfiltration", "Network tools", "telnet ");
+    }
+    if (str_contains(lower, "nmap ") == 1) {
+        return code_emit(text, lower, result, Severity.HIGH, "data_exfiltration", "Network tools", "nmap ");
+    }
+    return 0;
+}
+
+fn _cg_sudo(text, lower, result) {
+    if (str_contains(lower, "sudo ") == 1) {
+        return code_emit(text, lower, result, Severity.CRITICAL, "privilege_escalation", "Sudo/su", "sudo ");
+    }
+    if (str_contains(lower, "su -") == 1) {
+        return code_emit(text, lower, result, Severity.CRITICAL, "privilege_escalation", "Sudo/su", "su -");
+    }
+    if (str_contains(lower, "su root") == 1) {
+        return code_emit(text, lower, result, Severity.CRITICAL, "privilege_escalation", "Sudo/su", "su root");
+    }
+    return 0;
+}
+
+fn _cg_perm_change(text, lower, result) {
+    if (str_contains(lower, "chmod ") == 1) {
+        return code_emit(text, lower, result, Severity.HIGH, "privilege_escalation", "Permission change", "chmod ");
+    }
+    if (str_contains(lower, "chown ") == 1) {
+        return code_emit(text, lower, result, Severity.HIGH, "privilege_escalation", "Permission change", "chown ");
+    }
+    if (str_contains(lower, "chgrp ") == 1) {
+        return code_emit(text, lower, result, Severity.HIGH, "privilege_escalation", "Permission change", "chgrp ");
+    }
+    if (str_contains(lower, "setuid") == 1) {
+        return code_emit(text, lower, result, Severity.HIGH, "privilege_escalation", "Permission change", "setuid");
+    }
+    if (str_contains(lower, "setgid") == 1) {
+        return code_emit(text, lower, result, Severity.HIGH, "privilege_escalation", "Permission change", "setgid");
+    }
+    return 0;
+}
+
+fn _cg_kernel_mod(text, lower, result) {
+    if (str_contains(lower, "insmod ") == 1) {
+        return code_emit(text, lower, result, Severity.CRITICAL, "privilege_escalation", "Kernel module", "insmod ");
+    }
+    if (str_contains(lower, "modprobe ") == 1) {
+        return code_emit(text, lower, result, Severity.CRITICAL, "privilege_escalation", "Kernel module", "modprobe ");
+    }
+    if (str_contains(lower, "rmmod ") == 1) {
+        return code_emit(text, lower, result, Severity.CRITICAL, "privilege_escalation", "Kernel module", "rmmod ");
+    }
+    return 0;
+}
+
+fn _cg_mount(text, lower, result) {
+    if (str_contains(lower, "mount ") == 1) {
+        return code_emit(text, lower, result, Severity.CRITICAL, "privilege_escalation", "Mount operation", "mount ");
+    }
+    if (str_contains(lower, "umount ") == 1) {
+        return code_emit(text, lower, result, Severity.CRITICAL, "privilege_escalation", "Mount operation", "umount ");
+    }
+    if (str_contains(lower, "mount(") == 1) {
+        return code_emit(text, lower, result, Severity.CRITICAL, "privilege_escalation", "Mount operation", "mount(");
+    }
+    return 0;
+}
+
+fn _cg_capability(text, lower, result) {
+    if (str_contains(lower, "setcap ") == 1) {
+        return code_emit(text, lower, result, Severity.CRITICAL, "privilege_escalation", "Capability manipulation", "setcap ");
+    }
+    if (str_contains(lower, "getcap ") == 1) {
+        return code_emit(text, lower, result, Severity.CRITICAL, "privilege_escalation", "Capability manipulation", "getcap ");
+    }
+    if (str_contains(lower, "capsh ") == 1) {
+        return code_emit(text, lower, result, Severity.CRITICAL, "privilege_escalation", "Capability manipulation", "capsh ");
+    }
+    return 0;
+}
+
+fn _cg_pkg_install(text, lower, result) {
+    if (str_contains(lower, "npm install") == 1) {
+        return code_emit(text, lower, result, Severity.HIGH, "supply_chain", "Package install", "npm install");
+    }
+    if (str_contains(lower, "pip install") == 1) {
+        return code_emit(text, lower, result, Severity.HIGH, "supply_chain", "Package install", "pip install");
+    }
+    if (str_contains(lower, "gem install") == 1) {
+        return code_emit(text, lower, result, Severity.HIGH, "supply_chain", "Package install", "gem install");
+    }
+    if (str_contains(lower, "cargo install") == 1) {
+        return code_emit(text, lower, result, Severity.HIGH, "supply_chain", "Package install", "cargo install");
+    }
+    if (str_contains(lower, "go install") == 1) {
+        return code_emit(text, lower, result, Severity.HIGH, "supply_chain", "Package install", "go install");
+    }
+    if (str_contains(lower, "apt install") == 1) {
+        return code_emit(text, lower, result, Severity.HIGH, "supply_chain", "Package install", "apt install");
+    }
+    if (str_contains(lower, "apt-get install") == 1) {
+        return code_emit(text, lower, result, Severity.HIGH, "supply_chain", "Package install", "apt-get install");
+    }
+    if (str_contains(lower, "yum install") == 1) {
+        return code_emit(text, lower, result, Severity.HIGH, "supply_chain", "Package install", "yum install");
+    }
+    if (str_contains(lower, "dnf install") == 1) {
+        return code_emit(text, lower, result, Severity.HIGH, "supply_chain", "Package install", "dnf install");
+    }
+    if (str_contains(lower, "pacman -s") == 1) {
+        return code_emit(text, lower, result, Severity.HIGH, "supply_chain", "Package install", "pacman -s");
+    }
+    return 0;
+}
+
+fn _cg_remote_script(text, lower, result) {
+    if (str_contains(lower, "curl | sh") == 1) {
+        return code_emit(text, lower, result, Severity.CRITICAL, "supply_chain", "Remote script execution", "curl | sh");
+    }
+    if (str_contains(lower, "curl | bash") == 1) {
+        return code_emit(text, lower, result, Severity.CRITICAL, "supply_chain", "Remote script execution", "curl | bash");
+    }
+    if (str_contains(lower, "wget -o - |") == 1) {
+        return code_emit(text, lower, result, Severity.CRITICAL, "supply_chain", "Remote script execution", "wget -o - |");
+    }
+    if (str_contains(lower, "curl -ssl |") == 1) {
+        return code_emit(text, lower, result, Severity.CRITICAL, "supply_chain", "Remote script execution", "curl -ssl |");
+    }
+    return 0;
+}
+
+fn _cg_dyn_import(text, lower, result) {
+    if (str_contains(lower, "require(") == 1) {
+        return code_emit(text, lower, result, Severity.MEDIUM, "supply_chain", "Dynamic require/import", "require(");
+    }
+    if (str_contains(lower, "import(") == 1) {
+        return code_emit(text, lower, result, Severity.MEDIUM, "supply_chain", "Dynamic require/import", "import(");
+    }
+    if (str_contains(lower, "__import__(") == 1) {
+        return code_emit(text, lower, result, Severity.MEDIUM, "supply_chain", "Dynamic require/import", "__import__(");
+    }
+    return 0;
+}
+
+fn _cg_base64(text, lower, result) {
+    if (str_contains(lower, "atob(") == 1) {
+        return code_emit(text, lower, result, Severity.MEDIUM, "obfuscation", "Base64 decode", "atob(");
+    }
+    if (str_contains(lower, "base64 -d") == 1) {
+        return code_emit(text, lower, result, Severity.MEDIUM, "obfuscation", "Base64 decode", "base64 -d");
+    }
+    if (str_contains(lower, "base64 --decode") == 1) {
+        return code_emit(text, lower, result, Severity.MEDIUM, "obfuscation", "Base64 decode", "base64 --decode");
+    }
+    if (str_contains(lower, "b64decode") == 1) {
+        return code_emit(text, lower, result, Severity.MEDIUM, "obfuscation", "Base64 decode", "b64decode");
+    }
+    return 0;
+}
+
+fn _cg_unicode_esc(text, lower, result) {
+    if (str_contains(lower, "\\u00") == 1) {
+        return code_emit(text, lower, result, Severity.MEDIUM, "obfuscation", "Unicode escape", "\\u00");
+    }
+    if (str_contains(lower, "\\x00") == 1) {
+        return code_emit(text, lower, result, Severity.MEDIUM, "obfuscation", "Unicode escape", "\\x00");
+    }
+    if (str_contains(lower, "string.fromcharcode") == 1) {
+        return code_emit(text, lower, result, Severity.MEDIUM, "obfuscation", "Unicode escape", "string.fromcharcode");
+    }
+    return 0;
+}
+
+fn _cg_hex_enc(text, lower, result) {
+    if (str_contains(lower, "\\x") == 1) {
+        return code_emit(text, lower, result, Severity.LOW, "obfuscation", "Hex encoding", "\\x");
+    }
+    if (str_contains(lower, "fromhex(") == 1) {
+        return code_emit(text, lower, result, Severity.LOW, "obfuscation", "Hex encoding", "fromhex(");
+    }
+    if (str_contains(lower, "hex.decode") == 1) {
+        return code_emit(text, lower, result, Severity.LOW, "obfuscation", "Hex encoding", "hex.decode");
+    }
+    return 0;
+}
+
+fn _cg_sens_path(text, lower, result) {
+    if (str_contains(lower, "/etc/shadow") == 1) {
+        return code_emit(text, lower, result, Severity.CRITICAL, "filesystem_abuse", "Sensitive path access", "/etc/shadow");
+    }
+    if (str_contains(lower, "/etc/passwd") == 1) {
+        return code_emit(text, lower, result, Severity.CRITICAL, "filesystem_abuse", "Sensitive path access", "/etc/passwd");
+    }
+    if (str_contains(lower, "/etc/sudoers") == 1) {
+        return code_emit(text, lower, result, Severity.CRITICAL, "filesystem_abuse", "Sensitive path access", "/etc/sudoers");
+    }
+    if (str_contains(lower, "/.ssh/") == 1) {
+        return code_emit(text, lower, result, Severity.CRITICAL, "filesystem_abuse", "Sensitive path access", "/.ssh/");
+    }
+    if (str_contains(lower, "/.gnupg/") == 1) {
+        return code_emit(text, lower, result, Severity.CRITICAL, "filesystem_abuse", "Sensitive path access", "/.gnupg/");
+    }
+    if (str_contains(lower, "/.aws/") == 1) {
+        return code_emit(text, lower, result, Severity.CRITICAL, "filesystem_abuse", "Sensitive path access", "/.aws/");
+    }
+    if (str_contains(lower, "/.kube/") == 1) {
+        return code_emit(text, lower, result, Severity.CRITICAL, "filesystem_abuse", "Sensitive path access", "/.kube/");
+    }
+    if (str_contains(lower, "/dev/mem") == 1) {
+        return code_emit(text, lower, result, Severity.CRITICAL, "filesystem_abuse", "Sensitive path access", "/dev/mem");
+    }
+    if (str_contains(lower, "/dev/kmem") == 1) {
+        return code_emit(text, lower, result, Severity.CRITICAL, "filesystem_abuse", "Sensitive path access", "/dev/kmem");
+    }
+    if (str_contains(lower, "/proc/kcore") == 1) {
+        return code_emit(text, lower, result, Severity.CRITICAL, "filesystem_abuse", "Sensitive path access", "/proc/kcore");
+    }
+    return 0;
+}
+
+fn _cg_traversal(text, lower, result) {
+    if (str_contains(lower, "../") == 1) {
+        return code_emit(text, lower, result, Severity.HIGH, "filesystem_abuse", "Path traversal", "../");
+    }
+    if (str_contains(lower, "..\\") == 1) {
+        return code_emit(text, lower, result, Severity.HIGH, "filesystem_abuse", "Path traversal", "..\\");
+    }
+    return 0;
+}
+
+fn _cg_destructive(text, lower, result) {
+    if (str_contains(lower, "rm -rf") == 1) {
+        return code_emit(text, lower, result, Severity.CRITICAL, "filesystem_abuse", "Destructive operation", "rm -rf");
+    }
+    if (str_contains(lower, "dd if=") == 1) {
+        return code_emit(text, lower, result, Severity.CRITICAL, "filesystem_abuse", "Destructive operation", "dd if=");
+    }
+    if (str_contains(lower, "mkfs.") == 1) {
+        return code_emit(text, lower, result, Severity.CRITICAL, "filesystem_abuse", "Destructive operation", "mkfs.");
+    }
+    if (str_contains(lower, "shred ") == 1) {
+        return code_emit(text, lower, result, Severity.CRITICAL, "filesystem_abuse", "Destructive operation", "shred ");
+    }
+    return 0;
+}
+
+fn _cg_weak_hash(text, lower, result) {
+    if (str_contains(lower, "md5(") == 1) {
+        return code_emit(text, lower, result, Severity.MEDIUM, "crypto_misuse", "Weak hash", "md5(");
+    }
+    if (str_contains(lower, "sha1(") == 1) {
+        return code_emit(text, lower, result, Severity.MEDIUM, "crypto_misuse", "Weak hash", "sha1(");
+    }
+    return 0;
+}
+
+fn _cg_hardcoded_key(text, lower, result) {
+    if (str_contains(lower, "aes_key =") == 1) {
+        return code_emit(text, lower, result, Severity.HIGH, "crypto_misuse", "Hardcoded key", "aes_key =");
+    }
+    if (str_contains(lower, "encryption_key =") == 1) {
+        return code_emit(text, lower, result, Severity.HIGH, "crypto_misuse", "Hardcoded key", "encryption_key =");
+    }
+    if (str_contains(lower, "secret_key =") == 1) {
+        return code_emit(text, lower, result, Severity.HIGH, "crypto_misuse", "Hardcoded key", "secret_key =");
+    }
+    return 0;
+}
+
+# ---- main scan -----------------------------------------------------------
+
+fn code_scan(text, result) {
+    var n = strlen(text);
+    var lower = alloc(n + 1);
+    str_to_lower_into(text, lower);
+
+    _cg_shell_exec(text, lower, result);
+    _cg_process_spawn(text, lower, result);
+    _cg_eval_exec(text, lower, result);
+    _cg_shell_invoc(text, lower, result);
+    _cg_shell_meta(text, lower, result);
+    _cg_pipe_shell(text, lower, result);
+    _cg_http_req(text, lower, result);
+    _cg_dns_exfil(text, lower, result);
+    _cg_reverse_shell(text, lower, result);
+    _cg_net_tools(text, lower, result);
+    _cg_sudo(text, lower, result);
+    _cg_perm_change(text, lower, result);
+    _cg_kernel_mod(text, lower, result);
+    _cg_mount(text, lower, result);
+    _cg_capability(text, lower, result);
+    _cg_pkg_install(text, lower, result);
+    _cg_remote_script(text, lower, result);
+    _cg_dyn_import(text, lower, result);
+    _cg_base64(text, lower, result);
+    _cg_unicode_esc(text, lower, result);
+    _cg_hex_enc(text, lower, result);
+    _cg_sens_path(text, lower, result);
+    _cg_traversal(text, lower, result);
+    _cg_destructive(text, lower, result);
+    _cg_weak_hash(text, lower, result);
+    _cg_hardcoded_key(text, lower, result);
+    return 0;
+}

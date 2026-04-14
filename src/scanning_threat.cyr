@@ -1,0 +1,160 @@
+# kavach — threat classification (intent scoring + kill-chain)
+# Ported from rust-old/src/scanning/threat.rs
+#
+# Cyrius i64 arithmetic; Rust floats are expressed as fixed-point x1000:
+#   intent_score 0..1000 represents 0.000..1.000.
+# OffenderTracker (time-decay + agent keying) is deferred until chrono +
+# hashmap coverage is wired.
+
+enum KillChainStage {
+    RECONNAISSANCE = 0;
+    WEAPONIZATION = 1;
+    DELIVERY = 2;
+    EXPLOITATION = 3;
+    INSTALLATION = 4;
+    COMMAND_AND_CONTROL = 5;
+    EXFILTRATION = 6;
+}
+
+fn kill_chain_stage_name(s) {
+    if (s == KillChainStage.RECONNAISSANCE) { return "reconnaissance"; }
+    if (s == KillChainStage.WEAPONIZATION) { return "weaponization"; }
+    if (s == KillChainStage.DELIVERY) { return "delivery"; }
+    if (s == KillChainStage.EXPLOITATION) { return "exploitation"; }
+    if (s == KillChainStage.INSTALLATION) { return "installation"; }
+    if (s == KillChainStage.COMMAND_AND_CONTROL) { return "command_and_control"; }
+    if (s == KillChainStage.EXFILTRATION) { return "exfiltration"; }
+    return "unknown";
+}
+
+enum ThreatTier {
+    BENIGN = 0;
+    SUSPICIOUS = 1;
+    LIKELY_MALICIOUS = 2;
+    MALICIOUS = 3;
+}
+
+enum EscalationTier {
+    TIER1_LOG = 0;
+    TIER2_ALERT = 1;
+    TIER3_SUSPEND = 2;
+    TIER4_REVOKE = 3;
+}
+
+fn threat_tier_name(t) {
+    if (t == ThreatTier.BENIGN) { return "benign"; }
+    if (t == ThreatTier.SUSPICIOUS) { return "suspicious"; }
+    if (t == ThreatTier.LIKELY_MALICIOUS) { return "likely_malicious"; }
+    if (t == ThreatTier.MALICIOUS) { return "malicious"; }
+    return "unknown";
+}
+
+fn escalation_tier_name(e) {
+    if (e == EscalationTier.TIER1_LOG) { return "tier1_log"; }
+    if (e == EscalationTier.TIER2_ALERT) { return "tier2_alert"; }
+    if (e == EscalationTier.TIER3_SUSPEND) { return "tier3_suspend"; }
+    if (e == EscalationTier.TIER4_REVOKE) { return "tier4_revoke"; }
+    return "unknown";
+}
+
+#derive(accessors)
+struct ThreatAssessment {
+    intent_score_x1000;
+    classification;
+    escalation;
+    kill_chain_stages;
+    finding_count;
+}
+
+fn _severity_weight_x1000(sev) {
+    if (sev == Severity.INFO) { return 50; }
+    if (sev == Severity.LOW) { return 150; }
+    if (sev == Severity.MEDIUM) { return 350; }
+    if (sev == Severity.HIGH) { return 600; }
+    if (sev == Severity.CRITICAL) { return 900; }
+    return 0;
+}
+
+# Map a finding category to its kill-chain stage. Returns -1 if no mapping.
+fn _category_to_stage(category) {
+    if (streq(category, "pii_network") == 1) { return KillChainStage.RECONNAISSANCE; }
+    if (streq(category, "obfuscation") == 1) { return KillChainStage.WEAPONIZATION; }
+    if (streq(category, "crypto_misuse") == 1) { return KillChainStage.WEAPONIZATION; }
+    if (streq(category, "supply_chain") == 1) { return KillChainStage.DELIVERY; }
+    if (streq(category, "command_injection") == 1) { return KillChainStage.EXPLOITATION; }
+    if (streq(category, "privilege_escalation") == 1) { return KillChainStage.EXPLOITATION; }
+    if (streq(category, "filesystem_abuse") == 1) { return KillChainStage.INSTALLATION; }
+    if (streq(category, "data_exfiltration") == 1) { return KillChainStage.COMMAND_AND_CONTROL; }
+    if (streq(category, "cloud_credential") == 1) { return KillChainStage.EXFILTRATION; }
+    if (streq(category, "api_token") == 1) { return KillChainStage.EXFILTRATION; }
+    if (streq(category, "auth_token") == 1) { return KillChainStage.EXFILTRATION; }
+    if (streq(category, "private_key") == 1) { return KillChainStage.EXFILTRATION; }
+    if (streq(category, "connection_string") == 1) { return KillChainStage.EXFILTRATION; }
+    if (streq(category, "credential") == 1) { return KillChainStage.EXFILTRATION; }
+    if (streq(category, "pii") == 1) { return KillChainStage.EXFILTRATION; }
+    if (streq(category, "pii_financial") == 1) { return KillChainStage.EXFILTRATION; }
+    return 0 - 1;
+}
+
+fn _vec_contains_stage(v, stage) {
+    var i = 0;
+    while (i < vec_len(v)) {
+        if (vec_get(v, i) == stage) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Classify findings (vec<ScanFinding>) into a ThreatAssessment.
+fn classify_threat(findings) {
+    var assessment = alloc(40);
+    ThreatAssessment_set_finding_count(assessment, vec_len(findings));
+    ThreatAssessment_set_kill_chain_stages(assessment, vec_new());
+
+    if (vec_len(findings) == 0) {
+        ThreatAssessment_set_intent_score_x1000(assessment, 0);
+        ThreatAssessment_set_classification(assessment, ThreatTier.BENIGN);
+        ThreatAssessment_set_escalation(assessment, EscalationTier.TIER1_LOG);
+        return assessment;
+    }
+
+    var raw_x1000 = 0;
+    var stages = vec_new();
+    var i = 0;
+    while (i < vec_len(findings)) {
+        var f = vec_get(findings, i);
+        raw_x1000 = raw_x1000 + _severity_weight_x1000(ScanFinding_severity(f));
+        var st = _category_to_stage(ScanFinding_category(f));
+        if (st >= 0) {
+            if (_vec_contains_stage(stages, st) == 0) { vec_push(stages, st); }
+        }
+        i = i + 1;
+    }
+    ThreatAssessment_set_kill_chain_stages(assessment, stages);
+
+    # Co-occurrence amplifier (x1000):
+    #   >= 3 stages -> 1.5x (1500)
+    #   >= 2 stages -> 1.3x (1300)
+    #   else         -> 1.0x (1000)
+    var amp = 1000;
+    if (vec_len(stages) >= 3) { amp = 1500; }
+    elif (vec_len(stages) >= 2) { amp = 1300; }
+
+    var intent = raw_x1000 * amp / 1000;
+    if (intent > 1000) { intent = 1000; }
+    ThreatAssessment_set_intent_score_x1000(assessment, intent);
+
+    var cls = ThreatTier.BENIGN;
+    if (intent >= 200) { cls = ThreatTier.SUSPICIOUS; }
+    if (intent >= 500) { cls = ThreatTier.LIKELY_MALICIOUS; }
+    if (intent >= 800) { cls = ThreatTier.MALICIOUS; }
+    ThreatAssessment_set_classification(assessment, cls);
+
+    var esc = EscalationTier.TIER1_LOG;
+    if (cls == ThreatTier.SUSPICIOUS) { esc = EscalationTier.TIER2_ALERT; }
+    if (cls == ThreatTier.LIKELY_MALICIOUS) { esc = EscalationTier.TIER3_SUSPEND; }
+    if (cls == ThreatTier.MALICIOUS) { esc = EscalationTier.TIER4_REVOKE; }
+    ThreatAssessment_set_escalation(assessment, esc);
+
+    return assessment;
+}

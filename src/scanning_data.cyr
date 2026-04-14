@@ -1,0 +1,405 @@
+# kavach — data/compliance scanner (PII + HIPAA/GDPR/PCI/SOC2)
+# Ported from rust-old/src/scanning/data.rs
+#
+# Compliance keywords are case-insensitive multi-word substrings — matched
+# against a pre-lowered copy of the text. Numeric/structural PII patterns
+# (credit cards, phone, IPv4, IBAN) use hand-rolled char-class scanners.
+
+fn _dg_emit(text, lower, result, severity, category, name, matched) {
+    return code_emit(text, lower, result, severity, category, name, matched);
+}
+
+# ---- Credit card matchers ------------------------------------------------
+
+# Word boundary: position 0 or preceding char is non-token.
+fn _at_word_start(text, i) {
+    if (i == 0) { return 1; }
+    if (is_token_c(load8(text + i - 1)) == 0) { return 1; }
+    return 0;
+}
+
+# Word boundary: position == length or next char is non-token.
+fn _at_word_end(text, i, n) {
+    if (i >= n) { return 1; }
+    if (is_token_c(load8(text + i)) == 0) { return 1; }
+    return 0;
+}
+
+# Consecutive digit run starting at i; returns count.
+fn _digit_run(text, i, n) {
+    var j = 0;
+    while (i + j < n) {
+        if (is_digit_c(load8(text + i + j)) == 0) { return j; }
+        j = j + 1;
+    }
+    return j;
+}
+
+# Visa: 4 + 12 digits, optionally +3 more, word-bounded. Returns match len.
+fn match_visa(text, i, n) {
+    if (_at_word_start(text, i) == 0) { return 0; }
+    if (i + 13 > n) { return 0; }
+    if (load8(text + i) != 52) { return 0; }
+    var run = _digit_run(text, i, n);
+    if (run == 16) {
+        if (_at_word_end(text, i + 16, n) == 1) { return 16; }
+        return 0;
+    }
+    if (run == 13) {
+        if (_at_word_end(text, i + 13, n) == 1) { return 13; }
+        return 0;
+    }
+    return 0;
+}
+
+# Mastercard: 5[1-5] + 14 digits = 16 total.
+fn match_mastercard(text, i, n) {
+    if (_at_word_start(text, i) == 0) { return 0; }
+    if (i + 16 > n) { return 0; }
+    if (load8(text + i) != 53) { return 0; }
+    var c2 = load8(text + i + 1);
+    if (c2 < 49) { return 0; }
+    if (c2 > 53) { return 0; }
+    var run = _digit_run(text, i, n);
+    if (run == 16) {
+        if (_at_word_end(text, i + 16, n) == 1) { return 16; }
+    }
+    return 0;
+}
+
+# Amex: 3[47] + 13 digits = 15 total.
+fn match_amex(text, i, n) {
+    if (_at_word_start(text, i) == 0) { return 0; }
+    if (i + 15 > n) { return 0; }
+    if (load8(text + i) != 51) { return 0; }
+    var c2 = load8(text + i + 1);
+    if (c2 != 52) { if (c2 != 55) { return 0; } }
+    var run = _digit_run(text, i, n);
+    if (run == 15) {
+        if (_at_word_end(text, i + 15, n) == 1) { return 15; }
+    }
+    return 0;
+}
+
+# Parse a 1-3 digit octet (0-255) starting at i. Returns (value+1, len) or (0,0).
+# We use value+1 so 0 return indicates failure even for octet 0.
+fn _parse_octet(text, i, n) {
+    if (i >= n) { return (0, 0); }
+    var c1 = load8(text + i);
+    if (is_digit_c(c1) == 0) { return (0, 0); }
+    var v = c1 - 48;
+    var len = 1;
+    if (i + 1 < n) {
+        var c2 = load8(text + i + 1);
+        if (is_digit_c(c2) == 1) {
+            v = v * 10 + (c2 - 48);
+            len = 2;
+            if (i + 2 < n) {
+                var c3 = load8(text + i + 2);
+                if (is_digit_c(c3) == 1) {
+                    var v3 = v * 10 + (c3 - 48);
+                    if (v3 <= 255) {
+                        v = v3;
+                        len = 3;
+                    }
+                }
+            }
+        }
+    }
+    return (v + 1, len);
+}
+
+# IPv4: octet '.' octet '.' octet '.' octet, all 0-255, word-bounded.
+fn match_ipv4(text, i, n) {
+    if (_at_word_start(text, i) == 0) { return 0; }
+    var pos = i;
+    var k = 0;
+    while (k < 3) {
+        var v, l = _parse_octet(text, pos, n);
+        if (v == 0) { return 0; }
+        pos = pos + l;
+        if (pos >= n) { return 0; }
+        if (load8(text + pos) != 46) { return 0; }
+        pos = pos + 1;
+        k = k + 1;
+    }
+    var v4, l4 = _parse_octet(text, pos, n);
+    if (v4 == 0) { return 0; }
+    pos = pos + l4;
+    if (_at_word_end(text, pos, n) == 0) { return 0; }
+    return pos - i;
+}
+
+# IBAN: [A-Z]{2}[0-9]{2}[A-Z0-9]{4}[0-9]{7}[A-Z0-9]{0,18}, word-bounded.
+fn match_iban(text, i, n) {
+    if (_at_word_start(text, i) == 0) { return 0; }
+    if (i + 15 > n) { return 0; }
+    if (is_upper_c(load8(text + i)) == 0) { return 0; }
+    if (is_upper_c(load8(text + i + 1)) == 0) { return 0; }
+    if (is_digit_c(load8(text + i + 2)) == 0) { return 0; }
+    if (is_digit_c(load8(text + i + 3)) == 0) { return 0; }
+    var j = 4;
+    while (j < 8) {
+        var c = load8(text + i + j);
+        if (is_upper_c(c) == 0) {
+            if (is_digit_c(c) == 0) { return 0; }
+        }
+        j = j + 1;
+    }
+    while (j < 15) {
+        if (is_digit_c(load8(text + i + j)) == 0) { return 0; }
+        j = j + 1;
+    }
+    # Optional 0..18 more [A-Z0-9]
+    var extra = 0;
+    while (extra < 18) {
+        if (i + j + extra >= n) { break; }
+        var c = load8(text + i + j + extra);
+        if (is_upper_c(c) == 0) {
+            if (is_digit_c(c) == 0) { break; }
+        }
+        extra = extra + 1;
+    }
+    if (_at_word_end(text, i + j + extra, n) == 0) { return 0; }
+    return j + extra;
+}
+
+# US phone: "(###) ###-####" or "###-###-####" or "###.###.####" — simplified.
+# Rust had a complex regex; we accept the common formats.
+fn _is_phone_sep(c) {
+    if (c == 45) { return 1; }   # -
+    if (c == 46) { return 1; }   # .
+    if (c == 32) { return 1; }   # space
+    return 0;
+}
+
+fn match_us_phone(text, i, n) {
+    if (_at_word_start(text, i) == 0) { return 0; }
+    var pos = i;
+    # Optional "(": skip if present, expect ")" after 3 digits
+    var paren = 0;
+    if (pos < n) {
+        if (load8(text + pos) == 40) {
+            paren = 1;
+            pos = pos + 1;
+        }
+    }
+    var k = 0;
+    while (k < 3) {
+        if (pos >= n) { return 0; }
+        if (is_digit_c(load8(text + pos)) == 0) { return 0; }
+        pos = pos + 1;
+        k = k + 1;
+    }
+    if (paren == 1) {
+        if (pos >= n) { return 0; }
+        if (load8(text + pos) != 41) { return 0; }
+        pos = pos + 1;
+    }
+    # Optional separator
+    if (pos < n) {
+        if (_is_phone_sep(load8(text + pos)) == 1) { pos = pos + 1; }
+    }
+    k = 0;
+    while (k < 3) {
+        if (pos >= n) { return 0; }
+        if (is_digit_c(load8(text + pos)) == 0) { return 0; }
+        pos = pos + 1;
+        k = k + 1;
+    }
+    if (pos < n) {
+        if (_is_phone_sep(load8(text + pos)) == 1) { pos = pos + 1; }
+    }
+    k = 0;
+    while (k < 4) {
+        if (pos >= n) { return 0; }
+        if (is_digit_c(load8(text + pos)) == 0) { return 0; }
+        pos = pos + 1;
+        k = k + 1;
+    }
+    if (_at_word_end(text, pos, n) == 0) { return 0; }
+    return pos - i;
+}
+
+# ---- PII dispatch (credit cards, phone, IP, IBAN) ------------------------
+# Walk the text once, try each matcher at each position, emit on first hit.
+
+fn _data_scan_pii(text, lower, result) {
+    var n = strlen(text);
+    var i = 0;
+    while (i < n) {
+        var m = match_visa(text, i, n);
+        if (m > 0) {
+            _dg_emit(text, lower, result, Severity.CRITICAL,
+                "pii_financial", "Credit Card (Visa)", "4");
+            i = i + m;
+        }
+        else {
+            var mc = match_mastercard(text, i, n);
+            if (mc > 0) {
+                _dg_emit(text, lower, result, Severity.CRITICAL,
+                    "pii_financial", "Credit Card (Mastercard)", "5");
+                i = i + mc;
+            }
+            else {
+                var amex = match_amex(text, i, n);
+                if (amex > 0) {
+                    _dg_emit(text, lower, result, Severity.CRITICAL,
+                        "pii_financial", "Credit Card (Amex)", "3");
+                    i = i + amex;
+                }
+                else {
+                    var ip = match_ipv4(text, i, n);
+                    if (ip > 0) {
+                        _dg_emit(text, lower, result, Severity.LOW,
+                            "pii_network", "IP Address (IPv4)", "0");
+                        i = i + ip;
+                    }
+                    else {
+                        var ib = match_iban(text, i, n);
+                        if (ib > 0) {
+                            _dg_emit(text, lower, result, Severity.HIGH,
+                                "pii_financial", "IBAN", "0");
+                            i = i + ib;
+                        }
+                        else {
+                            var ph = match_us_phone(text, i, n);
+                            if (ph > 0) {
+                                _dg_emit(text, lower, result, Severity.MEDIUM,
+                                    "pii", "US Phone Number", "0");
+                                i = i + ph;
+                            }
+                            else {
+                                i = i + 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+# ---- Compliance keyword groups (substring, case-insensitive) -------------
+
+fn _dg_hipaa(text, lower, result) {
+    if (str_contains(lower, "patient id") == 1) {
+        return _dg_emit(text, lower, result, Severity.HIGH, "compliance_hipaa", "HIPAA identifier", "patient id");
+    }
+    if (str_contains(lower, "patient name") == 1) {
+        return _dg_emit(text, lower, result, Severity.HIGH, "compliance_hipaa", "HIPAA identifier", "patient name");
+    }
+    if (str_contains(lower, "patient record") == 1) {
+        return _dg_emit(text, lower, result, Severity.HIGH, "compliance_hipaa", "HIPAA identifier", "patient record");
+    }
+    if (str_contains(lower, "patient dob") == 1) {
+        return _dg_emit(text, lower, result, Severity.HIGH, "compliance_hipaa", "HIPAA identifier", "patient dob");
+    }
+    if (str_contains(lower, "patient ssn") == 1) {
+        return _dg_emit(text, lower, result, Severity.HIGH, "compliance_hipaa", "HIPAA identifier", "patient ssn");
+    }
+    if (str_contains(lower, "patient mrn") == 1) {
+        return _dg_emit(text, lower, result, Severity.HIGH, "compliance_hipaa", "HIPAA identifier", "patient mrn");
+    }
+    if (str_contains(lower, "medical record number") == 1) {
+        return _dg_emit(text, lower, result, Severity.HIGH, "compliance_hipaa", "HIPAA identifier", "medical record number");
+    }
+    if (str_contains(lower, "health insurance claim") == 1) {
+        return _dg_emit(text, lower, result, Severity.HIGH, "compliance_hipaa", "HIPAA identifier", "health insurance claim");
+    }
+    if (str_contains(lower, "protected health information") == 1) {
+        return _dg_emit(text, lower, result, Severity.HIGH, "compliance_hipaa", "HIPAA identifier", "protected health information");
+    }
+    return 0;
+}
+
+fn _dg_gdpr(text, lower, result) {
+    if (str_contains(lower, "data subject") == 1) {
+        return _dg_emit(text, lower, result, Severity.MEDIUM, "compliance_gdpr", "GDPR personal data", "data subject");
+    }
+    if (str_contains(lower, "right to erasure") == 1) {
+        return _dg_emit(text, lower, result, Severity.MEDIUM, "compliance_gdpr", "GDPR personal data", "right to erasure");
+    }
+    if (str_contains(lower, "right to be forgotten") == 1) {
+        return _dg_emit(text, lower, result, Severity.MEDIUM, "compliance_gdpr", "GDPR personal data", "right to be forgotten");
+    }
+    if (str_contains(lower, "consent withdraw") == 1) {
+        return _dg_emit(text, lower, result, Severity.MEDIUM, "compliance_gdpr", "GDPR personal data", "consent withdraw");
+    }
+    if (str_contains(lower, "data processing agreement") == 1) {
+        return _dg_emit(text, lower, result, Severity.MEDIUM, "compliance_gdpr", "GDPR personal data", "data processing agreement");
+    }
+    if (str_contains(lower, "data controller") == 1) {
+        return _dg_emit(text, lower, result, Severity.MEDIUM, "compliance_gdpr", "GDPR personal data", "data controller");
+    }
+    if (str_contains(lower, "data processor") == 1) {
+        return _dg_emit(text, lower, result, Severity.MEDIUM, "compliance_gdpr", "GDPR personal data", "data processor");
+    }
+    return 0;
+}
+
+fn _dg_pci(text, lower, result) {
+    if (str_contains(lower, "cardholder data") == 1) {
+        return _dg_emit(text, lower, result, Severity.HIGH, "compliance_pci", "PCI-DSS cardholder data", "cardholder data");
+    }
+    if (str_contains(lower, "card verification") == 1) {
+        return _dg_emit(text, lower, result, Severity.HIGH, "compliance_pci", "PCI-DSS cardholder data", "card verification");
+    }
+    if (str_contains(lower, "cvv") == 1) {
+        return _dg_emit(text, lower, result, Severity.HIGH, "compliance_pci", "PCI-DSS cardholder data", "cvv");
+    }
+    if (str_contains(lower, "cvc") == 1) {
+        return _dg_emit(text, lower, result, Severity.HIGH, "compliance_pci", "PCI-DSS cardholder data", "cvc");
+    }
+    if (str_contains(lower, "primary account number") == 1) {
+        return _dg_emit(text, lower, result, Severity.HIGH, "compliance_pci", "PCI-DSS cardholder data", "primary account number");
+    }
+    if (str_contains(lower, "pan data") == 1) {
+        return _dg_emit(text, lower, result, Severity.HIGH, "compliance_pci", "PCI-DSS cardholder data", "pan data");
+    }
+    if (str_contains(lower, "track data") == 1) {
+        return _dg_emit(text, lower, result, Severity.HIGH, "compliance_pci", "PCI-DSS cardholder data", "track data");
+    }
+    if (str_contains(lower, "magnetic stripe") == 1) {
+        return _dg_emit(text, lower, result, Severity.HIGH, "compliance_pci", "PCI-DSS cardholder data", "magnetic stripe");
+    }
+    return 0;
+}
+
+fn _dg_soc2(text, lower, result) {
+    if (str_contains(lower, "soc 2") == 1) {
+        return _dg_emit(text, lower, result, Severity.MEDIUM, "compliance_soc2", "SOC2 audit artifact", "soc 2");
+    }
+    if (str_contains(lower, "soc2") == 1) {
+        return _dg_emit(text, lower, result, Severity.MEDIUM, "compliance_soc2", "SOC2 audit artifact", "soc2");
+    }
+    if (str_contains(lower, "trust service criteria") == 1) {
+        return _dg_emit(text, lower, result, Severity.MEDIUM, "compliance_soc2", "SOC2 audit artifact", "trust service criteria");
+    }
+    if (str_contains(lower, "system description") == 1) {
+        return _dg_emit(text, lower, result, Severity.MEDIUM, "compliance_soc2", "SOC2 audit artifact", "system description");
+    }
+    if (str_contains(lower, "complementary user entity controls") == 1) {
+        return _dg_emit(text, lower, result, Severity.MEDIUM, "compliance_soc2", "SOC2 audit artifact", "complementary user entity controls");
+    }
+    if (str_contains(lower, "cuec") == 1) {
+        return _dg_emit(text, lower, result, Severity.MEDIUM, "compliance_soc2", "SOC2 audit artifact", "cuec");
+    }
+    return 0;
+}
+
+# ---- main scan -----------------------------------------------------------
+
+fn data_scan(text, result) {
+    var n = strlen(text);
+    var lower = alloc(n + 1);
+    str_to_lower_into(text, lower);
+
+    _data_scan_pii(text, lower, result);
+    _dg_hipaa(text, lower, result);
+    _dg_gdpr(text, lower, result);
+    _dg_pci(text, lower, result);
+    _dg_soc2(text, lower, result);
+    return 0;
+}
