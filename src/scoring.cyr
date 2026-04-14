@@ -1,0 +1,94 @@
+# kavach — strength scoring (0-100)
+# Ported from rust-old/src/scoring/mod.rs
+
+fn base_score(backend) {
+    if (backend == Backend.NOOP) { return 0; }
+    if (backend == Backend.PROCESS) { return 50; }
+    if (backend == Backend.OCI) { return 55; }
+    if (backend == Backend.WASM) { return 65; }
+    if (backend == Backend.GVISOR) { return 70; }
+    if (backend == Backend.SGX) { return 80; }
+    if (backend == Backend.SEV) { return 82; }
+    if (backend == Backend.TDX) { return 85; }
+    if (backend == Backend.SY_AGNOS) { return 80; }
+    if (backend == Backend.FIRECRACKER) { return 90; }
+    return 0;
+}
+
+fn score_label(score) {
+    if (score < 30) { return "minimal"; }
+    if (score < 50) { return "basic"; }
+    if (score < 70) { return "standard"; }
+    if (score < 85) { return "hardened"; }
+    if (score <= 100) { return "fortress"; }
+    return "unknown";
+}
+
+# Score a backend with policy modifiers applied. Matches SY reference.
+fn score_backend(backend, policy) {
+    var score = base_score(backend);
+
+    if (SandboxPolicy_seccomp_enabled(policy) == 1) { score = score + 5; }
+    if (SandboxPolicy_landlock_rules_len(policy) > 0) { score = score + 3; }
+    if (SandboxPolicy_network_enabled(policy) == 0) { score = score + 5; }
+    if (SandboxPolicy_read_only_rootfs(policy) == 1) { score = score + 3; }
+
+    # Resource limits: +2 once if either memory or cpu is set
+    if (SandboxPolicy_memory_limit_mb(policy) > 0) { score = score + 2; }
+    elif (SandboxPolicy_cpu_limit_tenths(policy) > 0) { score = score + 2; }
+
+    # Landlock TCP ports (ABI v4): +3 once if either list is non-empty
+    if (SandboxPolicy_network_tcp_bind_len(policy) > 0) { score = score + 3; }
+    elif (SandboxPolicy_network_tcp_connect_len(policy) > 0) { score = score + 3; }
+
+    # Landlock scoping (ABI v6)
+    if (SandboxPolicy_landlock_abstract_unix(policy) == 1) { score = score + 2; }
+    if (SandboxPolicy_landlock_signal(policy) == 1) { score = score + 2; }
+
+    if (score > 100) { score = 100; }
+    if (score < 0) { score = 0; }
+    return score;
+}
+
+# Rank all available backends by score under `policy`. Returns strongest
+# available backend code. Falls back to Backend.NOOP if nothing else passes.
+fn resolve_best_backend(policy) {
+    var best = Backend.NOOP;
+    var best_score = 0 - 1;
+    var i = 0;
+    while (i < BACKEND_COUNT) {
+        var b = backend_at(i);
+        if (b != Backend.NOOP) {
+            if (backend_is_available(b) == 1) {
+                var s = score_backend(b, policy);
+                if (s > best_score) {
+                    best_score = s;
+                    best = b;
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return best;
+}
+
+# Returns strongest backend meeting min_score, or -1 if none.
+fn resolve_min_strength_backend(policy, min_score) {
+    var best = 0 - 1;
+    var best_score = min_score - 1;
+    var i = 0;
+    while (i < BACKEND_COUNT) {
+        var b = backend_at(i);
+        if (backend_is_available(b) == 1) {
+            var s = score_backend(b, policy);
+            if (s >= min_score) {
+                if (s > best_score) {
+                    best_score = s;
+                    best = b;
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return best;
+}

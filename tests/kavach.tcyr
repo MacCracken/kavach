@@ -1,10 +1,121 @@
 # kavach test suite
 
+include "src/util.cyr"
+include "src/error.cyr"
+include "src/backend.cyr"
+include "src/policy.cyr"
+include "src/scoring.cyr"
+
+fn test_backend_parse() {
+    test_group("backend_parse");
+    assert_eq(backend_parse("noop"), Backend.NOOP, "parse noop");
+    assert_eq(backend_parse("process"), Backend.PROCESS, "parse process");
+    assert_eq(backend_parse("firecracker"), Backend.FIRECRACKER, "parse firecracker");
+    assert_eq(backend_parse("NOOP"), Backend.NOOP, "parse noop (case)");
+    assert_eq(backend_parse("SyAgnos"), Backend.SY_AGNOS, "parse syagnos (mixed case)");
+    assert_eq(backend_parse("sy-agnos"), Backend.SY_AGNOS, "parse sy-agnos");
+    assert_eq(backend_parse("bogus"), 0 - 1, "unknown returns -1");
+    return 0;
+}
+
+fn test_base_scores() {
+    test_group("base_score");
+    assert_eq(base_score(Backend.NOOP), 0, "noop 0");
+    assert_eq(base_score(Backend.PROCESS), 50, "process 50");
+    assert_eq(base_score(Backend.FIRECRACKER), 90, "firecracker 90");
+    assert_eq(base_score(Backend.SY_AGNOS), 80, "syagnos base 80");
+    return 0;
+}
+
+fn test_score_labels() {
+    test_group("score_label");
+    var l0 = score_label(0);
+    var l29 = score_label(29);
+    var l30 = score_label(30);
+    var l50 = score_label(50);
+    var l70 = score_label(70);
+    var l85 = score_label(85);
+    var l100 = score_label(100);
+    assert_eq(streq(l0, "minimal"), 1, "0 minimal");
+    assert_eq(streq(l29, "minimal"), 1, "29 minimal");
+    assert_eq(streq(l30, "basic"), 1, "30 basic");
+    assert_eq(streq(l50, "standard"), 1, "50 standard");
+    assert_eq(streq(l70, "hardened"), 1, "70 hardened");
+    assert_eq(streq(l85, "fortress"), 1, "85 fortress");
+    assert_eq(streq(l100, "fortress"), 1, "100 fortress");
+    return 0;
+}
+
+fn test_policy_presets() {
+    test_group("policy_preset");
+    var m = policy_minimal();
+    assert_eq(SandboxPolicy_seccomp_enabled(m), 0, "minimal no seccomp");
+    assert_eq(SandboxPolicy_read_only_rootfs(m), 0, "minimal not read-only");
+
+    var b = policy_basic();
+    assert_eq(SandboxPolicy_seccomp_enabled(b), 1, "basic has seccomp");
+    assert_eq(SandboxPolicy_network_enabled(b), 0, "basic no network");
+
+    var s = policy_strict();
+    assert_eq(SandboxPolicy_seccomp_enabled(s), 1, "strict seccomp");
+    assert_eq(SandboxPolicy_read_only_rootfs(s), 1, "strict read-only");
+    assert_eq(SandboxPolicy_memory_limit_mb(s), 512, "strict mem 512");
+    assert_eq(SandboxPolicy_max_pids(s), 64, "strict max_pids 64");
+    assert_eq(SandboxPolicy_landlock_abstract_unix(s), 1, "strict scope abstract");
+    assert_eq(SandboxPolicy_landlock_signal(s), 1, "strict scope signal");
+    return 0;
+}
+
+fn test_policy_from_preset() {
+    test_group("policy_from_preset");
+    var s = policy_from_preset("STRICT");
+    assert(s != 0, "STRICT parses");
+    assert_eq(SandboxPolicy_read_only_rootfs(s), 1, "STRICT → strict");
+
+    var b = policy_from_preset("Basic");
+    assert(b != 0, "Basic parses");
+    assert_eq(SandboxPolicy_seccomp_enabled(b), 1, "Basic → basic");
+
+    var u = policy_from_preset("unknown");
+    assert_eq(u, 0, "unknown → 0");
+    return 0;
+}
+
+fn test_score_modifiers() {
+    test_group("score_modifiers");
+    # Minimal policy on Noop: network disabled adds +5.
+    var m = policy_minimal();
+    assert_eq(score_backend(Backend.NOOP, m), 5, "noop+minimal = 5");
+
+    # Strict policy on Process: base 50 + seccomp 5 + no-net 5 + ro 3 + mem/cpu 2
+    # + scope abstract 2 + scope signal 2 = 69
+    var s = policy_strict();
+    assert_eq(score_backend(Backend.PROCESS, s), 69, "process+strict = 69");
+
+    # Firecracker clamped to 100 under strict.
+    var f = score_backend(Backend.FIRECRACKER, s);
+    assert(f <= 100, "firecracker clamped");
+    assert(f >= 90, "firecracker >= base");
+    return 0;
+}
+
+fn test_err_names() {
+    test_group("error_names");
+    assert_eq(streq(kavach_err_name(KavachError.OK), "ok"), 1, "OK → ok");
+    assert_eq(streq(kavach_err_name(KavachError.TIMEOUT), "sandbox timeout"), 1, "TIMEOUT → sandbox timeout");
+    assert_eq(streq(kavach_err_name(KavachError.POLICY_VIOLATION), "policy violation"), 1, "POLICY → policy violation");
+    return 0;
+}
+
 fn main() {
     alloc_init();
-    test_group("smoke");
-    assert(1, "true is true");
-    assert_eq(1 + 1, 2, "math works");
+    test_backend_parse();
+    test_base_scores();
+    test_score_labels();
+    test_policy_presets();
+    test_policy_from_preset();
+    test_score_modifiers();
+    test_err_names();
     return assert_summary();
 }
 

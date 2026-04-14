@@ -1,0 +1,84 @@
+# kavach — Backend enum and metadata
+# Ported from rust-old/src/backend/mod.rs
+
+enum Backend {
+    PROCESS = 0;
+    GVISOR = 1;
+    FIRECRACKER = 2;
+    WASM = 3;
+    OCI = 4;
+    SGX = 5;
+    SEV = 6;
+    TDX = 7;
+    SY_AGNOS = 8;
+    NOOP = 9;
+}
+
+var BACKEND_COUNT = 10;
+
+fn backend_name(b) {
+    if (b == Backend.PROCESS) { return "process"; }
+    if (b == Backend.GVISOR) { return "gvisor"; }
+    if (b == Backend.FIRECRACKER) { return "firecracker"; }
+    if (b == Backend.WASM) { return "wasm"; }
+    if (b == Backend.OCI) { return "oci"; }
+    if (b == Backend.SGX) { return "sgx"; }
+    if (b == Backend.SEV) { return "sev"; }
+    if (b == Backend.TDX) { return "tdx"; }
+    if (b == Backend.SY_AGNOS) { return "sy-agnos"; }
+    if (b == Backend.NOOP) { return "noop"; }
+    return "unknown";
+}
+
+# Case-insensitive parse. Returns backend code on success, -1 on unknown.
+fn backend_parse(s) {
+    if (strieq(s, "process") == 1) { return Backend.PROCESS; }
+    if (strieq(s, "gvisor") == 1) { return Backend.GVISOR; }
+    if (strieq(s, "firecracker") == 1) { return Backend.FIRECRACKER; }
+    if (strieq(s, "wasm") == 1) { return Backend.WASM; }
+    if (strieq(s, "oci") == 1) { return Backend.OCI; }
+    if (strieq(s, "sgx") == 1) { return Backend.SGX; }
+    if (strieq(s, "sev") == 1) { return Backend.SEV; }
+    if (strieq(s, "tdx") == 1) { return Backend.TDX; }
+    if (strieq(s, "sy-agnos") == 1) { return Backend.SY_AGNOS; }
+    if (strieq(s, "syagnos") == 1) { return Backend.SY_AGNOS; }
+    if (strieq(s, "noop") == 1) { return Backend.NOOP; }
+    return 0 - 1;
+}
+
+# TODO: walk $PATH and stat each candidate (requires fs module).
+fn which_exists(name) {
+    return 0;
+}
+
+# TODO: fstatat-based existence check (requires fs module).
+fn path_exists(path) {
+    return 0;
+}
+
+fn backend_is_available(b) {
+    if (b == Backend.NOOP) { return 1; }
+    if (b == Backend.PROCESS) { return 1; }
+    if (b == Backend.WASM) { return 0; }
+    if (b == Backend.GVISOR) { return which_exists("runsc"); }
+    if (b == Backend.FIRECRACKER) { return which_exists("firecracker"); }
+    if (b == Backend.OCI) {
+        if (which_exists("runc") == 1) { return 1; }
+        if (which_exists("crun") == 1) { return 1; }
+        return 0;
+    }
+    if (b == Backend.SGX) { return path_exists("/dev/sgx_enclave"); }
+    if (b == Backend.SEV) { return path_exists("/dev/sev"); }
+    if (b == Backend.TDX) { return path_exists("/dev/tdx_guest"); }
+    if (b == Backend.SY_AGNOS) {
+        if (which_exists("docker") == 1) { return 1; }
+        if (which_exists("podman") == 1) { return 1; }
+        return 0;
+    }
+    return 0;
+}
+
+# Iterate all 10 backends by index 0..BACKEND_COUNT.
+fn backend_at(i) {
+    return i;
+}

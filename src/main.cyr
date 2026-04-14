@@ -1,11 +1,33 @@
-# kavach — Cyrius port
-# Ported from 25935 lines of Rust
+# kavach — sandbox execution framework
+# Cyrius port from rust-old/ (25935 lines of Rust)
+#
+# Stdlib auto-included via cyrius.toml: string, fmt, alloc, vec, str,
+# syscalls, io, args, assert.
 
-# Stdlib auto-included via cyrius.toml
+include "src/util.cyr"
+include "src/error.cyr"
+include "src/backend.cyr"
+include "src/policy.cyr"
+include "src/scoring.cyr"
 
 fn main() {
     alloc_init();
+    var p = policy_strict();
+    var best = resolve_best_backend(p);
+    var score = score_backend(best, p);
     println("kavach ready");
+    var prefix1 = "  best backend: ";
+    syscall(1, 1, prefix1, strlen(prefix1));
+    var name = backend_name(best);
+    syscall(1, 1, name, strlen(name));
+    syscall(1, 1, "\n", 1);
+    var prefix2 = "  score: ";
+    syscall(1, 1, prefix2, strlen(prefix2));
+    print_num(score);
+    syscall(1, 1, " (", 2);
+    var label = score_label(score);
+    syscall(1, 1, label, strlen(label));
+    syscall(1, 1, ")\n", 2);
     return 0;
 }
 

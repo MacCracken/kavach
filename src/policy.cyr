@@ -1,0 +1,64 @@
+# kavach — SandboxPolicy
+# Ported from rust-old/src/policy/mod.rs
+#
+# No floats in Cyrius core — cpu_limit stored as tenths (10 = 1.0 core).
+
+#derive(accessors)
+struct SandboxPolicy {
+    seccomp_enabled;
+    seccomp_profile;
+    landlock_rules_len;
+    network_enabled;
+    network_tcp_bind_len;
+    network_tcp_connect_len;
+    read_only_rootfs;
+    memory_limit_mb;
+    cpu_limit_tenths;
+    max_pids;
+    landlock_abstract_unix;
+    landlock_signal;
+}
+
+var SANDBOX_POLICY_SIZE = 96;
+
+fn policy_new() {
+    var p = alloc(SANDBOX_POLICY_SIZE);
+    var i = 0;
+    while (i < SANDBOX_POLICY_SIZE) {
+        store64(p + i, 0);
+        i = i + 8;
+    }
+    return p;
+}
+
+fn policy_minimal() {
+    return policy_new();
+}
+
+fn policy_basic() {
+    var p = policy_new();
+    SandboxPolicy_set_seccomp_enabled(p, 1);
+    SandboxPolicy_set_seccomp_profile(p, "basic");
+    return p;
+}
+
+fn policy_strict() {
+    var p = policy_new();
+    SandboxPolicy_set_seccomp_enabled(p, 1);
+    SandboxPolicy_set_seccomp_profile(p, "strict");
+    SandboxPolicy_set_read_only_rootfs(p, 1);
+    SandboxPolicy_set_memory_limit_mb(p, 512);
+    SandboxPolicy_set_cpu_limit_tenths(p, 10);
+    SandboxPolicy_set_max_pids(p, 64);
+    SandboxPolicy_set_landlock_abstract_unix(p, 1);
+    SandboxPolicy_set_landlock_signal(p, 1);
+    return p;
+}
+
+# Case-insensitive preset lookup. Returns 0 on unknown name.
+fn policy_from_preset(name) {
+    if (strieq(name, "minimal") == 1) { return policy_minimal(); }
+    if (strieq(name, "basic") == 1) { return policy_basic(); }
+    if (strieq(name, "strict") == 1) { return policy_strict(); }
+    return 0;
+}

@@ -1,0 +1,43 @@
+# kavach — error codes
+# Ported from rust-old/src/error.rs
+
+enum KavachError {
+    OK = 0;
+    BACKEND_UNAVAILABLE = 1;
+    CREATION_FAILED = 2;
+    EXEC_FAILED = 3;
+    TIMEOUT = 4;
+    POLICY_VIOLATION = 5;
+    CREDENTIAL_ERROR = 6;
+    INVALID_TRANSITION = 7;
+    EXTERNALIZATION_BLOCKED = 8;
+    IO_ERROR = 9;
+    OTHER = 10;
+}
+
+fn kavach_err_name(code) {
+    if (code == KavachError.OK) { return "ok"; }
+    if (code == KavachError.BACKEND_UNAVAILABLE) { return "backend not available"; }
+    if (code == KavachError.CREATION_FAILED) { return "sandbox creation failed"; }
+    if (code == KavachError.EXEC_FAILED) { return "sandbox execution failed"; }
+    if (code == KavachError.TIMEOUT) { return "sandbox timeout"; }
+    if (code == KavachError.POLICY_VIOLATION) { return "policy violation"; }
+    if (code == KavachError.CREDENTIAL_ERROR) { return "credential error"; }
+    if (code == KavachError.INVALID_TRANSITION) { return "lifecycle error"; }
+    if (code == KavachError.EXTERNALIZATION_BLOCKED) { return "externalization blocked"; }
+    if (code == KavachError.IO_ERROR) { return "i/o error"; }
+    if (code == KavachError.OTHER) { return "error"; }
+    return "unknown error";
+}
+
+fn kavach_err_print(code, detail) {
+    var name = kavach_err_name(code);
+    syscall(1, 2, "kavach: ", 8);
+    syscall(1, 2, name, strlen(name));
+    if (detail != 0) {
+        syscall(1, 2, ": ", 2);
+        syscall(1, 2, detail, strlen(detail));
+    }
+    syscall(1, 2, "\n", 1);
+    return 0;
+}
