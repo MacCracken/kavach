@@ -4,7 +4,7 @@ version = "3.0.0"
 description = "Sandbox execution framework — 10 backends, strength scoring, 3-scanner gate, HMAC audit chain. Cyrius port of Rust v2.x."
 license = "GPL-3.0-only"
 language = "cyrius"
-cyrius = "4.4.4"
+cyrius = "4.5.0"
 
 [build]
 entry = "src/main.cyr"
