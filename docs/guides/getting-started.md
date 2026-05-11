@@ -7,12 +7,24 @@ configure a policy, create a sandbox, execute through the full pipeline.
 
 ```sh
 cd kavach
+cyrius deps                                # resolve lib/ from cyrius.cyml [deps]
 cyrius build src/main.cyr build/kavach
-./build/kavach         # runs the end-to-end demo
+./build/kavach                             # runs the end-to-end demo
 ```
 
-Cyrius toolchain ≥ 4.4.3 required. Build dependencies resolve automatically
-from `cyrius.toml` (stdlib + sigil 2.1.2 for crypto).
+Cyrius toolchain `5.10.34` required (pinned in `cyrius.cyml` — same first-party
+tree gate as majra / nein / agnosys, locked by the sigil-NI asm-offset bisect).
+Dependencies are declared in [`cyrius.cyml`](../../cyrius.cyml):
+
+- **Cyrius stdlib** modules (alloc, args, assert, bench, bigint, chrono, fmt,
+  fnptr, freelist, hashmap, io, process, str, string, syscalls, tagged, vec)
+- **[sigil](https://github.com/MacCracken/sigil) 2.9.0** for SHA-256, HMAC-SHA256,
+  and constant-time compare (used by `src/audit.cyr` + `src/util.cyr::ct_streq`).
+  Pinned at 2.9.0 because 2.9.1+ SIGILL on the ed25519-NI / aes-gcm-NI paths
+  under cc 5.10.x.
+
+`cyrius deps` populates `lib/` (gitignored) — that directory is reproducible
+from the manifest + lockfile, not committed.
 
 ## 2. Configure a sandbox
 

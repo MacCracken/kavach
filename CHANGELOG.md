@@ -5,6 +5,57 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Post-3.1.0 doc sweep. Drains the four `🟡 Stale` / `🟠 Read-through` rows
+the v3.1.0 cut's `doc-health.md` queued. No source / behavior changes.
+
+### Changed
+- **`README.md`** — Cyrius floor bumped to 5.10.34 with the pin-lock
+  rationale (sigil-NI asm-offset bisect); `cyrius deps` step added to
+  the build instructions; `cyrius.toml` → `cyrius.cyml`; v3.0 status
+  block split into v3.1 modernization arc + v3.0 port summary; dep
+  list updated against `[deps] stdlib` + sigil 2.9.0; `doc-health.md`
+  cross-link added under `## Docs`.
+- **`CLAUDE.md`** — Rust-era `MSRV: 1.89` line dropped; Version
+  bumped 3.0.0 → 3.1.0; new `Language: Cyrius (pinned at 5.10.34 …)`
+  line carrying the pin-lock rationale; `Type` line acknowledges the
+  consumer-embedding future. Cleanliness Check lines in P(-1) +
+  Development Loop swapped from `cargo fmt / clippy / audit / deny`
+  → `cyrius fmt / lint / vet / audit`. Version-check step references
+  `cyrius.cyml` instead of `Cargo.toml`. Key Principles section
+  translated from Rust-attribute idioms (`#[non_exhaustive]`,
+  `#[must_use]`, `#[inline]`, `Cow over clone`, `// SAFETY:`) to
+  Cyrius-shaped equivalents (Str-borrows, `# SAFETY:` comment on raw
+  syscalls, etc.). DO-NOT list rewritten — pin-bump prohibition
+  added, `cyrius fmt` on non-pinned-toolchain prohibition added,
+  `lib/` / `build/` gitignore reminder added; `Cargo.lock` reference
+  dropped.
+- **`docs/guides/getting-started.md`** — § 1 "Build + install"
+  rewritten: `cyrius deps` step added; toolchain line bumped to
+  5.10.34 with pin-lock rationale; dep list aligned to `[deps]
+  stdlib`; sigil pin updated 2.1.2 → 2.9.0 with the SIGILL gate
+  context; `lib/` gitignored model documented.
+- **`docs/development/rust-old-removal.md`** — sed recipe in
+  § "Removal command" updated: `cyrius.toml` → `cyrius.cyml`; commit
+  message bumped from v3.0 → v3.x. Pre-removal checklist gains a
+  checked-off row recording the cyrius.cyml-migration prereq. Parity
+  audit re-verified against the v3.0 surface — no drift caught.
+- **`docs/doc-health.md`** — bucket counts walked after the sweep:
+  Fresh 5 → 9, Stale 3 → 1 (benchmarks-rust-v-cyrius.md only — see
+  the Tier-1 frozen note), Read-through 2 → 0. Per-row Last touched /
+  Status / Notes refreshed for the four files above. The queued
+  fmt-drift + lint-warnings rows remain on the v3.2 `cyrius audit`
+  clean item; nothing else carries over.
+
+### Still queued (carried into v3.2 backlog)
+- `cyrius fmt` drift across 9 src/ files + 2 tests/ files — needs a
+  clean run against the cc 5.10.34 toolchain (don't run with a
+  non-pinned local toolchain).
+- `cyrius lint` long-line warnings (37 total), chiefly in the
+  scanner pattern lists. CI runs both as `::warning::` informational
+  steps until cleared.
+
 ## [3.1.0] — 2026-05-10
 
 **Modernization arc.** Brings the kavach build / dependency / CI / release

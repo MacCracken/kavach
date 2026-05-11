@@ -101,6 +101,9 @@ Before `rust-old/` is deleted, these need to live somewhere:
       `benchmarks-rust-v-cyrius.md`.
 - [x] Test coverage is equivalent for ported features.
 - [x] P(-1) hardening pass complete (ADR-005).
+- [x] Manifest migration to `cyrius.cyml` complete (v3.1.0 modernization
+      arc); sed recipe below targets `cyrius.cyml` rather than the retired
+      `cyrius.toml`.
 - [ ] Downstream consumers (SY, stiva, kiran, …) notified to migrate imports.
 - [ ] One `git log` snapshot captured for rollback reference.
 
@@ -111,9 +114,10 @@ Before `rust-old/` is deleted, these need to live somewhere:
 git tag kavach-pre-rust-removal HEAD
 # Delete
 git rm -r rust-old/
-# Update the grep-friendly remaining lines:
-sed -i 's/25935 lines of Rust/25935 lines of Rust (archived pre-v3.0.0)/' cyrius.toml src/main.cyr
-git commit -m "chore: remove rust-old tree; Cyrius port v3.0 is source of truth"
+# Update the grep-friendly remaining lines (cyrius.cyml carries the
+# package description post-v3.1.0; src/main.cyr carries the port header):
+sed -i 's/25935 lines of Rust/25935 lines of Rust (archived pre-v3.0.0)/' cyrius.cyml src/main.cyr
+git commit -m "chore: remove rust-old tree; Cyrius port v3.x is source of truth"
 ```
 
 ## Post-removal

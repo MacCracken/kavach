@@ -10,19 +10,29 @@ classification, credential proxy, HMAC-SHA256 audit chain — all in pure Cyrius
 
 ---
 
-## v3.0 status
+## Status
 
-Cyrius port of the Rust v1.x framework. v3.0 shipped the full architecture
-(10 backends + scanners + audit + credential proxy) and the P(-1) security
-hardening pass ([ADR-005](docs/adr/005-v2-hardening-pass.md)); v3.0 drained
-the "ready" queue (UUID v4, WARN-verdict redaction, OffenderTracker,
-integrity monitoring, composite backends, observability types).
+**v3.1 — modernization arc.** Behavior-preserving repo modernization on top
+of the v3.0 surface: Cyrius pin 4.5.0 → 5.10.34, manifest format
+`cyrius.toml` → `cyrius.cyml`, `lib/` resolved by `cyrius deps` (no longer
+committed), CI/release rewritten to match the rest of the first-party tree
+(majra, nein, agnosys). The sandbox runtime, scanners, audit chain, and
+threat classifier are unchanged from v3.0. See
+[`CHANGELOG.md`](CHANGELOG.md) for the full v3.1.0 stanza and
+[`docs/development/roadmap.md`](docs/development/roadmap.md) for the
+cascaded v3.2 unblocking queue.
 
-See [ADR-001](docs/adr/001-cyrius-port-architecture.md) for the port
-philosophy and [ADR-004](docs/adr/004-deferred-features.md) for what's
-intentionally deferred.
+**v3.0 — Cyrius port.** Full Rust → Cyrius migration: 10 backends, 3
+scanners, audit chain, credential proxy, threat classifier — plus the
+P(-1) security hardening pass ([ADR-005](docs/adr/005-v2-hardening-pass.md))
+that closed 9 CWE-class findings (constant-time HMAC verify, full RFC 8259
+JSON escape, symlink TOCTOU on /tmp, sensitive-artifact mode 0600, secret
+evidence redaction, argument-smuggling guards, HMAC-key zeroization,
+integer overflow guards). See [ADR-001](docs/adr/001-cyrius-port-architecture.md)
+for the port philosophy and [ADR-004](docs/adr/004-deferred-features.md)
+for what's intentionally deferred.
 
-| | v1.x (Rust) | v3.0 (Cyrius) |
+| | v1.x (Rust) | v3.x (Cyrius) |
 |--|--|--|
 | Lines | ~26K | ~3K |
 | Backends registered | 10 | 10 — full set with real dispatch contracts |
@@ -53,20 +63,31 @@ intentionally deferred.
 ## Build
 
 ```sh
-# Requires Cyrius ≥ 4.0.0
+# Requires Cyrius 5.10.34 (pinned in cyrius.cyml; first-party tree gate
+# from the sigil-NI asm-offset bisect — same pin as majra / nein /
+# agnosys).
+
+# 1. Resolve deps — populates lib/ (gitignored) with the cc 5.10.34
+#    stdlib snapshot + sigil 2.9.0 at the pinned tag.
+cyrius deps
+
+# 2. Build the binary.
 cyrius build src/main.cyr build/kavach
 ./build/kavach
 
-# Run the test suite (201 tests)
+# Run the test suite (349 tests).
 cyrius test tests/kavach.tcyr
 
-# Audit (fmt + lint + vet + deny + test + bench + doc)
+# Run the bench harness (15 benches).
+cyrius bench tests/kavach.bcyr
+
+# Audit (fmt + lint + vet + deny + test + bench + doc).
 cyrius audit
 ```
 
-Dependencies (declared in [`cyrius.toml`](cyrius.toml)):
-- Cyrius stdlib — `string, fmt, alloc, vec, str, syscalls, io, args, assert, bigint, chrono, hashmap, freelist, fnptr, process`
-- [sigil](https://github.com/MacCracken/sigil) ≥ 2.1.2 — SHA-256, HMAC-SHA256
+Dependencies (declared in [`cyrius.cyml`](cyrius.cyml)):
+- **Cyrius stdlib** — `alloc, args, assert, bench, bigint, chrono, fmt, fnptr, freelist, hashmap, io, process, str, string, syscalls, tagged, vec` (resolved by `cyrius deps` into `lib/`, which is gitignored)
+- **[sigil](https://github.com/MacCracken/sigil) 2.9.0** — SHA-256, HMAC-SHA256, constant-time compare (pinned tag; 2.9.1+ SIGILL on the ed25519-NI / aes-gcm-NI paths under cc 5.10.x — see [doc-health.md](docs/doc-health.md) for the bisect context)
 
 ---
 
@@ -109,7 +130,7 @@ fn app() {
 
 ## Backend scoreboard
 
-| Backend | Base score | Tier | v3.0 status |
+| Backend | Base score | Tier | v3.x status |
 |---------|-----------:|------|-------------|
 | Noop | 0 | minimal | **registered** (testing only) |
 | Process | 50 | standard | **registered** (fork+exec+capture + guard precheck) |
@@ -179,7 +200,8 @@ Separate paths:
 - [Architecture overview](docs/architecture/overview.md) — module map, data flow, extension pattern
 - [Guides](docs/guides/) — getting started, composite backends, threat tracking
 - [Worked examples](docs/examples/) — four progressive walkthroughs
-- [Benchmarks — Rust v1.x vs Cyrius v3.0](benchmarks-rust-v-cyrius.md) — honest per-op comparison
+- [Benchmarks — Rust v2.0 vs Cyrius v3.0](benchmarks-rust-v-cyrius.md) — honest per-op comparison (frozen at the v3.0 cutover)
+- [Doc Health](docs/doc-health.md) — currency ledger for the prose docs
 - [ADR-001](docs/adr/001-cyrius-port-architecture.md) — port architecture
 - [ADR-002](docs/adr/002-backend-dispatch-fnptr-table.md) — dispatch table
 - [ADR-003](docs/adr/003-fixed-point-threat-scoring.md) — fixed-point threat scoring

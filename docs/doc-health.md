@@ -6,7 +6,7 @@ type: state
 
 # Documentation Health — kavach
 
-> **Last refresh**: 2026-05-10 (initial audit at the v3.1.0 modernization cut — cyrius pin 4.5.0 → 5.10.34, `cyrius.toml` → `cyrius.cyml`, lib/ gitignored, CI/release modernized) | **Refresh cadence**: when docs are touched, update the affected row. Pair with the release dance, but no hard release attachment.
+> **Last refresh**: 2026-05-10 (initial audit at the v3.1.0 modernization cut + post-3.1.0 doc sweep — README / CLAUDE.md refreshed against the modernization reality; getting-started.md + rust-old-removal.md read-through complete). | **Refresh cadence**: when docs are touched, update the affected row. Pair with the release dance, but no hard release attachment.
 > **Scope**: This repo only (`kavach`) — root-level files (README, CHANGELOG, CLAUDE.md, etc.) plus the entire `docs/` tree, plus `benchmarks-rust-v-cyrius.md` at the root. The `rust-old/` tree is **deliberately excluded** — it's the pre-v3.0 Rust archive (slated for removal, see roadmap) and its inline docs are not maintained.
 
 This is a **ledger**, not a one-time audit. Rewrite-in-place as docs change. Kavach is the sandbox-execution primitive for SY, stiva, kiran, AgnosAI, hoosh, bote, and aethersafta; stale backend / policy / scanner docs propagate downstream as consumer-side mis-integrations, so doc currency carries weight even though the doc surface is small (~22 files).
@@ -17,13 +17,13 @@ Pattern lifted from the majra ledger ([`majra/docs/doc-health.md`](https://githu
 
 ## At a glance — 2026-05-10 inventory
 
-**~22 markdown files** total (8 root + 13 under `docs/` + 1 benchmarks artifact at root). Buckets at the v3.1.0 modernization cut:
+**~22 markdown files** total (8 root + 13 under `docs/` + 1 benchmarks artifact at root). Buckets after the v3.1.0 modernization cut + the post-cut doc sweep:
 
 | Bucket | Count | What it means |
 |---|---|---|
-| ✅ **Fresh — touched in the v3.1.0 modernization arc** | 5 | `CHANGELOG.md`, `VERSION`, `cyrius.cyml` (new), `.github/workflows/{ci,release}.yml`, `docs/development/roadmap.md`, `docs/doc-health.md` (this file). All carry the cyrius-5.10.34 / sigil-2.9.0 / lib-via-`cyrius deps` reality. |
-| 🟡 **Stale — refresh in place** | 3 | `README.md` (says "Requires Cyrius ≥ 4.0.0" + references `cyrius.toml`; needs cc 5.10.34 + cyrius.cyml + `cyrius deps` flow), `CLAUDE.md` (Version field still reads v3.0.0; MSRV line is Rust-era and meaningless under Cyrius; `cargo fmt / clippy / audit / deny` references in the dev loop don't match the `cyrius audit` reality), `benchmarks-rust-v-cyrius.md` root file (snapshot at v3.0.0; see Tier-6 frozen note — refresh only if a new comparison snapshot is captured). |
-| 🟠 **Read-through outstanding** | 2 | `docs/guides/getting-started.md` (mentions `cyrius.toml` for deps — needs swap to cyrius.cyml + sigil tag 2.9.0; otherwise the build-and-run flow still tracks src/). `docs/development/rust-old-removal.md` (references `cyrius.toml` in its post-removal sed recipe; needs read-through to confirm parity checklist is still accurate). |
+| ✅ **Fresh — touched in the v3.1.0 arc or the post-cut sweep** | 9 | `CHANGELOG.md`, `VERSION`, `cyrius.cyml` (new), `.github/workflows/{ci,release}.yml`, `docs/development/roadmap.md`, `docs/doc-health.md` (this file) — all from the modernization arc. Plus `README.md`, `CLAUDE.md`, `docs/guides/getting-started.md`, `docs/development/rust-old-removal.md` — refreshed in the post-cut sweep. All carry the cyrius-5.10.34 / sigil-2.9.0 / lib-via-`cyrius deps` reality. |
+| 🟡 **Stale — refresh in place** | 1 | `benchmarks-rust-v-cyrius.md` root file (snapshot at v3.0.0; see Tier-1 frozen note — refresh only if a new comparison snapshot is captured, otherwise treat as `📦 Frozen — snapshot`). |
+| 🟠 **Read-through outstanding** | 0 | Both queued read-through items (`docs/guides/getting-started.md`, `docs/development/rust-old-removal.md`) closed in the post-cut sweep. |
 | 🔵 **Probably evergreen** | 4 | `SECURITY.md`, `CODE_OF_CONDUCT.md`, `LICENSE`, `CONTRIBUTING.md`. No version-tied claims that drift between minor releases. Re-read pass annually. |
 | 📦 **Archive / frozen by design** | 6 | `docs/adr/001..005` (5 ADRs — decisions are dated at write-time and don't decay; superseding ADRs reference originals) + `docs/adr/README.md` (index, refresh only when ADRs are added). |
 | 📁 **Worked examples + supplementary** | 5 | `docs/examples/01..04` + `docs/examples/README.md`, `docs/guides/{composite-backends,threat-tracking}.md`, `docs/guides/README.md`, `docs/architecture/overview.md`, `docs/development/stiva.md`. Mostly untouched in this cut — flag for refresh during next feature work that lands new public API surface. |
@@ -39,11 +39,13 @@ Pattern lifted from the majra ledger ([`majra/docs/doc-health.md`](https://githu
 - ✅ `docs/development/roadmap.md` — previous "v3.1 — unblocking queue" cascaded to v3.2 per the modernization arc convention; new "v3.1 — modernization arc" section records what shipped.
 - ✅ `docs/doc-health.md` (this file) scaffolded — initial audit + bucket assignment + 3 stale rows queued for follow-up.
 
-**Queued for follow-up in 3.1.x:**
-- 🟡 `README.md` refresh — drop "Requires Cyrius ≥ 4.0.0", swap `cyrius.toml` → `cyrius.cyml`, add `cyrius deps` step before build.
-- 🟡 `CLAUDE.md` refresh — drop Rust-era MSRV line, swap `cargo fmt / clippy / audit / deny` references to `cyrius fmt / lint / vet / audit`, bump Version field to v3.1.0.
-- 🟠 `docs/guides/getting-started.md` read-through — manifest reference swap; verify the build/configure/execute walkthrough still tracks src/.
-- 🟠 `docs/development/rust-old-removal.md` read-through — confirm parity checklist accuracy, swap `cyrius.toml` to `cyrius.cyml` in the post-removal sed recipe.
+**Post-cut doc sweep completed 2026-05-10:**
+- ✅ `README.md` — "Requires Cyrius ≥ 4.0.0" replaced with "Cyrius 5.10.34 (pinned in `cyrius.cyml`)"; `cyrius.toml` → `cyrius.cyml`; explicit `cyrius deps` step added to the build instructions; v3.0 status block expanded to a v3.1 / v3.0 split (modernization arc on top, port summary below); dep list updated against the actual `[deps] stdlib` set + sigil 2.9.0; consumer reference to `doc-health.md` added.
+- ✅ `CLAUDE.md` — Rust-era `MSRV: 1.89` line dropped; Version bumped 3.0.0 → 3.1.0; new `Language: Cyrius (pinned at 5.10.34 ...)` line carrying the pin-lock rationale; `Type` line rewritten to acknowledge the consumer-embedding future; Cleanliness Check lines in P(-1) + Development Loop swapped from `cargo fmt / clippy / audit / deny` → `cyrius fmt / lint / vet / audit`; `Cargo.toml` → `cyrius.cyml` in the Version-check step; Key Principles section translated from Rust-attribute idioms (`#[non_exhaustive]`, `#[must_use]`, `#[inline]`, `Cow over clone`, `// SAFETY:`) to Cyrius-shaped equivalents (Str-borrows, `# SAFETY:` comment on raw syscalls, etc.); DO-NOT list rewritten — pin-bump prohibition added, `cyrius fmt`-on-wrong-toolchain prohibition added, `lib/`/`build/` gitignore reminder added; `Cargo.lock` reference dropped.
+- ✅ `docs/guides/getting-started.md` — § 1 "Build + install" rewritten: `cyrius deps` step added; toolchain line bumped to 5.10.34 with the pin-lock rationale; dep list updated against `cyrius.cyml`; sigil pin updated 2.1.2 → 2.9.0 with the SIGILL gate context; `lib/` gitignored model documented.
+- ✅ `docs/development/rust-old-removal.md` — sed recipe in § "Removal command" updated: `cyrius.toml` → `cyrius.cyml`; commit message bumped from `v3.0` → `v3.x`; new checked-off line in the Pre-removal checklist records the cyrius.cyml-migration prereq; parity checklist re-verified against the v3.0 surface — no drift caught.
+
+**Queued for follow-up (carried from v3.1.0; now sits in roadmap v3.2 under the `cyrius audit` clean item):**
 - ⚠️ **`cyrius fmt` drift** — pre-existing drift across nine src/ files and two tests/ files (see roadmap v3.2 `cyrius audit` clean item for the file list). CI runs fmt as `::warning::` informational at v3.1.0; flip to hard fail once drift is resolved against the cc 5.10.34 toolchain. Don't run `cyrius fmt` locally with a non-5.10.34 toolchain — fmt output is minor-version-sensitive and would commit new drift.
 - ⚠️ **`cyrius lint` long-line warnings (37 total)** — pre-existing v3.0 content, chiefly in the scanner pattern lists: `src/scanning_code.cyr` (16) + `src/scanning_data.cyr` (16), plus stragglers in `src/backend_sgx.cyr` (3), `src/oci_spec.cyr` (1), `src/scanning_runtime.cyr` (1). CI runs lint as `::warning::` informational at v3.1.0; tracked alongside fmt in the v3.2 `cyrius audit` clean item. The lint step also handles cc's "exit code = warning count" convention via `|| true` so the loop doesn't trip `set -eo pipefail`.
 
@@ -53,9 +55,9 @@ Pattern lifted from the majra ledger ([`majra/docs/doc-health.md`](https://githu
 
 | File | Last touched | Status | Notes |
 |---|---|---|---|
-| `README.md` | 2026-04-13 | 🟡 Stale | "Requires Cyrius ≥ 4.0.0" + `cyrius.toml` reference at L67 are pre-modernization. Queued for the 3.1.x refresh: bump floor to 5.10.34, swap manifest reference, document the `cyrius deps` step. The v1.x↔v3.0 comparison table is still accurate as a historical artifact. |
+| `README.md` | 2026-05-10 | ✅ Fresh | Refreshed in the post-3.1.0 sweep: Cyrius floor bumped to 5.10.34 with the pin-lock rationale; `cyrius deps` step added to build instructions; `cyrius.toml` → `cyrius.cyml`; v3.0 status block split into v3.1 modernization arc + v3.0 port summary; dep list updated against `[deps] stdlib` + sigil 2.9.0; doc-health cross-link added. The v1.x↔v3.x comparison table is still accurate as a historical artifact. |
 | `CHANGELOG.md` | 2026-05-10 | ✅ Fresh | v3.1.0 stanza records the modernization arc. v3.0.0 stanza unchanged. |
-| `CLAUDE.md` | 2026-04-13 | 🟡 Stale | `MSRV: 1.89` is a Rust artifact and no longer load-bearing under Cyrius. `Version: v3.0.0` needs bump. Cleanliness-check lines reference `cargo *` tooling — swap to `cyrius fmt / lint / vet / audit`. Queued for 3.1.x. |
+| `CLAUDE.md` | 2026-05-10 | ✅ Fresh | Refreshed in the post-3.1.0 sweep: `MSRV: 1.89` Rust artifact dropped; Version bumped to v3.1.0; new `Language: Cyrius (pinned at 5.10.34 ...)` line; Cleanliness Check lines (P(-1) + Development Loop) swapped from `cargo *` to `cyrius *`; Key Principles translated from Rust-attribute idioms to Cyrius-shaped equivalents; DO-NOT list rewritten with the pin-bump + fmt-on-wrong-toolchain prohibitions. `Cargo.toml` / `Cargo.lock` references removed. |
 | `CONTRIBUTING.md` | 2026-04-13 | 🔵 Evergreen | Generic contributor workflow. Re-read annually. |
 | `SECURITY.md` | 2026-04-13 | 🔵 Evergreen | Reporting policy + scope. Re-read annually. |
 | `CODE_OF_CONDUCT.md` | 2026-04-13 | 🔵 Evergreen | Standard. |
@@ -96,7 +98,7 @@ Decision velocity is low. Open a new ADR only when a load-bearing decision is re
 | File | Last touched | Status | Notes |
 |---|---|---|---|
 | `roadmap.md` | 2026-05-10 | ✅ Fresh | v3.1 cascade applied: prior "v3.1 — unblocking queue" renamed to "v3.2 — unblocking queue"; new "v3.1 — modernization arc (shipped)" section captures the cc-5.10.34 / cyrius.cyml / lib-via-deps / CI rewrite work. The cyrius `deps` symlink-bug roadmap item is **retired** — the new manifest uses `git`-based `[deps.sigil]` per majra/nein and no longer needs the path-symlink workaround. |
-| `rust-old-removal.md` | 2026-04-13 | 🟠 Read-through | Per-symbol audit confirming Cyrius coverage + pre-removal checklist. Post-removal sed recipe at L115 references `cyrius.toml`; needs read-through during the rust-old/ deletion (which still sits in the v3.2 backlog). |
+| `rust-old-removal.md` | 2026-05-10 | ✅ Fresh | Read-through completed in the post-3.1.0 sweep: sed recipe in § "Removal command" updated `cyrius.toml` → `cyrius.cyml`; commit message bumped v3.0 → v3.x; new checked-off line records the cyrius.cyml-migration prereq. Parity audit (Rust public API ↔ Cyrius modules) re-verified against the v3.0 surface — no drift. The rust-old/ tree deletion itself still sits in the v3.2 backlog. |
 | `stiva.md` | 2026-04-13 | 📁 Supplementary | Integration note for the stiva consumer. Refresh when stiva's Cyrius port lands (tracked in roadmap v3.2 blocked queue). |
 
 ---
@@ -106,7 +108,7 @@ Decision velocity is low. Open a new ADR only when a load-bearing decision is re
 | File | Last touched | Status | Notes |
 |---|---|---|---|
 | `README.md` | 2026-04-13 | 📁 Supplementary | Index. |
-| `getting-started.md` | 2026-04-13 | 🟠 Read-through | L15 references `cyrius.toml` for deps. Swap to `cyrius.cyml` + document the `cyrius deps` step. Otherwise the build → configure → execute walkthrough still tracks src/ as of the v3.0 cut. |
+| `getting-started.md` | 2026-05-10 | ✅ Fresh | Refreshed in the post-3.1.0 sweep: § "Build + install" rewritten with the `cyrius deps` step; toolchain line bumped to 5.10.34 with pin-lock rationale; dep list aligned to `[deps] stdlib`; sigil pin bumped 2.1.2 → 2.9.0; `lib/` gitignored model documented. Build → configure → execute walkthrough still tracks src/ (no drift caught in the read-through). |
 | `composite-backends.md` | 2026-04-13 | 📁 Supplementary | Defense-in-depth merge rules. No manifest references; content tracks `src/composite.cyr`. |
 | `threat-tracking.md` | 2026-04-13 | 📁 Supplementary | Intent scoring + OffenderTracker + decay tuning. No manifest references; content tracks `src/scanning_threat.cyr`. |
 
