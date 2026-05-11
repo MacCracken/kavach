@@ -44,6 +44,7 @@ Pattern lifted from the majra ledger ([`majra/docs/doc-health.md`](https://githu
 - 🟡 `CLAUDE.md` refresh — drop Rust-era MSRV line, swap `cargo fmt / clippy / audit / deny` references to `cyrius fmt / lint / vet / audit`, bump Version field to v3.1.0.
 - 🟠 `docs/guides/getting-started.md` read-through — manifest reference swap; verify the build/configure/execute walkthrough still tracks src/.
 - 🟠 `docs/development/rust-old-removal.md` read-through — confirm parity checklist accuracy, swap `cyrius.toml` to `cyrius.cyml` in the post-removal sed recipe.
+- ⚠️ **`cyrius fmt` drift** — pre-existing drift across nine src/ files and two tests/ files (see roadmap v3.2 `cyrius audit` clean item for the file list). CI runs fmt as `::warning::` informational at v3.1.0; flip to hard fail once drift is resolved against the cc 5.10.34 toolchain. Don't run `cyrius fmt` locally with a non-5.10.34 toolchain — fmt output is minor-version-sensitive and would commit new drift.
 
 ---
 

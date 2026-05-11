@@ -73,7 +73,7 @@ re-scoped to the modernization arc.
 | Feature | Source | Notes |
 |---------|--------|-------|
 | `FileInjection.mode` honoring helper | ADR-005 §M2 | `credential_inject_files(injections)` that writes via `file_write_secure` then `sys_fchmod`. |
-| `cyrius audit` clean | v3.0 backlog | fmt / lint / vet / deny — partially covered by the v3.1.0 CI rewrite; close the loop by getting `cyrius audit` to exit-0 in tree. |
+| `cyrius audit` clean | v3.0 backlog | fmt / lint / vet / deny — partially covered by the v3.1.0 CI rewrite; close the loop by getting `cyrius audit` to exit-0 in tree. **Specific work owed**: `cyrius fmt` drift across `src/{audit,backend_sy_agnos,composite,credential,quarantine,scanning_code,scanning_data,scanning_gate,scanning_secrets}.cyr` and `tests/kavach.{tcyr,bcyr}` — inherited from the v3.0 cut. The v3.1.0 CI runs fmt as a `::warning::` informational step; flip it to `exit 1` once the drift is resolved against the cc 5.10.34 toolchain. |
 | Delete `rust-old/` | v3.0 backlog | Fully captured per `rust-old-removal.md`. Final pre-removal parity check + sed-recipe update (`cyrius.toml` → `cyrius.cyml`) owed. |
 
 #### Blocked — awaiting upstream
