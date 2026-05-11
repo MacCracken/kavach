@@ -233,7 +233,7 @@ Each backend is a plug into the dispatch table. To add `<name>`:
 
 | Dep | Version | Purpose |
 |-----|---------|---------|
-| Cyrius toolchain | 5.10.34 (pinned in `cyrius.cyml`) | First-party tree gate from the sigil-NI asm-offset bisect — same pin as majra / nein / agnosys |
+| Cyrius toolchain | 5.10.44 (pinned in `cyrius.cyml`) | First-party tree gate from the sigil-NI asm-offset bisect — same pin as majra / nein / agnosys |
 | Cyrius stdlib | resolved by `cyrius deps` into `lib/` (gitignored) | `alloc, args, assert, bench, bigint, chrono, dynlib, fdlopen, fmt, fnptr, freelist, fs, hashmap, hashmap_fast, io, mmap, net, process, result, sandhi, str, string, syscalls, tagged, tls, vec` |
 | [sigil](https://github.com/MacCracken/sigil) | 2.9.0 (pinned tag) | SHA-256, HMAC-SHA256, constant-time compare. 2.9.1+ SIGILL on the NI paths under cc 5.10.x — see [`doc-health.md`](../doc-health.md) for bisect context. |
 

@@ -5,6 +5,20 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.2.1] — 2026-05-11
+
+Toolchain pin refresh — Cyrius 5.10.34 → 5.10.44 across the first-party
+tree (majra / nein / agnosys / kavach), re-validated against the
+sigil-NI asm-offset bisect. No source changes; CI fmt baseline now
+runs at 5.10.44.
+
+### Changed
+- **Cyrius pin** — `cyrius.cyml` bumped from `5.10.34` to `5.10.44`.
+  `README.md`, `CLAUDE.md`, and `docs/architecture/overview.md` updated
+  to match. The DO-NOT rule against running `cyrius fmt` with a
+  non-pinned local toolchain now references 5.10.44 as the in-tree
+  baseline.
+
 ## [3.2.0] — 2026-05-10
 
 Two new feature modules from the v3.2 Ready queue. Both are unblocked

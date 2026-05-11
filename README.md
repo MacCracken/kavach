@@ -22,7 +22,7 @@ benches. v3.3.0 (the final cut of this work arc) will land Landlock +
 `sandbox_fork_exec` infrastructure + OCI backend cgroup integration.
 
 **v3.1 — modernization arc + closeout.** v3.1.0 brought the repo onto the
-first-party-tree baseline (Cyrius pin 5.10.34, `cyrius.cyml` manifest,
+first-party-tree baseline (Cyrius pin 5.10.44, `cyrius.cyml` manifest,
 `lib/` via `cyrius deps`, CI/release rewritten). v3.1.1 added the
 `FileInjection.mode` honoring helper (ADR-005 §M2), cleared 37 lint
 warnings, and removed the `rust-old/` archive (1.4 MB / 26K lines).
@@ -72,11 +72,11 @@ for what's intentionally deferred.
 ## Build
 
 ```sh
-# Requires Cyrius 5.10.34 (pinned in cyrius.cyml; first-party tree gate
+# Requires Cyrius 5.10.44 (pinned in cyrius.cyml; first-party tree gate
 # from the sigil-NI asm-offset bisect — same pin as majra / nein /
 # agnosys).
 
-# 1. Resolve deps — populates lib/ (gitignored) with the cc 5.10.34
+# 1. Resolve deps — populates lib/ (gitignored) with the cc 5.10.44
 #    stdlib snapshot + sigil 2.9.0 at the pinned tag.
 cyrius deps
 
