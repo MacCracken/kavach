@@ -71,8 +71,28 @@ fn process_exec(sandbox, command) {
         return r;
     }
 
+    # Cgroup wrap: if the sandbox's policy carries any resource limit
+    # (memory.max / cpu.max / pids.max), create a per-sandbox cgroup,
+    # wrap the user argv in the cgroup-join sh prelude, and tear the
+    # cgroup down after exec. Graceful fall-through when cgroup v2 is
+    # unavailable: setup returns 0 and we run unwrapped.
+    var cgroup_path = 0;
+    var cfg = Sandbox_config(sandbox);
+    if (cfg != 0) {
+        var policy = SandboxConfig_policy(cfg);
+        if (policy != 0) {
+            if (cgroup_policy_has_limits(policy) == 1) {
+                cgroup_path = cgroup_setup(policy);
+                if (cgroup_path != 0) {
+                    args = cgroup_wrap_argv(cgroup_path, args);
+                }
+            }
+        }
+    }
+
     var buf = alloc(PROCESS_MAX_OUTPUT);
     var n = exec_capture(args, buf, PROCESS_MAX_OUTPUT);
+    cgroup_teardown(cgroup_path);
     var end_ns = now_ns();
 
     var r = exec_result_new();

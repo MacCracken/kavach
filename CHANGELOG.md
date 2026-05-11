@@ -5,6 +5,132 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.2.0] — 2026-05-10
+
+Two new feature modules from the v3.2 Ready queue. Both are unblocked
+at cc 5.10.34 + sigil 2.9.0 — no upstream wait. The third Ready
+feature (Landlock hooks) deferred to v3.3.0 because it requires a
+`sandbox_fork_exec(args, pre_exec_fn)` helper that's better built
+jointly with future seccomp support; v3.3.0 will be the final cut of
+this work arc.
+
+### Added
+- **`src/cgroup.cyr`** — cgroups v2 resource limits. Wires
+  `SandboxPolicy.{memory_limit_mb, cpu_limit_tenths, max_pids}` into a
+  per-sandbox cgroup at `/sys/fs/cgroup/kavach-<random_u64>/`. Writes
+  `memory.max` (bytes), `cpu.max` (quota/period with 100ms period), and
+  `pids.max` from the policy. Placement uses the shell-prepend pattern:
+  user argv gets wrapped in `["sh", "-c", "echo $$ > <path>/cgroup.procs;
+  exec \"$@\"", "--", <user argv>...]` so the shell writes its own PID
+  into `cgroup.procs` and `exec "$@"` replaces the shell with the user
+  command — same PID, same cgroup placement, **no shell re-interpretation
+  of the user's argv** (variables and metachars in user args don't
+  expand because they pass through `"$@"` positionally, not through
+  `<command>` substitution). Graceful no-op when /sys/fs/cgroup isn't
+  writable. Public surface: `cgroup_supported()`,
+  `cgroup_policy_has_limits(policy)`, `cgroup_setup(policy) → path`,
+  `cgroup_wrap_argv(path, user_argv) → wrapped_argv`,
+  `cgroup_teardown(path)`. Wired into `backend_process.cyr::process_exec`;
+  the OCI backend handles cgroup limits via the OCI runtime spec
+  (future enhancement; current `oci_spec.cyr` minimal spec is unchanged
+  in this cut).
+- **`src/credential_http.cyr`** — closes ADR-004 §4. Sandhi-backed
+  HTTP server on `127.0.0.1:<port>` (loopback only — never binds
+  `INADDR_ANY`) that serves `GET /v1/secret/<name>` from the existing
+  in-memory `CredentialProxy`. Per-instance allowlist gates which names
+  this proxy serves; allowlist-miss returns 403 without consulting the
+  proxy (no oracle for "does this name exist?"). Every served fetch +
+  every 403/404 hits the audit chain when one is wired. Pairs with the
+  v3.0 env/file/stdin injection methods — HTTP is the "no secret on
+  disk" alternative. Public surface:
+  `credential_http_proxy_new(proxy, allowed_vec, audit) → handle`,
+  `credential_http_proxy_listen(http, port) → 0|-1`,
+  `credential_http_proxy_serve_one(http)`,
+  `credential_http_proxy_serve(http, max_requests)`,
+  `credential_http_proxy_close(http)`.
+- **`file_write_secure_modal` precedent reuse** — the cgroup module's
+  `_cgroup_write_int` / `_cgroup_write_str` use plain `file_write_all`
+  rather than the secure variant; cgroup files are owned by root and
+  the kernel manages their attributes — the precautions
+  `file_write_secure` adds (O_EXCL, O_NOFOLLOW, mode 0600) don't
+  apply to /sys/fs/cgroup writes.
+- **stdlib surface added** to `cyrius.cyml [deps] stdlib`:
+  `dynlib`, `fdlopen`, `fs`, `hashmap_fast`, `mmap`, `net`, `result`,
+  `sandhi`, `tls` — most are transitive pulls from sandhi's TLS / HTTP
+  surface. `net` + `sandhi` are the direct dependencies of the HTTP
+  credential proxy.
+- **28 new tests** (358 → 386). Coverage:
+  - cgroup: `policy_has_limits` shape, `wrap_argv` shape (argv layout +
+    body content), `supported()` graceful return, `setup()` no-op when
+    unsupported (the common CI environment).
+  - credential_http: handle shape, allowlist hit/miss/empty, path
+    extraction (valid / wrong-prefix / empty-suffix / nested-path
+    rejected), listen+close lifecycle.
+- **5 new benches** (15 → 20):
+  - `cgroup_wrap_argv` — 498ns (alloc + vec_push of 4 strings)
+  - `cgroup_policy_has_limits` — 9ns (3 field reads + compares)
+  - `http_path_extract` — 111ns (prefix check + traversal check + alloc)
+  - `http_allowlist_hit` — 69ns (linear scan + streq)
+  - `http_allowlist_miss` — 81ns (linear scan, no early termination)
+
+### Changed
+- **`src/backend_process.cyr::process_exec`** — when the sandbox's
+  policy has any cgroup-controlled limit set, the user argv is wrapped
+  via `cgroup_wrap_argv()` before being passed to `exec_capture()`.
+  The wrap is conditional — sandboxes with no resource limits avoid
+  the `sh` dependency entirely. Cgroup teardown via `cgroup_teardown()`
+  runs unconditionally after exec (no-op when no setup happened).
+  Runtime guard check runs against the *original* command (not the
+  wrapped one), so the sh-prepend doesn't bypass argument-smuggling
+  detection.
+- **`src/main.cyr`** banner string `v3.0.0` → `v3.2.0` (the v3.1.x
+  patches didn't touch the banner; this cut brings it current).
+- **CI **lint gate** stays hard-fail** (set in v3.1.1); the two new
+  modules + bench-file edits ship lint-clean against cc 5.10.34.
+
+### Internal — known upstream gap
+- **sandhi 1.3.3 hashmap_ vs map_ naming inconsistency.** sandhi's
+  TLS session cache references `hashmap_new_a` / `hashmap_get` /
+  `hashmap_set_a` / `hashmap_len` while the stdlib `hashmap` module
+  exports the same shape under `map_*` names. The HTTP credential
+  proxy is loopback-only and never reaches sandhi's TLS code, but the
+  linker still resolves the symbols. Worked around with 4-line shim
+  wrappers in `credential_http.cyr` that route `hashmap_*` → `map_*`.
+  Tracked: needs an upstream sandhi filing — fold the shims back to
+  bare imports when sandhi resolves the naming.
+
+### Race-tolerance note for cgroups v2
+Per the 3.1.2 scoping discussion: cgroups v2 placement is done via
+the shell-prepend pattern, which introduces a small bounded window
+between `fork()` and the shell writing its own PID to `cgroup.procs`
+in the new process. During that window the process is NOT in the
+target cgroup; its scheduling / accounting falls under whatever
+cgroup `kavach` itself sits in (typically the agnos service slice,
+fine). Functional impact: resource accounting from the first ~few
+syscalls of `sh` startup is attributed to kavach's parent cgroup,
+not the sandbox's. This is the standard race-tolerant model used by
+container runtimes that don't have a custom fork+pre_exec helper
+available. v3.3.0 + the `sandbox_fork_exec` helper will close this
+window for the configurations that need exact accounting from the
+first instruction; today's pattern is correct for the 99% case
+where cgroup limits exist to constrain steady-state, not to bound
+microsecond-scale startup costs.
+
+### Deferred to v3.3.0 (final cut of this work arc)
+- **Landlock hooks** — needs the `sandbox_fork_exec(args, pre_exec_fn)`
+  helper to install the ruleset post-fork in the child.
+- **`sandbox_fork_exec` helper itself** — same infrastructure that
+  future seccomp (waiting on the upstream cyrius `sys_prctl` /
+  `sys_seccomp` wrappers) will slot into.
+- **OCI backend cgroup integration** — populate the `resources` section
+  of the OCI runtime spec so `runc` / `crun` set up cgroups directly.
+  Independent of the fork-infra; deferred only to keep this cut tight.
+
+### Still deferred (unchanged)
+- **`cyrius fmt` drift** across 7 src/ files + 2 tests/ files. Local
+  cyrius is 5.10.44; pin is 5.10.34. Awaiting 5.10.34 toolchain to
+  clear safely. CI fmt step remains `::warning::` informational.
+
 ## [3.1.2] — 2026-05-10
 
 Closes out the 3.1.x arc by filing the v3.2 Blocked-queue items

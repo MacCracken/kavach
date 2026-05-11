@@ -6,7 +6,7 @@ type: state
 
 # Documentation Health — kavach
 
-> **Last refresh**: 2026-05-10 (v3.1.2 patch cut — upstream P1 filings landed for the cyrius syscall wrappers + sigil TEE attestation modules; cross-links from kavach v3.2 Blocked rows; remaining 3.2-Ready features deliberately deferred to 3.2.0). Earlier on 2026-05-10: v3.1.1 cut (doc sweep, lint cleared, FileInjection.mode helper, rust-old/ removed, v3.2 Blocked queue rewritten). | **Refresh cadence**: when docs are touched, update the affected row. Pair with the release dance, but no hard release attachment.
+> **Last refresh**: 2026-05-10 (v3.2.0 minor — cgroups v2 + HTTP credential proxy landed; v3.3.0 set up as the final cut of this work arc with Landlock + fork-infra + OCI cgroup integration). Earlier on 2026-05-10: 3.1.x arc (modernization, doc sweep, lint cleared, FileInjection.mode, rust-old/ removed, upstream P1 filings). | **Refresh cadence**: when docs are touched, update the affected row. Pair with the release dance, but no hard release attachment.
 > **Scope**: This repo only (`kavach`) — root-level files (README, CHANGELOG, CLAUDE.md, etc.) plus the entire `docs/` tree, plus `benchmarks-rust-v-cyrius.md` at the root. The `rust-old/` tree is **deliberately excluded** — it's the pre-v3.0 Rust archive (slated for removal, see roadmap) and its inline docs are not maintained.
 
 This is a **ledger**, not a one-time audit. Rewrite-in-place as docs change. Kavach is the sandbox-execution primitive for SY, stiva, kiran, AgnosAI, hoosh, bote, and aethersafta; stale backend / policy / scanner docs propagate downstream as consumer-side mis-integrations, so doc currency carries weight even though the doc surface is small (~22 files).
@@ -61,7 +61,7 @@ Pattern lifted from the majra ledger ([`majra/docs/doc-health.md`](https://githu
 | `CONTRIBUTING.md` | 2026-04-13 | 🔵 Evergreen | Generic contributor workflow. Re-read annually. |
 | `SECURITY.md` | 2026-04-13 | 🔵 Evergreen | Reporting policy + scope. Re-read annually. |
 | `CODE_OF_CONDUCT.md` | 2026-04-13 | 🔵 Evergreen | Standard. |
-| `VERSION` | 2026-05-10 | ✅ Fresh | `3.1.2` — single source of truth, read into `cyrius.cyml` via `${file:VERSION}`. |
+| `VERSION` | 2026-05-10 | ✅ Fresh | `3.2.0` — single source of truth, read into `cyrius.cyml` via `${file:VERSION}`. |
 | `LICENSE` | (initial commit) | 🔵 Evergreen | GPL-3.0-only. |
 | `cyrius.cyml` | 2026-05-10 | ✅ Fresh | New in v3.1.0 — replaces `cyrius.toml`. cc pin 5.10.34, sigil pin 2.9.0, stdlib list mirrors src/. |
 | `benchmarks-rust-v-cyrius.md` | 2026-04-13 | 📦 Frozen — snapshot | v2.0.0-Rust ↔ v3.0.0-Cyrius release comparison. Don't refresh in place; the next cross-language comparison (if any) gets a new dated file. Today the numbers stand as the cutover headliner. |

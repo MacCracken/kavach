@@ -15,7 +15,9 @@ include "src/scanning_runtime.cyr"
 include "src/scanning_threat.cyr"
 include "src/audit.cyr"
 include "src/credential.cyr"
+include "src/credential_http.cyr"
 include "src/quarantine.cyr"
+include "src/cgroup.cyr"
 include "src/oci_spec.cyr"
 include "src/backend_dispatch.cyr"
 include "src/backend_noop.cyr"
@@ -1645,6 +1647,124 @@ fn test_scan_multiple() {
     return 0;
 }
 
+# ---- cgroup v2 tests -----------------------------------------------------
+
+fn test_cgroup_policy_has_limits() {
+    test_group("cgroup_policy_has_limits");
+    var empty = policy_new();
+    assert_eq(cgroup_policy_has_limits(empty), 0, "empty policy = 0");
+    var strict = policy_strict();
+    # policy_strict sets memory/cpu/pids → has limits
+    assert_eq(cgroup_policy_has_limits(strict), 1, "strict policy = 1");
+    return 0;
+}
+
+fn test_cgroup_wrap_argv_shape() {
+    test_group("cgroup_wrap_argv_shape");
+    var user_args = vec_new();
+    vec_push(user_args, "ls");
+    vec_push(user_args, "/tmp");
+    var wrapped = cgroup_wrap_argv("/sys/fs/cgroup/kavach-42", user_args);
+    # Expected: ["sh", "-c", "echo $$ > .../cgroup.procs; exec \"$@\"", "--", "ls", "/tmp"]
+    assert_eq(vec_len(wrapped), 6, "6 args in wrapped argv");
+    assert_eq(streq(vec_get(wrapped, 0), "sh"), 1, "argv[0] = sh");
+    assert_eq(streq(vec_get(wrapped, 1), "-c"), 1, "argv[1] = -c");
+    assert_eq(streq(vec_get(wrapped, 3), "--"), 1, "argv[3] = --");
+    assert_eq(streq(vec_get(wrapped, 4), "ls"), 1, "argv[4] = ls (user)");
+    assert_eq(streq(vec_get(wrapped, 5), "/tmp"), 1, "argv[5] = /tmp (user)");
+    # Body should contain the cgroup_path and the exec "$@" suffix.
+    var body = vec_get(wrapped, 2);
+    assert_eq(str_contains(body, "kavach-42/cgroup.procs"), 1, "body has cgroup path");
+    assert_eq(str_contains(body, "exec \"$@\""), 1, "body has exec $@ passthrough");
+    return 0;
+}
+
+fn test_cgroup_supported_graceful() {
+    test_group("cgroup_supported_graceful");
+    # cgroup_supported returns 0 or 1 — should not crash on read-only or
+    # absent /sys/fs/cgroup. Just exercise the path.
+    var r = cgroup_supported();
+    assert(r == 0 || r == 1, "returns 0 or 1");
+    return 0;
+}
+
+fn test_cgroup_setup_graceful_when_unsupported() {
+    test_group("cgroup_setup_graceful_when_unsupported");
+    # When cgroup v2 isn't writable, setup returns 0 (no-op). Caller skips wrap.
+    if (cgroup_supported() == 0) {
+        var policy = policy_strict();
+        assert_eq(cgroup_setup(policy), 0, "setup returns 0 when unsupported");
+        cgroup_teardown(0);   # no-op on null
+    }
+    # When supported, we don't test setup() in the test suite — it'd require
+    # writeable /sys/fs/cgroup which is rare in CI. Covered by manual e2e.
+    return 0;
+}
+
+# ---- credential_http tests -----------------------------------------------
+
+fn test_credential_http_proxy_new_shape() {
+    test_group("credential_http_proxy_new");
+    var proxy = credential_proxy_new();
+    var allowed = vec_new();
+    vec_push(allowed, "API_KEY");
+    vec_push(allowed, "DB_PASSWORD");
+    var http = credential_http_proxy_new(proxy, allowed, 0);
+    assert(http != 0, "handle allocated");
+    assert_eq(CredentialHttpProxy_listen_fd(http), 0 - 1, "listen_fd starts at -1");
+    assert_eq(CredentialHttpProxy_request_count(http), 0, "request_count = 0");
+    assert_eq(CredentialHttpProxy_proxy_ref(http), proxy, "proxy_ref wired");
+    return 0;
+}
+
+fn test_credential_http_allowlist_check() {
+    test_group("credential_http_allowlist");
+    var proxy = credential_proxy_new();
+    credential_proxy_register(proxy, "API_KEY", "sk-12345");
+    credential_proxy_register(proxy, "DB_PASSWORD", "hunter2");
+    credential_proxy_register(proxy, "SECRET_INTERNAL", "do-not-expose");
+    var allowed = vec_new();
+    vec_push(allowed, "API_KEY");
+    vec_push(allowed, "DB_PASSWORD");
+    var http = credential_http_proxy_new(proxy, allowed, 0);
+    assert_eq(_http_allowed(http, "API_KEY"), 1, "API_KEY allowed");
+    assert_eq(_http_allowed(http, "DB_PASSWORD"), 1, "DB_PASSWORD allowed");
+    assert_eq(_http_allowed(http, "SECRET_INTERNAL"), 0, "SECRET_INTERNAL denied");
+    assert_eq(_http_allowed(http, "UNKNOWN"), 0, "UNKNOWN denied");
+    return 0;
+}
+
+fn test_credential_http_path_extract() {
+    test_group("credential_http_path_extract");
+    var n1 = _http_extract_secret_name("/v1/secret/API_KEY");
+    assert(n1 != 0, "valid path -> name");
+    assert_eq(streq(n1, "API_KEY"), 1, "name == API_KEY");
+    # Wrong prefix → 0
+    assert_eq(_http_extract_secret_name("/wrong/API_KEY"), 0, "wrong prefix -> 0");
+    # Empty suffix → 0
+    assert_eq(_http_extract_secret_name("/v1/secret/"), 0, "empty suffix -> 0");
+    # Path traversal → 0 (slashes in suffix rejected)
+    assert_eq(_http_extract_secret_name("/v1/secret/foo/bar"), 0, "nested path -> 0");
+    return 0;
+}
+
+fn test_credential_http_listen_close() {
+    test_group("credential_http_listen_close");
+    var proxy = credential_proxy_new();
+    var allowed = vec_new();
+    var http = credential_http_proxy_new(proxy, allowed, 0);
+    # Port 0 = kernel-assigned; if that's not supported, try a high port. We
+    # just want to exercise the listen/close path.
+    var r = credential_http_proxy_listen(http, 0);
+    assert(r == 0 || r == 0 - 1, "listen returns 0 or -1");
+    if (r == 0) {
+        assert(CredentialHttpProxy_listen_fd(http) >= 0, "listen_fd set");
+        credential_http_proxy_close(http);
+        assert_eq(CredentialHttpProxy_listen_fd(http), 0 - 1, "fd reset to -1 after close");
+    }
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_backend_parse();
@@ -1710,6 +1830,14 @@ fn main() {
     test_credential_file_injections();
     test_credential_inject_files();
     test_credential_stdin_payload();
+    test_cgroup_policy_has_limits();
+    test_cgroup_wrap_argv_shape();
+    test_cgroup_supported_graceful();
+    test_cgroup_setup_graceful_when_unsupported();
+    test_credential_http_proxy_new_shape();
+    test_credential_http_allowlist_check();
+    test_credential_http_path_extract();
+    test_credential_http_listen_close();
     test_audit_chain_record();
     test_audit_chain_linkage();
     test_audit_entry_verify();

@@ -17,7 +17,9 @@ include "src/scanning_runtime.cyr"
 include "src/scanning_threat.cyr"
 include "src/audit.cyr"
 include "src/credential.cyr"
+include "src/credential_http.cyr"
 include "src/quarantine.cyr"
+include "src/cgroup.cyr"
 include "src/oci_spec.cyr"
 include "src/backend_dispatch.cyr"
 include "src/backend_noop.cyr"
@@ -189,6 +191,50 @@ fn bench_backend_parse() {
     return 0;
 }
 
+# ---- 3.2.0 modules -------------------------------------------------------
+
+fn bench_cgroup_wrap_argv() {
+    var user_args = vec_new();
+    vec_push(user_args, "ls");
+    vec_push(user_args, "/tmp");
+    cgroup_wrap_argv("/sys/fs/cgroup/kavach-42", user_args);
+    return 0;
+}
+
+fn bench_cgroup_policy_has_limits() {
+    cgroup_policy_has_limits(_strict_policy);
+    return 0;
+}
+
+fn bench_http_path_extract() {
+    _http_extract_secret_name("/v1/secret/API_KEY");
+    return 0;
+}
+
+var _bench_http_proxy = 0;
+
+fn _bench_setup_http() {
+    if (_bench_http_proxy != 0) { return 0; }
+    var p = credential_proxy_new();
+    credential_proxy_register(p, "K1", "v1");
+    credential_proxy_register(p, "K2", "v2");
+    var allowed = vec_new();
+    vec_push(allowed, "K1");
+    vec_push(allowed, "K2");
+    _bench_http_proxy = credential_http_proxy_new(p, allowed, 0);
+    return 0;
+}
+
+fn bench_http_allowlist_hit() {
+    _http_allowed(_bench_http_proxy, "K2");
+    return 0;
+}
+
+fn bench_http_allowlist_miss() {
+    _http_allowed(_bench_http_proxy, "UNKNOWN");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     sha256_global_init();
@@ -198,6 +244,7 @@ fn main() {
     _setup_text_with_secrets();
     _setup_gate_clean();
     _setup_chain();
+    _bench_setup_http();
 
     var benches = vec_new();
 
@@ -263,6 +310,27 @@ fn main() {
     var b15 = bench_new("audit_chain_record_to_tmpfs");
     bench_run(b15, &bench_audit_chain_record, 500);
     vec_push(benches, b15);
+
+    # 3.2.0 modules
+    var b16 = bench_new("cgroup_wrap_argv");
+    bench_run_batch(b16, &bench_cgroup_wrap_argv, 5000, 50);
+    vec_push(benches, b16);
+
+    var b17 = bench_new("cgroup_policy_has_limits");
+    bench_run_batch(b17, &bench_cgroup_policy_has_limits, 100000, 100);
+    vec_push(benches, b17);
+
+    var b18 = bench_new("http_path_extract");
+    bench_run_batch(b18, &bench_http_path_extract, 50000, 100);
+    vec_push(benches, b18);
+
+    var b19 = bench_new("http_allowlist_hit");
+    bench_run_batch(b19, &bench_http_allowlist_hit, 50000, 100);
+    vec_push(benches, b19);
+
+    var b20 = bench_new("http_allowlist_miss");
+    bench_run_batch(b20, &bench_http_allowlist_miss, 50000, 100);
+    vec_push(benches, b20);
 
     bench_report_all(benches);
     return 0;

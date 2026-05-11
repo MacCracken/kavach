@@ -79,23 +79,32 @@ re-scoped to the modernization arc.
 > work via plain `fs.cyr` file I/O). See the per-item rows below for
 > detail.
 
-#### Done — landed in 3.1.1
+#### Done — landed in 3.1.x
 
 | Feature | Source | Notes |
 |---------|--------|-------|
-| `FileInjection.mode` honoring helper | ADR-005 §M2 | `credential_inject_files(injections)` in [`src/credential.cyr`](../../src/credential.cyr) writes each FileInjection via new `file_write_secure_modal(path, buf, len, mode)` in [`src/util.cyr`](../../src/util.cyr) — O_CREAT\|O_EXCL\|O_NOFOLLOW at mode 0600, then `syscall(91, fd, mode, 0)` (raw SYS_FCHMOD; stdlib has no `sys_fchmod` wrapper at cc 5.10.34) before close. No TOCTOU window between write and chmod. 5 new tests in `tests/kavach.tcyr`. |
-| `cyrius lint` clean | v3.0 backlog | 37 long-line warnings (chiefly the scanner-pattern lists in `scanning_code.cyr` / `scanning_data.cyr`) cleared by rewrapping `code_emit` / `_dg_emit` call sites onto two lines — no semantic change. CI lint gate flipped from `::warning::` informational to hard-fail. |
-| Delete `rust-old/` | v3.0 backlog | 1.4 MB / ~26K lines of Rust archive removed from working tree. Parity audit re-verified 2026-05-10 — every public Rust API has a Cyrius equivalent per [`rust-old-removal.md`](rust-old-removal.md). Heritage `# Ported from rust-old/...` comments in src/ preserved as breadcrumbs to git history. |
+| `FileInjection.mode` honoring helper | ADR-005 §M2, **3.1.1** | `credential_inject_files(injections)` in [`src/credential.cyr`](../../src/credential.cyr) writes each FileInjection via new `file_write_secure_modal(path, buf, len, mode)` in [`src/util.cyr`](../../src/util.cyr). |
+| `cyrius lint` clean | v3.0 backlog, **3.1.1** | 37 long-line warnings cleared. CI lint gate flipped to hard-fail. |
+| Delete `rust-old/` | v3.0 backlog, **3.1.1** | 1.4 MB / ~26K lines removed; parity re-verified. |
+| Upstream P1 filings | **3.1.2** | Sandbox-runtime syscall wrappers filed in cyrius; SGX/SEV/TDX attestation modules filed in sigil. |
 
-#### Ready — no external blockers
+#### Done — landed in 3.2.0
 
-Each item below has the wrappers/helpers it needs already available at cc 5.10.34 + sigil 2.9.0. Pick by priority + appetite; nothing is upstream-gated.
+| Feature | What landed | Where |
+|---------|-------------|-------|
+| **cgroups v2 resource limits** | `memory.max`, `cpu.max` (quota/period at 100ms), `pids.max` wired from `SandboxPolicy`. Per-sandbox cgroup at `/sys/fs/cgroup/kavach-<rand>/`. Race-tolerant shell-prepend placement: `["sh", "-c", "echo $$ > <path>/cgroup.procs; exec \"$@\"", "--", <argv>...]` — `"$@"` passthrough prevents user-argv re-interpretation. Graceful no-op when /sys/fs/cgroup is unavailable. | [`src/cgroup.cyr`](../../src/cgroup.cyr); wired into [`src/backend_process.cyr`](../../src/backend_process.cyr). |
+| **HTTP credential proxy** (ADR-004 §4) | Loopback-only HTTP server serving `GET /v1/secret/<name>` from in-memory `CredentialProxy`. Per-instance allowlist (allowlist-miss = 403 without proxy consult). Audit-chain integration on every served fetch + 403/404. | [`src/credential_http.cyr`](../../src/credential_http.cyr); uses stdlib `sandhi` + `net`. |
+
+#### Ready — but deferred to v3.3.0 (final cut)
+
+The remaining items group around a single shared piece of infrastructure (a `sandbox_fork_exec(args, pre_exec_fn)` helper). v3.3.0 will land that helper + Landlock + OCI cgroup integration, closing out the work arc.
 
 | Feature | What it adds | Where it lands |
 |---------|--------------|----------------|
-| **Landlock hooks** | Filesystem and network sandboxing via the Linux Landlock LSM — ABI v4 (TCP port restrictions) + v6 (scoping). Adds the second hardening layer to `policy_strict()` alongside the existing process-scope guards. | New `src/landlock.cyr` (struct LandlockRuleset, builder fns) + post-fork hook in `src/backend_process.cyr` and `src/backend_oci.cyr`. Uses `sys_landlock_create_ruleset` / `sys_landlock_add_rule` / `sys_landlock_restrict_self` from stdlib `syscalls_x86_64_linux.cyr` L614-630 (and the aarch64 peer at L665-675). |
-| **cgroups v2 resource limits** | Memory cap, CPU quota, pid count via the cgroupfs writer — wires up the `SandboxPolicy.memory_max_bytes` / `cpu_quota_us` fields that v3.0 stored but didn't enforce. | New `src/cgroup.cyr` (cgroup-create + write-controller-files) + pre-exec hook in `src/sandbox_exec.cyr`. No stdlib wrapper needed — pure `fs.cyr` writes against `/sys/fs/cgroup/<scope>/{memory.max,cpu.max,pids.max,cgroup.procs}`. Mis-classified as upstream-blocked in v3.0; never actually was. |
-| **`cyrius fmt` clean** | Drains the v3.0-inherited fmt drift across `src/{audit,backend_sy_agnos,composite,credential,quarantine,scanning_gate,scanning_secrets}.cyr` and `tests/kavach.{tcyr,bcyr}` — note the list is shorter than in v3.1.0 because the lint-cleanup pass touched `scanning_code` / `scanning_data` and incidentally restyled them. | In-tree edits across the listed files. **Local-toolchain caveat**: cc 5.10.34 must be the running fmt — running 5.10.44 fmt locally and committing the result would write minor-version-sensitive drift. CI runs fmt as `::warning::` informational until cleared. |
+| **Landlock hooks** | Filesystem and network sandboxing via the Linux Landlock LSM — ABI v4 (TCP port restrictions) + v6 (scoping). Adds the second hardening layer to `policy_strict()` alongside the existing process-scope guards. | New `src/landlock.cyr` (struct LandlockRuleset, builder fns) + post-fork hook in `src/backend_process.cyr`. Uses `sys_landlock_create_ruleset` / `sys_landlock_add_rule` / `sys_landlock_restrict_self` from stdlib `syscalls_x86_64_linux.cyr` L614-630 (and the aarch64 peer at L665-675). Needs the fork-infra below to install the ruleset post-fork in the child. |
+| **`sandbox_fork_exec(args, pre_exec_fn)`** | Custom fork+exec helper: `sys_fork()` → in child, run async-signal-safe `pre_exec_fn` callback (landlock install, cgroup re-join when exact accounting matters, future seccomp filter), then `sys_execve`. Replaces the shell-prepend trick with a tight, no-shell-dependency path for sandboxes that need it. | New helper in `src/util.cyr` or new `src/fork_exec.cyr`. The shared infra for landlock + future seccomp. |
+| **OCI backend cgroup integration** | Populate the `resources.linux.{memory,cpu,pids}` section of the OCI runtime spec in `oci_spec.cyr` so `runc` / `crun` set up cgroups directly instead of relying on kavach-managed cgroupfs writes. | [`src/oci_spec.cyr`](../../src/oci_spec.cyr) — extend the JSON template. Independent of the fork-infra; bundled into v3.3.0 to keep the OCI-cgroup story coherent. |
+| **`cyrius fmt` clean** | Drains the v3.0-inherited fmt drift across `src/{audit,backend_sy_agnos,composite,credential,quarantine,scanning_gate,scanning_secrets}.cyr` and `tests/kavach.{tcyr,bcyr}`. | In-tree edits across the listed files. **Local-toolchain caveat**: cc 5.10.34 must be the running fmt — running 5.10.44 fmt locally and committing the result would write minor-version-sensitive drift. CI runs fmt as `::warning::` informational until cleared. |
 
 #### Blocked — actually awaiting upstream
 

@@ -1,0 +1,210 @@
+# kavach — cgroups v2 resource limits
+#
+# Wires SandboxPolicy.{memory_limit_mb,cpu_limit_tenths,max_pids} into a
+# per-sandbox cgroup under /sys/fs/cgroup/kavach-<id>/.
+#
+# Placement model: cgroups are created as direct children of the cgroup-v2
+# root. That avoids the "no internal processes" rule (root cgroup is the
+# only one allowed to host both processes AND child cgroups; non-root
+# non-leaf cgroups can't host processes). Requires that the running
+# system has cgroup v2 mounted at /sys/fs/cgroup (the unified hierarchy
+# default on modern systemd) and that the desired controllers (memory,
+# cpu, pids) are enabled in the root's cgroup.subtree_control.
+#
+# PID assignment uses the "shell-prepend" pattern — the user command is
+# wrapped in `sh -c 'echo $$ > /sys/fs/cgroup/<scope>/cgroup.procs;
+# exec <cmd>'`. The shell writes its own PID into the cgroup, then
+# exec()s the user command, which inherits the cgroup placement. The
+# window between fork and the write is bounded by sh's startup (a few
+# syscalls); no userspace work runs in the unrestricted cgroup. This is
+# the standard Linux-container-runtime pattern for unprivileged
+# placement without a custom fork+pre_exec helper.
+#
+# Graceful degradation: if /sys/fs/cgroup isn't writable (read-only
+# mount, missing controllers, unprivileged container, non-Linux), every
+# entry point returns 0 / no-op and cgroup_supported() returns 0 so
+# callers can decline to wrap.
+
+var CGROUP_ROOT = "/sys/fs/cgroup";
+
+# Check whether cgroup v2 is mounted and writable. Returns 1 if the root
+# is writable AND the memory + cpu + pids controllers are enabled in the
+# root's cgroup.subtree_control (so child cgroups can use them).
+fn cgroup_supported() {
+    if (sys_access(CGROUP_ROOT, 2) < 0) { return 0; }
+    var buf = alloc(512);
+    var n = file_read_all("/sys/fs/cgroup/cgroup.subtree_control", buf, 511);
+    if (n <= 0) { return 0; }
+    store8(buf + n, 0);
+    if (str_contains(buf, "memory") == 0) { return 0; }
+    if (str_contains(buf, "cpu") == 0) { return 0; }
+    if (str_contains(buf, "pids") == 0) { return 0; }
+    return 1;
+}
+
+# Build the cgroup path for a sandbox id (a random u64). Returns a freshly
+# allocated cstr the caller owns.
+fn _cgroup_path(scope_id) {
+    var prefix = "/sys/fs/cgroup/kavach-";
+    var prefix_len = strlen(prefix);
+    var id_buf[24];
+    var id_len = fmt_int_buf(scope_id, &id_buf);
+    var out = alloc(prefix_len + id_len + 1);
+    memcpy(out, prefix, prefix_len);
+    memcpy(out + prefix_len, &id_buf, id_len);
+    store8(out + prefix_len + id_len, 0);
+    return out;
+}
+
+# Build a child file path under a cgroup directory. Caller owns return.
+fn _cgroup_file(cgroup_path, name) {
+    var clen = strlen(cgroup_path);
+    var nlen = strlen(name);
+    var out = alloc(clen + 1 + nlen + 1);
+    memcpy(out, cgroup_path, clen);
+    store8(out + clen, 47);
+    memcpy(out + clen + 1, name, nlen);
+    store8(out + clen + 1 + nlen, 0);
+    return out;
+}
+
+# Write a numeric value to a cgroup controller file (e.g. memory.max).
+# Returns 0 on success, -1 on failure (gracefully ignored by caller).
+fn _cgroup_write_int(cgroup_path, name, value) {
+    var fpath = _cgroup_file(cgroup_path, name);
+    var buf[32];
+    var len = fmt_int_buf(value, &buf);
+    var r = file_write_all(fpath, &buf, len);
+    if (r < 0) { return 0 - 1; }
+    return 0;
+}
+
+# Write a literal string to a cgroup controller file. Used for cpu.max
+# which takes "<quota_us> <period_us>" rather than a bare integer.
+fn _cgroup_write_str(cgroup_path, name, value) {
+    var fpath = _cgroup_file(cgroup_path, name);
+    var r = file_write_all(fpath, value, strlen(value));
+    if (r < 0) { return 0 - 1; }
+    return 0;
+}
+
+# Build the cpu.max content for a tenths value (10 = 1.0 cores, 25 = 2.5 cores).
+# cgroup v2 cpu.max takes "<quota_us> <period_us>"; we use a 100ms period and
+# scale the quota accordingly: 1.0 cores = "100000 100000", 2.5 = "250000 100000".
+# Returns a freshly-allocated cstr.
+fn _cpu_max_string(tenths) {
+    var period_us = 100000;
+    var quota_us = (period_us * tenths) / 10;
+    var qbuf[24];
+    var qlen = fmt_int_buf(quota_us, &qbuf);
+    var pbuf[24];
+    var plen = fmt_int_buf(period_us, &pbuf);
+    var out = alloc(qlen + 1 + plen + 1);
+    memcpy(out, &qbuf, qlen);
+    store8(out + qlen, 32);
+    memcpy(out + qlen + 1, &pbuf, plen);
+    store8(out + qlen + 1 + plen, 0);
+    return out;
+}
+
+# Create the per-sandbox cgroup directory and write the limit files from
+# policy. Returns the cgroup_path cstr on success, 0 on any failure
+# (caller should fall back to running without cgroups).
+#
+# Honors: memory_limit_mb (memory.max in bytes), cpu_limit_tenths
+# (cpu.max as "<quota> <period>"), max_pids (pids.max).
+fn cgroup_setup(policy) {
+    if (cgroup_supported() == 0) { return 0; }
+    var scope = rand_u64();
+    if (scope < 0) { scope = 0 - scope; }
+    var path = _cgroup_path(scope);
+    # sys_mkdir mode is ignored by cgroupfs (it owns the dir mode), but
+    # passing 0700 keeps the intent visible.
+    if (sys_mkdir(path, 448) < 0) { return 0; }
+
+    var mem_mb = SandboxPolicy_memory_limit_mb(policy);
+    if (mem_mb > 0) {
+        _cgroup_write_int(path, "memory.max", mem_mb * 1048576);
+    }
+    var cpu_t = SandboxPolicy_cpu_limit_tenths(policy);
+    if (cpu_t > 0) {
+        var cpu_max = _cpu_max_string(cpu_t);
+        _cgroup_write_str(path, "cpu.max", cpu_max);
+    }
+    var pids = SandboxPolicy_max_pids(policy);
+    if (pids > 0) {
+        _cgroup_write_int(path, "pids.max", pids);
+    }
+    return path;
+}
+
+# Tear down a cgroup created by cgroup_setup. Safe to call with 0 (no-op).
+# The kernel rmdirs the cgroup only when no processes remain in it; after
+# the wrapped command exits, kavach's wait() returns and the cgroup is
+# empty.
+fn cgroup_teardown(cgroup_path) {
+    if (cgroup_path == 0) { return 0; }
+    sys_rmdir(cgroup_path);
+    return 0;
+}
+
+# Return 1 if `policy` has any cgroup-controlled limit set (memory, cpu,
+# or pids). Backends use this to decide whether to apply the wrapping at
+# all — no limits = no wrapping = no shell dependency.
+fn cgroup_policy_has_limits(policy) {
+    if (SandboxPolicy_memory_limit_mb(policy) > 0) { return 1; }
+    if (SandboxPolicy_cpu_limit_tenths(policy) > 0) { return 1; }
+    if (SandboxPolicy_max_pids(policy) > 0) { return 1; }
+    return 0;
+}
+
+# Build the cgroup-join "-c" body string for the sh wrapper.
+# Shape: `echo $$ > <cgroup_path>/cgroup.procs; exec "$@"`
+#
+# The `exec "$@"` pattern passes the user argv through positionally —
+# sh does NOT re-interpret quotes / variables / metachars in the user
+# command, only the literal `echo $$` line and the `exec "$@"` directive
+# are under shell control. This preserves the no-shell-interpretation
+# guarantee that direct execve would give, while still letting us write
+# the shell's own PID into cgroup.procs before it execs the user command.
+fn _cgroup_sh_body(cgroup_path) {
+    var head = "echo $$ > ";
+    var tail = "/cgroup.procs; exec \"$@\"";
+    var hl = strlen(head);
+    var cp = strlen(cgroup_path);
+    var tl = strlen(tail);
+    var out = alloc(hl + cp + tl + 1);
+    var pos = 0;
+    memcpy(out + pos, head, hl); pos = pos + hl;
+    memcpy(out + pos, cgroup_path, cp); pos = pos + cp;
+    memcpy(out + pos, tail, tl); pos = pos + tl;
+    store8(out + pos, 0);
+    return out;
+}
+
+# Wrap a user argv vec with the cgroup-join shell prelude, returning a
+# new argv vec. The resulting argv shape is:
+#
+#   ["sh", "-c", "echo $$ > <cgroup_path>/cgroup.procs; exec \"$@\"",
+#    "--", <user argv...>]
+#
+# `--` separates sh's own positional args ($0 = "--", $1.. = user argv).
+# Per `man sh`, $0 receives whatever follows "-c <body>", so the first
+# positional arg goes into $0 — passing "--" there is the standard way
+# to skip the slot.
+#
+# The returned vec is freshly allocated; the user_argv vec is not consumed
+# (callers can free / reuse it).
+fn cgroup_wrap_argv(cgroup_path, user_argv) {
+    var out = vec_new();
+    vec_push(out, "sh");
+    vec_push(out, "-c");
+    vec_push(out, _cgroup_sh_body(cgroup_path));
+    vec_push(out, "--");
+    var i = 0;
+    while (i < vec_len(user_argv)) {
+        vec_push(out, vec_get(user_argv, i));
+        i = i + 1;
+    }
+    return out;
+}

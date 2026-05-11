@@ -18,7 +18,9 @@ include "src/scanning_runtime.cyr"
 include "src/scanning_threat.cyr"
 include "src/audit.cyr"
 include "src/credential.cyr"
+include "src/credential_http.cyr"
 include "src/quarantine.cyr"
+include "src/cgroup.cyr"
 include "src/oci_spec.cyr"
 include "src/backend_dispatch.cyr"
 include "src/backend_noop.cyr"
@@ -37,7 +39,7 @@ include "src/attestation.cyr"
 include "src/sandbox_exec.cyr"
 
 fn _print_banner() {
-    var banner = "kavach v3.0.0 — Cyrius port\n";
+    var banner = "kavach v3.2.0 — Cyrius port\n";
     syscall(1, 1, banner, strlen(banner));
     return 0;
 }
