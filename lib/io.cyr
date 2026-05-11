@@ -1,6 +1,39 @@
 # io.cyr — file I/O library
 # Usage: include "lib/io.cyr"
 # Wraps Linux syscalls for file operations.
+#
+# v5.5.18: routes through lib/syscalls.cyr's per-arch sys_* wrappers
+# (sys_open/sys_close/sys_read/sys_write) rather than literal Linux
+# x86_64 syscall numbers 0/1/2/3. On aarch64 those numbers mean
+# io_setup/io_destroy/io_submit/io_cancel — this file's prior file_*
+# helpers would fire the wrong syscall on arm64 hosts (reproduced on
+# real Pi during the v5.5.18 stdlib shakedown — file_open returned
+# an error immediately). Same root-cause pattern as the v5.4.11
+# yukti fix; io.cyr was missed during that split.
+include "lib/syscalls.cyr"
+# v5.8.30: Result-returning *_r variants (added below) construct
+# Result via lib/result.cyr's compiler-generated `Ok` / `Err`.
+include "lib/result.cyr"
+
+# v5.8.30 — IoError variants. Bare-variant enum so each name folds
+# to a const int at compile time. Tag-name prefix `Io` keeps these
+# out of the way of any consumer-side enum collisions. Returned as
+# the `Err` payload of `Result<T, IoError>` from the *_r fns below.
+# Mapping is intentionally coarse for v5.8.30: NotFound = ENOENT (2),
+# AccessDenied = EACCES (13), BadFd = EBADF (9), IoFailed = EIO (5),
+# IoOther absorbs everything else (including positive-fd-but-EINTR
+# style transient failures). The kernel's raw errno can be retrieved
+# from `Err`'s payload only when IoOther fires; the common cases get
+# named variants. Per `Migration policy` in roadmap §v5.8.28-32: the
+# original int-returning `file_*` fns stay callable through v5.8.x
+# for back-compat; v6.0.0 closeout removes them.
+enum IoError {
+    IoNotFound;
+    IoAccessDenied;
+    IoBadFd;
+    IoFailed;
+    IoOther;
+}
 
 # Open flags
 var O_RDONLY = 0;
@@ -22,23 +55,23 @@ var STDOUT = 1;
 var STDERR = 2;
 
 # Open a file with given flags and mode, return fd
-fn file_open(path, flags, mode) {
-    return syscall(2, path, flags, mode);
+fn file_open(path: cstring, flags, mode): i64 {
+    return sys_open(path, flags, mode);
 }
 
 # Close a file descriptor
 fn file_close(fd) {
-    return syscall(3, fd);
+    return sys_close(fd);
 }
 
 # Read up to len bytes from fd into buf
 fn file_read(fd, buf, len) {
-    return syscall(0, fd, buf, len);
+    return sys_read(fd, buf, len);
 }
 
 # Write len bytes from buf to fd
 fn file_write(fd, buf, len) {
-    return syscall(1, fd, buf, len);
+    return sys_write(fd, buf, len);
 }
 
 # Read entire file into buffer. Returns bytes read.
@@ -68,6 +101,13 @@ fn file_write_all(path, buf, len) {
     return written;
 }
 
+# v5.5.16: flock helpers gated to CYRIUS_TARGET_LINUX. syscall(73) is
+# flock on Linux but a different BSD number on macOS (131), and the
+# ESYSXLAT chain doesn't currently translate it. Rather than emit
+# warnings on every Mach-O cross-build for dead-code the tools don't
+# call, skip the block entirely on non-Linux. v5.5.17 can add a BSD
+# translation if a real consumer needs file locking on Mach-O.
+#ifdef CYRIUS_TARGET_LINUX
 # Exclusive file lock (blocking). Use for append-only logs, audit chains.
 fn file_lock(fd) {
     return syscall(73, fd, LOCK_EX);
@@ -99,6 +139,7 @@ fn file_append_locked(path, buf, len) {
     file_close(fd);
     return n;
 }
+#endif
 
 # Check if file exists (try to open read-only)
 fn file_exists(path) {
@@ -118,6 +159,96 @@ fn print(msg, len) {
 fn eprint(msg, len) {
     file_write(STDERR, msg, len);
     return 0;
+}
+
+# ================================================================
+# v5.8.30 — Result-returning variants (`_r` suffix)
+# ================================================================
+# Each *_r variant calls the underlying sys_* fn and wraps the
+# result in Ok / Err per the IoError mapping above. The `?`
+# propagation operator (v5.8.29) makes chaining painless:
+#
+#   var fd = file_open_r(path, 0, 0)?;
+#   var n  = file_read_r(fd, &buf, 8192)?;
+#   file_close_r(fd);
+#
+# Existing int-returning fns (`file_open` etc.) stay unchanged for
+# back-compat; new code should prefer the `_r` variants.
+
+# Map a negative kernel-style return into the closest IoError
+# variant. `errn` is the POSITIVE errno (the caller passes
+# `0 - sys_open_result`).
+fn _io_errno_to_iorr(errn) {
+    if (errn == 2)  { return IoNotFound; }
+    if (errn == 13) { return IoAccessDenied; }
+    if (errn == 9)  { return IoBadFd; }
+    if (errn == 5)  { return IoFailed; }
+    return IoOther;
+}
+
+# Result variant of file_open. On success: Ok(fd); on failure:
+# Err(IoError variant for the underlying errno).
+fn file_open_r(path: cstring, flags, mode) {
+    var fd = sys_open(path, flags, mode);
+    if (fd < 0) { return Err(_io_errno_to_iorr(0 - fd)); }
+    return Ok(fd);
+}
+
+# Result variant of file_close. Kernel close(2) almost never fails
+# on a valid fd, but if it does, we surface it.
+fn file_close_r(fd) {
+    var rc = sys_close(fd);
+    if (rc < 0) { return Err(_io_errno_to_iorr(0 - rc)); }
+    return Ok(rc);
+}
+
+# Result variant of file_read. On success: Ok(bytes_read); on
+# failure: Err. Note that 0 bytes read at EOF is Ok(0), not Err.
+fn file_read_r(fd, buf, len) {
+    var n = sys_read(fd, buf, len);
+    if (n < 0) { return Err(_io_errno_to_iorr(0 - n)); }
+    return Ok(n);
+}
+
+# Result variant of file_write. On success: Ok(bytes_written).
+# Short writes (n < len) are still Ok — caller may need to loop.
+fn file_write_r(fd, buf, len) {
+    var n = sys_write(fd, buf, len);
+    if (n < 0) { return Err(_io_errno_to_iorr(0 - n)); }
+    return Ok(n);
+}
+
+# Result variant of file_read_all. Opens the file, reads up to
+# maxlen bytes, closes. Open failure surfaces as Err with the
+# corresponding IoError variant; read failure mid-stream returns
+# whatever was read up to that point as Ok.
+fn file_read_all_r(path, buf, maxlen) {
+    var fd = sys_open(path, 0, 0);
+    if (fd < 0) { return Err(_io_errno_to_iorr(0 - fd)); }
+    var total = 0;
+    var rgo = 1;
+    while (rgo == 1) {
+        var n = sys_read(fd, buf + total, maxlen - total);
+        if (n <= 0) { rgo = 0; }
+        else {
+            total = total + n;
+            if (total >= maxlen) { rgo = 0; }
+        }
+    }
+    sys_close(fd);
+    return Ok(total);
+}
+
+# Result variant of file_write_all. Opens with O_WRONLY|O_CREAT|
+# O_TRUNC, writes, closes. Open failure → Err; write failure →
+# Err with errno mapping.
+fn file_write_all_r(path, buf, len) {
+    var fd = sys_open(path, O_WRONLY | O_CREAT | O_TRUNC, 0x1A4);
+    if (fd < 0) { return Err(_io_errno_to_iorr(0 - fd)); }
+    var n = sys_write(fd, buf, len);
+    sys_close(fd);
+    if (n < 0) { return Err(_io_errno_to_iorr(0 - n)); }
+    return Ok(n);
 }
 
 # Read environment variable by name. Returns pointer to value or 0 if not found.

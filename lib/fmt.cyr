@@ -15,7 +15,7 @@ fn fmt_int(n: i64) {
     return 0;
 }
 
-# Print decimal number to a specific fd (v4.4.3 — bote feedback item 7).
+# Print decimal number to a specific fd.
 # Use when diagnostic output must go to stderr: `fmt_int_fd(2, value)`.
 # Otherwise identical to fmt_int which always writes to fd 1.
 fn fmt_int_fd(fd, n: i64) {
@@ -30,7 +30,7 @@ fn fmt_int_fd(fd, n: i64) {
     return 0;
 }
 
-# Print decimal number to stderr (v4.4.3). Shorthand for fmt_int_fd(2, n).
+# Print decimal number to stderr. Shorthand for fmt_int_fd(2, n).
 # Keeps diagnostic output atomic with adjacent `syscall(1, 2, "...", N)`
 # messages — mixing fmt_int (stdout) with stderr writes produces interleaved
 # output in logs.
@@ -132,20 +132,23 @@ fn fmt_hex_buf(n, buf) {
     return len;
 }
 
-# sprintf-like formatting into a buffer.
+# sprintf-like formatting into a buffer with bounds checking.
 # Format: %d = decimal, %x = hex, %s = string, %% = literal %
 # Args are passed as a vec of i64 values.
-# Returns: bytes written to buf.
+# bufsz: maximum bytes to write (including NUL terminator).
+# Returns: bytes written to buf (not counting NUL).
 #
 # Usage:
 #   var args = vec_new();
 #   vec_push(args, 42);
 #   vec_push(args, "hello");
-#   var len = fmt_sprintf(buf, "num=%d str=%s", args);
-fn fmt_sprintf(buf, format, args) {
+#   var len = fmt_sprintf(buf, 64, "num=%d str=%s", args);
+fn fmt_sprintf(buf, bufsz, format, args) {
     var fi = 0;
     var bi = 0;
     var ai = 0;
+    var maxw = bufsz - 1;  # reserve 1 for NUL
+    if (maxw < 0) { maxw = 0; }
     var flen = strlen(format);
     while (fi < flen) {
         var c = load8(format + fi);
@@ -160,8 +163,8 @@ fn fmt_sprintf(buf, format, args) {
                 ai = ai + 1;
                 var dtmp[24];
                 var dlen = fmt_int_buf(dval, &dtmp);
-                memcpy(buf + bi, &dtmp, dlen);
-                bi = bi + dlen;
+                if (bi + dlen > maxw) { dlen = maxw - bi; }
+                if (dlen > 0) { memcpy(buf + bi, &dtmp, dlen); bi = bi + dlen; }
             }
             if (spec == 120) {
                 # %x — hex integer
@@ -169,26 +172,24 @@ fn fmt_sprintf(buf, format, args) {
                 ai = ai + 1;
                 var xtmp[16];
                 var xlen = fmt_hex_buf(xval, &xtmp);
-                memcpy(buf + bi, &xtmp, xlen);
-                bi = bi + xlen;
+                if (bi + xlen > maxw) { xlen = maxw - bi; }
+                if (xlen > 0) { memcpy(buf + bi, &xtmp, xlen); bi = bi + xlen; }
             }
             if (spec == 115) {
                 # %s — string
                 var sptr = vec_get(args, ai);
                 ai = ai + 1;
                 var slen = strlen(sptr);
-                memcpy(buf + bi, sptr, slen);
-                bi = bi + slen;
+                if (bi + slen > maxw) { slen = maxw - bi; }
+                if (slen > 0) { memcpy(buf + bi, sptr, slen); bi = bi + slen; }
             }
             if (spec == 37) {
                 # %% — literal %
-                store8(buf + bi, 37);
-                bi = bi + 1;
+                if (bi < maxw) { store8(buf + bi, 37); bi = bi + 1; }
             }
             fi = fi + 1;
         } else {
-            store8(buf + bi, c);
-            bi = bi + 1;
+            if (bi < maxw) { store8(buf + bi, c); bi = bi + 1; }
             fi = fi + 1;
         }
     }
@@ -199,7 +200,7 @@ fn fmt_sprintf(buf, format, args) {
 # Convenience: format and print to stdout
 fn fmt_printf(format, args) {
     var buf[512];
-    var len = fmt_sprintf(&buf, format, args);
+    var len = fmt_sprintf(&buf, 512, format, args);
     syscall(1, 1, &buf, len);
     return len;
 }

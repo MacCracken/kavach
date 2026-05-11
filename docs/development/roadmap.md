@@ -68,6 +68,56 @@ Items deferred from v3.0 ([ADR-004](../adr/004-deferred-features.md),
 
 ---
 
+## Agent Injection Defense — Irreversible-Action Gating (post-closed-beta)
+
+> **Spec**: [`agnosticos/docs/development/planning/agent-injection-defense.md`](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/agent-injection-defense.md) — six-layer cross-cutting design. **kavach owns L4 (sandbox capability gating + confirmation tokens).** Triggered by 2026-05 incident (third-party AI agent drained $200K via Morse code in tweet). **Phasing**: post-public-beta — this is the structural-immunity layer that pairs with agnostik's `UntrustedInput<T>` (L6).
+
+L4's job: even when an agent is "authorized" to call a capability, **irreversible actions get a runtime confirmation step that the LLM cannot synthesize.** This is the layer that gives AGNOS structural immunity — same absence-by-design pattern as the kernel being immune to CVE-2026-31431, applied at the agent-capability boundary. Even if every detection layer (L1–L3) misses an injection encoding, the wallet drain doesn't happen because the gate doesn't exist for unconfirmed external-input-origin calls.
+
+### Schema additions
+
+- [ ] **`irreversible` capability flag** — declarative per-capability in agent profile. Defaults set on:
+  - Wallet / crypto / financial operations
+  - File deletion outside agent's working directory
+  - Network operations to external endpoints (per-deployment allowlist)
+  - System operations (reboot, shutdown, package install)
+  - Outbound communication (email, SMS, post-to-feed, Slack)
+- [ ] **Confirmation-token requirement** for irreversible actions — token must be one the LLM cannot generate (terminal-typed phrase, hardware-key press, or out-of-band confirmation)
+- [ ] **Token-scope schema** — single-use, scoped to specific action signature, time-limited (default ≤30s)
+- [ ] **External-input-origin tag** — kavach receives provenance from t-ron (L3) and uses it as the gate input
+
+### Confirmation mechanism
+
+The token mechanism is an **open design question** (see spec § Open design questions #1):
+
+- **Terminal-typed phrase** — agnoshi prompt for explicit confirmation
+- **Hardware key (YubiKey, etc.)** — physical presence requirement
+- **Out-of-band (Signal, Matrix)** — separate channel confirmation
+- **Per-deployment configurable, with a default** — TBD
+
+- [ ] **Decision: confirmation primitive** — pick default before implementation
+- [ ] **agnoshi integration** — terminal-typed confirmation flow
+- [ ] **Hardware-key backend** — optional, for higher-assurance deployments
+
+### Migration path
+
+- [ ] **Shadow mode** — log what would have been blocked, no enforcement
+- [ ] **Audit-only mode** — annotate decisions but allow
+- [ ] **Enforce mode** — block irreversible actions without confirmation token
+- [ ] **Per-deployment configurability** — each AGNOS deployment picks its mode
+
+### Companion repos
+
+- L1 (input scanning): `phylax`
+- L2 (gateway pre-flight): `hoosh`
+- L3 (MCP boundary capability-source policy): `t-ron`
+- L5 (audit chain): `libro` (already shipped)
+- L6 (`UntrustedInput<T>` shared type): `agnostik`
+
+This work pairs tightly with **shakti** for the privilege-escalation boundary: `shakti` is the inter-process equivalent of what kavach's L4 gating does at the intra-agent level.
+
+---
+
 ## Foreign Platform Containers
 
 **Goal**: Run Windows, macOS, and Linux applications inside AGNOS without surrendering sovereignty. The foreign OS runs as a fully sandboxed guest — kavach controls every boundary.
