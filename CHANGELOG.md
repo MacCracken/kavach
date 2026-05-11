@@ -5,56 +5,194 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [3.1.2] — 2026-05-10
 
-Post-3.1.0 doc sweep. Drains the four `🟡 Stale` / `🟠 Read-through` rows
-the v3.1.0 cut's `doc-health.md` queued. No source / behavior changes.
+Closes out the 3.1.x arc by filing the v3.2 Blocked-queue items
+upstream as P1 issues in the projects that own them. No source /
+behavior changes in kavach; this is documentation work that
+externalises kavach's wait-list so upstream maintainers can plan.
+
+The three v3.2 "Ready" feature items that the cc-5.10.34 verify pass
+unblocked (Landlock hooks, cgroups v2, HTTP credential proxy) are
+**deliberately deferred to 3.2.0** — each is a new module plus
+post-fork wiring, which is minor-sized work, not patch-sized.
+
+### Added (upstream filings)
+- **[`cyrius/docs/development/issues/2026-05-10-kavach-sandbox-syscall-wrappers.md`](https://github.com/MacCracken/cyrius/blob/main/docs/development/issues/2026-05-10-kavach-sandbox-syscall-wrappers.md)**
+  — single coordinated filing covering the six sandbox-runtime
+  syscall wrappers kavach v3.2 features will use: `sys_prctl`
+  (157), `sys_seccomp` (317), `sys_setresuid` (117),
+  `sys_setresgid` (119), `sys_execveat` (322), `sys_fchmod`
+  (91). Per-wrapper detail: numbers (x86_64 + aarch64), the
+  kavach feature it gates, the async-signal-safe post-fork
+  context, the workaround-via-raw-syscall pattern (kavach 3.1.1
+  ships `SYS_FCHMOD` this way as the precedent), and a
+  suggested landing order. Filed P1 with explicit "severity
+  rationale" letting an upstream maintainer re-rate to P2 if
+  scheduling pressure is elsewhere (workaround exists in-tree).
+- **[`sigil/docs/development/issues/2026-05-10-kavach-sgx-sev-tdx-attestation-modules.md`](https://github.com/MacCracken/sigil/blob/main/docs/development/issues/2026-05-10-kavach-sgx-sev-tdx-attestation-modules.md)**
+  — single coordinated filing covering the TEE attestation +
+  sealing surface for kavach's SGX / SEV-SNP / TDX backends.
+  Calls out: SGX quote parser + IAS/DCAP cert chain; SEV-SNP
+  guest attestation parser (VCEK chain); TDX TD-quote parser;
+  SGX sealing (key derivation against MRSIGNER + ISVSVN).
+  Notes which crypto primitives sigil 2.9.0 already ships
+  (sha256 / hmac / ct / hkdf / ed25519 / verify) and what's
+  missing (ECDSA P-256, minimal X.509 cert-chain primitives,
+  quote-format parsers). Suggested placement: sigil 3.2-or-later
+  (sigil 3.1 alloc-free verify rewrite shouldn't be displaced).
+  Filed P1 with explicit "severity rationale" letting an upstream
+  maintainer re-rate to P3 (enhancement; kavach ships fine
+  today without quote verify — the backends start the runtime
+  but don't attest its identity).
+- **Stiva OCI backend** — no upstream filing. There's no stiva
+  Cyrius port repo today; the blocker resolves when one ships,
+  and will be revisited then.
 
 ### Changed
-- **`README.md`** — Cyrius floor bumped to 5.10.34 with the pin-lock
-  rationale (sigil-NI asm-offset bisect); `cyrius deps` step added to
-  the build instructions; `cyrius.toml` → `cyrius.cyml`; v3.0 status
-  block split into v3.1 modernization arc + v3.0 port summary; dep
-  list updated against `[deps] stdlib` + sigil 2.9.0; `doc-health.md`
-  cross-link added under `## Docs`.
-- **`CLAUDE.md`** — Rust-era `MSRV: 1.89` line dropped; Version
-  bumped 3.0.0 → 3.1.0; new `Language: Cyrius (pinned at 5.10.34 …)`
-  line carrying the pin-lock rationale; `Type` line acknowledges the
-  consumer-embedding future. Cleanliness Check lines in P(-1) +
-  Development Loop swapped from `cargo fmt / clippy / audit / deny`
-  → `cyrius fmt / lint / vet / audit`. Version-check step references
-  `cyrius.cyml` instead of `Cargo.toml`. Key Principles section
-  translated from Rust-attribute idioms (`#[non_exhaustive]`,
-  `#[must_use]`, `#[inline]`, `Cow over clone`, `// SAFETY:`) to
-  Cyrius-shaped equivalents (Str-borrows, `# SAFETY:` comment on raw
-  syscalls, etc.). DO-NOT list rewritten — pin-bump prohibition
-  added, `cyrius fmt` on non-pinned-toolchain prohibition added,
-  `lib/` / `build/` gitignore reminder added; `Cargo.lock` reference
-  dropped.
-- **`docs/guides/getting-started.md`** — § 1 "Build + install"
-  rewritten: `cyrius deps` step added; toolchain line bumped to
-  5.10.34 with pin-lock rationale; dep list aligned to `[deps]
-  stdlib`; sigil pin updated 2.1.2 → 2.9.0 with the SIGILL gate
-  context; `lib/` gitignored model documented.
-- **`docs/development/rust-old-removal.md`** — sed recipe in
-  § "Removal command" updated: `cyrius.toml` → `cyrius.cyml`; commit
-  message bumped from v3.0 → v3.x. Pre-removal checklist gains a
-  checked-off row recording the cyrius.cyml-migration prereq. Parity
-  audit re-verified against the v3.0 surface — no drift caught.
-- **`docs/doc-health.md`** — bucket counts walked after the sweep:
-  Fresh 5 → 9, Stale 3 → 1 (benchmarks-rust-v-cyrius.md only — see
-  the Tier-1 frozen note), Read-through 2 → 0. Per-row Last touched /
-  Status / Notes refreshed for the four files above. The queued
-  fmt-drift + lint-warnings rows remain on the v3.2 `cyrius audit`
-  clean item; nothing else carries over.
+- **`docs/development/roadmap.md` § v3.2 Blocked rows** — each
+  blocker row now cross-links to its upstream filing under the
+  "Who owns it" line. SGX / SEV / TDX rows merged into a single
+  unified row (they share the upstream filing). Meta block updated
+  with a summary of the upstream-filing work landed in this patch.
+
+### Deferred to 3.2.0 (deliberately)
+The three v3.2-Ready feature items unblocked at cc 5.10.34 are
+**not** in this patch — each is new-module work that belongs in a
+minor cut, not a patch:
+- **Landlock hooks** — new `src/landlock.cyr` + post-fork hooks in
+  `backend_process` / `backend_oci`.
+- **cgroups v2 resource limits** — new `src/cgroup.cyr` + pre-exec
+  hook in `sandbox_exec.cyr`.
+- **HTTP credential proxy** — new `src/credential_http.cyr` using
+  sandhi + tls from stdlib.
+
+### Still deferred (unchanged from 3.1.1)
+- **`cyrius fmt` drift** across `src/{audit,backend_sy_agnos,composite,credential,quarantine,scanning_gate,scanning_secrets}.cyr`
+  + `tests/kavach.{tcyr,bcyr}`. Local toolchain is 5.10.44; pin is
+  5.10.34. Awaiting a 5.10.34-toolchain install to clear safely.
+
+## [3.1.1] — 2026-05-10
+
+Post-3.1.0 patch cut. Drains the doc-sweep queue the v3.1.0
+`doc-health.md` left open, plus three concrete v3.2-Ready items:
+lint clean, `FileInjection.mode` honoring helper, and the
+`rust-old/` removal. Also a verify-pass against cc 5.10.34
+that reclassifies three "Blocked" items as Ready and rewrites
+the v3.2 Blocked table with full per-item context. No
+behavior changes to the sandbox runtime, scanners, audit
+chain, or threat classifier.
+
+### Added
+- **`credential_inject_files(injections)`** in
+  [`src/credential.cyr`](src/credential.cyr) — closes
+  [ADR-005](docs/adr/005-v2-hardening-pass.md) §M2. Iterates the
+  FileInjection vec, writes each via the new
+  `file_write_secure_modal(path, buf, len, mode)` helper, returns
+  the count of successful writes (or `-(n+1)` on first failure).
+- **`file_write_secure_modal(path, buf, len, mode)`** in
+  [`src/util.cyr`](src/util.cyr) — variant of `file_write_secure`
+  that holds the fd across an fchmod-to-caller-mode before close.
+  Closes the TOCTOU window between write and chmod that
+  `file_write_secure` + post-close `sys_chmod` would re-open.
+  Raw `syscall(91, fd, mode, 0)` since stdlib has no
+  `sys_fchmod` wrapper at cc 5.10.34 — folded back to a wrapper
+  when upstream ships one. SAFETY-commented per the raw-syscall
+  convention.
+- **5 new tests** in `tests/kavach.tcyr` covering
+  `credential_inject_files`: empty vec, single file with mode
+  honoring, two-file batch, O_EXCL refuses preexisting target,
+  failure return-code shape (`-(written + 1)`). Test count:
+  349 → 358.
+
+### Changed
+- **`cyrius lint` clean across `src/`** — 37 long-line warnings
+  (inherited from the v3.0 cut, chiefly in the scanner pattern
+  lists) cleared by rewrapping call sites. Affected files:
+  `scanning_code.cyr` (16 `code_emit` call sites rewrapped to
+  two-line form, plus all sibling sites in the same module for
+  style consistency); `scanning_data.cyr` (16 `_dg_emit` sites,
+  same treatment); `backend_sgx.cyr` (3 long string literals
+  split into `p1a`/`p1b`, `p2a`/`p2b`, `p3a`-`p3f` with adjacent
+  `memcpy` calls — same bytes emitted, smaller per-line
+  surface); `oci_spec.cyr` (1 string-literal split via `mid1a` /
+  `mid1b`); `scanning_runtime.cyr` (1 multi-arg `vec_push` call
+  rewrapped). No semantic change. CI lint gate flipped from
+  `::warning::` informational to hard-fail.
+- **CHANGELOG `[Unreleased]` block from 3.1.0 → `[3.1.1]`** —
+  the post-cut doc sweep (README, CLAUDE.md, getting-started,
+  rust-old-removal) is now dated. See the rolled-in detail below.
+- **`docs/development/roadmap.md` § v3.2** — rewritten. Three
+  items reclassified out of "Blocked — awaiting upstream" after
+  a cc-5.10.34 verify pass:
+  - **Landlock hooks** — `sys_landlock_create_ruleset`,
+    `sys_landlock_add_rule`, `sys_landlock_restrict_self` ship
+    in stdlib (`syscalls_x86_64_linux.cyr` L614-630 + aarch64
+    peer). Moved to Ready.
+  - **HTTP credential proxy** — `sandhi` (HTTP server/client),
+    `tls`, `net` all ship in stdlib at 5.10.34. Moved to Ready.
+  - **cgroups v2** — never actually needed a stdlib wrapper;
+    `/sys/fs/cgroup/<scope>/{memory.max,cpu.max,pids.max}`
+    writes work via plain `fs.cyr`. Mis-classified in v3.0;
+    moved to Ready.
+
+  Remaining "Blocked — actually awaiting upstream" rows each
+  carry **what it means** (concrete kavach-side surface that
+  gates on the missing piece), **who owns the upstream work**,
+  and **trigger condition** (what has to ship): seccomp hooks,
+  Firecracker jailer/vsock/snapshot, H4 binary-path TOCTOU
+  (residual from ADR-005 §H4), SGX attestation + sealing,
+  SEV/TDX attestation, Stiva OCI backend.
+
+### Removed
+- **`rust-old/` tree** (1.4 MB, 25,935 lines of Rust). Parity
+  audit re-verified 2026-05-10 — every public Rust API has a
+  Cyrius equivalent per
+  [`docs/development/rust-old-removal.md`](docs/development/rust-old-removal.md).
+  Heritage `# Ported from rust-old/src/...` header comments
+  in `src/` preserved as breadcrumbs to git history; the source
+  tree itself is reachable via git history pre-3.1.1. Suggest
+  tagging `kavach-pre-rust-removal` at the parent commit for
+  easy rollback / archaeology. `.gitignore` `rust-old/target/`
+  line dropped (parent directory no longer exists).
+
+### Doc sweep (rolled in from the pre-3.1.1 [Unreleased] block)
+- **`README.md`** — Cyrius floor bumped to 5.10.34 with the
+  pin-lock rationale (sigil-NI asm-offset bisect); `cyrius
+  deps` step added to the build instructions; `cyrius.toml`
+  → `cyrius.cyml`; v3.0 status block split into v3.1
+  modernization arc + v3.0 port summary; dep list updated
+  against `[deps] stdlib` + sigil 2.9.0; `doc-health.md`
+  cross-link added.
+- **`CLAUDE.md`** — Rust-era `MSRV: 1.89` line dropped;
+  Version bumped to v3.1.0 (now → v3.1.1); new `Language:
+  Cyrius (pinned at 5.10.34 …)` line carrying the pin-lock
+  rationale. Cleanliness Check lines swapped from `cargo *`
+  → `cyrius *`. Key Principles translated from Rust-attribute
+  idioms to Cyrius-shaped equivalents. DO-NOT list rewritten
+  with the pin-bump prohibition + `cyrius fmt` on
+  non-pinned-toolchain prohibition + `lib/`/`build/`
+  gitignore reminders. `Cargo.lock` reference dropped.
+- **`docs/guides/getting-started.md`** — § 1 "Build +
+  install" rewritten: `cyrius deps` step added; toolchain
+  line bumped to 5.10.34; dep list aligned to `[deps]
+  stdlib`; sigil pin updated 2.1.2 → 2.9.0; `lib/`
+  gitignored model documented.
+- **`docs/development/rust-old-removal.md`** — sed recipe
+  `cyrius.toml` → `cyrius.cyml`; commit message bumped v3.0
+  → v3.x; pre-removal checklist gains the
+  cyrius.cyml-migration-prereq row.
+- **`docs/doc-health.md`** — bucket counts walked after the
+  sweep: Fresh 5 → 9, Stale 3 → 1, Read-through 2 → 0.
+  Per-row Last touched / Status / Notes refreshed.
 
 ### Still queued (carried into v3.2 backlog)
-- `cyrius fmt` drift across 9 src/ files + 2 tests/ files — needs a
-  clean run against the cc 5.10.34 toolchain (don't run with a
-  non-pinned local toolchain).
-- `cyrius lint` long-line warnings (37 total), chiefly in the
-  scanner pattern lists. CI runs both as `::warning::` informational
-  steps until cleared.
+- **`cyrius fmt` drift** across `src/{audit,backend_sy_agnos,composite,credential,quarantine,scanning_gate,scanning_secrets}.cyr`
+  + `tests/kavach.{tcyr,bcyr}`. (Shorter list than v3.1.0
+  documented — the lint-cleanup pass incidentally restyled
+  `scanning_code.cyr` and `scanning_data.cyr`.) Needs a clean
+  run against the cc 5.10.34 toolchain; CI fmt step remains
+  `::warning::` informational until cleared.
 
 ## [3.1.0] — 2026-05-10
 

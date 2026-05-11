@@ -1,7 +1,6 @@
 # Build artifacts
 /target/
 /build/
-rust-old/target/
 
 # Resolved deps — `cyrius deps` populates lib/ from cyrius.cyml
 # [deps] stdlib + [deps.sigil]. lib/ is reproducible from the

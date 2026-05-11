@@ -623,6 +623,54 @@ fn test_credential_file_injections() {
     return 0;
 }
 
+fn test_credential_inject_files() {
+    test_group("credential_inject_files");
+
+    # Empty vec -> 0 written
+    var empty = vec_new();
+    assert_eq(credential_inject_files(empty), 0, "empty vec -> 0");
+
+    # One file with mode 0644 — honors mode + lands content
+    var dir = "/tmp/kavach-test-inject";
+    sys_mkdir(dir, 448);
+    var path1 = "/tmp/kavach-test-inject/secret1.txt";
+    sys_unlink(path1);
+    var injections = vec_new();
+    vec_push(injections, file_injection_new(path1, "payload-1", 420));
+    var n = credential_inject_files(injections);
+    assert_eq(n, 1, "one file written");
+
+    # Verify content
+    var buf[64];
+    var fd = sys_open(path1, 0, 0);
+    assert(fd >= 0, "file readable after inject");
+    var rd = sys_read(fd, &buf, 32);
+    sys_close(fd);
+    assert_eq(rd, 9, "9 bytes content");
+
+    # Two files in one batch — second succeeds even though first existed
+    sys_unlink(path1);
+    var path2 = "/tmp/kavach-test-inject/secret2.txt";
+    sys_unlink(path2);
+    var batch = vec_new();
+    vec_push(batch, file_injection_new(path1, "alpha", 384));
+    vec_push(batch, file_injection_new(path2, "beta", 384));
+    assert_eq(credential_inject_files(batch), 2, "two-file batch");
+    sys_unlink(path1);
+    sys_unlink(path2);
+
+    # O_EXCL refuses preexisting target — returns negative
+    sys_open(path1, 1 + 64, 384);    # create empty preexisting target
+    var fail_batch = vec_new();
+    vec_push(fail_batch, file_injection_new(path1, "blocked", 384));
+    var rc = credential_inject_files(fail_batch);
+    assert(rc < 0, "O_EXCL refuses preexisting");
+    assert_eq(rc, 0 - 1, "rc == -(written+1) == -1 on first-file fail");
+    sys_unlink(path1);
+    sys_rmdir(dir);
+    return 0;
+}
+
 fn test_credential_stdin_payload() {
     test_group("credential_stdin_payload");
     var p = credential_proxy_new();
@@ -1660,6 +1708,7 @@ fn main() {
     test_credential_register_resolve();
     test_credential_env_vars();
     test_credential_file_injections();
+    test_credential_inject_files();
     test_credential_stdin_payload();
     test_audit_chain_record();
     test_audit_chain_linkage();

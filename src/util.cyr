@@ -110,6 +110,32 @@ fn file_write_secure(path, buf, len) {
     return n;
 }
 
+# As file_write_secure, but honors a caller-supplied final mode via fchmod
+# on the same fd that the write went through. Used by credential injection
+# (ADR-005 §M2): the file is created mode 0600 by O_CREAT, the content
+# lands while still 0600 (no other-readable window), then the fd is
+# fchmod'd to the requested mode before close. Closing the fd between
+# write and chmod would re-open a TOCTOU window — using fchmod on the
+# same fd closes it.
+#
+# Raw `syscall(91, ...)` because the stdlib doesn't ship a sys_fchmod
+# wrapper at cc 5.10.34. SYS_FCHMOD = 91 on x86_64 Linux. Only used here;
+# folded back into sys_fchmod when the wrapper lands upstream.
+fn file_write_secure_modal(path, buf, len, mode) {
+    var flags = 1 + 64 + 512 + 128 + 131072;
+    var fd = sys_open(path, flags, 384);
+    if (fd < 0) { return 0 - 1; }
+    var n = sys_write(fd, buf, len);
+    if (n < 0) { sys_close(fd); return 0 - 1; }
+    if (n != len) { sys_close(fd); return 0 - 1; }
+    # SAFETY: SYS_FCHMOD = 91 on x86_64 Linux; fd is owned by this fn
+    # (just opened above), mode is the caller-supplied octal value, the
+    # third arg is the standard syscall(...) trailing zero.
+    syscall(91, fd, mode, 0);
+    sys_close(fd);
+    return n;
+}
+
 # Restrict an existing file to owner-only (best-effort; ignores errors so
 # that failing platforms don't break the exec path — caller still wrote).
 fn file_restrict_mode(path) {

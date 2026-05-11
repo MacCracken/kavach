@@ -6,7 +6,7 @@ type: state
 
 # Documentation Health — kavach
 
-> **Last refresh**: 2026-05-10 (initial audit at the v3.1.0 modernization cut + post-3.1.0 doc sweep — README / CLAUDE.md refreshed against the modernization reality; getting-started.md + rust-old-removal.md read-through complete). | **Refresh cadence**: when docs are touched, update the affected row. Pair with the release dance, but no hard release attachment.
+> **Last refresh**: 2026-05-10 (v3.1.2 patch cut — upstream P1 filings landed for the cyrius syscall wrappers + sigil TEE attestation modules; cross-links from kavach v3.2 Blocked rows; remaining 3.2-Ready features deliberately deferred to 3.2.0). Earlier on 2026-05-10: v3.1.1 cut (doc sweep, lint cleared, FileInjection.mode helper, rust-old/ removed, v3.2 Blocked queue rewritten). | **Refresh cadence**: when docs are touched, update the affected row. Pair with the release dance, but no hard release attachment.
 > **Scope**: This repo only (`kavach`) — root-level files (README, CHANGELOG, CLAUDE.md, etc.) plus the entire `docs/` tree, plus `benchmarks-rust-v-cyrius.md` at the root. The `rust-old/` tree is **deliberately excluded** — it's the pre-v3.0 Rust archive (slated for removal, see roadmap) and its inline docs are not maintained.
 
 This is a **ledger**, not a one-time audit. Rewrite-in-place as docs change. Kavach is the sandbox-execution primitive for SY, stiva, kiran, AgnosAI, hoosh, bote, and aethersafta; stale backend / policy / scanner docs propagate downstream as consumer-side mis-integrations, so doc currency carries weight even though the doc surface is small (~22 files).
@@ -61,7 +61,7 @@ Pattern lifted from the majra ledger ([`majra/docs/doc-health.md`](https://githu
 | `CONTRIBUTING.md` | 2026-04-13 | 🔵 Evergreen | Generic contributor workflow. Re-read annually. |
 | `SECURITY.md` | 2026-04-13 | 🔵 Evergreen | Reporting policy + scope. Re-read annually. |
 | `CODE_OF_CONDUCT.md` | 2026-04-13 | 🔵 Evergreen | Standard. |
-| `VERSION` | 2026-05-10 | ✅ Fresh | `3.1.0` — single source of truth, read into `cyrius.cyml` via `${file:VERSION}`. |
+| `VERSION` | 2026-05-10 | ✅ Fresh | `3.1.2` — single source of truth, read into `cyrius.cyml` via `${file:VERSION}`. |
 | `LICENSE` | (initial commit) | 🔵 Evergreen | GPL-3.0-only. |
 | `cyrius.cyml` | 2026-05-10 | ✅ Fresh | New in v3.1.0 — replaces `cyrius.toml`. cc pin 5.10.34, sigil pin 2.9.0, stdlib list mirrors src/. |
 | `benchmarks-rust-v-cyrius.md` | 2026-04-13 | 📦 Frozen — snapshot | v2.0.0-Rust ↔ v3.0.0-Cyrius release comparison. Don't refresh in place; the next cross-language comparison (if any) gets a new dated file. Today the numbers stand as the cutover headliner. |
@@ -97,8 +97,8 @@ Decision velocity is low. Open a new ADR only when a load-bearing decision is re
 
 | File | Last touched | Status | Notes |
 |---|---|---|---|
-| `roadmap.md` | 2026-05-10 | ✅ Fresh | v3.1 cascade applied: prior "v3.1 — unblocking queue" renamed to "v3.2 — unblocking queue"; new "v3.1 — modernization arc (shipped)" section captures the cc-5.10.34 / cyrius.cyml / lib-via-deps / CI rewrite work. The cyrius `deps` symlink-bug roadmap item is **retired** — the new manifest uses `git`-based `[deps.sigil]` per majra/nein and no longer needs the path-symlink workaround. |
-| `rust-old-removal.md` | 2026-05-10 | ✅ Fresh | Read-through completed in the post-3.1.0 sweep: sed recipe in § "Removal command" updated `cyrius.toml` → `cyrius.cyml`; commit message bumped v3.0 → v3.x; new checked-off line records the cyrius.cyml-migration prereq. Parity audit (Rust public API ↔ Cyrius modules) re-verified against the v3.0 surface — no drift. The rust-old/ tree deletion itself still sits in the v3.2 backlog. |
+| `roadmap.md` | 2026-05-10 | ✅ Fresh | Major rewrite at v3.1.1: v3.2 § split into three sub-blocks — **Done** (3.1.1 work — FileInjection.mode, lint clean, rust-old/ removal), **Ready** (Landlock + cgroups v2 + fmt clean; Landlock + cgroups reclassified out of Blocked at the cc-5.10.34 verify pass), **Blocked — actually awaiting upstream** (seccomp / Firecracker jailer / H4 TOCTOU / SGX-SEV-TDX attestation / Stiva OCI — each row now carries "what it means / who owns the upstream work / trigger condition"). Cleanup pass earlier in the day fixed ADR-005 link, dropped aethersafha typo, dropped duplicate Meta block. |
+| `rust-old-removal.md` | 2026-05-10 | 📦 Frozen — historical | Doc fulfilled its purpose at v3.1.1: rust-old/ tree deleted (1.4 MB / 25,935 lines), parity audit re-verified, sed recipe applied to `src/main.cyr` header. Keep as historical reference (per-symbol Rust→Cyrius mapping is still useful archaeology). No refresh owed; if rust-old/ is restored from git history for any reason, re-open. |
 | `stiva.md` | 2026-04-13 | 📁 Supplementary | Integration note for the stiva consumer. Refresh when stiva's Cyrius port lands (tracked in roadmap v3.2 blocked queue). |
 
 ---

@@ -52,16 +52,30 @@ fn _sgx_write_manifest(workdir, sandbox, command) {
     var buf = alloc(2048 + strlen(cmd_escaped));
     var pos = 0;
 
-    var p1 = "# kavach SGX enclave manifest (auto-generated)\n[libos]\nentrypoint = \"/bin/sh\"\n\n[loader]\nentrypoint = \"file:{{ gramine.libos }}\"\nargv = [\"/bin/sh\", \"-c\", \"";
-    memcpy(buf + pos, p1, strlen(p1)); pos = pos + strlen(p1);
+    var p1a = "# kavach SGX enclave manifest (auto-generated)\n[libos]\nentrypoint = \"/bin/sh\"\n\n";
+    var p1b = "[loader]\nentrypoint = \"file:{{ gramine.libos }}\"\nargv = [\"/bin/sh\", \"-c\", \"";
+    memcpy(buf + pos, p1a, strlen(p1a)); pos = pos + strlen(p1a);
+    memcpy(buf + pos, p1b, strlen(p1b)); pos = pos + strlen(p1b);
     memcpy(buf + pos, cmd_escaped, strlen(cmd_escaped)); pos = pos + strlen(cmd_escaped);
 
-    var p2 = "\"]\nloader.env.PATH = \"/usr/local/bin:/usr/bin:/bin\"\nloader.env.HOME = \"/tmp\"\n\n[sgx]\nenclave_size = \"";
-    memcpy(buf + pos, p2, strlen(p2)); pos = pos + strlen(p2);
+    var p2a = "\"]\nloader.env.PATH = \"/usr/local/bin:/usr/bin:/bin\"\nloader.env.HOME = \"/tmp\"\n\n";
+    var p2b = "[sgx]\nenclave_size = \"";
+    memcpy(buf + pos, p2a, strlen(p2a)); pos = pos + strlen(p2a);
+    memcpy(buf + pos, p2b, strlen(p2b)); pos = pos + strlen(p2b);
     memcpy(buf + pos, &mem_buf, mem_len); pos = pos + mem_len;
 
-    var p3 = "M\"\nmax_threads = 4\nedmm_enable = false\n\n[fs]\nmounts = [\n  { path = \"/lib\", uri = \"file:{{ gramine.runtimedir() }}\" },\n  { path = \"/usr\", uri = \"file:/usr\" },\n  { path = \"/bin\", uri = \"file:/bin\" },\n  { path = \"/tmp\", uri = \"file:/tmp\", type = \"tmpfs\" },\n]\n\n[[fs.trusted_files]]\nuri = \"file:{{ gramine.libos }}\"\n\n[[fs.trusted_files]]\nuri = \"file:/bin/sh\"\n";
-    memcpy(buf + pos, p3, strlen(p3)); pos = pos + strlen(p3);
+    var p3a = "M\"\nmax_threads = 4\nedmm_enable = false\n\n[fs]\nmounts = [\n";
+    var p3b = "  { path = \"/lib\", uri = \"file:{{ gramine.runtimedir() }}\" },\n";
+    var p3c = "  { path = \"/usr\", uri = \"file:/usr\" },\n  { path = \"/bin\", uri = \"file:/bin\" },\n";
+    var p3d = "  { path = \"/tmp\", uri = \"file:/tmp\", type = \"tmpfs\" },\n]\n\n";
+    var p3e = "[[fs.trusted_files]]\nuri = \"file:{{ gramine.libos }}\"\n\n";
+    var p3f = "[[fs.trusted_files]]\nuri = \"file:/bin/sh\"\n";
+    memcpy(buf + pos, p3a, strlen(p3a)); pos = pos + strlen(p3a);
+    memcpy(buf + pos, p3b, strlen(p3b)); pos = pos + strlen(p3b);
+    memcpy(buf + pos, p3c, strlen(p3c)); pos = pos + strlen(p3c);
+    memcpy(buf + pos, p3d, strlen(p3d)); pos = pos + strlen(p3d);
+    memcpy(buf + pos, p3e, strlen(p3e)); pos = pos + strlen(p3e);
+    memcpy(buf + pos, p3f, strlen(p3f)); pos = pos + strlen(p3f);
     store8(buf + pos, 0);
 
     var path = _sgx_manifest_file(workdir);

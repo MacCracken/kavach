@@ -1,5 +1,7 @@
 # kavach — sandbox execution framework
-# Cyrius port from rust-old/ (25935 lines of Rust)
+# Cyrius port from rust-old/ (25935 lines of Rust; archived in git history
+# pre-3.1.1 — see the rust-old removal commit + the kavach-pre-rust-removal
+# tag for the original tree).
 
 include "src/util.cyr"
 include "src/error.cyr"

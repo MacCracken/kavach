@@ -115,18 +115,16 @@ jobs:
             echo "::warning::fmt drift present — informational at v3.1.0; tracked in roadmap v3.2"
           fi
 
-      - name: Lint (informational)
+      - name: Lint
         # `cyrius lint` exits with the warning count, so the `$(...)`
         # capture would trip `set -eo pipefail` on the first file with
-        # any warnings — explicit `|| true` keeps the loop alive.
+        # any warnings — explicit `|| true` keeps the loop alive long
+        # enough to print the full picture before failing.
         #
-        # Informational at v3.1.0: pre-modernization src/ carries
-        # ~37 long-line warnings (chiefly `scanning_code.cyr` /
-        # `scanning_data.cyr` pattern lists + a handful in
-        # `backend_sgx.cyr` / `oci_spec.cyr` / `scanning_runtime.cyr`).
-        # Tracked in roadmap v3.2 under the "`cyrius audit` clean"
-        # item alongside the fmt-drift sweep. Flip back to hard-fail
-        # once src/ is warning-clean against cc 5.10.34.
+        # Cleared in v3.1.1: the long-line warnings inherited from the
+        # v3.0 cut (37 across scanning_code / scanning_data / backend_sgx
+        # / oci_spec / scanning_runtime) were rewrapped without any
+        # semantic change. Hard-fail gate restored.
         run: |
           total=0
           for f in src/*.cyr; do
@@ -137,7 +135,8 @@ jobs:
             total=$((total + n))
           done
           if [ "$total" -gt 0 ]; then
-            echo "::warning::cyrius lint: $total warning(s) across src/ — informational at v3.1.0; tracked in roadmap v3.2"
+            echo "lint: $total warning(s) across src/"
+            exit 1
           fi
 
       - name: Vet (include-graph audit)
