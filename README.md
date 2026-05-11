@@ -12,15 +12,23 @@ classification, credential proxy, HMAC-SHA256 audit chain — all in pure Cyrius
 
 ## Status
 
-**v3.1 — modernization arc.** Behavior-preserving repo modernization on top
-of the v3.0 surface: Cyrius pin 4.5.0 → 5.10.34, manifest format
-`cyrius.toml` → `cyrius.cyml`, `lib/` resolved by `cyrius deps` (no longer
-committed), CI/release rewritten to match the rest of the first-party tree
-(majra, nein, agnosys). The sandbox runtime, scanners, audit chain, and
-threat classifier are unchanged from v3.0. See
-[`CHANGELOG.md`](CHANGELOG.md) for the full v3.1.0 stanza and
-[`docs/development/roadmap.md`](docs/development/roadmap.md) for the
-cascaded v3.2 unblocking queue.
+**v3.2 — cgroups v2 + HTTP credential proxy.** Two new feature modules:
+[`src/cgroup.cyr`](src/cgroup.cyr) wires `SandboxPolicy.{memory_limit_mb,
+cpu_limit_tenths, max_pids}` into per-sandbox cgroups via a race-tolerant
+shell-prepend placement; [`src/credential_http.cyr`](src/credential_http.cyr)
+exposes `GET /v1/secret/<name>` on a loopback HTTP listener with per-instance
+allowlist + audit-chain integration (closes ADR-004 §4). 386 tests, 20
+benches. v3.3.0 (the final cut of this work arc) will land Landlock +
+`sandbox_fork_exec` infrastructure + OCI backend cgroup integration.
+
+**v3.1 — modernization arc + closeout.** v3.1.0 brought the repo onto the
+first-party-tree baseline (Cyrius pin 5.10.34, `cyrius.cyml` manifest,
+`lib/` via `cyrius deps`, CI/release rewritten). v3.1.1 added the
+`FileInjection.mode` honoring helper (ADR-005 §M2), cleared 37 lint
+warnings, and removed the `rust-old/` archive (1.4 MB / 26K lines).
+v3.1.2 filed coordinated P1 upstream issues for the remaining sandbox
+blockers ([cyrius syscall wrappers](https://github.com/MacCracken/cyrius/blob/main/docs/development/issues/2026-05-10-kavach-sandbox-syscall-wrappers.md),
+[sigil TEE attestation modules](https://github.com/MacCracken/sigil/blob/main/docs/development/issues/2026-05-10-kavach-sgx-sev-tdx-attestation-modules.md)).
 
 **v3.0 — Cyrius port.** Full Rust → Cyrius migration: 10 backends, 3
 scanners, audit chain, credential proxy, threat classifier — plus the
@@ -52,7 +60,8 @@ for what's intentionally deferred.
 | **3-scanner pipeline** | Secrets (7 families) + code (26 pattern groups) + data (PII + HIPAA/GDPR/PCI/SOC2) |
 | **Runtime guards** | Fork bomb, sensitive path, command blocklist, shell metacharacters, time anomaly |
 | **Threat classification** | Intent 0..1000 (fixed-point), 7 kill-chain stages, 4 tiers, escalation |
-| **Credential proxy** | In-memory `CredentialProxy` + env/file/stdin injection |
+| **Credential proxy** | In-memory `CredentialProxy` + env/file/stdin injection — plus loopback HTTP via `CredentialHttpProxy` (v3.2+, allowlist-gated, audit-logged) |
+| **cgroups v2 limits** | `memory.max` / `cpu.max` (quota+period) / `pids.max` from `SandboxPolicy` (v3.2+, race-tolerant shell-prepend placement) |
 | **Audit chain** | HMAC-SHA256 signed, prev-linked, JSONL on disk, tamper-detectable |
 | **Quarantine** | File-based storage with status lifecycle (quarantined/approved/released/rejected) |
 | **Lifecycle FSM** | Created → Running → Paused → Stopped → Destroyed |
@@ -75,10 +84,10 @@ cyrius deps
 cyrius build src/main.cyr build/kavach
 ./build/kavach
 
-# Run the test suite (349 tests).
+# Run the test suite (386 tests).
 cyrius test tests/kavach.tcyr
 
-# Run the bench harness (15 benches).
+# Run the bench harness (20 benches).
 cyrius bench tests/kavach.bcyr
 
 # Audit (fmt + lint + vet + deny + test + bench + doc).

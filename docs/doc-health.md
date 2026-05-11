@@ -6,7 +6,7 @@ type: state
 
 # Documentation Health — kavach
 
-> **Last refresh**: 2026-05-10 (v3.2.0 minor — cgroups v2 + HTTP credential proxy landed; v3.3.0 set up as the final cut of this work arc with Landlock + fork-infra + OCI cgroup integration). Earlier on 2026-05-10: 3.1.x arc (modernization, doc sweep, lint cleared, FileInjection.mode, rust-old/ removed, upstream P1 filings). | **Refresh cadence**: when docs are touched, update the affected row. Pair with the release dance, but no hard release attachment.
+> **Last refresh**: 2026-05-10 (v3.2.0 minor + final doc sweep — cgroups v2 + HTTP credential proxy landed; architecture overview refreshed against new modules + dep set; README + CLAUDE.md version mentions current; v3.3.0 queued as the final cut of this work arc with Landlock + fork-infra + OCI cgroup integration). Earlier on 2026-05-10: 3.1.x arc (modernization, doc sweep, lint cleared, FileInjection.mode, rust-old/ removed, upstream P1 filings). | **Refresh cadence**: when docs are touched, update the affected row. Pair with the release dance, but no hard release attachment.
 > **Scope**: This repo only (`kavach`) — root-level files (README, CHANGELOG, CLAUDE.md, etc.) plus the entire `docs/` tree, plus `benchmarks-rust-v-cyrius.md` at the root. The `rust-old/` tree is **deliberately excluded** — it's the pre-v3.0 Rust archive (slated for removal, see roadmap) and its inline docs are not maintained.
 
 This is a **ledger**, not a one-time audit. Rewrite-in-place as docs change. Kavach is the sandbox-execution primitive for SY, stiva, kiran, AgnosAI, hoosh, bote, and aethersafta; stale backend / policy / scanner docs propagate downstream as consumer-side mis-integrations, so doc currency carries weight even though the doc surface is small (~22 files).
@@ -55,9 +55,9 @@ Pattern lifted from the majra ledger ([`majra/docs/doc-health.md`](https://githu
 
 | File | Last touched | Status | Notes |
 |---|---|---|---|
-| `README.md` | 2026-05-10 | ✅ Fresh | Refreshed in the post-3.1.0 sweep: Cyrius floor bumped to 5.10.34 with the pin-lock rationale; `cyrius deps` step added to build instructions; `cyrius.toml` → `cyrius.cyml`; v3.0 status block split into v3.1 modernization arc + v3.0 port summary; dep list updated against `[deps] stdlib` + sigil 2.9.0; doc-health cross-link added. The v1.x↔v3.x comparison table is still accurate as a historical artifact. |
+| `README.md` | 2026-05-10 | ✅ Fresh | Refreshed in the post-3.1.0 sweep + bumped at the 3.2.0 cut: status block now carries v3.2 (cgroups + HTTP credential proxy), v3.1 (modernization + closeout + upstream filings), v3.0 (port + hardening). Capability table adds rows for the cgroups limits + HTTP credential variant. Test count 349 → 386; bench count 15 → 20. |
 | `CHANGELOG.md` | 2026-05-10 | ✅ Fresh | v3.1.0 stanza records the modernization arc. v3.0.0 stanza unchanged. |
-| `CLAUDE.md` | 2026-05-10 | ✅ Fresh | Refreshed in the post-3.1.0 sweep: `MSRV: 1.89` Rust artifact dropped; Version bumped to v3.1.0; new `Language: Cyrius (pinned at 5.10.34 ...)` line; Cleanliness Check lines (P(-1) + Development Loop) swapped from `cargo *` to `cyrius *`; Key Principles translated from Rust-attribute idioms to Cyrius-shaped equivalents; DO-NOT list rewritten with the pin-bump + fmt-on-wrong-toolchain prohibitions. `Cargo.toml` / `Cargo.lock` references removed. |
+| `CLAUDE.md` | 2026-05-10 | ✅ Fresh | Refreshed in the post-3.1.0 sweep; Version field bumped to v3.2.0 in the 3.2.0 final sweep. Cleanliness Check / Key Principles / DO-NOT list all carry the cyrius-shaped idioms. |
 | `CONTRIBUTING.md` | 2026-04-13 | 🔵 Evergreen | Generic contributor workflow. Re-read annually. |
 | `SECURITY.md` | 2026-04-13 | 🔵 Evergreen | Reporting policy + scope. Re-read annually. |
 | `CODE_OF_CONDUCT.md` | 2026-04-13 | 🔵 Evergreen | Standard. |
@@ -72,7 +72,7 @@ Pattern lifted from the majra ledger ([`majra/docs/doc-health.md`](https://githu
 
 | File | Last touched | Status | Notes |
 |---|---|---|---|
-| `overview.md` | 2026-04-13 | 📁 Supplementary | Module map + data flow. Last touched at the v3.0 cut. Re-read at the next feature work that lands a new module (seccomp / landlock / cgroups v2 — see roadmap v3.2 blocked queue). |
+| `overview.md` | 2026-05-10 | ✅ Fresh | Refreshed at the 3.2.0 final sweep: title bumped v3.0 → v3.x; module map adds `src/cgroup.cyr` + `src/credential_http.cyr`; "External dependencies" rebuilt against the 5.10.34 / sigil 2.9.0 reality + the full v3.2 [deps] stdlib set; "Deferred surface" table rewritten to reflect what shipped in v3.0/3.1.1/3.2.0 vs what's queued for v3.3.0 vs what remains upstream-blocked (with cross-links to the upstream filings). Policy-modifier table annotated with per-row enforcement status. "Trust boundary" section adds CredentialHttpProxy + cgroup-v2 entries. |
 
 ---
 

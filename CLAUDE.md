@@ -7,7 +7,7 @@
 - **Type**: Cyrius binary (with first-party consumers; `[lib]` profile may earn a slot when a consumer starts embedding kavach at the source level)
 - **License**: GPL-3.0-only
 - **Language**: Cyrius (pinned at `5.10.34` in `cyrius.cyml` — same first-party tree gate as majra / nein / agnosys, locked by the sigil-NI asm-offset bisect; do not bump the pin without re-running the bisect)
-- **Version**: SemVer, v3.1.0 (Cyrius port; Rust v1.x/v2.x archived in git history)
+- **Version**: SemVer, v3.2.0 (Cyrius port; Rust v1.x/v2.x archived in git history pre-3.1.1)
 - **Genesis repo**: [agnosticos](https://github.com/MacCracken/agnosticos)
 - **Philosophy**: [AGNOS Philosophy & Intention](https://github.com/MacCracken/agnosticos/blob/main/docs/philosophy.md)
 - **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md)

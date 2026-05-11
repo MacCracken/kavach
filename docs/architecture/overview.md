@@ -1,4 +1,4 @@
-# Kavach Architecture (v3.0 — Cyrius port)
+# Kavach Architecture (v3.x — Cyrius port)
 
 > Sandbox execution framework with quantitative strength scoring, a three-scanner
 > externalization gate, credential proxy, runtime guards, threat classification,
@@ -71,7 +71,10 @@ src/
 │
 ├── audit.cyr              HMAC-SHA256 append-only chain (JSONL on disk)
 ├── credential.cyr         SecretRef + CredentialProxy (env/file/stdin inject)
+├── credential_http.cyr    Loopback HTTP credential proxy (GET /v1/secret/<name>)
 ├── quarantine.cyr         File-based artifact quarantine + status lifecycle
+├── cgroup.cyr             cgroups v2 (memory.max / cpu.max / pids.max +
+│                          shell-prepend placement)
 │
 ├── oci_spec.cyr           Shared OCI runtime spec v1.0.2 generator +
 │                          bundle mkdir/cleanup (used by gVisor + OCI)
@@ -99,9 +102,14 @@ src/
 ### Policy construction
 
 ```
-policy_strict() ─► SandboxPolicy{ seccomp, ro_rootfs, mem=512, cpu=1.0,
-                                  scope.abstract_unix=1, scope.signal=1 }
+policy_strict() ─► SandboxPolicy{ seccomp_enabled=1, seccomp_profile="strict",
+                                  read_only_rootfs=1, memory_limit_mb=512,
+                                  cpu_limit_tenths=10 (1.0 cores),
+                                  max_pids=64,
+                                  landlock_abstract_unix=1, landlock_signal=1 }
 ```
+
+The `memory_limit_mb` / `cpu_limit_tenths` / `max_pids` fields are honored by `src/cgroup.cyr` (v3.2.0+); the `seccomp_*` and `landlock_*` fields wait on v3.3.0 + future seccomp.
 
 ### Backend selection
 
@@ -150,18 +158,20 @@ sandbox_exec(sb, "echo hi")
 | SyAgnos | 80 | hardened |
 | Firecracker | 90 | fortress |
 
-Policy modifiers (additive, clamped to [0, 100]):
+Policy modifiers (additive, clamped to [0, 100]). The score reflects what the
+sandbox *claims* to enforce; runtime enforcement is per-feature (cgroups v2
+shipping in v3.2.0; seccomp + Landlock waiting on v3.3.0):
 
-| Modifier | +Score |
-|----------|-------:|
-| seccomp enabled | +5 |
-| landlock rules present | +3 |
-| network disabled | +5 |
-| read-only rootfs | +3 |
-| memory OR cpu limit set | +2 |
-| TCP bind/connect port allowlist | +3 |
-| landlock scope: abstract unix socket | +2 |
-| landlock scope: signal | +2 |
+| Modifier | +Score | Enforced at runtime today? |
+|----------|-------:|----------------------------|
+| seccomp enabled | +5 | No — claim only; v3.3.0+ |
+| landlock rules present | +3 | No — claim only; v3.3.0 |
+| network disabled | +5 | Backend-dependent (microVM/OCI yes, Process no) |
+| read-only rootfs | +3 | Backend-dependent (OCI/gVisor/microVM yes) |
+| memory OR cpu limit set | +2 | **Yes** (v3.2.0 via cgroups v2 on process backend) |
+| TCP bind/connect port allowlist | +3 | No — claim only; v3.3.0 (Landlock ABI v4) |
+| landlock scope: abstract unix socket | +2 | No — claim only; v3.3.0 |
+| landlock scope: signal | +2 | No — claim only; v3.3.0 |
 
 ---
 
@@ -172,12 +182,18 @@ Policy modifiers (additive, clamped to [0, 100]):
 - Each entry: `HMAC(key, "serial:event_type:payload:timestamp:prev_hmac")`.
 - File format: JSONL, appended with `file_append_locked` (file-locked writes).
 - Tamper detection: `audit_entry_verify(entry, key, key_len)` recomputes HMAC; chain verification walks serials + `prev_hmac` linkage.
-- Crypto via [sigil](https://github.com/MacCracken/sigil) ≥ 2.1.2.
+- Crypto via [sigil](https://github.com/MacCracken/sigil) 2.9.0 (pinned).
 
-**Credential proxy** (`src/credential.cyr`)
+**Credential proxy** (`src/credential.cyr` + `src/credential_http.cyr`)
 - `CredentialProxy` keeps a `map_new()` of `name → value`.
 - `SecretRef{ name, inject_via: ENV_VAR | FILE | STDIN, param1, param2 }`.
-- Resolution returns raw cstr (in-memory); the sandbox process sees only the destination form (env var, mounted file, stdin byte stream).
+- Resolution returns raw cstr (in-memory); the sandbox process sees only the destination form (env var, mounted file, stdin byte stream, or HTTP fetch).
+- **HTTP variant (v3.2.0+):** `CredentialHttpProxy` exposes `GET /v1/secret/<name>` on a 127.0.0.1 listener; per-instance allowlist gates which names this proxy serves; every fetch + every 403/404 hits the audit chain when wired. Secrets never land on disk in this path — the "no on-disk artifact" alternative to file injection.
+
+**cgroups v2 resource limits** (v3.2.0+, `src/cgroup.cyr`)
+- Honors `SandboxPolicy.{memory_limit_mb, cpu_limit_tenths, max_pids}` via per-sandbox cgroup at `/sys/fs/cgroup/kavach-<rand_u64>/`.
+- Placement: shell-prepend pattern. `backend_process.cyr::process_exec` wraps the user argv as `["sh", "-c", "echo $$ > <path>/cgroup.procs; exec \"$@\"", "--", <argv>...]`. `"$@"` passthrough avoids re-interpreting user metachars (variables, glob, quotes pass through positionally).
+- Graceful no-op when `/sys/fs/cgroup` is read-only / absent / unprivileged. v3.3.0 will add a no-shell-dependency path via `sandbox_fork_exec` for sandboxes that need exact accounting from the first instruction.
 
 ---
 
@@ -217,8 +233,9 @@ Each backend is a plug into the dispatch table. To add `<name>`:
 
 | Dep | Version | Purpose |
 |-----|---------|---------|
-| Cyrius stdlib | 4.0.0+ | string, fmt, alloc, vec, str, syscalls, io, args, assert, bigint, chrono, hashmap, freelist, fnptr, process |
-| [sigil](https://github.com/MacCracken/sigil) | 2.1.2+ | SHA-256, HMAC-SHA256 |
+| Cyrius toolchain | 5.10.34 (pinned in `cyrius.cyml`) | First-party tree gate from the sigil-NI asm-offset bisect — same pin as majra / nein / agnosys |
+| Cyrius stdlib | resolved by `cyrius deps` into `lib/` (gitignored) | `alloc, args, assert, bench, bigint, chrono, dynlib, fdlopen, fmt, fnptr, freelist, fs, hashmap, hashmap_fast, io, mmap, net, process, result, sandhi, str, string, syscalls, tagged, tls, vec` |
+| [sigil](https://github.com/MacCracken/sigil) | 2.9.0 (pinned tag) | SHA-256, HMAC-SHA256, constant-time compare. 2.9.1+ SIGILL on the NI paths under cc 5.10.x — see [`doc-health.md`](../doc-health.md) for bisect context. |
 
 ---
 
@@ -242,7 +259,8 @@ Each backend is a plug into the dispatch table. To add `<name>`:
 - [Composite backends](../guides/composite-backends.md) — defense-in-depth patterns
 - [Threat tracking](../guides/threat-tracking.md) — intent scoring and OffenderTracker
 - [Worked examples](../examples/) — 4 progressive walkthroughs
-- [Rust v1.x vs Cyrius v3.0 benchmarks](../../benchmarks-rust-v-cyrius.md)
+- [Rust v2.0 vs Cyrius v3.0 benchmarks](../../benchmarks-rust-v-cyrius.md) (frozen historical snapshot)
+- [Doc Health ledger](../doc-health.md) — currency tracking for the prose docs
 - [ADR-001 port architecture](../adr/001-cyrius-port-architecture.md)
 - [ADR-002 dispatch table](../adr/002-backend-dispatch-fnptr-table.md)
 - [ADR-003 fixed-point scoring](../adr/003-fixed-point-threat-scoring.md)
@@ -250,18 +268,22 @@ Each backend is a plug into the dispatch table. To add `<name>`:
 
 ## Deferred surface (intentional)
 
-See [ADR-004](../adr/004-deferred-features.md) for rationale.
+See [ADR-004](../adr/004-deferred-features.md) for rationale; [`development/roadmap.md`](../development/roadmap.md) carries the live v3.3 + Blocked queues with upstream-filing cross-links.
 
-| Feature | Blocking dep | Workaround |
-|---------|--------------|------------|
-| Enriched per-backend features (SGX attestation + sealing, SEV attestation, Firecracker vsock/snapshot/jailer, SyAgnos image manager) | per-feature: sigil EAR helpers, net.cyr Unix sockets, uid/gid syscalls | dispatch slots live — enrichment happens in-place |
-| seccomp/Landlock/cgroups hooks | syscall wrappers in Cyrius stdlib | process backend runs without them today |
-| async exec | Cyrius async story still maturing | synchronous fork+wait |
-| HTTP credential proxy | TLS + HTTP server in stdlib | direct injection (env/file/stdin) |
-| OffenderTracker | chrono + keyed hashmap | threat classification still scores each exec |
-| Sandbox integrity monitoring | /proc file reads | runtime guard still blocks by pattern |
-| Secret redaction (WARN verdict) | single-pass range merger | BLOCK on any secret, WARN never redacts |
-| UUID v4 | random-bytes provider | monotonic counter for sandbox id + quarantine id |
-| Full regex in pattern matchers | PCRE engine in Cyrius | hand-rolled literal-prefix + char-class matchers |
+What's still deferred at v3.2.0:
 
-These are pluggable: each has a clear hook point and does not affect the architecture.
+| Feature | Blocking dep | Trigger condition |
+|---------|--------------|-------------------|
+| **Landlock hooks** | A `sandbox_fork_exec(args, pre_exec_fn)` helper in kavach | **v3.3.0 (final cut)** — `sys_landlock_*` already in stdlib; we just need the post-fork hook point |
+| **Seccomp BPF filter install** | Upstream `sys_prctl` + `sys_seccomp` wrappers (filed: [cyrius issue](https://github.com/MacCracken/cyrius/blob/main/docs/development/issues/2026-05-10-kavach-sandbox-syscall-wrappers.md)) OR raw syscall in kavach | Either upstream wrappers ship OR kavach raw-syscalls them; needs the same fork-infra as Landlock |
+| **H4 binary-path TOCTOU** (ADR-005 §H4 residual) | Upstream `sys_execveat` wrapper (same filing) | Enhancement to a *closed* finding — H1-H3 already block dominant attack class |
+| **Firecracker jailer / vsock / snapshot** | Upstream `sys_setresuid` / `sys_setresgid` + robust unix-socket helpers (same filing) | Lower priority — microVM boundary already isolates without jailer |
+| **SGX / SEV / TDX attestation + sealing** | Upstream sigil attestation modules (filed: [sigil issue](https://github.com/MacCracken/sigil/blob/main/docs/development/issues/2026-05-10-kavach-sgx-sev-tdx-attestation-modules.md)) | sigil ships SGX/SEV/TDX quote-parser + cert-chain primitives |
+| **Stiva OCI backend** | stiva Cyrius port repo exists | Single-line addition to `_oci_runtime_path()` when stiva ships v1.0.0 |
+| **OCI backend cgroup integration** | None — populate `resources.linux.{memory,cpu,pids}` in `oci_spec.cyr` | **v3.3.0** (bundled with the fork-infra cut) |
+| **async exec** | Cyrius async story still maturing | Synchronous fork+wait remains correct for sandbox-runtime semantics |
+| **Full regex in pattern matchers** | PCRE engine in Cyrius | hand-rolled literal-prefix + char-class matchers cover the v3.x surface |
+
+What was deferred in v3.0 but has since shipped: UUID v4 IDs, WARN-verdict secret redaction, OffenderTracker, sandbox integrity monitoring (all v3.0 closeout); `FileInjection.mode` honoring (v3.1.1); cgroups v2 + HTTP credential proxy (v3.2.0).
+
+Hook points stay pluggable: each remaining row has a clear landing site and doesn't disturb the dispatch / scanner / audit-chain spine.
