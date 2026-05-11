@@ -11,34 +11,182 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # `cyrius deps` populates ./lib/ from the version-pinned snapshot,
+  # which then shadows the global ~/.cyrius/versions/<V>/lib snapshot
+  # on every subsequent `cyrius build` invocation. That's intentional
+  # (the cwd lib IS the version-pinned content cyrius deps just
+  # copied); silence the informational note across all CI steps.
+  CYRIUS_NO_WARN_SHADOW_LIB: "1"
+
+  # Whole-program dead-code elimination — smaller binaries, faster
+  # link, matches the agnosys/agnostik/majra CI pattern.
+  CYRIUS_DCE: "1"
+
 jobs:
-  build:
-    name: Build
+  build-and-test:
+    name: Build & Test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Cyrius toolchain
+        # Lays out ~/.cyrius/versions/<VERSION>/{bin,lib} and symlinks
+        # ~/.cyrius/{bin,lib} -> versions/<VERSION>/{bin,lib}. Required
+        # by cc5 5.10.9+: arch-peer includes (syscalls_x86_64_linux.cyr
+        # etc.) are resolved against the version-pinned snapshot, so
+        # the flat ~/.cyrius/lib layout that worked under 5.4.x no
+        # longer finds the peer files.
+        #
+        # 5.10.x release tarballs ship `bin/` + `deps/` only — the
+        # `lib/` (stdlib snapshot) is NOT in the tarball, so we fetch
+        # the GitHub source-archive at the version tag and copy lib/
+        # from there. Same installer body as majra / nein.
         run: |
-          CYRIUS_VERSION="${CYRIUS_VERSION:-$(cat .cyrius-toolchain | tr -d '[:space:]')}"
+          CYRIUS_VERSION="${CYRIUS_VERSION:-$(grep -E '^cyrius[[:space:]]*=' cyrius.cyml | sed -E 's/^cyrius[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/')}"
           echo "Installing Cyrius $CYRIUS_VERSION"
+
           curl -sLO "https://github.com/MacCracken/cyrius/releases/download/$CYRIUS_VERSION/cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
           tar xzf "cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
           CYRIUS_DIR="cyrius-$CYRIUS_VERSION-x86_64-linux"
-          mkdir -p "$HOME/.cyrius/bin" "$HOME/.cyrius/lib"
-          cp "$CYRIUS_DIR/bin/"* "$HOME/.cyrius/bin/" 2>/dev/null || true
-          cp -r "$CYRIUS_DIR/lib/"* "$HOME/.cyrius/lib/" 2>/dev/null || true
-          chmod +x "$HOME/.cyrius/bin/"* 2>/dev/null || true
+
+          curl -sL "https://github.com/MacCracken/cyrius/archive/refs/tags/$CYRIUS_VERSION.tar.gz" -o cyrius-src.tar.gz
+          tar xzf cyrius-src.tar.gz
+          CYRIUS_SRC="cyrius-$CYRIUS_VERSION"
+
+          VERSIONED="$HOME/.cyrius/versions/$CYRIUS_VERSION"
+          mkdir -p "$VERSIONED/bin" "$VERSIONED/lib"
+          cp "$CYRIUS_DIR/bin/"* "$VERSIONED/bin/" 2>/dev/null || true
+          cp "$CYRIUS_DIR/scripts/cyrius" "$VERSIONED/bin/cyrius" 2>/dev/null || true
+          cp -r "$CYRIUS_SRC/lib/"* "$VERSIONED/lib/"
+          if [ -d "$CYRIUS_DIR/deps" ]; then
+            mkdir -p "$HOME/.cyrius/deps"
+            cp -r "$CYRIUS_DIR/deps/"* "$HOME/.cyrius/deps/"
+          fi
+          chmod +x "$VERSIONED/bin/"* 2>/dev/null || true
+          ln -sfn "$VERSIONED/bin" "$HOME/.cyrius/bin"
+          ln -sfn "$VERSIONED/lib" "$HOME/.cyrius/lib"
+          echo "$CYRIUS_VERSION" > "$HOME/.cyrius/current"
           echo "$HOME/.cyrius/bin" >> $GITHUB_PATH
           echo "CYRIUS_HOME=$HOME/.cyrius" >> $GITHUB_ENV
 
+          test -f "$VERSIONED/lib/syscalls_x86_64_linux.cyr" || { echo "FAIL: stdlib lib/syscalls_x86_64_linux.cyr missing — source archive extraction failed"; exit 1; }
+          test -x "$VERSIONED/bin/cc5" || { echo "FAIL: bin/cc5 missing — release tarball extraction failed"; exit 1; }
+          echo "OK: stdlib + binaries installed under $VERSIONED"
+
       - name: Resolve dependencies
+        # Populates ./lib/ from cyrius.cyml [deps] stdlib + [deps.sigil]
+        # at the pinned tag. ./lib/ is gitignored (see .gitignore).
         run: cyrius deps
 
-      - name: Build
+      - name: Verify dep hashes
+        # Skip if cyrius.lock isn't in the tree yet — first push that
+        # introduces deps under the new manifest has to land the
+        # lockfile before this gate can enforce.
+        run: |
+          if [ -f cyrius.lock ]; then
+            cyrius deps --verify
+          else
+            echo "::warning::cyrius.lock not committed — skipping hash verification"
+          fi
+
+      - name: Format check
+        # `cyrius fmt <file>` writes formatted source to stdout; diff
+        # against the committed file catches drift. `--check` only
+        # sets the exit code without emitting output, so diffing its
+        # stdout always reports spurious drift — same workaround as
+        # agnosys / agnostik / nein.
+        run: |
+          fail=0
+          for f in src/*.cyr tests/*.tcyr tests/*.bcyr tests/*.fcyr; do
+            [ -f "$f" ] || continue
+            if ! diff -q <(cyrius fmt "$f" 2>/dev/null) "$f" > /dev/null; then
+              echo "needs fmt: $f"
+              fail=1
+            fi
+          done
+          [ $fail -eq 0 ] || { echo "fmt: drift detected"; exit 1; }
+
+      - name: Lint
+        # Treat any `warn ` line on src/ as a failure.
+        run: |
+          fail=0
+          for f in src/*.cyr; do
+            [ -f "$f" ] || continue
+            out=$(cyrius lint "$f" 2>&1)
+            echo "$out"
+            if echo "$out" | grep -qE '^\s*warn '; then
+              fail=1
+            fi
+          done
+          [ $fail -eq 0 ] || { echo "lint: warnings present in src/"; exit 1; }
+
+      - name: Vet (include-graph audit)
+        run: cyrius vet src/main.cyr
+
+      - name: Build (x86_64, DCE)
         run: |
           mkdir -p build
-          cyrius build src/main.cyr build/${{ github.event.repository.name }}
+          cyrius build src/main.cyr build/kavach
+          echo "kavach (x86_64): $(wc -c < build/kavach) bytes"
+
+      - name: Verify ELF
+        run: xxd -l 4 build/kavach | grep -q "7f45 4c46"
+
+      - name: Smoke test
+        run: |
+          ./build/kavach > /tmp/kavach_out 2>&1 || true
+          grep -q "kavach v" /tmp/kavach_out || { echo "FAIL: banner missing"; cat /tmp/kavach_out; exit 1; }
+
+      - name: Tests
+        run: cyrius test tests/kavach.tcyr
+
+      - name: Benchmarks
+        run: cyrius bench tests/kavach.bcyr
+
+      - name: Fuzz
+        # Single-harness fuzz target; bounded run length keeps CI time
+        # in check while still exercising the scanner / gate paths.
+        run: |
+          cyrius build tests/kavach.fcyr build/kavach_fuzz
+          timeout 10 build/kavach_fuzz 500 || { echo "FUZZ CRASH"; exit 1; }
+
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scan for dangerous patterns
+        # Code-only matches. kavach's `backend_process.cyr` execve is
+        # the whole point — explicitly allowlisted. Anything else
+        # under src/ that raw-syscalls into execve is a regression.
+        run: |
+          FAIL=0
+          scan() {
+            local label="$1"; shift
+            local pat="$1"; shift
+            local allow_file="${1:-}"
+            local hits
+            hits=$(grep -rn "$pat" src/ 2>/dev/null | awk -F: '
+              { line=$3; for(i=4;i<=NF;i++) line=line":"$i;
+                sub(/^[[:space:]]+/,"",line);
+                if (substr(line,1,1) != "#") print $1":"$2":"line }')
+            if [ -n "$allow_file" ]; then
+              hits=$(echo "$hits" | grep -v "^$allow_file:" || true)
+            fi
+            if [ -n "$hits" ]; then
+              echo "FAIL: $label"
+              echo "$hits"
+              FAIL=1
+            fi
+          }
+          # Raw execve outside the documented backend entry points.
+          scan "raw execve (syscall 59)" '\bsyscall\(\s*59\b' src/backend_process.cyr
+          # Hardcoded /etc paths — kavach has no business writing to
+          # system config; injection / mount escape territory.
+          scan "writes to /etc" '"/etc/'
+          echo "security scan complete (fail: $FAIL)"
+          exit $FAIL
 
   docs:
     name: Documentation
@@ -47,6 +195,37 @@ jobs:
       - uses: actions/checkout@v4
       - name: Check required docs
         run: |
-          for doc in README.md CHANGELOG.md VERSION LICENSE cyrius.toml; do
-            test -f "$doc" && echo "OK: $doc" || { echo "MISSING: $doc"; exit 1; }
+          MISSING=0
+          for doc in README.md CHANGELOG.md CLAUDE.md CONTRIBUTING.md SECURITY.md CODE_OF_CONDUCT.md LICENSE VERSION cyrius.cyml docs/doc-health.md docs/development/roadmap.md docs/architecture/overview.md; do
+            if [ -f "$doc" ]; then echo "  OK: $doc"; else echo "  MISSING: $doc"; MISSING=1; fi
           done
+          exit $MISSING
+
+      - name: Verify version consistency
+        run: |
+          FILE_VERSION=$(tr -d '[:space:]' < VERSION)
+          CYML_VERSION=$(grep '^version = ' cyrius.cyml | head -1 | sed -E 's/version = "([^"]+)".*/\1/')
+          # cyrius.cyml uses ${file:VERSION} — treat the literal as "match"
+          if [ "$CYML_VERSION" != '${file:VERSION}' ] && [ "$CYML_VERSION" != "$FILE_VERSION" ]; then
+            echo "FAIL: VERSION ($FILE_VERSION) != cyrius.cyml ($CYML_VERSION)"
+            exit 1
+          fi
+          grep -q "\[$FILE_VERSION\]" CHANGELOG.md || { echo "FAIL: version $FILE_VERSION not in CHANGELOG.md"; exit 1; }
+          echo "Version consistent: $FILE_VERSION"
+
+      - name: Currency check (CHANGELOG dated entry)
+        run: |
+          VERSION=$(tr -d '[:space:]' < VERSION)
+          TODAY=$(date -u +%Y-%m-%d)
+          CL_LINE=$(grep -E "^## \[$VERSION\] — [0-9]{4}-[0-9]{2}-[0-9]{2}" CHANGELOG.md || true)
+          if [ -z "$CL_LINE" ]; then
+            echo "FAIL: CHANGELOG.md has no dated entry for $VERSION"
+            echo "Expected: '## [$VERSION] — YYYY-MM-DD'"
+            exit 1
+          fi
+          CL_DATE=$(echo "$CL_LINE" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}')
+          if [[ "$CL_DATE" > "$TODAY" ]]; then
+            echo "FAIL: CHANGELOG entry for $VERSION dated $CL_DATE (future)"
+            exit 1
+          fi
+          echo "  CHANGELOG: $VERSION dated $CL_DATE"

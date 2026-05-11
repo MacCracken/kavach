@@ -3,6 +3,18 @@
 /build/
 rust-old/target/
 
+# Resolved deps — `cyrius deps` populates lib/ from cyrius.cyml
+# [deps] stdlib + [deps.sigil]. lib/ is reproducible from the
+# manifest + lockfile and is NOT committed (post-3.1.0).
+/lib/
+
+# Cyrius toolchain artifacts pulled into the workspace by the
+# installer flow (release tarball + source archive). CI extracts
+# these under $HOME/.cyrius, but ad-hoc local installs sometimes
+# land them at the repo root.
+cyrius-*.tar.gz
+cyrius-[0-9]*/
+
 # Editor / IDE
 *.swp
 *.swo

@@ -1,0 +1,52 @@
+[package]
+name = "kavach"
+version = "${file:VERSION}"
+description = "Sandbox execution framework — 10 backends, strength scoring (0-100), 3-scanner externalization gate, HMAC audit chain, threat classification. Cyrius port of Rust v2.x."
+license = "GPL-3.0-only"
+repository = "https://github.com/MacCracken/kavach"
+language = "cyrius"
+cyrius = "5.10.34"
+
+[build]
+entry = "src/main.cyr"
+output = "build/kavach"
+
+# ── Dependencies ─────────────────────────────────────────────────
+# Cyrius-stdlib modules vendored into lib/ by `cyrius deps`. kavach
+# includes them transitively via the modules under src/; the list
+# here mirrors the union of imports across src/, tests/, fuzz/, and
+# benches/ so `cyrius deps` resolves the full set. lib/ is gitignored
+# (see .gitignore) — `cyrius deps` is the source of truth.
+[deps]
+stdlib = [
+    "alloc",
+    "args",
+    "assert",
+    "bench",
+    "bigint",
+    "chrono",
+    "fmt",
+    "fnptr",
+    "freelist",
+    "hashmap",
+    "io",
+    "process",
+    "str",
+    "string",
+    "syscalls",
+    "tagged",
+    "vec",
+]
+
+# External first-party deps. Resolved into lib/sigil.cyr by `cyrius deps`
+# at the pinned tag — used by src/audit.cyr for HMAC-SHA256 of the
+# audit chain and src/util.cyr for ct_eq constant-time comparisons.
+#
+# Pinned at 2.9.0 — same gate as majra/nein. Tags 2.9.1 → 3.0.1 SIGILL
+# on the ed25519-NI path under cc5 5.10.x; 3.1.0 also breaks the
+# aes-gcm-NI path. Bump only when sigil ships an asm-offset-stable
+# release (tracked upstream in sigil/docs/development/issues/).
+[deps.sigil]
+git = "https://github.com/MacCracken/sigil.git"
+tag = "2.9.0"
+modules = ["dist/sigil.cyr"]

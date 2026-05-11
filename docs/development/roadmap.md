@@ -33,19 +33,48 @@ All of these landed in v3.0.0 (see CHANGELOG for full detail).
 - [x] Architecture overview + 5 ADRs + 3 guides + 4 examples
 - [x] Benchmark comparison Rust v2.0 ↔ Cyrius v3.0
 
-## v3.1 — unblocking queue
+## v3.1 — modernization arc — shipped
+
+Behavior-preserving repo modernization. Sandbox runtime / scanner /
+audit-chain surface from v3.0 is unchanged. The previously-queued
+"v3.1 — unblocking queue" cascaded to **v3.2** (below).
+
+- [x] Cyrius toolchain pin: 4.5.0 → 5.10.34 (same floor as majra / nein / agnosys post-M6).
+- [x] Manifest format: `cyrius.toml` → `cyrius.cyml` (mirrors majra shape — `${file:VERSION}`, `[deps] stdlib = [...]`, `[deps.sigil]` via git+tag).
+- [x] `lib/` deleted from working tree + gitignored (`cyrius deps` is the source of truth; mirrors majra / nein).
+- [x] `.cyrius-toolchain` deleted (cyrius pin lives in `cyrius.cyml`).
+- [x] sigil pin: 2.1.2 → 2.9.0 (matches the rest of the first-party tree's bisect gate).
+- [x] CI rewrite (`.github/workflows/ci.yml`): version-pinned toolchain installer + source-archive lib fetch + `cyrius deps` + lockfile hash gate + fmt / lint / vet / build / smoke / test / bench / fuzz / security / docs jobs. Pattern lifted from majra / nein.
+- [x] Release rewrite (`.github/workflows/release.yml`): same installer flow + version verify + binary + source-archive assets + SHA256SUMS + dated CHANGELOG body extraction.
+- [x] `docs/doc-health.md` scaffolded — initial currency ledger modeled on majra's.
+- [x] cyrius `deps` symlink-bug roadmap item **retired** — the new manifest uses git-based `[deps.sigil]`, no longer needs the absolute-path workaround.
+
+#### Queued for 3.1.x patch cuts
+
+Doc + cleanup fallout from the modernization, queued in `doc-health.md`:
+
+- [ ] `README.md` refresh — drop "Requires Cyrius ≥ 4.0.0", swap `cyrius.toml` → `cyrius.cyml`, document the `cyrius deps` step.
+- [ ] `CLAUDE.md` refresh — drop Rust-era MSRV line, swap `cargo fmt / clippy / audit / deny` references to `cyrius fmt / lint / vet / audit`, bump Version field to v3.1.0.
+- [ ] `docs/guides/getting-started.md` read-through — manifest reference swap.
+- [ ] `docs/development/rust-old-removal.md` read-through — post-removal sed recipe references `cyrius.toml`.
+- [ ] (Optional) `[lib]` profile + `dist/kavach.cyr` bundle if a consumer starts embedding kavach at the source level.
+
+---
+
+## v3.2 — unblocking queue
 
 Items deferred from v3.0 ([ADR-004](../adr/004-deferred-features.md),
 [ADR-005](../adr/005-v2-hardening-pass.md)), plus operational cleanups.
+Cascaded from the prior "v3.1 — unblocking queue" when v3.1.0 was
+re-scoped to the modernization arc.
 
 #### Ready — no external blockers
 
 | Feature | Source | Notes |
 |---------|--------|-------|
 | `FileInjection.mode` honoring helper | ADR-005 §M2 | `credential_inject_files(injections)` that writes via `file_write_secure` then `sys_fchmod`. |
-| `cyrius audit` clean | v3.0 backlog | fmt / lint / vet / deny. |
-| Delete `rust-old/` | v3.0 backlog | Fully captured per `rust-old-removal.md`. |
-| Report cyrius `deps` symlink bug upstream | v3.0 backlog | Workaround: absolute path for sigil in cyrius.toml. |
+| `cyrius audit` clean | v3.0 backlog | fmt / lint / vet / deny — partially covered by the v3.1.0 CI rewrite; close the loop by getting `cyrius audit` to exit-0 in tree. |
+| Delete `rust-old/` | v3.0 backlog | Fully captured per `rust-old-removal.md`. Final pre-removal parity check + sed-recipe update (`cyrius.toml` → `cyrius.cyml`) owed. |
 
 #### Blocked — awaiting upstream
 
@@ -63,8 +92,7 @@ Items deferred from v3.0 ([ADR-004](../adr/004-deferred-features.md),
 
 #### Meta
 
-- [ ] Report cyrius `deps` relative-path symlink bug upstream (workaround in cyrius.toml uses absolute path for sigil).
-- [ ] Delete `rust-old/` once parity is reached in v3.0.
+- [ ] Delete `rust-old/` once parity is reached.
 
 ---
 
