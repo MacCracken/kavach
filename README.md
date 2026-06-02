@@ -12,14 +12,23 @@ classification, credential proxy, HMAC-SHA256 audit chain — all in pure Cyrius
 
 ## Status
 
+**v3.3 — Cyrius 6.0 toolchain + dependency jump.** Cyrius pin `5.10.44`
+→ `6.0.40` and sigil `2.9.0` → `3.5.9` (latest), moving the repo onto the
+cc 6.0 line and off the retired 5.10.x sigil-NI asm-offset bisect. Includes
+the cc 6.0 symbol migration (sigil's `ct_eq` → stdlib `ct_eq_bytes_lens`;
+renamed kavach helpers that collided with new stdlib/sigil symbols), an
+agnosys `1.3.0` transitive override for cc 6.0.40 compatibility, and the
+release-benchmark discipline (a `benches/bench-history.csv` row per
+release). 384 tests, 20 benches. Landlock + `sandbox_fork_exec`
+infrastructure + OCI backend cgroup integration are pushed back one minor
+to **v3.4.0**.
+
 **v3.2 — cgroups v2 + HTTP credential proxy.** Two new feature modules:
 [`src/cgroup.cyr`](src/cgroup.cyr) wires `SandboxPolicy.{memory_limit_mb,
 cpu_limit_tenths, max_pids}` into per-sandbox cgroups via a race-tolerant
 shell-prepend placement; [`src/credential_http.cyr`](src/credential_http.cyr)
 exposes `GET /v1/secret/<name>` on a loopback HTTP listener with per-instance
-allowlist + audit-chain integration (closes ADR-004 §4). 386 tests, 20
-benches. v3.3.0 (the final cut of this work arc) will land Landlock +
-`sandbox_fork_exec` infrastructure + OCI backend cgroup integration.
+allowlist + audit-chain integration (closes ADR-004 §4).
 
 **v3.1 — modernization arc + closeout.** v3.1.0 brought the repo onto the
 first-party-tree baseline (Cyrius pin 5.10.44, `cyrius.cyml` manifest,
@@ -72,19 +81,21 @@ for what's intentionally deferred.
 ## Build
 
 ```sh
-# Requires Cyrius 5.10.44 (pinned in cyrius.cyml; first-party tree gate
-# from the sigil-NI asm-offset bisect — same pin as majra / nein /
-# agnosys).
+# Requires Cyrius 6.0.40 (pinned in cyrius.cyml; the first-party tree is
+# on the cc 6.0 line — the old 5.10.x sigil-NI asm-offset bisect is
+# retired). Local cycc may sit a patch ahead (6.0.41); the manifest pins
+# 6.0.40, so skip local fmt writes to avoid minor-version drift.
 
-# 1. Resolve deps — populates lib/ (gitignored) with the cc 5.10.44
-#    stdlib snapshot + sigil 2.9.0 at the pinned tag.
+# 1. Resolve deps — populates lib/ (gitignored) with the cc 6.0.40
+#    stdlib snapshot + sigil 3.5.9 at the pinned tag (with an agnosys
+#    1.3.0 transitive override; see cyrius.cyml).
 cyrius deps
 
 # 2. Build the binary.
 cyrius build src/main.cyr build/kavach
 ./build/kavach
 
-# Run the test suite (386 tests).
+# Run the test suite (384 tests).
 cyrius test tests/kavach.tcyr
 
 # Run the bench harness (20 benches).
@@ -95,8 +106,8 @@ cyrius audit
 ```
 
 Dependencies (declared in [`cyrius.cyml`](cyrius.cyml)):
-- **Cyrius stdlib** — `alloc, args, assert, bench, bigint, chrono, fmt, fnptr, freelist, hashmap, io, process, str, string, syscalls, tagged, vec` (resolved by `cyrius deps` into `lib/`, which is gitignored)
-- **[sigil](https://github.com/MacCracken/sigil) 2.9.0** — SHA-256, HMAC-SHA256, constant-time compare (pinned tag; 2.9.1+ SIGILL on the ed25519-NI / aes-gcm-NI paths under cc 5.10.x — see [doc-health.md](docs/doc-health.md) for the bisect context)
+- **Cyrius stdlib** — `alloc, args, assert, bench, bigint, chrono, ct, dynlib, fdlopen, fmt, fnptr, freelist, fs, hashmap, hashmap_fast, io, json, keccak, mmap, net, process, result, sandhi, slice, str, string, syscalls, tagged, thread, tls, vec` (resolved by `cyrius deps` into `lib/`, which is gitignored)
+- **[sigil](https://github.com/MacCracken/sigil) 3.5.9** — SHA-256, HMAC-SHA256 (constant-time compare now via the stdlib `ct` module — sigil retired its own `ct_eq` in the 3.x line). Latest tag; the 5.10.x SIGILL bisect that capped it at 2.9.0 no longer applies under cc 6.0.40. sigil pins agnosys `1.2.7` transitively, which kavach overrides to `1.3.0` for cc 6.0.40 compatibility (see [`cyrius.cyml`](cyrius.cyml)).
 
 ---
 

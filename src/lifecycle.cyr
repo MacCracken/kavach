@@ -149,7 +149,7 @@ var SANDBOX_SIZE = 48;
 # v3.0 now that util.cyr ships rand_u64().
 
 # Nanoseconds since boot. clock_gettime(CLOCK_MONOTONIC, &ts).
-fn now_ns() {
+fn mono_now_ns() {
     var ts[16];
     syscall(228, 1, &ts);
     var sec = load64(&ts);
@@ -169,7 +169,7 @@ fn sandbox_create(config) {
     Sandbox_set_id(s, rand_u64());
     Sandbox_set_config(s, config);
     Sandbox_set_state(s, SandboxState.CREATED);
-    Sandbox_set_created_at(s, now_ns());
+    Sandbox_set_created_at(s, mono_now_ns());
     Sandbox_set_started_at(s, 0);
     Sandbox_set_stopped_at(s, 0);
     return s;
@@ -184,10 +184,10 @@ fn sandbox_transition(s, to) {
     }
     Sandbox_set_state(s, to);
     if (to == SandboxState.RUNNING) {
-        Sandbox_set_started_at(s, now_ns());
+        Sandbox_set_started_at(s, mono_now_ns());
     }
-    if (to == SandboxState.STOPPED) { Sandbox_set_stopped_at(s, now_ns()); }
-    if (to == SandboxState.DESTROYED) { Sandbox_set_stopped_at(s, now_ns()); }
+    if (to == SandboxState.STOPPED) { Sandbox_set_stopped_at(s, mono_now_ns()); }
+    if (to == SandboxState.DESTROYED) { Sandbox_set_stopped_at(s, mono_now_ns()); }
     return KavachError.OK;
 }
 

@@ -1,15 +1,17 @@
 # kavach — shared string helpers + security hardening primitives
 
 # ---- constant-time ops ---------------------------------------------------
-# Delegates to sigil's ct_eq, which XORs byte-by-byte into an accumulator
-# without early exit. Prevents timing side channels on HMAC/signature
-# verification (ADR-005 §C1).
+# Delegates to the stdlib ct_eq_bytes_lens, which XORs byte-by-byte into an
+# accumulator without early exit. Prevents timing side channels on
+# HMAC/signature verification (ADR-005 §C1). sigil retired its own ct_eq in
+# the 3.x line in favor of this stdlib symbol (identical semantics) — see
+# CHANGELOG 3.3.0.
 
 fn ct_streq(a, b) {
     var la = strlen(a);
     var lb = strlen(b);
     if (la != lb) { return 0; }
-    return ct_eq(a, la, b, lb);
+    return ct_eq_bytes_lens(a, la, b, lb);
 }
 
 # ---- overflow-checked arithmetic -----------------------------------------

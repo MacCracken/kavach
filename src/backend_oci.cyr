@@ -51,7 +51,7 @@ fn _oci_error(msg) {
 }
 
 fn oci_exec(sandbox, command) {
-    var start_ns = now_ns();
+    var start_ns = mono_now_ns();
     var runtime = _oci_runtime_path();
     if (runtime == 0) {
         return _oci_error("no OCI runtime (runc/crun) found in PATH");
@@ -76,7 +76,7 @@ fn oci_exec(sandbox, command) {
     var out_cap = 1048576;
     var out_buf = alloc(out_cap);
     var n = _oci_run(runtime, bundle, container_id, out_buf, out_cap);
-    var end_ns = now_ns();
+    var end_ns = mono_now_ns();
 
     _oci_delete(runtime, container_id);
     oci_cleanup_bundle(bundle);

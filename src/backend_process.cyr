@@ -37,7 +37,7 @@ fn _split_command(cmdline) {
 }
 
 fn process_exec(sandbox, command) {
-    var start_ns = now_ns();
+    var start_ns = mono_now_ns();
 
     # Reject control chars before tokenizing. A NUL/CR/newline in `command`
     # would otherwise split into multiple argv tokens and smuggle extra
@@ -93,7 +93,7 @@ fn process_exec(sandbox, command) {
     var buf = alloc(PROCESS_MAX_OUTPUT);
     var n = exec_capture(args, buf, PROCESS_MAX_OUTPUT);
     cgroup_teardown(cgroup_path);
-    var end_ns = now_ns();
+    var end_ns = mono_now_ns();
 
     var r = exec_result_new();
     if (n < 0) {

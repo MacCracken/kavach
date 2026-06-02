@@ -785,7 +785,7 @@ fn test_process_rejects_newline_smuggling() {
     store8(cmd + 18, 0);
     var r = process_exec(sb, cmd);
     assert_eq(ExecResult_exit_code(r), 126, "newline rejected");
-    assert(str_contains(ExecResult_stderr(r), "control") == 1, "msg says control");
+    assert(cstr_contains(ExecResult_stderr(r), "control") == 1, "msg says control");
     return 0;
 }
 
@@ -821,8 +821,8 @@ fn test_redact_evidence() {
     assert(vec_len(v) >= 1, "finding");
     var f = vec_get(v, 0);
     var ev = ScanFinding_evidence(f);
-    assert(str_contains(ev, "****") == 1, "redacted evidence");
-    assert_eq(str_contains(ev, "IOSFODNN7EXA"), 0, "no raw middle bytes");
+    assert(cstr_contains(ev, "****") == 1, "redacted evidence");
+    assert_eq(cstr_contains(ev, "IOSFODNN7EXA"), 0, "no raw middle bytes");
     return 0;
 }
 
@@ -892,12 +892,12 @@ fn test_warn_verdict_redacts_stdout() {
     var sr = gate_apply(er, pol);
     assert_eq(ScanResult_verdict(sr), ScanVerdict.WARN, "verdict = warn");
     var out = ExecResult_stdout(er);
-    assert(str_contains(out, "AKIAIOSFODNN7EXAMPLE") == 0, "aws key redacted");
-    assert(str_contains(out, "[REDACTED:cloud_credential]") == 1, "marker present");
-    assert(str_contains(out, "ghp_ABCDEFGHIJKLMNOPQRST") == 0, "gh token redacted");
-    assert(str_contains(out, "[REDACTED:api_token]") == 1, "gh marker");
-    assert(str_contains(out, "prefix ") == 1, "leading context preserved");
-    assert(str_contains(out, " tail") == 1, "trailing context preserved");
+    assert(cstr_contains(out, "AKIAIOSFODNN7EXAMPLE") == 0, "aws key redacted");
+    assert(cstr_contains(out, "[REDACTED:cloud_credential]") == 1, "marker present");
+    assert(cstr_contains(out, "ghp_ABCDEFGHIJKLMNOPQRST") == 0, "gh token redacted");
+    assert(cstr_contains(out, "[REDACTED:api_token]") == 1, "gh marker");
+    assert(cstr_contains(out, "prefix ") == 1, "leading context preserved");
+    assert(cstr_contains(out, " tail") == 1, "trailing context preserved");
     return 0;
 }
 
@@ -910,7 +910,7 @@ fn test_warn_verdict_redact_disabled() {
     ExternalizationPolicy_set_quarantine_threshold(pol, Severity.CRITICAL + 1);
     ExternalizationPolicy_set_redact_secrets(pol, 0);
     gate_apply(er, pol);
-    assert(str_contains(ExecResult_stdout(er), "AKIAIOSFODNN7EXAMPLE") == 1, "not redacted");
+    assert(cstr_contains(ExecResult_stdout(er), "AKIAIOSFODNN7EXAMPLE") == 1, "not redacted");
     return 0;
 }
 
@@ -1104,7 +1104,7 @@ fn test_oci_bundle_mode_0700() {
     var bundle = oci_prepare_bundle(id, sb, "echo hi");
     assert(bundle != 0, "bundle created");
     # Random id component prevents predictable-path attacks.
-    assert(str_contains(id, "kavach-modetest-") == 1, "prefix kept");
+    assert(cstr_contains(id, "kavach-modetest-") == 1, "prefix kept");
     # ID includes 16-hex random suffix → total length > prefix+timestamp+counter
     assert(strlen(id) > 30, "id includes randomness");
     oci_cleanup_bundle(bundle);
@@ -1255,7 +1255,7 @@ fn test_gvisor_container_id_unique() {
     var a = oci_container_id("kavach-gvisor");
     var b = oci_container_id("kavach-gvisor");
     assert(streq(a, b) == 0, "ids differ");
-    assert(str_contains(a, "kavach-gvisor-") == 1, "prefix");
+    assert(cstr_contains(a, "kavach-gvisor-") == 1, "prefix");
     return 0;
 }
 
@@ -1277,11 +1277,11 @@ fn test_gvisor_oci_spec_shape() {
     var sb = alloc(SANDBOX_SIZE);
     Sandbox_set_config(sb, cfg);
     var spec = oci_generate_spec(sb, "echo hi");
-    assert(str_contains(spec, "\"ociVersion\":\"1.0.2\"") == 1, "version");
-    assert(str_contains(spec, "\"args\":[\"/bin/sh\",\"-c\",\"echo hi\"]") == 1, "command wrapped");
-    assert(str_contains(spec, "\"type\":\"pid\"") == 1, "pid ns");
+    assert(cstr_contains(spec, "\"ociVersion\":\"1.0.2\"") == 1, "version");
+    assert(cstr_contains(spec, "\"args\":[\"/bin/sh\",\"-c\",\"echo hi\"]") == 1, "command wrapped");
+    assert(cstr_contains(spec, "\"type\":\"pid\"") == 1, "pid ns");
     # network disabled by default → network namespace should be included
-    assert(str_contains(spec, "\"type\":\"network\"") == 1, "net ns (default isolated)");
+    assert(cstr_contains(spec, "\"type\":\"network\"") == 1, "net ns (default isolated)");
     return 0;
 }
 
@@ -1294,7 +1294,7 @@ fn test_gvisor_oci_spec_host_network() {
     Sandbox_set_config(sb, cfg);
     var spec = oci_generate_spec(sb, "echo hi");
     # host network → no network namespace entry
-    assert_eq(str_contains(spec, "\"type\":\"network\""), 0, "no net ns when enabled");
+    assert_eq(cstr_contains(spec, "\"type\":\"network\""), 0, "no net ns when enabled");
     return 0;
 }
 
@@ -1306,9 +1306,9 @@ fn test_gvisor_oci_spec_readonly() {
     var sb = alloc(SANDBOX_SIZE);
     Sandbox_set_config(sb, cfg);
     var spec = oci_generate_spec(sb, "echo hi");
-    assert(str_contains(spec, "\"readonly\":true") == 1, "readonly rootfs");
-    assert(str_contains(spec, "\"resources\":{\"memory\":") == 1, "memory limit");
-    assert(str_contains(spec, "\"pids\":{\"limit\":64}") == 1, "pids limit");
+    assert(cstr_contains(spec, "\"readonly\":true") == 1, "readonly rootfs");
+    assert(cstr_contains(spec, "\"resources\":{\"memory\":") == 1, "memory limit");
+    assert(cstr_contains(spec, "\"pids\":{\"limit\":64}") == 1, "pids limit");
     return 0;
 }
 
@@ -1339,7 +1339,7 @@ fn test_oci_exec_without_runtime() {
     if (_oci_runtime_path() == 0) {
         var r = oci_exec(sb, "echo hi");
         assert_eq(ExecResult_exit_code(r), 1, "clean failure");
-        assert(str_contains(ExecResult_stderr(r), "OCI runtime") == 1, "mentions oci");
+        assert(cstr_contains(ExecResult_stderr(r), "OCI runtime") == 1, "mentions oci");
     }
     return 0;
 }
@@ -1406,7 +1406,7 @@ fn test_wasm_exec_without_wasmtime() {
     if (_wasm_binary_path() == 0) {
         var r = wasm_exec(sb, "/tmp/whatever.wasm");
         assert_eq(ExecResult_exit_code(r), 1, "clean failure");
-        assert(str_contains(ExecResult_stderr(r), "wasmtime") == 1, "mentions wasmtime");
+        assert(cstr_contains(ExecResult_stderr(r), "wasmtime") == 1, "mentions wasmtime");
     }
     return 0;
 }
@@ -1423,7 +1423,7 @@ fn test_wasm_exec_missing_file() {
     if (_wasm_binary_path() != 0) {
         var r = wasm_exec(sb, "/tmp/kavach-nonexistent-does-not-exist.wasm");
         assert_eq(ExecResult_exit_code(r), 1, "failure on missing .wasm");
-        assert(str_contains(ExecResult_stderr(r), "not found") == 1, "err says not found");
+        assert(cstr_contains(ExecResult_stderr(r), "not found") == 1, "err says not found");
     }
     return 0;
 }
@@ -1439,7 +1439,7 @@ fn test_gvisor_exec_without_runsc() {
     if (_gvisor_runsc_path() == 0) {
         var r = gvisor_exec(sb, "echo hi");
         assert_eq(ExecResult_exit_code(r), 1, "clean failure");
-        assert(str_contains(ExecResult_stderr(r), "runsc") == 1, "mentions runsc");
+        assert(cstr_contains(ExecResult_stderr(r), "runsc") == 1, "mentions runsc");
     }
     return 0;
 }
@@ -1472,7 +1472,7 @@ fn test_process_backend_real_exec() {
     assert(r != 0, "exec returned a result");
     assert_eq(ExecResult_exit_code(r), 0, "exit 0");
     var out = ExecResult_stdout(r);
-    assert(str_contains(out, "hello_from_process_backend") == 1, "stdout captured");
+    assert(cstr_contains(out, "hello_from_process_backend") == 1, "stdout captured");
     return 0;
 }
 
@@ -1486,7 +1486,7 @@ fn test_process_backend_rejects_bash() {
     assert(r != 0, "result returned");
     assert_eq(ExecResult_exit_code(r), 126, "blocklist exit code");
     var err = ExecResult_stderr(r);
-    assert(str_contains(err, "blocked command") == 1, "blocklist message");
+    assert(cstr_contains(err, "blocked command") == 1, "blocklist message");
     return 0;
 }
 
@@ -1674,8 +1674,8 @@ fn test_cgroup_wrap_argv_shape() {
     assert_eq(streq(vec_get(wrapped, 5), "/tmp"), 1, "argv[5] = /tmp (user)");
     # Body should contain the cgroup_path and the exec "$@" suffix.
     var body = vec_get(wrapped, 2);
-    assert_eq(str_contains(body, "kavach-42/cgroup.procs"), 1, "body has cgroup path");
-    assert_eq(str_contains(body, "exec \"$@\""), 1, "body has exec $@ passthrough");
+    assert_eq(cstr_contains(body, "kavach-42/cgroup.procs"), 1, "body has cgroup path");
+    assert_eq(cstr_contains(body, "exec \"$@\""), 1, "body has exec $@ passthrough");
     return 0;
 }
 

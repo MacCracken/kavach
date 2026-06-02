@@ -6,8 +6,8 @@
 
 - **Type**: Cyrius binary (with first-party consumers; `[lib]` profile may earn a slot when a consumer starts embedding kavach at the source level)
 - **License**: GPL-3.0-only
-- **Language**: Cyrius (pinned at `5.10.44` in `cyrius.cyml` — same first-party tree gate as majra / nein / agnosys, locked by the sigil-NI asm-offset bisect; do not bump the pin without re-running the bisect)
-- **Version**: SemVer, v3.2.1 (Cyrius port; Rust v1.x/v2.x archived in git history pre-3.1.1)
+- **Language**: Cyrius (pinned at `6.0.40` in `cyrius.cyml`). The 5.10.x sigil-NI asm-offset bisect that capped the tree at `5.10.44` no longer applies under cc 6.0 — the first-party tree has moved to the cc 6.0 line (sigil 3.5.9 → cc 6.0.14, agnosys 1.3.0 → cc 6.0.24). Validate a pin move with a clean `deps → build → lint → vet → test → bench` run rather than the old asm-offset bisect.
+- **Version**: SemVer, v3.3.0 (Cyrius port; Rust v1.x/v2.x archived in git history pre-3.1.1)
 - **Genesis repo**: [agnosticos](https://github.com/MacCracken/agnosticos)
 - **Philosophy**: [AGNOS Philosophy & Intention](https://github.com/MacCracken/agnosticos/blob/main/docs/philosophy.md)
 - **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md)
@@ -45,11 +45,13 @@ SY (agent sandboxing), stiva (container isolation), kiran (WASM scripting), Agno
 9. If audit heavy → return to step 5
 10. Documentation — update CHANGELOG, roadmap, docs, ADRs for design decisions, source citations for algorithms/formulas, update docs/sources.md, guides and examples for new API surface, verify recipe version in zugot; refresh `docs/doc-health.md` row for any doc you touched
 11. Version check — `VERSION`, `cyrius.cyml` (which pulls VERSION via `${file:VERSION}`), recipe (in zugot) all in sync
-12. Return to step 1
+12. **Release benchmark — on every version release, run `./scripts/bench-history.sh <version>` (label = the new SemVer, e.g. `3.3.0`) so `benches/bench-history.csv` carries a per-release row. Compare against the prior release's row, call out deltas/regressions in the CHANGELOG, and never cut a release without this baseline recorded.**
+13. Return to step 1
 
 ### Key Principles
 
 - **Never skip benchmarks.** Numbers don't lie. The CSV history (`scripts/bench-history.sh`) is the proof.
+- **Benchmark every release.** Every version release records a `bench-history.csv` row labeled with its SemVer (`./scripts/bench-history.sh <version>`). The per-release history is how deltas and regressions are tracked across versions — a release without a recorded benchmark row is not done.
 - **Tests + benchmarks are the way.** Minimum 80%+ coverage target.
 - **Own the stack.** If a first-party Cyrius crate wraps an external surface, depend on the first-party crate (sigil for crypto, sandhi for HTTP, patra for SQL, sakshi for tracing, agnosys for syscall glue).
 - **No magic.** Every operation is measurable, auditable, traceable.
@@ -86,8 +88,8 @@ Follow [Keep a Changelog](https://keepachangelog.com/). Performance claims MUST 
 ## DO NOT
 - **Do not commit or push** — the user handles all git operations (commit, push, tag)
 - **NEVER use `gh` CLI** — use `curl` to GitHub API only
-- **Do not bump the Cyrius pin** without re-running the sigil-NI asm-offset bisect across the first-party tree (majra / nein / agnosys / kavach all share the 5.10.44 pin for a reason)
-- **Do not run `cyrius fmt` against a non-pinned local toolchain** — fmt output is minor-version-sensitive; running a non-5.10.44 fmt and committing creates new drift against CI's 5.10.44
+- **Do not bump the Cyrius pin** without a clean `deps → build → lint → vet → test → bench` run on the new toolchain across the first-party tree. The pin is `6.0.40`; the old 5.10.x sigil-NI asm-offset bisect is retired (the tree is on cc 6.0 now). A pin move can require migrating renamed/retired stdlib + sigil symbols (e.g. sigil's `ct_eq` → stdlib `ct_eq_bytes_lens` in the 3.x line) — see CHANGELOG 3.3.0.
+- **Do not run `cyrius fmt` against a non-pinned local toolchain** — fmt output is minor-version-sensitive; running a non-6.0.40 fmt and committing creates new drift against CI's 6.0.40. (Local `cycc` may sit a patch ahead, e.g. 6.0.41 — skip fmt writes when it does.)
 - Do not commit `lib/` — it's gitignored; `cyrius deps` is the source of truth
 - Do not commit `build/` — gitignored
 - Do not add unnecessary dependencies — keep it lean

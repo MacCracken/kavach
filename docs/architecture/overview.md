@@ -182,7 +182,7 @@ shipping in v3.2.0; seccomp + Landlock waiting on v3.3.0):
 - Each entry: `HMAC(key, "serial:event_type:payload:timestamp:prev_hmac")`.
 - File format: JSONL, appended with `file_append_locked` (file-locked writes).
 - Tamper detection: `audit_entry_verify(entry, key, key_len)` recomputes HMAC; chain verification walks serials + `prev_hmac` linkage.
-- Crypto via [sigil](https://github.com/MacCracken/sigil) 2.9.0 (pinned).
+- Crypto via [sigil](https://github.com/MacCracken/sigil) 3.5.9 (pinned). Constant-time compare is now the stdlib `ct` module (`ct_eq_bytes_lens`) — sigil retired its own `ct_eq` in the 3.x line.
 
 **Credential proxy** (`src/credential.cyr` + `src/credential_http.cyr`)
 - `CredentialProxy` keeps a `map_new()` of `name → value`.
@@ -233,9 +233,10 @@ Each backend is a plug into the dispatch table. To add `<name>`:
 
 | Dep | Version | Purpose |
 |-----|---------|---------|
-| Cyrius toolchain | 5.10.44 (pinned in `cyrius.cyml`) | First-party tree gate from the sigil-NI asm-offset bisect — same pin as majra / nein / agnosys |
-| Cyrius stdlib | resolved by `cyrius deps` into `lib/` (gitignored) | `alloc, args, assert, bench, bigint, chrono, dynlib, fdlopen, fmt, fnptr, freelist, fs, hashmap, hashmap_fast, io, mmap, net, process, result, sandhi, str, string, syscalls, tagged, tls, vec` |
-| [sigil](https://github.com/MacCracken/sigil) | 2.9.0 (pinned tag) | SHA-256, HMAC-SHA256, constant-time compare. 2.9.1+ SIGILL on the NI paths under cc 5.10.x — see [`doc-health.md`](../doc-health.md) for bisect context. |
+| Cyrius toolchain | 6.0.40 (pinned in `cyrius.cyml`) | First-party tree is on the cc 6.0 line; the old 5.10.x sigil-NI asm-offset bisect is retired. Local cycc may sit a patch ahead (6.0.41). |
+| Cyrius stdlib | resolved by `cyrius deps` into `lib/` (gitignored) | `alloc, args, assert, bench, bigint, chrono, ct, dynlib, fdlopen, fmt, fnptr, freelist, fs, hashmap, hashmap_fast, io, json, keccak, mmap, net, process, result, sandhi, slice, str, string, syscalls, tagged, thread, tls, vec` |
+| [sigil](https://github.com/MacCracken/sigil) | 3.5.9 (pinned tag) | SHA-256, HMAC-SHA256. Constant-time compare moved to the stdlib `ct` module (`ct_eq_bytes_lens`) — sigil retired `ct_eq` in 3.x. The 5.10.x SIGILL bisect that capped sigil at 2.9.0 no longer applies under cc 6.0.40. |
+| [agnosys](https://github.com/MacCracken/agnosys) | 1.3.0 (transitive override) | sigil 3.5.9 pins agnosys 1.2.7 (cc 6.0.1), which fails to build under cc 6.0.40; kavach overrides to 1.3.0 (cc 6.0.24). Drops when sigil bumps its own pin. |
 
 ---
 

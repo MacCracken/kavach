@@ -32,7 +32,7 @@ fn _sev_error(msg) {
 }
 
 fn sev_exec(sandbox, command) {
-    var start_ns = now_ns();
+    var start_ns = mono_now_ns();
     var qemu = _sev_qemu_path();
     if (qemu == 0) {
         return _sev_error("qemu-system-x86_64 not found in PATH");
@@ -82,7 +82,7 @@ fn sev_exec(sandbox, command) {
     var out_cap = 1048576;
     var out_buf = alloc(out_cap);
     var n = exec_capture(args, out_buf, out_cap);
-    var end_ns = now_ns();
+    var end_ns = mono_now_ns();
 
     var r = exec_result_new();
     if (n < 0) {

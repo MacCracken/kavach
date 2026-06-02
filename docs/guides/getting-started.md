@@ -12,16 +12,23 @@ cyrius build src/main.cyr build/kavach
 ./build/kavach                             # runs the end-to-end demo
 ```
 
-Cyrius toolchain `5.10.34` required (pinned in `cyrius.cyml` — same first-party
-tree gate as majra / nein / agnosys, locked by the sigil-NI asm-offset bisect).
+Cyrius toolchain `6.0.40` required (pinned in `cyrius.cyml`). The first-party
+tree is on the cc 6.0 line; the old 5.10.x sigil-NI asm-offset bisect is
+retired. Local `cycc` may sit a patch ahead (6.0.41) — the manifest pins
+6.0.40, so skip local `cyrius fmt` writes to avoid minor-version drift.
 Dependencies are declared in [`cyrius.cyml`](../../cyrius.cyml):
 
-- **Cyrius stdlib** modules (alloc, args, assert, bench, bigint, chrono, fmt,
-  fnptr, freelist, hashmap, io, process, str, string, syscalls, tagged, vec)
-- **[sigil](https://github.com/MacCracken/sigil) 2.9.0** for SHA-256, HMAC-SHA256,
-  and constant-time compare (used by `src/audit.cyr` + `src/util.cyr::ct_streq`).
-  Pinned at 2.9.0 because 2.9.1+ SIGILL on the ed25519-NI / aes-gcm-NI paths
-  under cc 5.10.x.
+- **Cyrius stdlib** modules (alloc, args, assert, bench, bigint, chrono, ct,
+  dynlib, fdlopen, fmt, fnptr, freelist, fs, hashmap, hashmap_fast, io, json,
+  keccak, mmap, net, process, result, sandhi, slice, str, string, syscalls,
+  tagged, thread, tls, vec)
+- **[sigil](https://github.com/MacCracken/sigil) 3.5.9** for SHA-256 and
+  HMAC-SHA256 (used by `src/audit.cyr`). Constant-time compare
+  (`src/util.cyr::ct_streq`) now uses the stdlib `ct` module's
+  `ct_eq_bytes_lens` — sigil retired its own `ct_eq` in the 3.x line. Latest
+  tag; the 5.10.x SIGILL bisect that capped sigil at 2.9.0 no longer applies
+  under cc 6.0.40. kavach adds an agnosys `1.3.0` transitive override for
+  cc 6.0.40 compatibility (sigil pins 1.2.7, which is cc 6.0.1-only).
 
 `cyrius deps` populates `lib/` (gitignored) — that directory is reproducible
 from the manifest + lockfile, not committed.

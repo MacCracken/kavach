@@ -95,9 +95,11 @@ re-scoped to the modernization arc.
 | **cgroups v2 resource limits** | `memory.max`, `cpu.max` (quota/period at 100ms), `pids.max` wired from `SandboxPolicy`. Per-sandbox cgroup at `/sys/fs/cgroup/kavach-<rand>/`. Race-tolerant shell-prepend placement: `["sh", "-c", "echo $$ > <path>/cgroup.procs; exec \"$@\"", "--", <argv>...]` — `"$@"` passthrough prevents user-argv re-interpretation. Graceful no-op when /sys/fs/cgroup is unavailable. | [`src/cgroup.cyr`](../../src/cgroup.cyr); wired into [`src/backend_process.cyr`](../../src/backend_process.cyr). |
 | **HTTP credential proxy** (ADR-004 §4) | Loopback-only HTTP server serving `GET /v1/secret/<name>` from in-memory `CredentialProxy`. Per-instance allowlist (allowlist-miss = 403 without proxy consult). Audit-chain integration on every served fetch + 403/404. | [`src/credential_http.cyr`](../../src/credential_http.cyr); uses stdlib `sandhi` + `net`. |
 
-#### Ready — but deferred to v3.3.0 (final cut)
+#### Ready — but deferred to v3.4.0
 
-The remaining items group around a single shared piece of infrastructure (a `sandbox_fork_exec(args, pre_exec_fn)` helper). v3.3.0 will land that helper + Landlock + OCI cgroup integration, closing out the work arc.
+> **Note (v3.3.0):** v3.3.0 shipped as the Cyrius 6.0 toolchain + dependency jump (cc `5.10.44` → `6.0.40`, sigil `2.9.0` → `3.5.9`), *not* the feature cut originally planned here. The items below were pushed back one minor to **v3.4.0**.
+
+The remaining items group around a single shared piece of infrastructure (a `sandbox_fork_exec(args, pre_exec_fn)` helper). v3.4.0 will land the helper + Landlock + OCI cgroup integration, closing out the work arc.
 
 | Feature | What it adds | Where it lands |
 |---------|--------------|----------------|
@@ -142,9 +144,10 @@ Each row carries: **what it means** (the concrete kavach-side surface that gates
 
 #### Meta
 
+- **Toolchain patch available.** cc `6.0.41` shipped just after the v3.3.0 pin landed at `6.0.40`. Pin stays at `6.0.40` for this release; adopt `6.0.41` in a later patch (v3.3.1 / v3.4.0) once it's run through the `deps → build → lint → vet → test → bench` gate. Local `cycc` already sits at 6.0.41, so the manifest-vs-cycc drift warning is expected until the pin catches up.
 - Three items reclassified out of Blocked at the cc 5.10.34 verify pass (Landlock / cgroups v2 / HTTP credential proxy). The Blocked table is now load-bearing — each row gates on a verified-absent upstream surface, not a stale assumption.
 - Upstream filings landed in 3.1.2: one cyrius issue covering the six sandbox-runtime syscall wrappers (prctl / seccomp / setresuid / setresgid / execveat / fchmod) and one sigil issue covering the SGX/SEV/TDX quote-parser + cert-chain primitives. Both filings include a **severity rationale** section letting the upstream maintainer adjust the rating; both are filed at P1 per kavach's perspective, with honest counter-cases noted (kavach raw-syscall workaround precedent for cyrius; "kavach ships fine without this today" for sigil).
-- Re-run the verify pass when the Cyrius pin moves or when sigil unblocks past 2.9.0.
+- Re-run the verify pass when the Cyrius pin moves or when sigil unblocks past 2.9.0. **(v3.3.0: pin moved to cc 6.0.40 and sigil unblocked to 3.5.9 — the 5.10.x SIGILL bisect is retired. Re-run the SGX/SEV/TDX verify pass against the cc 6.0 surface.)**
 
 ---
 

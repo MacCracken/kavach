@@ -284,39 +284,39 @@ fn _data_scan_pii(text, lower, result) {
 # ---- Compliance keyword groups (substring, case-insensitive) -------------
 
 fn _dg_hipaa(text, lower, result) {
-    if (str_contains(lower, "patient id") == 1) {
+    if (cstr_contains(lower, "patient id") == 1) {
         return _dg_emit(text, lower, result,
             Severity.HIGH, "compliance_hipaa", "HIPAA identifier", "patient id");
     }
-    if (str_contains(lower, "patient name") == 1) {
+    if (cstr_contains(lower, "patient name") == 1) {
         return _dg_emit(text, lower, result,
             Severity.HIGH, "compliance_hipaa", "HIPAA identifier", "patient name");
     }
-    if (str_contains(lower, "patient record") == 1) {
+    if (cstr_contains(lower, "patient record") == 1) {
         return _dg_emit(text, lower, result,
             Severity.HIGH, "compliance_hipaa", "HIPAA identifier", "patient record");
     }
-    if (str_contains(lower, "patient dob") == 1) {
+    if (cstr_contains(lower, "patient dob") == 1) {
         return _dg_emit(text, lower, result,
             Severity.HIGH, "compliance_hipaa", "HIPAA identifier", "patient dob");
     }
-    if (str_contains(lower, "patient ssn") == 1) {
+    if (cstr_contains(lower, "patient ssn") == 1) {
         return _dg_emit(text, lower, result,
             Severity.HIGH, "compliance_hipaa", "HIPAA identifier", "patient ssn");
     }
-    if (str_contains(lower, "patient mrn") == 1) {
+    if (cstr_contains(lower, "patient mrn") == 1) {
         return _dg_emit(text, lower, result,
             Severity.HIGH, "compliance_hipaa", "HIPAA identifier", "patient mrn");
     }
-    if (str_contains(lower, "medical record number") == 1) {
+    if (cstr_contains(lower, "medical record number") == 1) {
         return _dg_emit(text, lower, result,
             Severity.HIGH, "compliance_hipaa", "HIPAA identifier", "medical record number");
     }
-    if (str_contains(lower, "health insurance claim") == 1) {
+    if (cstr_contains(lower, "health insurance claim") == 1) {
         return _dg_emit(text, lower, result,
             Severity.HIGH, "compliance_hipaa", "HIPAA identifier", "health insurance claim");
     }
-    if (str_contains(lower, "protected health information") == 1) {
+    if (cstr_contains(lower, "protected health information") == 1) {
         return _dg_emit(text, lower, result,
             Severity.HIGH, "compliance_hipaa", "HIPAA identifier", "protected health information");
     }
@@ -324,31 +324,31 @@ fn _dg_hipaa(text, lower, result) {
 }
 
 fn _dg_gdpr(text, lower, result) {
-    if (str_contains(lower, "data subject") == 1) {
+    if (cstr_contains(lower, "data subject") == 1) {
         return _dg_emit(text, lower, result,
             Severity.MEDIUM, "compliance_gdpr", "GDPR personal data", "data subject");
     }
-    if (str_contains(lower, "right to erasure") == 1) {
+    if (cstr_contains(lower, "right to erasure") == 1) {
         return _dg_emit(text, lower, result,
             Severity.MEDIUM, "compliance_gdpr", "GDPR personal data", "right to erasure");
     }
-    if (str_contains(lower, "right to be forgotten") == 1) {
+    if (cstr_contains(lower, "right to be forgotten") == 1) {
         return _dg_emit(text, lower, result,
             Severity.MEDIUM, "compliance_gdpr", "GDPR personal data", "right to be forgotten");
     }
-    if (str_contains(lower, "consent withdraw") == 1) {
+    if (cstr_contains(lower, "consent withdraw") == 1) {
         return _dg_emit(text, lower, result,
             Severity.MEDIUM, "compliance_gdpr", "GDPR personal data", "consent withdraw");
     }
-    if (str_contains(lower, "data processing agreement") == 1) {
+    if (cstr_contains(lower, "data processing agreement") == 1) {
         return _dg_emit(text, lower, result,
             Severity.MEDIUM, "compliance_gdpr", "GDPR personal data", "data processing agreement");
     }
-    if (str_contains(lower, "data controller") == 1) {
+    if (cstr_contains(lower, "data controller") == 1) {
         return _dg_emit(text, lower, result,
             Severity.MEDIUM, "compliance_gdpr", "GDPR personal data", "data controller");
     }
-    if (str_contains(lower, "data processor") == 1) {
+    if (cstr_contains(lower, "data processor") == 1) {
         return _dg_emit(text, lower, result,
             Severity.MEDIUM, "compliance_gdpr", "GDPR personal data", "data processor");
     }
@@ -356,35 +356,35 @@ fn _dg_gdpr(text, lower, result) {
 }
 
 fn _dg_pci(text, lower, result) {
-    if (str_contains(lower, "cardholder data") == 1) {
+    if (cstr_contains(lower, "cardholder data") == 1) {
         return _dg_emit(text, lower, result,
             Severity.HIGH, "compliance_pci", "PCI-DSS cardholder data", "cardholder data");
     }
-    if (str_contains(lower, "card verification") == 1) {
+    if (cstr_contains(lower, "card verification") == 1) {
         return _dg_emit(text, lower, result,
             Severity.HIGH, "compliance_pci", "PCI-DSS cardholder data", "card verification");
     }
-    if (str_contains(lower, "cvv") == 1) {
+    if (cstr_contains(lower, "cvv") == 1) {
         return _dg_emit(text, lower, result,
             Severity.HIGH, "compliance_pci", "PCI-DSS cardholder data", "cvv");
     }
-    if (str_contains(lower, "cvc") == 1) {
+    if (cstr_contains(lower, "cvc") == 1) {
         return _dg_emit(text, lower, result,
             Severity.HIGH, "compliance_pci", "PCI-DSS cardholder data", "cvc");
     }
-    if (str_contains(lower, "primary account number") == 1) {
+    if (cstr_contains(lower, "primary account number") == 1) {
         return _dg_emit(text, lower, result,
             Severity.HIGH, "compliance_pci", "PCI-DSS cardholder data", "primary account number");
     }
-    if (str_contains(lower, "pan data") == 1) {
+    if (cstr_contains(lower, "pan data") == 1) {
         return _dg_emit(text, lower, result,
             Severity.HIGH, "compliance_pci", "PCI-DSS cardholder data", "pan data");
     }
-    if (str_contains(lower, "track data") == 1) {
+    if (cstr_contains(lower, "track data") == 1) {
         return _dg_emit(text, lower, result,
             Severity.HIGH, "compliance_pci", "PCI-DSS cardholder data", "track data");
     }
-    if (str_contains(lower, "magnetic stripe") == 1) {
+    if (cstr_contains(lower, "magnetic stripe") == 1) {
         return _dg_emit(text, lower, result,
             Severity.HIGH, "compliance_pci", "PCI-DSS cardholder data", "magnetic stripe");
     }
@@ -392,27 +392,27 @@ fn _dg_pci(text, lower, result) {
 }
 
 fn _dg_soc2(text, lower, result) {
-    if (str_contains(lower, "soc 2") == 1) {
+    if (cstr_contains(lower, "soc 2") == 1) {
         return _dg_emit(text, lower, result,
             Severity.MEDIUM, "compliance_soc2", "SOC2 audit artifact", "soc 2");
     }
-    if (str_contains(lower, "soc2") == 1) {
+    if (cstr_contains(lower, "soc2") == 1) {
         return _dg_emit(text, lower, result,
             Severity.MEDIUM, "compliance_soc2", "SOC2 audit artifact", "soc2");
     }
-    if (str_contains(lower, "trust service criteria") == 1) {
+    if (cstr_contains(lower, "trust service criteria") == 1) {
         return _dg_emit(text, lower, result,
             Severity.MEDIUM, "compliance_soc2", "SOC2 audit artifact", "trust service criteria");
     }
-    if (str_contains(lower, "system description") == 1) {
+    if (cstr_contains(lower, "system description") == 1) {
         return _dg_emit(text, lower, result,
             Severity.MEDIUM, "compliance_soc2", "SOC2 audit artifact", "system description");
     }
-    if (str_contains(lower, "complementary user entity controls") == 1) {
+    if (cstr_contains(lower, "complementary user entity controls") == 1) {
         return _dg_emit(text, lower, result,
             Severity.MEDIUM, "compliance_soc2", "SOC2 audit artifact", "complementary user entity controls");
     }
-    if (str_contains(lower, "cuec") == 1) {
+    if (cstr_contains(lower, "cuec") == 1) {
         return _dg_emit(text, lower, result,
             Severity.MEDIUM, "compliance_soc2", "SOC2 audit artifact", "cuec");
     }

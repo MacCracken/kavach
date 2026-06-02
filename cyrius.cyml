@@ -5,7 +5,7 @@ description = "Sandbox execution framework — 10 backends, strength scoring (0-
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/kavach"
 language = "cyrius"
-cyrius = "5.10.44"
+cyrius = "6.0.40"
 
 [build]
 entry = "src/main.cyr"
@@ -25,6 +25,7 @@ stdlib = [
     "bench",
     "bigint",
     "chrono",
+    "ct",
     "dynlib",
     "fdlopen",
     "fmt",
@@ -34,15 +35,19 @@ stdlib = [
     "hashmap",
     "hashmap_fast",
     "io",
+    "json",
+    "keccak",
     "mmap",
     "net",
     "process",
     "result",
     "sandhi",
+    "slice",
     "str",
     "string",
     "syscalls",
     "tagged",
+    "thread",
     "tls",
     "vec",
 ]
@@ -51,11 +56,23 @@ stdlib = [
 # at the pinned tag — used by src/audit.cyr for HMAC-SHA256 of the
 # audit chain and src/util.cyr for ct_eq constant-time comparisons.
 #
-# Pinned at 2.9.0 — same gate as majra/nein. Tags 2.9.1 → 3.0.1 SIGILL
-# on the ed25519-NI path under cc5 5.10.x; 3.1.0 also breaks the
-# aes-gcm-NI path. Bump only when sigil ships an asm-offset-stable
-# release (tracked upstream in sigil/docs/development/issues/).
+# Pinned at 3.5.9 — latest. The cc 5.10.x asm-offset bisect that
+# capped sigil at 2.9.0 (2.9.1 → 3.0.1 SIGILL on the ed25519-NI path,
+# 3.1.0 on the aes-gcm-NI path) no longer applies under cc 6.0.40: the
+# NI-path offsets are stable across the sigil 3.x line on the 6.0
+# toolchain, validated by a clean build/test/bench run at this pin.
+# Bump in lockstep with the cyrius pin and re-validate.
 [deps.sigil]
 git = "https://github.com/MacCracken/sigil.git"
-tag = "2.9.0"
+tag = "3.5.9"
 modules = ["dist/sigil.cyr"]
+
+# Transitive override. sigil 3.5.9 pins agnosys 1.2.7 (authored for
+# cc 6.0.1), which fails to compile under the cc 6.0.40 toolchain
+# (6.0.x tightened slice-subscript codegen to require the lib/slice.cyr
+# helpers). 1.3.0 is the latest agnosys (cc 6.0.24) and builds clean.
+# Drop this override once sigil bumps its own agnosys pin upstream.
+[deps.agnosys]
+git = "https://github.com/MacCracken/agnosys.git"
+tag = "1.3.0"
+modules = ["dist/agnosys.cyr"]

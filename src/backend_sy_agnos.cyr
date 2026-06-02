@@ -69,46 +69,46 @@ fn phylax_scan(text, result) {
     var lower = alloc(n + 1);
     str_to_lower_into(text, lower);
 
-    if (str_contains(lower, "dm-verity") == 1) {
+    if (cstr_contains(lower, "dm-verity") == 1) {
         _phylax_emit(text, lower, result, "VERITY", "dm-verity");
     }
-    if (str_contains(lower, "verity validation failed") == 1) {
+    if (cstr_contains(lower, "verity validation failed") == 1) {
         _phylax_emit(text, lower, result, "VERITY", "verity validation failed");
     }
-    if (str_contains(lower, "device-mapper: verity") == 1) {
+    if (cstr_contains(lower, "device-mapper: verity") == 1) {
         _phylax_emit(text, lower, result, "VERITY", "device-mapper: verity");
     }
-    if (str_contains(lower, "nft ") == 1) {
+    if (cstr_contains(lower, "nft ") == 1) {
         _phylax_emit(text, lower, result, "NFTABLES_BYPASS", "nft ");
     }
-    if (str_contains(lower, "nftables") == 1) {
+    if (cstr_contains(lower, "nftables") == 1) {
         _phylax_emit(text, lower, result, "NFTABLES_BYPASS", "nftables");
     }
-    if (str_contains(lower, "iptables") == 1) {
+    if (cstr_contains(lower, "iptables") == 1) {
         _phylax_emit(text, lower, result, "NFTABLES_BYPASS", "iptables");
     }
-    if (str_contains(lower, "nsenter") == 1) {
+    if (cstr_contains(lower, "nsenter") == 1) {
         _phylax_emit(text, lower, result, "NAMESPACE_ESCAPE", "nsenter");
     }
-    if (str_contains(lower, "setns(") == 1) {
+    if (cstr_contains(lower, "setns(") == 1) {
         _phylax_emit(text, lower, result, "NAMESPACE_ESCAPE", "setns(");
     }
-    if (str_contains(lower, "unshare(") == 1) {
+    if (cstr_contains(lower, "unshare(") == 1) {
         _phylax_emit(text, lower, result, "NAMESPACE_ESCAPE", "unshare(");
     }
-    if (str_contains(lower, "/proc/1/ns/") == 1) {
+    if (cstr_contains(lower, "/proc/1/ns/") == 1) {
         _phylax_emit(text, lower, result, "NAMESPACE_ESCAPE", "/proc/1/ns/");
     }
-    if (str_contains(lower, "mount -t proc") == 1) {
+    if (cstr_contains(lower, "mount -t proc") == 1) {
         _phylax_emit(text, lower, result, "MOUNT_ESCAPE", "mount -t proc");
     }
-    if (str_contains(lower, "mount -o remount,rw") == 1) {
+    if (cstr_contains(lower, "mount -o remount,rw") == 1) {
         _phylax_emit(text, lower, result, "MOUNT_ESCAPE", "mount -o remount,rw");
     }
-    if (str_contains(lower, "pivot_root") == 1) {
+    if (cstr_contains(lower, "pivot_root") == 1) {
         _phylax_emit(text, lower, result, "MOUNT_ESCAPE", "pivot_root");
     }
-    if (str_contains(lower, "chroot") == 1) {
+    if (cstr_contains(lower, "chroot") == 1) {
         _phylax_emit(text, lower, result, "MOUNT_ESCAPE", "chroot");
     }
     return 0;
@@ -141,7 +141,7 @@ fn _sy_agnos_error(msg) {
 }
 
 fn sy_agnos_exec(sandbox, command) {
-    var start_ns = now_ns();
+    var start_ns = mono_now_ns();
     var runtime = _sy_agnos_runtime();
     if (runtime == 0) {
         return _sy_agnos_error("no container runtime (docker/podman) found");
@@ -203,7 +203,7 @@ fn sy_agnos_exec(sandbox, command) {
     var out_cap = 1048576;
     var out_buf = alloc(out_cap);
     var n = exec_capture(args, out_buf, out_cap);
-    var end_ns = now_ns();
+    var end_ns = mono_now_ns();
 
     var r = exec_result_new();
     if (n < 0) {

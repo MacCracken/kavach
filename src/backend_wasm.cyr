@@ -13,7 +13,8 @@
 fn _wasm_binary_path() {
     if (path_exists("/usr/local/bin/wasmtime") == 1) { return "/usr/local/bin/wasmtime"; }
     if (path_exists("/usr/bin/wasmtime") == 1) { return "/usr/bin/wasmtime"; }
-    var home = syscall(0 - 1, 0);  # placeholder; no getenv yet
+    # No $HOME/.cargo/bin probe yet — stdlib getenv lands later; until then
+    # only the two standard install prefixes above are checked.
     return 0;
 }
 
@@ -101,7 +102,7 @@ fn _wasm_trim(s) {
 }
 
 fn wasm_exec(sandbox, command) {
-    var start_ns = now_ns();
+    var start_ns = mono_now_ns();
     var wasmtime = _wasm_binary_path();
     if (wasmtime == 0) {
         return _wasm_error("wasmtime not found in PATH");
@@ -146,7 +147,7 @@ fn wasm_exec(sandbox, command) {
     var out_cap = 1048576;
     var out_buf = alloc(out_cap);
     var n = exec_capture(args, out_buf, out_cap);
-    var end_ns = now_ns();
+    var end_ns = mono_now_ns();
 
     var r = exec_result_new();
     if (n < 0) {

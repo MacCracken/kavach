@@ -5,6 +5,79 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.3.0] — 2026-06-02
+
+Major toolchain + dependency jump to the Cyrius 6.0 line, plus the
+release-benchmark discipline now baked into the dev loop. The first-party
+tree has moved off the 5.10.x sigil-NI asm-offset bisect gate; validation
+is now a clean `deps → build → lint → vet → test → bench` run on the
+pinned toolchain. All 384 tests pass; lint is 0 warnings; vet reports 34
+deps, 0 untrusted, 0 missing.
+
+### Changed
+- **Cyrius pin** — `cyrius.cyml` bumped `5.10.44` → `6.0.40`. `README.md`,
+  `CLAUDE.md`, and the `docs/` set updated to match. The DO-NOT rule
+  against bumping the pin now references the build/test/bench validation
+  path instead of the retired 5.10.x asm-offset bisect. (Local `cycc` may
+  sit a patch ahead at 6.0.41 — the manifest pins 6.0.40 and fmt writes
+  are skipped locally to avoid minor-version drift against CI.)
+- **sigil pin** — `2.9.0` → `3.5.9` (latest). The cc 5.10.x bisect that
+  capped sigil at 2.9.0 (2.9.1 → 3.0.1 SIGILL on the ed25519-NI path,
+  3.1.0 on aes-gcm-NI) no longer applies under cc 6.0.40 — the NI-path
+  offsets are stable across the sigil 3.x line, validated by a clean
+  build/test/bench at this pin.
+- **`scripts/bench-history.sh`** — ported off the Rust-era
+  `cargo bench --manifest-path Cargo.toml` (the stale `Cargo.toml` is
+  long gone) to `cyrius bench tests/kavach.bcyr`. Parser rewritten for the
+  `name: <avg><unit> avg (...)` format; unit→ns normalization moved from
+  `bc` (not installed here) to `awk` so the `time_ns` column is correctly
+  comparable across ns/us/ms rows. Seeds `benches/bench-history.csv` (new).
+
+### Added
+- **`[deps.agnosys]` transitive override (`1.3.0`)** — sigil 3.5.9 pins
+  agnosys `1.2.7` (authored for cc 6.0.1), which fails to compile under
+  cc 6.0.40 (the 6.0 line tightened slice-subscript codegen to require the
+  `lib/slice.cyr` helpers). agnosys `1.3.0` (cc 6.0.24) is the latest and
+  builds clean; override drops once sigil bumps its own agnosys pin
+  upstream.
+- **Stdlib modules `ct`, `json`, `keccak`, `slice`, `thread`** added to
+  `[deps] stdlib`. The cc 6.0 stdlib absorbed constant-time compare into
+  `ct.cyr` (which is why sigil retired its own `ct.cyr`), and the sigil
+  3.5.9 dist transitively references `json`/`keccak`/`thread`; `slice`
+  satisfies the new slice-subscript helper requirement.
+- **`benches/bench-history.csv`** — first per-release benchmark baseline,
+  labeled `3.3.0` (20 benchmarks). Selected medians at this cut:
+  `state_valid_transition_check` 7ns, `cgroup_policy_has_limits` 10ns,
+  `score_backend_process_strict` 37ns, `http_allowlist_hit` 74ns,
+  `policy_strict_create` 100ns, `ct_streq_64` 227ns,
+  `score_all_backends_strict` 365ns, `cgroup_wrap_argv` 545ns,
+  `sandbox_full_lifecycle` 9µs, `audit_chain_record_to_tmpfs` 13µs,
+  `credential_env_vars_100` 18µs. This is the reference row future
+  releases diff against.
+
+### Migration
+- **sigil `ct_eq` retired → stdlib `ct_eq_bytes_lens`.** sigil removed
+  `src/ct.cyr` and the public `ct_eq` / `ct_eq_32` symbols from
+  `dist/sigil.cyr` in the 3.x line in favor of the cyrius stdlib
+  `ct_eq_bytes_lens` (identical semantics, one identifier rename).
+  `src/util.cyr::ct_streq` migrated accordingly — the audit-chain
+  constant-time HMAC compare (ADR-005 §C1) is unchanged in behavior.
+- **Renamed kavach helpers that newly collided with cc 6.0 stdlib / sigil
+  symbols** (the cc 6.0 stdlib grew `str_contains`/`str_index_of`/`now_ns`
+  and sigil's dist now exports `integrity_report_new`, all with
+  signatures incompatible with kavach's same-named helpers):
+  - `now_ns` → `mono_now_ns` (kavach's CLOCK_MONOTONIC timer; the stdlib
+    `bench.cyr` now ships a CLOCK_MONOTONIC_RAW `now_ns`).
+  - `str_contains` → `cstr_contains`, `str_index_of` → `cstr_index_of`
+    (kavach's cstr-pointer substring helpers; the stdlib's are `Str`-typed
+    and char-based — passing a cstr to the stdlib version SIGSEGVs).
+  - `integrity_report_new` → `runtime_integrity_report_new` (kavach's
+    runtime-scanner report, distinct from sigil's integrity type).
+  These were applied across `src/` **and** `tests/kavach.tcyr`.
+- **`backend_wasm.cyr`** — removed a dead `syscall(0 - 1, 0)` placeholder
+  (unused `home`, flagged by cc 6.0's stricter syscall-arity check); the
+  `$HOME/.cargo/bin` probe lands when stdlib `getenv` is available.
+
 ## [3.2.1] — 2026-05-11
 
 Toolchain pin refresh — Cyrius 5.10.34 → 5.10.44 across the first-party

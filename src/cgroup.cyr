@@ -36,9 +36,9 @@ fn cgroup_supported() {
     var n = file_read_all("/sys/fs/cgroup/cgroup.subtree_control", buf, 511);
     if (n <= 0) { return 0; }
     store8(buf + n, 0);
-    if (str_contains(buf, "memory") == 0) { return 0; }
-    if (str_contains(buf, "cpu") == 0) { return 0; }
-    if (str_contains(buf, "pids") == 0) { return 0; }
+    if (cstr_contains(buf, "memory") == 0) { return 0; }
+    if (cstr_contains(buf, "cpu") == 0) { return 0; }
+    if (cstr_contains(buf, "pids") == 0) { return 0; }
     return 1;
 }
 

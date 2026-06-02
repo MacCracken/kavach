@@ -27,7 +27,7 @@ fn _tdx_error(msg) {
 }
 
 fn tdx_exec(sandbox, command) {
-    var start_ns = now_ns();
+    var start_ns = mono_now_ns();
     var qemu = _tdx_qemu_path();
     if (qemu == 0) {
         return _tdx_error("qemu-system-x86_64 not found in PATH");
@@ -77,7 +77,7 @@ fn tdx_exec(sandbox, command) {
     var out_cap = 1048576;
     var out_buf = alloc(out_cap);
     var n = exec_capture(args, out_buf, out_cap);
-    var end_ns = now_ns();
+    var end_ns = mono_now_ns();
 
     var r = exec_result_new();
     if (n < 0) {

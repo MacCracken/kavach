@@ -45,7 +45,7 @@ fn _gvisor_error(msg) {
 }
 
 fn gvisor_exec(sandbox, command) {
-    var start_ns = now_ns();
+    var start_ns = mono_now_ns();
     var runsc = _gvisor_runsc_path();
     if (runsc == 0) {
         return _gvisor_error("runsc not found in PATH");
@@ -73,7 +73,7 @@ fn gvisor_exec(sandbox, command) {
     var out_cap = 1048576;
     var out_buf = alloc(out_cap);
     var n = _gvisor_run(runsc, bundle, container_id, network, out_buf, out_cap);
-    var end_ns = now_ns();
+    var end_ns = mono_now_ns();
 
     _gvisor_delete(runsc, container_id);
     oci_cleanup_bundle(bundle);

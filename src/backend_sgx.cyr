@@ -94,7 +94,7 @@ fn _sgx_error(msg) {
 }
 
 fn sgx_exec(sandbox, command) {
-    var start_ns = now_ns();
+    var start_ns = mono_now_ns();
     var gramine = _sgx_gramine_path();
     if (gramine == 0) {
         return _sgx_error("gramine-sgx not found in PATH");
@@ -131,7 +131,7 @@ fn sgx_exec(sandbox, command) {
     var out_cap = 1048576;
     var out_buf = alloc(out_cap);
     var n = exec_capture(args, out_buf, out_cap);
-    var end_ns = now_ns();
+    var end_ns = mono_now_ns();
 
     # Cleanup: unlink manifest, rmdir workdir.
     var manifest = _sgx_manifest_file(workdir);
