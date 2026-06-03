@@ -1518,6 +1518,33 @@ fn test_fill_random_entropy() {
     return 0;
 }
 
+# 3.3.3: Result-returning secure write — Ok(len) on a fresh write, and a
+# distinguishable IoError (not a bare -1) when the parent dir is missing.
+fn test_file_write_secure_r() {
+    test_group("file_write_secure_r");
+    # Fresh, unpredictable path so O_EXCL doesn't trip on a leftover file.
+    var rid = rand_hex_id();
+    var prefix = "/tmp/kavach-wsr-";
+    var path = alloc(strlen(prefix) + 17);
+    memcpy(path, prefix, strlen(prefix));
+    memcpy(path + strlen(prefix), rid, 16);
+    store8(path + strlen(prefix) + 16, 0);
+
+    var w = file_write_secure_r(path, "hello", 5);
+    assert_eq(is_ok(w), 1, "fresh secure write is Ok");
+    assert_eq(result_unwrap(w), 5, "wrote 5 bytes");
+    sys_unlink(path);
+
+    # Missing parent directory → ENOENT → IoNotFound (distinguishable error).
+    var w2 = file_write_secure_r("/no/such/kavach/dir/file", "x", 1);
+    assert_eq(is_err_result(w2), 1, "missing dir -> Err");
+    assert_eq(err_code_of(w2), IoNotFound, "ENOENT maps to IoNotFound");
+
+    # Back-compat int wrapper still returns -1 on the same failure.
+    assert_eq(file_write_secure("/no/such/kavach/dir/file", "x", 1), 0 - 1, "int wrapper -1 on failure");
+    return 0;
+}
+
 fn test_process_backend_real_exec() {
     test_group("process_real_exec");
     kavach_init();
@@ -1959,6 +1986,7 @@ fn main() {
     test_backend_dispatch_bounds();
     test_code_evidence_at();
     test_fill_random_entropy();
+    test_file_write_secure_r();
     return assert_summary();
 }
 

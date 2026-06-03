@@ -5,6 +5,47 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.3.3] — 2026-06-02
+
+Toolchain patch refresh + the next cc 6.0 stdlib adoption (Result `_r` on the
+secure-write path). 402 tests pass (+5); lint 0 warnings; vet 34 deps, 0
+untrusted/missing; benchmarks flat within noise.
+
+### Changed
+- **Cyrius pin `6.0.40` → `6.0.43`.** Patch-level toolchain refresh within the
+  cc 6.0 line, re-validated with a clean `deps → build → lint → vet → test →
+  bench` run. The manifest-vs-`cycc` drift warning that had been informational
+  since 3.3.0 now clears (pin matches the installed `cycc 6.0.43`).
+- **Hardened secure write now carries a distinguishable error.** Added
+  `file_write_secure_r` (`util.cyr`) — a `Result`-returning write with the same
+  `O_EXCL|O_NOFOLLOW`, mode-0600 guarantee as `file_write_secure`, built on the
+  stdlib `_r` primitives (`file_open_r`/`file_write_r`/`file_close_r`) so a
+  failure surfaces a typed `IoError` (`IoNotFound`/`IoAccessDenied`/…) instead
+  of a bare `-1`. `file_write_secure` is now a thin int wrapper over it, so all
+  existing callers are unchanged. The stdlib `file_write_all_r` is deliberately
+  **not** used — it opens `O_WRONLY|O_CREAT|O_TRUNC` without the
+  `O_EXCL|O_NOFOLLOW` hardening (ADR-005 §C4).
+- **Quarantine writes log *why* they fail.** `quarantine_store` now uses
+  `file_write_secure_r` and emits a structured error line naming the `IoError`
+  (`io_error_name`) when the artifact or metadata write fails — a failed
+  quarantine is a security-relevant event, and the trail now distinguishes
+  "access denied" / "not found" / staged-symlink from an opaque `-1`
+  (satisfies the "structured logging on every external operation" principle).
+
+### Added
+- **`file_write_secure_r` + `io_error_name`** in `util.cyr` (the `_r` write
+  pattern, available for future leaf-by-leaf migration of other write paths).
+- **Regression test `file_write_secure_r`** — `Ok(len)` on a fresh write,
+  `Err(IoNotFound)` on a missing parent directory, and the int wrapper still
+  returning `-1` on the same failure.
+
+### Notes
+- The audit-chain append (`audit.cyr`) stays on `file_append_locked` (flock +
+  append; no stdlib `_r` equivalent) — out of scope for this cut. Other secure
+  writes (oci_spec / credential / sgx / firecracker) remain on the back-compat
+  `file_write_secure` int wrapper; they can adopt `_r` if/when they grow
+  error-specific handling.
+
 ## [3.3.2] — 2026-06-02
 
 Continues the cc 6.0 stdlib-adoption arc. Cyrius pin stays at `6.0.40`. 397

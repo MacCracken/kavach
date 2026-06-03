@@ -101,15 +101,39 @@ fn is_safe_argument(s) {
 # O_WRONLY=1, O_CREAT=0x40, O_TRUNC=0x200, O_EXCL=0x80, O_NOFOLLOW=0x20000
 # Mode 0600 = 384.
 
-fn file_write_secure(path, buf, len) {
+# Human-readable name for a stdlib IoError variant — for the structured
+# log/error line emitted on a failed external write (ADR-005 audit trail).
+fn io_error_name(e) {
+    if (e == IoNotFound) { return "not found"; }
+    if (e == IoAccessDenied) { return "access denied"; }
+    if (e == IoBadFd) { return "bad fd"; }
+    if (e == IoFailed) { return "write incomplete"; }
+    return "i/o error";
+}
+
+# Result-returning hardened write. Same O_EXCL|O_NOFOLLOW guarantee as
+# file_write_secure (refuses to follow a symlink or clobber an existing file;
+# mode 0600), but built on the stdlib `_r` primitives so the failure carries a
+# distinguishable IoError (ENOENT vs EACCES vs ELOOP/EEXIST→IoOther) instead of
+# a bare -1. NOTE: the stdlib file_write_all_r is deliberately NOT used — it
+# opens O_WRONLY|O_CREAT|O_TRUNC without the O_EXCL|O_NOFOLLOW hardening
+# (ADR-005 §C4). Returns Ok(len) or Err(IoError).
+fn file_write_secure_r(path, buf, len): Result {
     var flags = 1 + 64 + 512 + 128 + 131072;
-    var fd = sys_open(path, flags, 384);
-    if (fd < 0) { return 0 - 1; }
-    var n = sys_write(fd, buf, len);
-    sys_close(fd);
-    if (n < 0) { return 0 - 1; }
-    if (n != len) { return 0 - 1; }
-    return n;
+    var fo = file_open_r(path, flags, 384);
+    if (is_err_result(fo) == 1) { return fo; }
+    var fd = result_unwrap(fo);
+    var wr = file_write_r(fd, buf, len);
+    file_close_r(fd);
+    if (is_err_result(wr) == 1) { return wr; }
+    if (result_unwrap(wr) != len) { return Err(IoFailed); }
+    return Ok(len);
+}
+
+# Back-compat int wrapper: returns bytes written, or -1 on any failure.
+# Existing callers that don't need the distinguished error keep using this.
+fn file_write_secure(path, buf, len) {
+    return result_unwrap_or(file_write_secure_r(path, buf, len), 0 - 1);
 }
 
 # As file_write_secure, but honors a caller-supplied final mode via fchmod

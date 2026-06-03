@@ -6,8 +6,8 @@
 
 - **Type**: Cyrius binary (with first-party consumers; `[lib]` profile may earn a slot when a consumer starts embedding kavach at the source level)
 - **License**: GPL-3.0-only
-- **Language**: Cyrius (pinned at `6.0.40` in `cyrius.cyml`). The 5.10.x sigil-NI asm-offset bisect that capped the tree at `5.10.44` no longer applies under cc 6.0 — the first-party tree has moved to the cc 6.0 line (sigil 3.5.9 → cc 6.0.14, agnosys 1.3.0 → cc 6.0.24). Validate a pin move with a clean `deps → build → lint → vet → test → bench` run rather than the old asm-offset bisect.
-- **Version**: SemVer, v3.3.2 (Cyrius port; Rust v1.x/v2.x archived in git history pre-3.1.1)
+- **Language**: Cyrius (pinned at `6.0.43` in `cyrius.cyml`). The 5.10.x sigil-NI asm-offset bisect that capped the tree at `5.10.44` no longer applies under cc 6.0 — the first-party tree has moved to the cc 6.0 line (sigil 3.5.9 → cc 6.0.14, agnosys 1.3.0 → cc 6.0.24). Validate a pin move with a clean `deps → build → lint → vet → test → bench` run rather than the old asm-offset bisect.
+- **Version**: SemVer, v3.3.3 (Cyrius port; Rust v1.x/v2.x archived in git history pre-3.1.1)
 - **Genesis repo**: [agnosticos](https://github.com/MacCracken/agnosticos)
 - **Philosophy**: [AGNOS Philosophy & Intention](https://github.com/MacCracken/agnosticos/blob/main/docs/philosophy.md)
 - **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md)
@@ -88,8 +88,8 @@ Follow [Keep a Changelog](https://keepachangelog.com/). Performance claims MUST 
 ## DO NOT
 - **Do not commit or push** — the user handles all git operations (commit, push, tag)
 - **NEVER use `gh` CLI** — use `curl` to GitHub API only
-- **Do not bump the Cyrius pin** without a clean `deps → build → lint → vet → test → bench` run on the new toolchain across the first-party tree. The pin is `6.0.40`; the old 5.10.x sigil-NI asm-offset bisect is retired (the tree is on cc 6.0 now). A pin move can require migrating renamed/retired stdlib + sigil symbols (e.g. sigil's `ct_eq` → stdlib `ct_eq_bytes_lens` in the 3.x line) — see CHANGELOG 3.3.0.
-- **Do not run `cyrius fmt` against a non-pinned local toolchain** — fmt output is minor-version-sensitive; running a non-6.0.40 fmt and committing creates new drift against CI's 6.0.40. (Local `cycc` may sit a patch ahead, e.g. 6.0.41 — skip fmt writes when it does.)
+- **Do not bump the Cyrius pin** without a clean `deps → build → lint → vet → test → bench` run on the new toolchain across the first-party tree. The pin is `6.0.43`; the old 5.10.x sigil-NI asm-offset bisect is retired (the tree is on cc 6.0 now). A pin move can require migrating renamed/retired stdlib + sigil symbols (e.g. sigil's `ct_eq` → stdlib `ct_eq_bytes_lens` in the 3.x line) — see CHANGELOG 3.3.0.
+- **Do not run `cyrius fmt` against a non-pinned local toolchain** — fmt output is minor-version-sensitive; running a non-`6.0.43` fmt and committing creates new drift against CI's `6.0.43`. (The pin currently matches the installed `cycc`; if `cycc` later drifts ahead of the pin, skip fmt writes until the pin catches up.)
 - Do not commit `lib/` — it's gitignored; `cyrius deps` is the source of truth
 - Do not commit `build/` — gitignored
 - Do not add unnecessary dependencies — keep it lean

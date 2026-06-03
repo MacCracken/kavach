@@ -12,6 +12,12 @@ classification, credential proxy, HMAC-SHA256 audit chain — all in pure Cyrius
 
 ## Status
 
+**v3.3.3 — toolchain refresh + Result `_r`.** Cyrius pin `6.0.40` → `6.0.43`
+(patch refresh, re-validated; drift warning cleared). Added a Result-returning
+hardened secure write (`file_write_secure_r`) that preserves `O_EXCL|O_NOFOLLOW`
+while surfacing a distinguishable `IoError` instead of `-1`; `quarantine_store`
+now logs *why* a write failed. 402 tests.
+
 **v3.3.2 — cc 6.0 stdlib adoption.** Container-ID entropy moved from
 hand-rolled `/dev/urandom` open/read/close to the kernel CSPRNG via
 `getrandom(2)` (stdlib `random.cyr`) — no fd lifecycle, one syscall, works
@@ -98,12 +104,12 @@ for what's intentionally deferred.
 ## Build
 
 ```sh
-# Requires Cyrius 6.0.40 (pinned in cyrius.cyml; the first-party tree is
+# Requires Cyrius 6.0.43 (pinned in cyrius.cyml; the first-party tree is
 # on the cc 6.0 line — the old 5.10.x sigil-NI asm-offset bisect is
-# retired). Local cycc may sit a patch ahead (6.0.41); the manifest pins
-# 6.0.40, so skip local fmt writes to avoid minor-version drift.
+# retired). The pin matches the installed cycc; if cycc later drifts ahead,
+# skip local fmt writes to avoid minor-version drift.
 
-# 1. Resolve deps — populates lib/ (gitignored) with the cc 6.0.40
+# 1. Resolve deps — populates lib/ (gitignored) with the cc 6.0.43
 #    stdlib snapshot + sigil 3.5.9 at the pinned tag (with an agnosys
 #    1.3.0 transitive override; see cyrius.cyml).
 cyrius deps

@@ -119,14 +119,23 @@ fn quarantine_store(storage, artifact, artifact_len, scan_result, sandbox_id) {
 
     var art_path = _qpath(base, id, "bin");
     if (art_path == 0) { return 0 - 1; }
-    if (file_write_secure(art_path, artifact, artifact_len) < 0) { return 0 - 1; }
+    # Use the Result-returning secure write so a failed quarantine — a
+    # security-relevant event — records *why* (access denied vs not found vs
+    # a staged symlink) in the error trail rather than an opaque -1.
+    var aw = file_write_secure_r(art_path, artifact, artifact_len);
+    if (is_err_result(aw) == 1) {
+        kavach_err_print(KavachError.IO_ERROR, io_error_name(err_code_of(aw)));
+        return 0 - 1;
+    }
 
     var meta_path = _qpath(base, id, "meta");
     if (meta_path == 0) { sys_unlink(art_path); return 0 - 1; }
     var meta = _meta_jsonl(id, sandbox_id,
                            ScanResult_verdict(scan_result),
                            QuarantineStatus.QUARANTINED);
-    if (file_write_secure(meta_path, meta, strlen(meta)) < 0) {
+    var mw = file_write_secure_r(meta_path, meta, strlen(meta));
+    if (is_err_result(mw) == 1) {
+        kavach_err_print(KavachError.IO_ERROR, io_error_name(err_code_of(mw)));
         sys_unlink(art_path);
         return 0 - 1;
     }

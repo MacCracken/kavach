@@ -12,10 +12,10 @@ cyrius build src/main.cyr build/kavach
 ./build/kavach                             # runs the end-to-end demo
 ```
 
-Cyrius toolchain `6.0.40` required (pinned in `cyrius.cyml`). The first-party
+Cyrius toolchain `6.0.43` required (pinned in `cyrius.cyml`). The first-party
 tree is on the cc 6.0 line; the old 5.10.x sigil-NI asm-offset bisect is
-retired. Local `cycc` may sit a patch ahead (6.0.41) — the manifest pins
-6.0.40, so skip local `cyrius fmt` writes to avoid minor-version drift.
+retired. The pin matches the installed `cycc`; if `cycc` later drifts ahead of
+the pin, skip local `cyrius fmt` writes to avoid minor-version drift.
 Dependencies are declared in [`cyrius.cyml`](../../cyrius.cyml):
 
 - **Cyrius stdlib** modules (alloc, args, assert, bench, bigint, chrono, ct,
@@ -27,8 +27,8 @@ Dependencies are declared in [`cyrius.cyml`](../../cyrius.cyml):
   (`src/util.cyr::ct_streq`) now uses the stdlib `ct` module's
   `ct_eq_bytes_lens` — sigil retired its own `ct_eq` in the 3.x line. Latest
   tag; the 5.10.x SIGILL bisect that capped sigil at 2.9.0 no longer applies
-  under cc 6.0.40. kavach adds an agnosys `1.3.0` transitive override for
-  cc 6.0.40 compatibility (sigil pins 1.2.7, which is cc 6.0.1-only).
+  under cc 6.0.43. kavach adds an agnosys `1.3.0` transitive override for
+  cc 6.0.x compatibility (sigil pins 1.2.7, which is cc 6.0.1-only).
 
 `cyrius deps` populates `lib/` (gitignored) — that directory is reproducible
 from the manifest + lockfile, not committed.

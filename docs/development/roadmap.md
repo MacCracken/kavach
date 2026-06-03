@@ -106,7 +106,7 @@ The remaining items group around a single shared piece of infrastructure (a `san
 | **Landlock hooks** | Filesystem and network sandboxing via the Linux Landlock LSM — ABI v4 (TCP port restrictions) + v6 (scoping). Adds the second hardening layer to `policy_strict()` alongside the existing process-scope guards. | New `src/landlock.cyr` (struct LandlockRuleset, builder fns) + post-fork hook in `src/backend_process.cyr`. Uses `sys_landlock_create_ruleset` / `sys_landlock_add_rule` / `sys_landlock_restrict_self` from stdlib `syscalls_x86_64_linux.cyr` L614-630 (and the aarch64 peer at L665-675). Needs the fork-infra below to install the ruleset post-fork in the child. |
 | **`sandbox_fork_exec(args, pre_exec_fn)`** | Custom fork+exec helper: `sys_fork()` → in child, run async-signal-safe `pre_exec_fn` callback (landlock install, cgroup re-join when exact accounting matters, future seccomp filter), then `sys_execve`. Replaces the shell-prepend trick with a tight, no-shell-dependency path for sandboxes that need it. | New helper in `src/util.cyr` or new `src/fork_exec.cyr`. The shared infra for landlock + future seccomp. |
 | **OCI backend cgroup integration** | Populate the `resources.linux.{memory,cpu,pids}` section of the OCI runtime spec in `oci_spec.cyr` so `runc` / `crun` set up cgroups directly instead of relying on kavach-managed cgroupfs writes. | [`src/oci_spec.cyr`](../../src/oci_spec.cyr) — extend the JSON template. Independent of the fork-infra; bundled into v3.4.0 to keep the OCI-cgroup story coherent. |
-| **`cyrius fmt` clean** | Drains the v3.0-inherited fmt drift across `src/{audit,backend_sy_agnos,composite,credential,quarantine,scanning_gate,scanning_secrets}.cyr` and `tests/kavach.{tcyr,bcyr}`. | In-tree edits across the listed files. **Local-toolchain caveat**: the pinned `6.0.40` fmt must be the running fmt — running a different patch locally (e.g. the `6.0.41` cycc on the dev box) and committing the result would write minor-version-sensitive drift. CI runs fmt as `::warning::` informational until cleared. |
+| **`cyrius fmt` clean** | Drains the v3.0-inherited fmt drift across `src/{audit,backend_sy_agnos,composite,credential,quarantine,scanning_gate,scanning_secrets}.cyr` and `tests/kavach.{tcyr,bcyr}`. | In-tree edits across the listed files. **Local-toolchain caveat**: the pinned `6.0.43` fmt must be the running fmt — running a different patch locally and committing the result would write minor-version-sensitive drift. CI runs fmt as `::warning::` informational until cleared. |
 
 #### Blocked — actually awaiting upstream
 
@@ -144,7 +144,7 @@ Each row carries: **what it means** (the concrete kavach-side surface that gates
 
 #### Meta
 
-- **Toolchain patch available.** cc `6.0.41` shipped just after the v3.3.0 pin landed at `6.0.40`. Pin stays at `6.0.40` for this release; adopt `6.0.41` in a later patch (v3.3.1 / v3.4.0) once it's run through the `deps → build → lint → vet → test → bench` gate. Local `cycc` already sits at 6.0.41, so the manifest-vs-cycc drift warning is expected until the pin catches up.
+- **Toolchain pin.** Bumped to cc `6.0.43` in v3.3.3 (was `6.0.40` for 3.3.0–3.3.2), validated through the `deps → build → lint → vet → test → bench` gate; the manifest-vs-`cycc` drift warning is cleared now that the pin matches the installed toolchain.
 - Three items reclassified out of Blocked at the cc 5.10.34 verify pass (Landlock / cgroups v2 / HTTP credential proxy). The Blocked table is now load-bearing — each row gates on a verified-absent upstream surface, not a stale assumption.
 - Upstream filings landed in 3.1.2: one cyrius issue covering the six sandbox-runtime syscall wrappers (prctl / seccomp / setresuid / setresgid / execveat / fchmod) and one sigil issue covering the SGX/SEV/TDX quote-parser + cert-chain primitives. Both filings include a **severity rationale** section letting the upstream maintainer adjust the rating; both are filed at P1 per kavach's perspective, with honest counter-cases noted (kavach raw-syscall workaround precedent for cyrius; "kavach ships fine without this today" for sigil).
 - Re-run the verify pass when the Cyrius pin moves or when sigil unblocks past 2.9.0. **(v3.3.0: pin moved to cc 6.0.40 and sigil unblocked to 3.5.9 — the 5.10.x SIGILL bisect is retired. Re-run the SGX/SEV/TDX verify pass against the cc 6.0 surface.)**
@@ -236,12 +236,15 @@ are "available but never adopted," not 6.0-net-new.
   `rand_hex_id`/`rand_u64`/`rand_uuid_hex` unchanged at the call site. No fd lifecycle,
   one syscall vs three, works with no `/dev` mounted — strengthens ADR-005 §C3. flags=0,
   never `GRND_INSECURE`. `sandbox_full_lifecycle` bench 9µs → 7µs.
-- [ ] **(medium) Result `_r` I/O variants + `?` operator on the audit/quarantine write
-  paths.** `file_open_r`/`file_read_r`/`file_write_all_r` → `Result<T, IoError>` (cyrius
-  v5.8.30; `result` already in deps). Converts the `fd < 0 → return -1` checks in
-  `util.cyr:104/126/153` and `quarantine.cyr:142` into distinguishable errors (EACCES vs
-  ENOENT) that feed the "structured logging on every external op" principle. Convert
-  leaf-by-leaf; behavior-change risk where callers test `== -1`.
+- [x] **(medium) Result `_r` I/O variants on the secure-write path.** ✅ shipped 3.3.3.
+  Added `file_write_secure_r` (`Result<_, IoError>`) + `io_error_name` in `util.cyr`;
+  `file_write_secure` delegates to it (int wrapper, zero caller churn). `quarantine_store`
+  now surfaces the distinguishable `IoError` on a failed write. **Scope note:** the stdlib
+  `file_write_all_r` was *not* used as a drop-in — it lacks the `O_EXCL|O_NOFOLLOW`
+  hardening, so the `_r` write is built kavach-side on `file_open_r`/`file_write_r`. The
+  audit append (`file_append_locked`, no stdlib `_r` peer) and the other secure-write
+  callers (oci_spec/credential/sgx/firecracker) stay on the int wrapper — migrate if/when
+  they grow error-specific handling.
 - [ ] **(medium-large, opportunistic) Typed `: Str` / `slice<T>` params with
   bounds-checked subscripting.** The biggest idiom gap vs vidya — kavach uses zero typed
   slices today despite vendoring `slice`/`str`. `s[i]` traps on OOB (exit 134) instead of

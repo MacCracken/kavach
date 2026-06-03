@@ -233,10 +233,10 @@ Each backend is a plug into the dispatch table. To add `<name>`:
 
 | Dep | Version | Purpose |
 |-----|---------|---------|
-| Cyrius toolchain | 6.0.40 (pinned in `cyrius.cyml`) | First-party tree is on the cc 6.0 line; the old 5.10.x sigil-NI asm-offset bisect is retired. Local cycc may sit a patch ahead (6.0.41). |
+| Cyrius toolchain | 6.0.43 (pinned in `cyrius.cyml`) | First-party tree is on the cc 6.0 line; the old 5.10.x sigil-NI asm-offset bisect is retired. Pin matches the installed cycc. |
 | Cyrius stdlib | resolved by `cyrius deps` into `lib/` (gitignored) | `alloc, args, assert, bench, bigint, chrono, ct, dynlib, fdlopen, fmt, fnptr, freelist, fs, hashmap, hashmap_fast, io, json, keccak, mmap, net, process, result, sandhi, slice, str, string, syscalls, tagged, thread, tls, vec` |
-| [sigil](https://github.com/MacCracken/sigil) | 3.5.9 (pinned tag) | SHA-256, HMAC-SHA256. Constant-time compare moved to the stdlib `ct` module (`ct_eq_bytes_lens`) — sigil retired `ct_eq` in 3.x. The 5.10.x SIGILL bisect that capped sigil at 2.9.0 no longer applies under cc 6.0.40. |
-| [agnosys](https://github.com/MacCracken/agnosys) | 1.3.0 (transitive override) | sigil 3.5.9 pins agnosys 1.2.7 (cc 6.0.1), which fails to build under cc 6.0.40; kavach overrides to 1.3.0 (cc 6.0.24). Drops when sigil bumps its own pin. |
+| [sigil](https://github.com/MacCracken/sigil) | 3.5.9 (pinned tag) | SHA-256, HMAC-SHA256. Constant-time compare moved to the stdlib `ct` module (`ct_eq_bytes_lens`) — sigil retired `ct_eq` in 3.x. The 5.10.x SIGILL bisect that capped sigil at 2.9.0 no longer applies under cc 6.0.43. |
+| [agnosys](https://github.com/MacCracken/agnosys) | 1.3.0 (transitive override) | sigil 3.5.9 pins agnosys 1.2.7 (cc 6.0.1), which fails to build under cc 6.0.43; kavach overrides to 1.3.0 (cc 6.0.24). Drops when sigil bumps its own pin. |
 
 ---
 
