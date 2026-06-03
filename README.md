@@ -12,6 +12,12 @@ classification, credential proxy, HMAC-SHA256 audit chain — all in pure Cyrius
 
 ## Status
 
+**v3.3.2 — cc 6.0 stdlib adoption.** Container-ID entropy moved from
+hand-rolled `/dev/urandom` open/read/close to the kernel CSPRNG via
+`getrandom(2)` (stdlib `random.cyr`) — no fd lifecycle, one syscall, works
+without `/dev` mounted (chroot/landlocked/minimal mount ns), strengthening the
+unpredictable-id property. Cyrius pin stays `6.0.40`. 397 tests.
+
 **v3.3.1 — memory-safety + hardening patch.** Post-3.3.0 source audit: fixed a
 heap overflow in all nine exec-capture backends (NUL written one byte past the
 capture buffer on full output) and the same off-by-one in the `/proc` integrity

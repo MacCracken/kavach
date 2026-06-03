@@ -1505,6 +1505,19 @@ fn test_code_evidence_at() {
     return 0;
 }
 
+# 3.3.2: getrandom-backed entropy — fill_random reports the full count and the
+# rand_* helpers yield distinct, nonzero draws (the getrandom path is wired).
+fn test_fill_random_entropy() {
+    test_group("fill_random_entropy");
+    var buf[16];
+    assert_eq(fill_random(&buf, 16), 16, "fills all 16 requested bytes");
+    var a = rand_u64();
+    var b = rand_u64();
+    assert(a != 0, "rand_u64 nonzero");
+    assert(a != b, "two draws differ");
+    return 0;
+}
+
 fn test_process_backend_real_exec() {
     test_group("process_real_exec");
     kavach_init();
@@ -1945,6 +1958,7 @@ fn main() {
     test_cgroup_controller_token_match();
     test_backend_dispatch_bounds();
     test_code_evidence_at();
+    test_fill_random_entropy();
     return assert_summary();
 }
 

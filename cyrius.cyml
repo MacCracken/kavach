@@ -40,6 +40,7 @@ stdlib = [
     "mmap",
     "net",
     "process",
+    "random",
     "result",
     "sandhi",
     "slice",

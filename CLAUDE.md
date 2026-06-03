@@ -7,7 +7,7 @@
 - **Type**: Cyrius binary (with first-party consumers; `[lib]` profile may earn a slot when a consumer starts embedding kavach at the source level)
 - **License**: GPL-3.0-only
 - **Language**: Cyrius (pinned at `6.0.40` in `cyrius.cyml`). The 5.10.x sigil-NI asm-offset bisect that capped the tree at `5.10.44` no longer applies under cc 6.0 — the first-party tree has moved to the cc 6.0 line (sigil 3.5.9 → cc 6.0.14, agnosys 1.3.0 → cc 6.0.24). Validate a pin move with a clean `deps → build → lint → vet → test → bench` run rather than the old asm-offset bisect.
-- **Version**: SemVer, v3.3.1 (Cyrius port; Rust v1.x/v2.x archived in git history pre-3.1.1)
+- **Version**: SemVer, v3.3.2 (Cyrius port; Rust v1.x/v2.x archived in git history pre-3.1.1)
 - **Genesis repo**: [agnosticos](https://github.com/MacCracken/agnosticos)
 - **Philosophy**: [AGNOS Philosophy & Intention](https://github.com/MacCracken/agnosticos/blob/main/docs/philosophy.md)
 - **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md)

@@ -146,21 +146,18 @@ fn file_restrict_mode(path) {
 }
 
 # ---- random bytes --------------------------------------------------------
-# Read `count` bytes from /dev/urandom into buf. Returns bytes read, or
-# -1 on failure. Used for unpredictable container ids — breaks the
-# /tmp-symlink-precreate attack (ADR-005 §C3).
-
-fn read_urandom(buf, count) {
-    var fd = file_open("/dev/urandom", 0, 0);
-    if (fd < 0) { return 0 - 1; }
-    var got = 0;
-    while (got < count) {
-        var n = file_read(fd, buf + got, count - got);
-        if (n <= 0) { file_close(fd); return 0 - 1; }
-        got = got + n;
-    }
-    file_close(fd);
-    return got;
+# Fill `count` bytes of buf from the kernel CSPRNG via getrandom(2) (the
+# stdlib random_bytes wrapper). Returns bytes filled, or -1 on failure. Used
+# for unpredictable container ids — breaks the /tmp-symlink-precreate attack
+# (ADR-005 §C3). getrandom needs no fd and works where /dev/urandom isn't
+# mounted (chroot, landlocked, minimal mount ns) — strictly better for a
+# sandbox tool than the old open/read/close on /dev/urandom. Blocks only
+# until the kernel pool is seeded (immediate post-boot); flags=0, never
+# GRND_INSECURE — the unpredictability is a security property here.
+fn fill_random(buf, count) {
+    var n = random_bytes(buf, count);
+    if (n < 0) { return 0 - 1; }
+    return n;
 }
 
 # Hex-encode `len` bytes from src into dst. dst must fit len*2 + 1 bytes.
@@ -177,30 +174,30 @@ fn hex_encode_bytes(src, len, dst) {
     return 0;
 }
 
-# 16-char hex id from /dev/urandom (8 random bytes × 2). Returns heap cstr.
+# 16-char hex id from the kernel CSPRNG (8 random bytes × 2). Returns heap cstr.
 fn rand_hex_id() {
     var raw[8];
-    read_urandom(&raw, 8);
+    fill_random(&raw, 8);
     var out = alloc(17);
     hex_encode_bytes(&raw, 8, out);
     return out;
 }
 
-# 64-bit random from /dev/urandom. Used for UUID-v4-equivalent internal
+# 64-bit random from the kernel CSPRNG. Used for UUID-v4-equivalent internal
 # IDs (sandbox, finding, quarantine entry). Collision probability across
 # 2^32 entries is ~2^-32 — sufficient for correlation IDs. Falls back
 # to 0 on failure (caller sees a duplicate, which is a visible bug
 # rather than a silent TOCTOU).
 fn rand_u64() {
     var raw[8];
-    if (read_urandom(&raw, 8) != 8) { return 0; }
+    if (fill_random(&raw, 8) != 8) { return 0; }
     return load64(&raw);
 }
 
 # 32-char hex UUID-like id. Two u64 samples give 128 bits of randomness.
 fn rand_uuid_hex() {
     var raw[16];
-    read_urandom(&raw, 16);
+    fill_random(&raw, 16);
     var out = alloc(33);
     hex_encode_bytes(&raw, 16, out);
     return out;

@@ -5,6 +5,30 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.3.2] — 2026-06-02
+
+Continues the cc 6.0 stdlib-adoption arc. Cyrius pin stays at `6.0.40`. 397
+tests pass (+3); lint 0 warnings; vet 34 deps, 0 untrusted/missing.
+
+### Changed
+- **Container-ID entropy now uses the kernel CSPRNG via `getrandom(2)`** (stdlib
+  `random.cyr`'s `random_bytes`) instead of hand-rolled `/dev/urandom`
+  open/read/close. `util.cyr`'s `read_urandom` is replaced by `fill_random`
+  (same contract: bytes filled, or -1); `rand_hex_id` / `rand_u64` /
+  `rand_uuid_hex` are unchanged at the call site. Benefits for a sandbox tool:
+  no fd lifecycle, one syscall instead of three, and it works where
+  `/dev/urandom` isn't mounted (chroot, landlocked, minimal mount namespace) —
+  strengthening the unpredictable-id security property (ADR-005 §C3). Uses
+  `flags = 0` (blocks only until the pool is seeded); never `GRND_INSECURE`.
+  `sandbox_full_lifecycle` bench 9µs → 7µs (fewer syscalls in id generation;
+  other benches flat).
+
+### Added
+- **`random` added to `[deps] stdlib`** in `cyrius.cyml` (resolved into `lib/`
+  by `cyrius deps`).
+- **Regression test `fill_random_entropy`** — asserts the full byte count is
+  filled and that `rand_u64` draws are nonzero and distinct.
+
 ## [3.3.1] — 2026-06-02
 
 Memory-safety + hardening patch from the post-3.3.0 source audit, plus the

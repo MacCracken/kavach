@@ -231,12 +231,11 @@ are "available but never adopted," not 6.0-net-new.
   Replace with a thin alias to avoid touching ~22 call sites. (Note: neither checks the
   syscall return — fold the S1 "check return + name constant" hardening into a kavach
   wrapper if we want the guard.)
-- [ ] **(small) Adopt `random.cyr` (`getrandom(2)`) for container-ID entropy.**
-  `random_bytes(buf, len)` (cyrius `random.cyr`, v5.7.35) replaces the hand-rolled
-  `/dev/urandom` open/read/close in `util.cyr:153 read_urandom` (feeds
-  `rand_hex_id`/`rand_u64`/`rand_uuid_hex`). Better fit for a sandbox tool — works with
-  no `/dev` mounted, no fd lifecycle, strengthens ADR-005 §C3. Requires adding `random`
-  to deps; can block on early-boot entropy (don't use `GRND_INSECURE`).
+- [x] **(small) Adopt `random.cyr` (`getrandom(2)`) for container-ID entropy.** ✅ shipped 3.3.2.
+  `util.cyr`'s `read_urandom` → `fill_random` over `random_bytes` (`random` added to deps);
+  `rand_hex_id`/`rand_u64`/`rand_uuid_hex` unchanged at the call site. No fd lifecycle,
+  one syscall vs three, works with no `/dev` mounted — strengthens ADR-005 §C3. flags=0,
+  never `GRND_INSECURE`. `sandbox_full_lifecycle` bench 9µs → 7µs.
 - [ ] **(medium) Result `_r` I/O variants + `?` operator on the audit/quarantine write
   paths.** `file_open_r`/`file_read_r`/`file_write_all_r` → `Result<T, IoError>` (cyrius
   v5.8.30; `result` already in deps). Converts the `fd < 0 → return -1` checks in
