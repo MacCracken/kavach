@@ -31,48 +31,24 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Cyrius toolchain
-        # Lays out ~/.cyrius/versions/<VERSION>/{bin,lib} and symlinks
-        # ~/.cyrius/{bin,lib} -> versions/<VERSION>/{bin,lib}. Required
-        # by cc5 5.10.9+: arch-peer includes (syscalls_x86_64_linux.cyr
-        # etc.) are resolved against the version-pinned snapshot, so
-        # the flat ~/.cyrius/lib layout that worked under 5.4.x no
-        # longer finds the peer files.
-        #
-        # 5.10.x release tarballs ship `bin/` + `deps/` only — the
-        # `lib/` (stdlib snapshot) is NOT in the tarball, so we fetch
-        # the GitHub source-archive at the version tag and copy lib/
-        # from there. Same installer body as majra / nein.
+        # The cyrius.cyml `[package].cyrius` pin is the single source of
+        # truth — no version hardcoded in YAML. Hand the pin to the
+        # canonical upstream installer, which lays out the version-aware
+        # ~/.cyrius tree (versions/<pin>/{bin,lib} + bin/lib symlinks +
+        # a `current` file) that the 6.0.x toolchain resolves the pin
+        # against. The old manual tarball-fetch + flat `cp` into
+        # ~/.cyrius/{bin,lib} predated that layout — and hardcoded a
+        # `bin/cc5` check, but 6.0.x renamed the compiler binary to
+        # `cycc`, so that check broke on the 6.0 line. The installer
+        # ships whatever the binary is named. Same step as patra /
+        # samvada.
         run: |
+          set -e
           CYRIUS_VERSION="${CYRIUS_VERSION:-$(grep -E '^cyrius[[:space:]]*=' cyrius.cyml | sed -E 's/^cyrius[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/')}"
           echo "Installing Cyrius $CYRIUS_VERSION"
-
-          curl -sLO "https://github.com/MacCracken/cyrius/releases/download/$CYRIUS_VERSION/cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
-          tar xzf "cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
-          CYRIUS_DIR="cyrius-$CYRIUS_VERSION-x86_64-linux"
-
-          curl -sL "https://github.com/MacCracken/cyrius/archive/refs/tags/$CYRIUS_VERSION.tar.gz" -o cyrius-src.tar.gz
-          tar xzf cyrius-src.tar.gz
-          CYRIUS_SRC="cyrius-$CYRIUS_VERSION"
-
-          VERSIONED="$HOME/.cyrius/versions/$CYRIUS_VERSION"
-          mkdir -p "$VERSIONED/bin" "$VERSIONED/lib"
-          cp "$CYRIUS_DIR/bin/"* "$VERSIONED/bin/" 2>/dev/null || true
-          cp "$CYRIUS_DIR/scripts/cyrius" "$VERSIONED/bin/cyrius" 2>/dev/null || true
-          cp -r "$CYRIUS_SRC/lib/"* "$VERSIONED/lib/"
-          if [ -d "$CYRIUS_DIR/deps" ]; then
-            mkdir -p "$HOME/.cyrius/deps"
-            cp -r "$CYRIUS_DIR/deps/"* "$HOME/.cyrius/deps/"
-          fi
-          chmod +x "$VERSIONED/bin/"* 2>/dev/null || true
-          ln -sfn "$VERSIONED/bin" "$HOME/.cyrius/bin"
-          ln -sfn "$VERSIONED/lib" "$HOME/.cyrius/lib"
-          echo "$CYRIUS_VERSION" > "$HOME/.cyrius/current"
-          echo "$HOME/.cyrius/bin" >> $GITHUB_PATH
-          echo "CYRIUS_HOME=$HOME/.cyrius" >> $GITHUB_ENV
-
-          test -f "$VERSIONED/lib/syscalls_x86_64_linux.cyr" || { echo "FAIL: stdlib lib/syscalls_x86_64_linux.cyr missing — source archive extraction failed"; exit 1; }
-          test -x "$VERSIONED/bin/cc5" || { echo "FAIL: bin/cc5 missing — release tarball extraction failed"; exit 1; }
-          echo "OK: stdlib + binaries installed under $VERSIONED"
+          curl -sSf https://raw.githubusercontent.com/MacCracken/cyrius/main/scripts/install.sh | \
+            CYRIUS_VERSION="$CYRIUS_VERSION" sh
+          echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
 
       - name: Resolve dependencies
         # Populates ./lib/ from cyrius.cyml [deps] stdlib + [deps.sigil]
