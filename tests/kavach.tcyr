@@ -7,6 +7,7 @@ include "src/policy.cyr"
 include "src/scoring.cyr"
 include "src/lifecycle.cyr"
 include "src/scanning_types.cyr"
+include "src/aho_corasick.cyr"
 include "src/scanning_secrets.cyr"
 include "src/scanning_code.cyr"
 include "src/scanning_data.cyr"
@@ -395,6 +396,19 @@ fn test_code_clean() {
     var r = scan_result_new();
     code_scan("hello world\nstatus: ok\nresult: 42\n", r);
     assert_eq(vec_len(ScanResult_findings(r)), 0, "no findings");
+    return 0;
+}
+
+# 3.4.0: the single AC pass must surface patterns from multiple distinct groups
+# in one scan (exercises the dict-link output chain end-to-end through the real
+# integration, not just the engine unit test).
+fn test_code_scan_ac_multipattern() {
+    test_group("code_scan_ac_multipattern");
+    var r = scan_result_new();
+    # eval( (eval_exec) · npm install (pkg_install) · /etc/passwd (sens_path) ·
+    # "chmod " (perm_change) — four different groups, one pass.
+    code_scan("eval(x); npm install foo; cat /etc/passwd; chmod 777 /", r);
+    assert(vec_len(ScanResult_findings(r)) >= 4, "four distinct group hits in one pass");
     return 0;
 }
 
@@ -1558,6 +1572,39 @@ fn test_file_write_secure_r() {
     return 0;
 }
 
+# 3.4.0: Aho-Corasick multi-pattern matcher. Classic {he,she,his,hers} over
+# "ushers" — exercises shared prefixes, failure links, and the dict-link output
+# chain (he/hers both report at the same position; she at an earlier one).
+fn test_aho_corasick() {
+    test_group("aho_corasick");
+    var pats = vec_new();
+    vec_push(pats, "he");      # id 0
+    vec_push(pats, "she");     # id 1
+    vec_push(pats, "his");     # id 2
+    vec_push(pats, "hers");    # id 3
+    var ac = ac_build(pats);
+    var hits = ac_hits_new(ac);
+    ac_search(ac, "ushers", 6, hits);   # u0 s1 h2 e3 r4 s5
+    assert_eq(load64(hits + 0 * 8), 2, "he @ 2");
+    assert_eq(load64(hits + 1 * 8), 1, "she @ 1");
+    assert_eq(load64(hits + 2 * 8), 0 - 1, "his no match");
+    assert_eq(load64(hits + 3 * 8), 2, "hers @ 2");
+
+    # Fresh hit table over non-matching text stays all -1.
+    var h2 = ac_hits_new(ac);
+    ac_search(ac, "xyz", 3, h2);
+    assert_eq(load64(h2 + 0 * 8), 0 - 1, "he absent in xyz");
+
+    # First-match-position semantics: earliest occurrence wins.
+    var pats2 = vec_new();
+    vec_push(pats2, "ab");
+    var ac2 = ac_build(pats2);
+    var h3 = ac_hits_new(ac2);
+    ac_search(ac2, "xxabyyabzz", 10, h3);   # "ab" at 2 and 6 → first = 2
+    assert_eq(load64(h3 + 0 * 8), 2, "ab first match @ 2");
+    return 0;
+}
+
 fn test_process_backend_real_exec() {
     test_group("process_real_exec");
     kavach_init();
@@ -1891,6 +1938,7 @@ fn main() {
     test_scan_ssn();
     test_scan_multiple();
     test_code_command_injection();
+    test_code_scan_ac_multipattern();
     test_code_reverse_shell();
     test_code_sudo();
     test_code_sensitive_path();
@@ -2001,6 +2049,7 @@ fn main() {
     test_code_evidence_at();
     test_fill_random_entropy();
     test_file_write_secure_r();
+    test_aho_corasick();
     return assert_summary();
 }
 

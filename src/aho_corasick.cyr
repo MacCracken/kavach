@@ -1,0 +1,183 @@
+# kavach — Aho-Corasick multi-pattern matcher
+#
+# Replaces the scanners' per-pattern full-buffer re-scan (O(patterns × n × m)
+# naive substring, ~150 cstr_contains calls in scanning_code.cyr) with a
+# single O(n + matches) pass: build one automaton over the literal pattern set,
+# run the text through it once, and read each pattern's first-match position
+# out of a hit table.
+#
+# The automaton is built once over a static pattern set and cached by the
+# caller (the pattern set is compile-time fixed), so build cost is amortized to
+# zero across scans; only the O(n) search runs per artifact.
+#
+# Patterns are matched case-sensitively against bytes — callers that want
+# case-insensitive matching pre-lower both the text and the patterns (which is
+# exactly what the code/data scanners already do against their `lower` buffer).
+#
+# Memory model (all heap, manual): dense 256-way goto so a transition is a flat
+# load; node count is bounded by the total pattern length, built once.
+#
+#   automaton struct (64 bytes):
+#     +0  goto_base   (num_nodes_cap * 256 i64; 0 = no transition, root = node 0)
+#     +8  fail_base   (num_nodes_cap i64)
+#     +16 term_base   (num_nodes_cap i64; pattern id ending at node, or -1)
+#     +24 dict_base   (num_nodes_cap i64; output/suffix link to nearest terminal)
+#     +32 patlen_base (num_pats i64; byte length of each pattern)
+#     +40 num_pats
+#     +48 num_nodes   (actual, after build)
+
+# Build an automaton from a vec of pattern cstrs. Pattern ids are the vec
+# indices. Returns a heap automaton pointer (never freed — cache it).
+fn ac_build(patterns) {
+    var np = vec_len(patterns);
+
+    # Upper bound on trie nodes: root + one per pattern char (shared prefixes
+    # only ever use fewer). Sized exactly once.
+    var total = 0;
+    var i = 0;
+    while (i < np) {
+        total = total + strlen(vec_get(patterns, i));
+        i = i + 1;
+    }
+    var cap = total + 1;
+
+    var goto_b = alloc(cap * 256 * 8);
+    memset(goto_b, 0, cap * 256 * 8);
+    var fail_b = alloc(cap * 8);
+    memset(fail_b, 0, cap * 8);
+    var dict_b = alloc(cap * 8);
+    memset(dict_b, 0, cap * 8);
+    var term_b = alloc(cap * 8);
+    var patlen_b = alloc(np * 8);
+
+    # term[] initialised to -1 (no pattern ends here).
+    var t = 0;
+    while (t < cap) { store64(term_b + t * 8, 0 - 1); t = t + 1; }
+
+    var num_nodes = 1;   # node 0 = root
+
+    # ---- insert patterns into the trie ----
+    i = 0;
+    while (i < np) {
+        var p = vec_get(patterns, i);
+        var plen = strlen(p);
+        store64(patlen_b + i * 8, plen);
+        var node = 0;
+        var j = 0;
+        while (j < plen) {
+            var c = load8(p + j);
+            var slot = goto_b + (node * 256 + c) * 8;
+            var nxt = load64(slot);
+            if (nxt == 0) {
+                nxt = num_nodes;
+                num_nodes = num_nodes + 1;
+                store64(slot, nxt);
+            }
+            node = nxt;
+            j = j + 1;
+        }
+        store64(term_b + node * 8, i);   # pattern i terminates at `node`
+        i = i + 1;
+    }
+
+    # ---- BFS to compute failure + dict (output) links ----
+    var queue = vec_new();
+    # depth-1 nodes (root's children) fail to root.
+    var c0 = 0;
+    while (c0 < 256) {
+        var ch = load64(goto_b + c0 * 8);   # goto[root][c0]
+        if (ch != 0) {
+            store64(fail_b + ch * 8, 0);
+            vec_push(queue, ch);
+        }
+        c0 = c0 + 1;
+    }
+    var qi = 0;
+    while (qi < vec_len(queue)) {
+        var u = vec_get(queue, qi);
+        qi = qi + 1;
+        var cc = 0;
+        while (cc < 256) {
+            var v = load64(goto_b + (u * 256 + cc) * 8);
+            if (v != 0) {
+                # follow u's fail chain to find the longest proper suffix that
+                # has a transition on cc
+                var f = load64(fail_b + u * 8);
+                while (f != 0) {
+                    if (load64(goto_b + (f * 256 + cc) * 8) != 0) { break; }
+                    f = load64(fail_b + f * 8);
+                }
+                var ff = load64(goto_b + (f * 256 + cc) * 8);
+                if (ff == v) { ff = 0; }   # never let a node fail to itself
+                store64(fail_b + v * 8, ff);
+                # dict link: nearest terminal node reachable via fail links
+                if (load64(term_b + ff * 8) != (0 - 1)) {
+                    store64(dict_b + v * 8, ff);
+                }
+                else {
+                    store64(dict_b + v * 8, load64(dict_b + ff * 8));
+                }
+                vec_push(queue, v);
+            }
+            cc = cc + 1;
+        }
+    }
+
+    var ac = alloc(64);
+    store64(ac + 0, goto_b);
+    store64(ac + 8, fail_b);
+    store64(ac + 16, term_b);
+    store64(ac + 24, dict_b);
+    store64(ac + 32, patlen_b);
+    store64(ac + 40, np);
+    store64(ac + 48, num_nodes);
+    return ac;
+}
+
+fn ac_num_pats(ac) { return load64(ac + 40); }
+
+# Allocate a hit-position table for `ac`, initialised to -1 (no match).
+# Indexed by pattern id; on a hit, holds the START offset of the first match.
+fn ac_hits_new(ac) {
+    var np = load64(ac + 40);
+    var h = alloc(np * 8);
+    var i = 0;
+    while (i < np) { store64(h + i * 8, 0 - 1); i = i + 1; }
+    return h;
+}
+
+# Run `text` (length n) through the automaton, recording the first-match start
+# offset of every pattern into `hit_pos` (caller-allocated via ac_hits_new).
+fn ac_search(ac, text, n, hit_pos) {
+    var goto_b = load64(ac + 0);
+    var fail_b = load64(ac + 8);
+    var term_b = load64(ac + 16);
+    var dict_b = load64(ac + 24);
+    var patlen_b = load64(ac + 32);
+
+    var node = 0;
+    var i = 0;
+    while (i < n) {
+        var c = load8(text + i);
+        # follow fail links until a transition on c exists (or we're at root)
+        while (node != 0) {
+            if (load64(goto_b + (node * 256 + c) * 8) != 0) { break; }
+            node = load64(fail_b + node * 8);
+        }
+        node = load64(goto_b + (node * 256 + c) * 8);   # 0 (root) if none
+        # emit every pattern ending at this position via the dict-link chain
+        var u = node;
+        if (load64(term_b + u * 8) == (0 - 1)) { u = load64(dict_b + u * 8); }
+        while (u != 0) {
+            var pid = load64(term_b + u * 8);
+            if (pid != (0 - 1)) {
+                if (load64(hit_pos + pid * 8) == (0 - 1)) {
+                    store64(hit_pos + pid * 8, i - load64(patlen_b + pid * 8) + 1);
+                }
+            }
+            u = load64(dict_b + u * 8);
+        }
+        i = i + 1;
+    }
+    return 0;
+}

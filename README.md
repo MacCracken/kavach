@@ -12,6 +12,14 @@ classification, credential proxy, HMAC-SHA256 audit chain — all in pure Cyrius
 
 ## Status
 
+**v3.4.0 — Aho-Corasick scanner.** New `src/aho_corasick.cyr` (trie + failure
++ dict links, single O(n) pass). The code scanner's ~109 per-pattern
+`cstr_contains` re-scans (O(patterns × n × m)) collapse into one pass +
+per-pattern hit-table lookups — behavior-preserving (full scanner suite green),
+with a `cstr_contains` fallback so the pattern list can only cost speed, never
+correctness. Benchmarked **~12×** faster on a 16 KB artifact (6.60 ms → 0.54
+ms), scaling with size. 413 tests.
+
 **v3.3.4 — bounds-checked input validation (closes the v3.3.x arc).** The
 untrusted-command-string screens (`is_safe_text`/`is_safe_argument`) now read
 through a bounds-checked `[u8]` slice — an OOB read traps instead of touching

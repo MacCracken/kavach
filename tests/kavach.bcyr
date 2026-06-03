@@ -9,6 +9,7 @@ include "src/policy.cyr"
 include "src/scoring.cyr"
 include "src/lifecycle.cyr"
 include "src/scanning_types.cyr"
+include "src/aho_corasick.cyr"
 include "src/scanning_secrets.cyr"
 include "src/scanning_code.cyr"
 include "src/scanning_data.cyr"
@@ -130,6 +131,50 @@ fn bench_secrets_redact() {
     return 0;
 }
 
+# ~16 KB benign artifact (no scanner patterns) — the worst case for the old
+# per-pattern scan, since every cstr_contains runs to completion with no early
+# exit. Lets the AC-vs-naive code-scan benches show the real delta.
+var _large_code_text = 0;
+fn _setup_large_code_text() {
+    if (_large_code_text != 0) { return 0; }
+    var unit = "the quick brown fox jumps over the lazy dog 0123456789 ";
+    var ulen = strlen(unit);
+    var reps = 300;
+    var buf = alloc(ulen * reps + 1);
+    var i = 0;
+    while (i < reps) {
+        memcpy(buf + i * ulen, unit, ulen);
+        i = i + 1;
+    }
+    store8(buf + ulen * reps, 0);
+    _large_code_text = buf;
+    return 0;
+}
+
+# Code scan via the Aho-Corasick single pass (current implementation).
+fn bench_code_scan_large() {
+    var r = scan_result_new();
+    code_scan(_large_code_text, r);
+    return 0;
+}
+
+# Naive baseline: lower once, then one cstr_contains pass per master pattern —
+# exactly what the 26 groups did before the AC integration. The ratio of this
+# to bench_code_scan_large is the AC win on a scan-dominated artifact.
+fn bench_code_scan_naive() {
+    var n = strlen(_large_code_text);
+    var lower = alloc(n + 1);
+    str_to_lower_into(_large_code_text, lower);
+    var pats = _cg_master_patterns();
+    var np = vec_len(pats);
+    var i = 0;
+    while (i < np) {
+        cstr_contains(lower, vec_get(pats, i));
+        i = i + 1;
+    }
+    return 0;
+}
+
 var _clean_exec_result = 0;
 var _default_policy = 0;
 
@@ -245,6 +290,7 @@ fn main() {
     _setup_gate_clean();
     _setup_chain();
     _bench_setup_http();
+    _setup_large_code_text();
 
     var benches = vec_new();
 
@@ -331,6 +377,16 @@ fn main() {
     var b20 = bench_new("http_allowlist_miss");
     bench_run_batch(b20, &bench_http_allowlist_miss, 50000, 100);
     vec_push(benches, b20);
+
+    # 3.4.0 — Aho-Corasick scanner. Two views on a ~16 KB artifact: the AC
+    # single pass vs the old per-pattern scan, so the history captures the win.
+    var b21 = bench_new("code_scan_large_ac");
+    bench_run(b21, &bench_code_scan_large, 2000);
+    vec_push(benches, b21);
+
+    var b22 = bench_new("code_scan_large_naive");
+    bench_run(b22, &bench_code_scan_naive, 2000);
+    vec_push(benches, b22);
 
     bench_report_all(benches);
     return 0;

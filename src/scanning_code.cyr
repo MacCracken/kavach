@@ -119,19 +119,174 @@ fn code_emit_at(text, result, severity, category, name, start, len) {
     return 1;
 }
 
+# ---- Aho-Corasick presence pass -----------------------------------------
+# The 26 pattern groups below each used to call cstr_contains(lower, LIT) per
+# literal — ~109 full re-scans of the (pre-lowered) artifact, i.e. O(patterns ×
+# n × m). code_scan now runs ONE Aho-Corasick pass over `lower` and the groups
+# query a cheap per-pattern hit table via _cg_hit(). The master pattern list
+# below must mirror the literals the groups check; a literal NOT in it falls
+# back to a direct cstr_contains scan, so a drifted list can only cost speed,
+# never correctness. The automaton + list are built once and cached (the
+# pattern set is static); only the O(n) search runs per scan.
+#
+# Scan context lives in module globals set at the top of code_scan. kavach's
+# scan path is synchronous (ADR-004 §1 — no async/threads), so this is safe;
+# it is not reentrant.
+
+var _cg_pats_cache = 0;
+var _cg_ac = 0;
+var _cg_hits = 0;
+var _cg_lower = 0;
+
+fn _cg_master_patterns() {
+    if (_cg_pats_cache != 0) { return _cg_pats_cache; }
+    var v = vec_new();
+    vec_push(v, "exec(");
+    vec_push(v, "execsync(");
+    vec_push(v, "child_process");
+    vec_push(v, "spawn(");
+    vec_push(v, "spawnsync(");
+    vec_push(v, "eval(");
+    vec_push(v, "function(");
+    vec_push(v, "/bin/sh");
+    vec_push(v, "/bin/bash");
+    vec_push(v, "/bin/zsh");
+    vec_push(v, "cmd.exe");
+    vec_push(v, "powershell");
+    vec_push(v, "$(");
+    vec_push(v, "${");
+    vec_push(v, "| sh");
+    vec_push(v, "| bash");
+    vec_push(v, "; sh");
+    vec_push(v, "; bash");
+    vec_push(v, "/dev/tcp");
+    vec_push(v, "<(");
+    vec_push(v, ">(");
+    vec_push(v, "curl | sh");
+    vec_push(v, "curl | bash");
+    vec_push(v, "wget | sh");
+    vec_push(v, "wget | bash");
+    vec_push(v, "fetch(");
+    vec_push(v, "axios.");
+    vec_push(v, "http.request(");
+    vec_push(v, "https.request(");
+    vec_push(v, "dns.resolve");
+    vec_push(v, "dns.lookup");
+    vec_push(v, "nslookup");
+    vec_push(v, "dig ");
+    vec_push(v, "mkfifo");
+    vec_push(v, "/dev/tcp/");
+    vec_push(v, "nc -e");
+    vec_push(v, "ncat -e");
+    vec_push(v, "socat exec:");
+    vec_push(v, "bash -i >& /dev/tcp");
+    vec_push(v, "nc ");
+    vec_push(v, "ncat ");
+    vec_push(v, "socat ");
+    vec_push(v, "telnet ");
+    vec_push(v, "nmap ");
+    vec_push(v, "sudo ");
+    vec_push(v, "su -");
+    vec_push(v, "su root");
+    vec_push(v, "chmod ");
+    vec_push(v, "chown ");
+    vec_push(v, "chgrp ");
+    vec_push(v, "setuid");
+    vec_push(v, "setgid");
+    vec_push(v, "insmod ");
+    vec_push(v, "modprobe ");
+    vec_push(v, "rmmod ");
+    vec_push(v, "mount ");
+    vec_push(v, "umount ");
+    vec_push(v, "mount(");
+    vec_push(v, "setcap ");
+    vec_push(v, "getcap ");
+    vec_push(v, "capsh ");
+    vec_push(v, "npm install");
+    vec_push(v, "pip install");
+    vec_push(v, "gem install");
+    vec_push(v, "cargo install");
+    vec_push(v, "go install");
+    vec_push(v, "apt install");
+    vec_push(v, "apt-get install");
+    vec_push(v, "yum install");
+    vec_push(v, "dnf install");
+    vec_push(v, "pacman -s");
+    vec_push(v, "wget -o - |");
+    vec_push(v, "curl -ssl |");
+    vec_push(v, "require(");
+    vec_push(v, "import(");
+    vec_push(v, "__import__(");
+    vec_push(v, "atob(");
+    vec_push(v, "base64 -d");
+    vec_push(v, "base64 --decode");
+    vec_push(v, "b64decode");
+    vec_push(v, "\\u00");
+    vec_push(v, "\\x00");
+    vec_push(v, "string.fromcharcode");
+    vec_push(v, "\\x");
+    vec_push(v, "fromhex(");
+    vec_push(v, "hex.decode");
+    vec_push(v, "/etc/shadow");
+    vec_push(v, "/etc/passwd");
+    vec_push(v, "/etc/sudoers");
+    vec_push(v, "/.ssh/");
+    vec_push(v, "/.gnupg/");
+    vec_push(v, "/.aws/");
+    vec_push(v, "/.kube/");
+    vec_push(v, "/dev/mem");
+    vec_push(v, "/dev/kmem");
+    vec_push(v, "/proc/kcore");
+    vec_push(v, "../");
+    vec_push(v, "..\\");
+    vec_push(v, "rm -rf");
+    vec_push(v, "dd if=");
+    vec_push(v, "mkfs.");
+    vec_push(v, "shred ");
+    vec_push(v, "md5(");
+    vec_push(v, "sha1(");
+    vec_push(v, "aes_key =");
+    vec_push(v, "encryption_key =");
+    vec_push(v, "secret_key =");
+    _cg_pats_cache = v;
+    return v;
+}
+
+fn _cg_automaton() {
+    if (_cg_ac == 0) { _cg_ac = ac_build(_cg_master_patterns()); }
+    return _cg_ac;
+}
+
+# 1 if `lit` occurs in the current scan's lowered text, else 0. O(patterns)
+# lookup over the AC hit table; falls back to a direct substring scan if `lit`
+# isn't in the master set (correctness over speed).
+fn _cg_hit(lit) {
+    var pats = _cg_master_patterns();
+    var np = vec_len(pats);
+    var i = 0;
+    while (i < np) {
+        if (streq(vec_get(pats, i), lit) == 1) {
+            if (load64(_cg_hits + i * 8) >= 0) { return 1; }
+            return 0;
+        }
+        i = i + 1;
+    }
+    return cstr_contains(_cg_lower, lit);
+}
+
 # ---- pattern groups -------------------------------------------------------
 # Each returns 1 if any pattern matched (one finding emitted per group).
 
 fn _cg_shell_exec(text, lower, result) {
-    if (cstr_contains(lower, "exec(") == 1) {
+    if (_cg_hit("exec(") == 1) {
         return code_emit(text, lower, result,
             Severity.CRITICAL, "command_injection", "Shell exec", "exec(");
     }
-    if (cstr_contains(lower, "execsync(") == 1) {
+    if (_cg_hit("execsync(") == 1) {
         return code_emit(text, lower, result,
             Severity.CRITICAL, "command_injection", "Shell exec", "execsync(");
     }
-    if (cstr_contains(lower, "child_process") == 1) {
+    if (_cg_hit("child_process") == 1) {
         return code_emit(text, lower, result,
             Severity.CRITICAL, "command_injection", "Shell exec", "child_process");
     }
@@ -139,11 +294,11 @@ fn _cg_shell_exec(text, lower, result) {
 }
 
 fn _cg_process_spawn(text, lower, result) {
-    if (cstr_contains(lower, "spawn(") == 1) {
+    if (_cg_hit("spawn(") == 1) {
         return code_emit(text, lower, result,
             Severity.CRITICAL, "command_injection", "Process spawn", "spawn(");
     }
-    if (cstr_contains(lower, "spawnsync(") == 1) {
+    if (_cg_hit("spawnsync(") == 1) {
         return code_emit(text, lower, result,
             Severity.CRITICAL, "command_injection", "Process spawn", "spawnsync(");
     }
@@ -151,11 +306,11 @@ fn _cg_process_spawn(text, lower, result) {
 }
 
 fn _cg_eval_exec(text, lower, result) {
-    if (cstr_contains(lower, "eval(") == 1) {
+    if (_cg_hit("eval(") == 1) {
         return code_emit(text, lower, result,
             Severity.CRITICAL, "command_injection", "Eval execution", "eval(");
     }
-    if (cstr_contains(lower, "function(") == 1) {
+    if (_cg_hit("function(") == 1) {
         return code_emit(text, lower, result,
             Severity.CRITICAL, "command_injection", "Eval execution", "function(");
     }
@@ -163,23 +318,23 @@ fn _cg_eval_exec(text, lower, result) {
 }
 
 fn _cg_shell_invoc(text, lower, result) {
-    if (cstr_contains(lower, "/bin/sh") == 1) {
+    if (_cg_hit("/bin/sh") == 1) {
         return code_emit(text, lower, result,
             Severity.HIGH, "command_injection", "Shell invocation", "/bin/sh");
     }
-    if (cstr_contains(lower, "/bin/bash") == 1) {
+    if (_cg_hit("/bin/bash") == 1) {
         return code_emit(text, lower, result,
             Severity.HIGH, "command_injection", "Shell invocation", "/bin/bash");
     }
-    if (cstr_contains(lower, "/bin/zsh") == 1) {
+    if (_cg_hit("/bin/zsh") == 1) {
         return code_emit(text, lower, result,
             Severity.HIGH, "command_injection", "Shell invocation", "/bin/zsh");
     }
-    if (cstr_contains(lower, "cmd.exe") == 1) {
+    if (_cg_hit("cmd.exe") == 1) {
         return code_emit(text, lower, result,
             Severity.HIGH, "command_injection", "Shell invocation", "cmd.exe");
     }
-    if (cstr_contains(lower, "powershell") == 1) {
+    if (_cg_hit("powershell") == 1) {
         return code_emit(text, lower, result,
             Severity.HIGH, "command_injection", "Shell invocation", "powershell");
     }
@@ -187,39 +342,39 @@ fn _cg_shell_invoc(text, lower, result) {
 }
 
 fn _cg_shell_meta(text, lower, result) {
-    if (cstr_contains(lower, "$(") == 1) {
+    if (_cg_hit("$(") == 1) {
         return code_emit(text, lower, result,
             Severity.HIGH, "command_injection", "Shell metacharacters", "$(");
     }
-    if (cstr_contains(lower, "${") == 1) {
+    if (_cg_hit("${") == 1) {
         return code_emit(text, lower, result,
             Severity.HIGH, "command_injection", "Shell metacharacters", "${");
     }
-    if (cstr_contains(lower, "| sh") == 1) {
+    if (_cg_hit("| sh") == 1) {
         return code_emit(text, lower, result,
             Severity.HIGH, "command_injection", "Shell metacharacters", "| sh");
     }
-    if (cstr_contains(lower, "| bash") == 1) {
+    if (_cg_hit("| bash") == 1) {
         return code_emit(text, lower, result,
             Severity.HIGH, "command_injection", "Shell metacharacters", "| bash");
     }
-    if (cstr_contains(lower, "; sh") == 1) {
+    if (_cg_hit("; sh") == 1) {
         return code_emit(text, lower, result,
             Severity.HIGH, "command_injection", "Shell metacharacters", "; sh");
     }
-    if (cstr_contains(lower, "; bash") == 1) {
+    if (_cg_hit("; bash") == 1) {
         return code_emit(text, lower, result,
             Severity.HIGH, "command_injection", "Shell metacharacters", "; bash");
     }
-    if (cstr_contains(lower, "/dev/tcp") == 1) {
+    if (_cg_hit("/dev/tcp") == 1) {
         return code_emit(text, lower, result,
             Severity.HIGH, "command_injection", "Shell metacharacters", "/dev/tcp");
     }
-    if (cstr_contains(lower, "<(") == 1) {
+    if (_cg_hit("<(") == 1) {
         return code_emit(text, lower, result,
             Severity.HIGH, "command_injection", "Shell metacharacters", "<(");
     }
-    if (cstr_contains(lower, ">(") == 1) {
+    if (_cg_hit(">(") == 1) {
         return code_emit(text, lower, result,
             Severity.HIGH, "command_injection", "Shell metacharacters", ">(");
     }
@@ -227,19 +382,19 @@ fn _cg_shell_meta(text, lower, result) {
 }
 
 fn _cg_pipe_shell(text, lower, result) {
-    if (cstr_contains(lower, "curl | sh") == 1) {
+    if (_cg_hit("curl | sh") == 1) {
         return code_emit(text, lower, result,
             Severity.CRITICAL, "command_injection", "Pipe to shell", "curl | sh");
     }
-    if (cstr_contains(lower, "curl | bash") == 1) {
+    if (_cg_hit("curl | bash") == 1) {
         return code_emit(text, lower, result,
             Severity.CRITICAL, "command_injection", "Pipe to shell", "curl | bash");
     }
-    if (cstr_contains(lower, "wget | sh") == 1) {
+    if (_cg_hit("wget | sh") == 1) {
         return code_emit(text, lower, result,
             Severity.CRITICAL, "command_injection", "Pipe to shell", "wget | sh");
     }
-    if (cstr_contains(lower, "wget | bash") == 1) {
+    if (_cg_hit("wget | bash") == 1) {
         return code_emit(text, lower, result,
             Severity.CRITICAL, "command_injection", "Pipe to shell", "wget | bash");
     }
@@ -247,19 +402,19 @@ fn _cg_pipe_shell(text, lower, result) {
 }
 
 fn _cg_http_req(text, lower, result) {
-    if (cstr_contains(lower, "fetch(") == 1) {
+    if (_cg_hit("fetch(") == 1) {
         return code_emit(text, lower, result,
             Severity.MEDIUM, "data_exfiltration", "HTTP request", "fetch(");
     }
-    if (cstr_contains(lower, "axios.") == 1) {
+    if (_cg_hit("axios.") == 1) {
         return code_emit(text, lower, result,
             Severity.MEDIUM, "data_exfiltration", "HTTP request", "axios.");
     }
-    if (cstr_contains(lower, "http.request(") == 1) {
+    if (_cg_hit("http.request(") == 1) {
         return code_emit(text, lower, result,
             Severity.MEDIUM, "data_exfiltration", "HTTP request", "http.request(");
     }
-    if (cstr_contains(lower, "https.request(") == 1) {
+    if (_cg_hit("https.request(") == 1) {
         return code_emit(text, lower, result,
             Severity.MEDIUM, "data_exfiltration", "HTTP request", "https.request(");
     }
@@ -267,19 +422,19 @@ fn _cg_http_req(text, lower, result) {
 }
 
 fn _cg_dns_exfil(text, lower, result) {
-    if (cstr_contains(lower, "dns.resolve") == 1) {
+    if (_cg_hit("dns.resolve") == 1) {
         return code_emit(text, lower, result,
             Severity.HIGH, "data_exfiltration", "DNS exfil", "dns.resolve");
     }
-    if (cstr_contains(lower, "dns.lookup") == 1) {
+    if (_cg_hit("dns.lookup") == 1) {
         return code_emit(text, lower, result,
             Severity.HIGH, "data_exfiltration", "DNS exfil", "dns.lookup");
     }
-    if (cstr_contains(lower, "nslookup") == 1) {
+    if (_cg_hit("nslookup") == 1) {
         return code_emit(text, lower, result,
             Severity.HIGH, "data_exfiltration", "DNS exfil", "nslookup");
     }
-    if (cstr_contains(lower, "dig ") == 1) {
+    if (_cg_hit("dig ") == 1) {
         return code_emit(text, lower, result,
             Severity.HIGH, "data_exfiltration", "DNS exfil", "dig ");
     }
@@ -287,27 +442,27 @@ fn _cg_dns_exfil(text, lower, result) {
 }
 
 fn _cg_reverse_shell(text, lower, result) {
-    if (cstr_contains(lower, "mkfifo") == 1) {
+    if (_cg_hit("mkfifo") == 1) {
         return code_emit(text, lower, result,
             Severity.CRITICAL, "data_exfiltration", "Reverse shell", "mkfifo");
     }
-    if (cstr_contains(lower, "/dev/tcp/") == 1) {
+    if (_cg_hit("/dev/tcp/") == 1) {
         return code_emit(text, lower, result,
             Severity.CRITICAL, "data_exfiltration", "Reverse shell", "/dev/tcp/");
     }
-    if (cstr_contains(lower, "nc -e") == 1) {
+    if (_cg_hit("nc -e") == 1) {
         return code_emit(text, lower, result,
             Severity.CRITICAL, "data_exfiltration", "Reverse shell", "nc -e");
     }
-    if (cstr_contains(lower, "ncat -e") == 1) {
+    if (_cg_hit("ncat -e") == 1) {
         return code_emit(text, lower, result,
             Severity.CRITICAL, "data_exfiltration", "Reverse shell", "ncat -e");
     }
-    if (cstr_contains(lower, "socat exec:") == 1) {
+    if (_cg_hit("socat exec:") == 1) {
         return code_emit(text, lower, result,
             Severity.CRITICAL, "data_exfiltration", "Reverse shell", "socat exec:");
     }
-    if (cstr_contains(lower, "bash -i >& /dev/tcp") == 1) {
+    if (_cg_hit("bash -i >& /dev/tcp") == 1) {
         return code_emit(text, lower, result,
             Severity.CRITICAL, "data_exfiltration", "Reverse shell", "bash -i >& /dev/tcp");
     }
@@ -315,23 +470,23 @@ fn _cg_reverse_shell(text, lower, result) {
 }
 
 fn _cg_net_tools(text, lower, result) {
-    if (cstr_contains(lower, "nc ") == 1) {
+    if (_cg_hit("nc ") == 1) {
         return code_emit(text, lower, result,
             Severity.HIGH, "data_exfiltration", "Network tools", "nc ");
     }
-    if (cstr_contains(lower, "ncat ") == 1) {
+    if (_cg_hit("ncat ") == 1) {
         return code_emit(text, lower, result,
             Severity.HIGH, "data_exfiltration", "Network tools", "ncat ");
     }
-    if (cstr_contains(lower, "socat ") == 1) {
+    if (_cg_hit("socat ") == 1) {
         return code_emit(text, lower, result,
             Severity.HIGH, "data_exfiltration", "Network tools", "socat ");
     }
-    if (cstr_contains(lower, "telnet ") == 1) {
+    if (_cg_hit("telnet ") == 1) {
         return code_emit(text, lower, result,
             Severity.HIGH, "data_exfiltration", "Network tools", "telnet ");
     }
-    if (cstr_contains(lower, "nmap ") == 1) {
+    if (_cg_hit("nmap ") == 1) {
         return code_emit(text, lower, result,
             Severity.HIGH, "data_exfiltration", "Network tools", "nmap ");
     }
@@ -339,15 +494,15 @@ fn _cg_net_tools(text, lower, result) {
 }
 
 fn _cg_sudo(text, lower, result) {
-    if (cstr_contains(lower, "sudo ") == 1) {
+    if (_cg_hit("sudo ") == 1) {
         return code_emit(text, lower, result,
             Severity.CRITICAL, "privilege_escalation", "Sudo/su", "sudo ");
     }
-    if (cstr_contains(lower, "su -") == 1) {
+    if (_cg_hit("su -") == 1) {
         return code_emit(text, lower, result,
             Severity.CRITICAL, "privilege_escalation", "Sudo/su", "su -");
     }
-    if (cstr_contains(lower, "su root") == 1) {
+    if (_cg_hit("su root") == 1) {
         return code_emit(text, lower, result,
             Severity.CRITICAL, "privilege_escalation", "Sudo/su", "su root");
     }
@@ -355,23 +510,23 @@ fn _cg_sudo(text, lower, result) {
 }
 
 fn _cg_perm_change(text, lower, result) {
-    if (cstr_contains(lower, "chmod ") == 1) {
+    if (_cg_hit("chmod ") == 1) {
         return code_emit(text, lower, result,
             Severity.HIGH, "privilege_escalation", "Permission change", "chmod ");
     }
-    if (cstr_contains(lower, "chown ") == 1) {
+    if (_cg_hit("chown ") == 1) {
         return code_emit(text, lower, result,
             Severity.HIGH, "privilege_escalation", "Permission change", "chown ");
     }
-    if (cstr_contains(lower, "chgrp ") == 1) {
+    if (_cg_hit("chgrp ") == 1) {
         return code_emit(text, lower, result,
             Severity.HIGH, "privilege_escalation", "Permission change", "chgrp ");
     }
-    if (cstr_contains(lower, "setuid") == 1) {
+    if (_cg_hit("setuid") == 1) {
         return code_emit(text, lower, result,
             Severity.HIGH, "privilege_escalation", "Permission change", "setuid");
     }
-    if (cstr_contains(lower, "setgid") == 1) {
+    if (_cg_hit("setgid") == 1) {
         return code_emit(text, lower, result,
             Severity.HIGH, "privilege_escalation", "Permission change", "setgid");
     }
@@ -379,15 +534,15 @@ fn _cg_perm_change(text, lower, result) {
 }
 
 fn _cg_kernel_mod(text, lower, result) {
-    if (cstr_contains(lower, "insmod ") == 1) {
+    if (_cg_hit("insmod ") == 1) {
         return code_emit(text, lower, result,
             Severity.CRITICAL, "privilege_escalation", "Kernel module", "insmod ");
     }
-    if (cstr_contains(lower, "modprobe ") == 1) {
+    if (_cg_hit("modprobe ") == 1) {
         return code_emit(text, lower, result,
             Severity.CRITICAL, "privilege_escalation", "Kernel module", "modprobe ");
     }
-    if (cstr_contains(lower, "rmmod ") == 1) {
+    if (_cg_hit("rmmod ") == 1) {
         return code_emit(text, lower, result,
             Severity.CRITICAL, "privilege_escalation", "Kernel module", "rmmod ");
     }
@@ -395,15 +550,15 @@ fn _cg_kernel_mod(text, lower, result) {
 }
 
 fn _cg_mount(text, lower, result) {
-    if (cstr_contains(lower, "mount ") == 1) {
+    if (_cg_hit("mount ") == 1) {
         return code_emit(text, lower, result,
             Severity.CRITICAL, "privilege_escalation", "Mount operation", "mount ");
     }
-    if (cstr_contains(lower, "umount ") == 1) {
+    if (_cg_hit("umount ") == 1) {
         return code_emit(text, lower, result,
             Severity.CRITICAL, "privilege_escalation", "Mount operation", "umount ");
     }
-    if (cstr_contains(lower, "mount(") == 1) {
+    if (_cg_hit("mount(") == 1) {
         return code_emit(text, lower, result,
             Severity.CRITICAL, "privilege_escalation", "Mount operation", "mount(");
     }
@@ -411,15 +566,15 @@ fn _cg_mount(text, lower, result) {
 }
 
 fn _cg_capability(text, lower, result) {
-    if (cstr_contains(lower, "setcap ") == 1) {
+    if (_cg_hit("setcap ") == 1) {
         return code_emit(text, lower, result,
             Severity.CRITICAL, "privilege_escalation", "Capability manipulation", "setcap ");
     }
-    if (cstr_contains(lower, "getcap ") == 1) {
+    if (_cg_hit("getcap ") == 1) {
         return code_emit(text, lower, result,
             Severity.CRITICAL, "privilege_escalation", "Capability manipulation", "getcap ");
     }
-    if (cstr_contains(lower, "capsh ") == 1) {
+    if (_cg_hit("capsh ") == 1) {
         return code_emit(text, lower, result,
             Severity.CRITICAL, "privilege_escalation", "Capability manipulation", "capsh ");
     }
@@ -427,43 +582,43 @@ fn _cg_capability(text, lower, result) {
 }
 
 fn _cg_pkg_install(text, lower, result) {
-    if (cstr_contains(lower, "npm install") == 1) {
+    if (_cg_hit("npm install") == 1) {
         return code_emit(text, lower, result,
             Severity.HIGH, "supply_chain", "Package install", "npm install");
     }
-    if (cstr_contains(lower, "pip install") == 1) {
+    if (_cg_hit("pip install") == 1) {
         return code_emit(text, lower, result,
             Severity.HIGH, "supply_chain", "Package install", "pip install");
     }
-    if (cstr_contains(lower, "gem install") == 1) {
+    if (_cg_hit("gem install") == 1) {
         return code_emit(text, lower, result,
             Severity.HIGH, "supply_chain", "Package install", "gem install");
     }
-    if (cstr_contains(lower, "cargo install") == 1) {
+    if (_cg_hit("cargo install") == 1) {
         return code_emit(text, lower, result,
             Severity.HIGH, "supply_chain", "Package install", "cargo install");
     }
-    if (cstr_contains(lower, "go install") == 1) {
+    if (_cg_hit("go install") == 1) {
         return code_emit(text, lower, result,
             Severity.HIGH, "supply_chain", "Package install", "go install");
     }
-    if (cstr_contains(lower, "apt install") == 1) {
+    if (_cg_hit("apt install") == 1) {
         return code_emit(text, lower, result,
             Severity.HIGH, "supply_chain", "Package install", "apt install");
     }
-    if (cstr_contains(lower, "apt-get install") == 1) {
+    if (_cg_hit("apt-get install") == 1) {
         return code_emit(text, lower, result,
             Severity.HIGH, "supply_chain", "Package install", "apt-get install");
     }
-    if (cstr_contains(lower, "yum install") == 1) {
+    if (_cg_hit("yum install") == 1) {
         return code_emit(text, lower, result,
             Severity.HIGH, "supply_chain", "Package install", "yum install");
     }
-    if (cstr_contains(lower, "dnf install") == 1) {
+    if (_cg_hit("dnf install") == 1) {
         return code_emit(text, lower, result,
             Severity.HIGH, "supply_chain", "Package install", "dnf install");
     }
-    if (cstr_contains(lower, "pacman -s") == 1) {
+    if (_cg_hit("pacman -s") == 1) {
         return code_emit(text, lower, result,
             Severity.HIGH, "supply_chain", "Package install", "pacman -s");
     }
@@ -471,19 +626,19 @@ fn _cg_pkg_install(text, lower, result) {
 }
 
 fn _cg_remote_script(text, lower, result) {
-    if (cstr_contains(lower, "curl | sh") == 1) {
+    if (_cg_hit("curl | sh") == 1) {
         return code_emit(text, lower, result,
             Severity.CRITICAL, "supply_chain", "Remote script execution", "curl | sh");
     }
-    if (cstr_contains(lower, "curl | bash") == 1) {
+    if (_cg_hit("curl | bash") == 1) {
         return code_emit(text, lower, result,
             Severity.CRITICAL, "supply_chain", "Remote script execution", "curl | bash");
     }
-    if (cstr_contains(lower, "wget -o - |") == 1) {
+    if (_cg_hit("wget -o - |") == 1) {
         return code_emit(text, lower, result,
             Severity.CRITICAL, "supply_chain", "Remote script execution", "wget -o - |");
     }
-    if (cstr_contains(lower, "curl -ssl |") == 1) {
+    if (_cg_hit("curl -ssl |") == 1) {
         return code_emit(text, lower, result,
             Severity.CRITICAL, "supply_chain", "Remote script execution", "curl -ssl |");
     }
@@ -491,15 +646,15 @@ fn _cg_remote_script(text, lower, result) {
 }
 
 fn _cg_dyn_import(text, lower, result) {
-    if (cstr_contains(lower, "require(") == 1) {
+    if (_cg_hit("require(") == 1) {
         return code_emit(text, lower, result,
             Severity.MEDIUM, "supply_chain", "Dynamic require/import", "require(");
     }
-    if (cstr_contains(lower, "import(") == 1) {
+    if (_cg_hit("import(") == 1) {
         return code_emit(text, lower, result,
             Severity.MEDIUM, "supply_chain", "Dynamic require/import", "import(");
     }
-    if (cstr_contains(lower, "__import__(") == 1) {
+    if (_cg_hit("__import__(") == 1) {
         return code_emit(text, lower, result,
             Severity.MEDIUM, "supply_chain", "Dynamic require/import", "__import__(");
     }
@@ -507,19 +662,19 @@ fn _cg_dyn_import(text, lower, result) {
 }
 
 fn _cg_base64(text, lower, result) {
-    if (cstr_contains(lower, "atob(") == 1) {
+    if (_cg_hit("atob(") == 1) {
         return code_emit(text, lower, result,
             Severity.MEDIUM, "obfuscation", "Base64 decode", "atob(");
     }
-    if (cstr_contains(lower, "base64 -d") == 1) {
+    if (_cg_hit("base64 -d") == 1) {
         return code_emit(text, lower, result,
             Severity.MEDIUM, "obfuscation", "Base64 decode", "base64 -d");
     }
-    if (cstr_contains(lower, "base64 --decode") == 1) {
+    if (_cg_hit("base64 --decode") == 1) {
         return code_emit(text, lower, result,
             Severity.MEDIUM, "obfuscation", "Base64 decode", "base64 --decode");
     }
-    if (cstr_contains(lower, "b64decode") == 1) {
+    if (_cg_hit("b64decode") == 1) {
         return code_emit(text, lower, result,
             Severity.MEDIUM, "obfuscation", "Base64 decode", "b64decode");
     }
@@ -527,15 +682,15 @@ fn _cg_base64(text, lower, result) {
 }
 
 fn _cg_unicode_esc(text, lower, result) {
-    if (cstr_contains(lower, "\\u00") == 1) {
+    if (_cg_hit("\\u00") == 1) {
         return code_emit(text, lower, result,
             Severity.MEDIUM, "obfuscation", "Unicode escape", "\\u00");
     }
-    if (cstr_contains(lower, "\\x00") == 1) {
+    if (_cg_hit("\\x00") == 1) {
         return code_emit(text, lower, result,
             Severity.MEDIUM, "obfuscation", "Unicode escape", "\\x00");
     }
-    if (cstr_contains(lower, "string.fromcharcode") == 1) {
+    if (_cg_hit("string.fromcharcode") == 1) {
         return code_emit(text, lower, result,
             Severity.MEDIUM, "obfuscation", "Unicode escape", "string.fromcharcode");
     }
@@ -543,15 +698,15 @@ fn _cg_unicode_esc(text, lower, result) {
 }
 
 fn _cg_hex_enc(text, lower, result) {
-    if (cstr_contains(lower, "\\x") == 1) {
+    if (_cg_hit("\\x") == 1) {
         return code_emit(text, lower, result,
             Severity.LOW, "obfuscation", "Hex encoding", "\\x");
     }
-    if (cstr_contains(lower, "fromhex(") == 1) {
+    if (_cg_hit("fromhex(") == 1) {
         return code_emit(text, lower, result,
             Severity.LOW, "obfuscation", "Hex encoding", "fromhex(");
     }
-    if (cstr_contains(lower, "hex.decode") == 1) {
+    if (_cg_hit("hex.decode") == 1) {
         return code_emit(text, lower, result,
             Severity.LOW, "obfuscation", "Hex encoding", "hex.decode");
     }
@@ -559,43 +714,43 @@ fn _cg_hex_enc(text, lower, result) {
 }
 
 fn _cg_sens_path(text, lower, result) {
-    if (cstr_contains(lower, "/etc/shadow") == 1) {
+    if (_cg_hit("/etc/shadow") == 1) {
         return code_emit(text, lower, result,
             Severity.CRITICAL, "filesystem_abuse", "Sensitive path access", "/etc/shadow");
     }
-    if (cstr_contains(lower, "/etc/passwd") == 1) {
+    if (_cg_hit("/etc/passwd") == 1) {
         return code_emit(text, lower, result,
             Severity.CRITICAL, "filesystem_abuse", "Sensitive path access", "/etc/passwd");
     }
-    if (cstr_contains(lower, "/etc/sudoers") == 1) {
+    if (_cg_hit("/etc/sudoers") == 1) {
         return code_emit(text, lower, result,
             Severity.CRITICAL, "filesystem_abuse", "Sensitive path access", "/etc/sudoers");
     }
-    if (cstr_contains(lower, "/.ssh/") == 1) {
+    if (_cg_hit("/.ssh/") == 1) {
         return code_emit(text, lower, result,
             Severity.CRITICAL, "filesystem_abuse", "Sensitive path access", "/.ssh/");
     }
-    if (cstr_contains(lower, "/.gnupg/") == 1) {
+    if (_cg_hit("/.gnupg/") == 1) {
         return code_emit(text, lower, result,
             Severity.CRITICAL, "filesystem_abuse", "Sensitive path access", "/.gnupg/");
     }
-    if (cstr_contains(lower, "/.aws/") == 1) {
+    if (_cg_hit("/.aws/") == 1) {
         return code_emit(text, lower, result,
             Severity.CRITICAL, "filesystem_abuse", "Sensitive path access", "/.aws/");
     }
-    if (cstr_contains(lower, "/.kube/") == 1) {
+    if (_cg_hit("/.kube/") == 1) {
         return code_emit(text, lower, result,
             Severity.CRITICAL, "filesystem_abuse", "Sensitive path access", "/.kube/");
     }
-    if (cstr_contains(lower, "/dev/mem") == 1) {
+    if (_cg_hit("/dev/mem") == 1) {
         return code_emit(text, lower, result,
             Severity.CRITICAL, "filesystem_abuse", "Sensitive path access", "/dev/mem");
     }
-    if (cstr_contains(lower, "/dev/kmem") == 1) {
+    if (_cg_hit("/dev/kmem") == 1) {
         return code_emit(text, lower, result,
             Severity.CRITICAL, "filesystem_abuse", "Sensitive path access", "/dev/kmem");
     }
-    if (cstr_contains(lower, "/proc/kcore") == 1) {
+    if (_cg_hit("/proc/kcore") == 1) {
         return code_emit(text, lower, result,
             Severity.CRITICAL, "filesystem_abuse", "Sensitive path access", "/proc/kcore");
     }
@@ -603,11 +758,11 @@ fn _cg_sens_path(text, lower, result) {
 }
 
 fn _cg_traversal(text, lower, result) {
-    if (cstr_contains(lower, "../") == 1) {
+    if (_cg_hit("../") == 1) {
         return code_emit(text, lower, result,
             Severity.HIGH, "filesystem_abuse", "Path traversal", "../");
     }
-    if (cstr_contains(lower, "..\\") == 1) {
+    if (_cg_hit("..\\") == 1) {
         return code_emit(text, lower, result,
             Severity.HIGH, "filesystem_abuse", "Path traversal", "..\\");
     }
@@ -615,19 +770,19 @@ fn _cg_traversal(text, lower, result) {
 }
 
 fn _cg_destructive(text, lower, result) {
-    if (cstr_contains(lower, "rm -rf") == 1) {
+    if (_cg_hit("rm -rf") == 1) {
         return code_emit(text, lower, result,
             Severity.CRITICAL, "filesystem_abuse", "Destructive operation", "rm -rf");
     }
-    if (cstr_contains(lower, "dd if=") == 1) {
+    if (_cg_hit("dd if=") == 1) {
         return code_emit(text, lower, result,
             Severity.CRITICAL, "filesystem_abuse", "Destructive operation", "dd if=");
     }
-    if (cstr_contains(lower, "mkfs.") == 1) {
+    if (_cg_hit("mkfs.") == 1) {
         return code_emit(text, lower, result,
             Severity.CRITICAL, "filesystem_abuse", "Destructive operation", "mkfs.");
     }
-    if (cstr_contains(lower, "shred ") == 1) {
+    if (_cg_hit("shred ") == 1) {
         return code_emit(text, lower, result,
             Severity.CRITICAL, "filesystem_abuse", "Destructive operation", "shred ");
     }
@@ -635,11 +790,11 @@ fn _cg_destructive(text, lower, result) {
 }
 
 fn _cg_weak_hash(text, lower, result) {
-    if (cstr_contains(lower, "md5(") == 1) {
+    if (_cg_hit("md5(") == 1) {
         return code_emit(text, lower, result,
             Severity.MEDIUM, "crypto_misuse", "Weak hash", "md5(");
     }
-    if (cstr_contains(lower, "sha1(") == 1) {
+    if (_cg_hit("sha1(") == 1) {
         return code_emit(text, lower, result,
             Severity.MEDIUM, "crypto_misuse", "Weak hash", "sha1(");
     }
@@ -647,15 +802,15 @@ fn _cg_weak_hash(text, lower, result) {
 }
 
 fn _cg_hardcoded_key(text, lower, result) {
-    if (cstr_contains(lower, "aes_key =") == 1) {
+    if (_cg_hit("aes_key =") == 1) {
         return code_emit(text, lower, result,
             Severity.HIGH, "crypto_misuse", "Hardcoded key", "aes_key =");
     }
-    if (cstr_contains(lower, "encryption_key =") == 1) {
+    if (_cg_hit("encryption_key =") == 1) {
         return code_emit(text, lower, result,
             Severity.HIGH, "crypto_misuse", "Hardcoded key", "encryption_key =");
     }
-    if (cstr_contains(lower, "secret_key =") == 1) {
+    if (_cg_hit("secret_key =") == 1) {
         return code_emit(text, lower, result,
             Severity.HIGH, "crypto_misuse", "Hardcoded key", "secret_key =");
     }
@@ -668,6 +823,14 @@ fn code_scan(text, result) {
     var n = strlen(text);
     var lower = alloc(n + 1);
     str_to_lower_into(text, lower);
+
+    # Single Aho-Corasick pass over the lowered text replaces the ~109
+    # per-pattern re-scans the groups below used to do. Results go into the
+    # module-global hit table the groups read via _cg_hit().
+    var ac = _cg_automaton();
+    _cg_hits = ac_hits_new(ac);
+    _cg_lower = lower;
+    ac_search(ac, lower, n, _cg_hits);
 
     _cg_shell_exec(text, lower, result);
     _cg_process_spawn(text, lower, result);

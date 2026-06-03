@@ -5,6 +5,50 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.4.0] — 2026-06-02
+
+Aho-Corasick multi-pattern matching for the code scanner — the post-3.3.0
+audit's P2 perf finding. 413 tests pass (+7); lint 0 warnings; vet 35 deps, 0
+untrusted/missing; pin stays `6.0.43`.
+
+### Added
+- **`src/aho_corasick.cyr`** — a reusable Aho-Corasick automaton: trie + BFS
+  failure links + dict (output) links, with a single-pass `ac_search` that
+  fills a per-pattern first-match-position hit table. Built once over a static
+  pattern set and cached (build cost amortized to zero); only the O(n) search
+  runs per scan. Public surface: `ac_build(patterns) → ac`, `ac_hits_new(ac)`,
+  `ac_search(ac, text, n, hits)`, `ac_num_pats(ac)`.
+
+### Changed
+- **Code scanner runs one Aho-Corasick pass instead of ~109 per-pattern
+  re-scans.** Each of the 26 pattern groups in `scanning_code.cyr` previously
+  called `cstr_contains(lower, LIT)` per literal — O(patterns × n × m), i.e.
+  ~109 full walks of the (pre-lowered) artifact. `code_scan` now runs a single
+  O(n) AC pass over `lower` and the groups query a cheap per-pattern hit table
+  via `_cg_hit()`. Behavior is identical (same groups, order, one-finding-per-
+  group, severity/category/name, evidence) — verified by the full existing
+  scanner test suite. A literal not in the master pattern list falls back to a
+  direct `cstr_contains` scan, so a drifted list can only cost speed, never
+  correctness.
+
+  **Benchmark** (new `code_scan_large_*`, ~16 KB benign artifact — worst case
+  for the old path since every `cstr_contains` runs to completion):
+  - `code_scan_large_naive` (old, 109 scans): **6.60 ms**
+  - `code_scan_large_ac` (new, one pass): **0.54 ms** → **~12× faster**
+
+  The win grows with artifact size: naive is O(patterns × n), AC is O(n) plus a
+  constant per-pattern lookup, so on multi-MiB artifacts the ratio approaches
+  the pattern count (~100×).
+
+### Notes
+- Scan context (the cached automaton, the per-scan hit table, and the lowered
+  buffer for fallback) lives in `scanning_code.cyr` module globals set at the
+  top of `code_scan`. kavach's scan path is synchronous (ADR-004 §1 — no
+  async/threads), so this is safe; it is not reentrant.
+- The **data** and **phylax** scanners still use per-pattern `cstr_contains` —
+  they can adopt the same AC engine next (the engine is scanner-agnostic);
+  tracked as follow-up.
+
 ## [3.3.4] — 2026-06-02
 
 Final cc 6.0 modernization-arc item: bounds-checked slice reads on the

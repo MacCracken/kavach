@@ -60,9 +60,11 @@ src/
 │
 ├── scanning_types.cyr     Severity, ScanVerdict, ScanFinding, ScanResult,
 │                          ExternalizationPolicy
+├── aho_corasick.cyr       Multi-pattern matcher (trie + failure/dict links,
+│                          single O(n) pass → per-pattern hit table)
 ├── scanning_secrets.cyr   Secret-pattern matchers (AWS/GitHub/GCP/JWT/priv-key/
 │                          conn-string/SSN)
-├── scanning_code.cyr      26 code-violation pattern groups
+├── scanning_code.cyr      26 code-violation pattern groups (one AC pass)
 ├── scanning_data.cyr      Credit-card/phone/IPv4/IBAN + HIPAA/GDPR/PCI/SOC2
 ├── scanning_gate.cyr      3-scanner orchestration → verdict
 ├── scanning_runtime.cyr   Fork-bomb, sensitive-path, command blocklist, shell

@@ -253,9 +253,11 @@ are "available but never adopted," not 6.0-net-new.
   they grow error-specific handling.
 - [x] **(medium-large, opportunistic) Typed `slice` bounds-checked subscripting.** ✅ shipped 3.3.4 — scoped to the untrusted-input validation path (`is_safe_text`/`is_safe_argument` now read via `sl[i]` → bounds-checked `_slice_idx_get_1`). **Deliberately not swept** further after evaluating the real 6.0.43 API: subscripting is read-only (no `_slice_idx_set_W`, so write loops like `hex_encode_bytes` can't use it), dot-syntax (`s.len`) isn't wired yet (use `slice_len`/`slice_ptr`), kavach's loops are already correctly bounded (future-proofing, not a live fix), and the high-volume reads are in the hot scanner paths where per-element bounds checks would regress throughput. Idiom established; adopt further opportunistically.
 
-#### Next substantive investment (beyond the v3.3.x arc)
+#### Scanner perf — Aho-Corasick (audit P2)
 
-- [ ] **(medium-large) Scanner multi-pattern matching — kavach-side Aho-Corasick.** The post-3.3.0 audit's P2: `code_scan`/`_data_scan_*`/phylax re-scan the full pre-lowered buffer once per literal pattern (≈150 `cstr_contains` calls in `scanning_code.cyr` alone) — O(patterns × n × m). The stdlib has no faster substring (confirmed: `str_contains_cstr` is the same naive loop), so a single-pass Aho-Corasick / trie over the literal pattern set is the real fix; collapses ~150 full-buffer scans into one. Highest-value remaining perf item; gated behind a benchmark on large (multi-MiB) artifacts to prove the win.
+- [x] **(medium-large) Code scanner → single Aho-Corasick pass.** ✅ shipped 3.4.0.
+  New `src/aho_corasick.cyr` engine (trie + failure + dict links, O(n) search → per-pattern hit table); `code_scan`'s ~109 per-pattern `cstr_contains` re-scans collapsed into one pass + cheap `_cg_hit()` lookups, behavior-preserving (full scanner suite green) with a `cstr_contains` fallback for any literal off the master list. Benchmarked **~12×** on a 16 KB artifact (`code_scan_large_naive` 6.60 ms → `code_scan_large_ac` 0.54 ms); win scales with size (naive O(patterns × n) vs AC O(n)).
+- [ ] **(medium) Extend AC to the data + phylax scanners.** The engine is scanner-agnostic; `_data_scan_*` (compliance keyword groups in `scanning_data.cyr`) and the phylax checks in `backend_sy_agnos.cyr` still do per-pattern `cstr_contains`. Same hit-table-with-fallback integration as the code scanner. Lower volume than the code scanner, so lower priority — do when convenient.
 - **Recorded negatives (don't chase these):** no faster substring search in the stdlib —
   `str_contains_cstr` is the *same* naive O(n·m) loop, so swapping `cstr_contains` buys
   clarity, not speed (a real fix is a kavach-side Aho-Corasick over the literal pattern
