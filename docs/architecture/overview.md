@@ -162,18 +162,19 @@ sandbox_exec(sb, "echo hi")
 
 Policy modifiers (additive, clamped to [0, 100]). The score reflects what the
 sandbox *claims* to enforce; runtime enforcement is per-feature (cgroups v2
-shipping in v3.2.0; seccomp + Landlock waiting on v3.3.0):
+shipped in v3.2.0; Landlock is the v3.5.0 feature cut; seccomp is
+upstream-blocked on cyrius syscall wrappers — see the roadmap):
 
 | Modifier | +Score | Enforced at runtime today? |
 |----------|-------:|----------------------------|
-| seccomp enabled | +5 | No — claim only; v3.3.0+ |
-| landlock rules present | +3 | No — claim only; v3.3.0 |
+| seccomp enabled | +5 | No — claim only; blocked on upstream cyrius wrappers |
+| landlock rules present | +3 | No — claim only; v3.5.0 |
 | network disabled | +5 | Backend-dependent (microVM/OCI yes, Process no) |
 | read-only rootfs | +3 | Backend-dependent (OCI/gVisor/microVM yes) |
 | memory OR cpu limit set | +2 | **Yes** (v3.2.0 via cgroups v2 on process backend) |
-| TCP bind/connect port allowlist | +3 | No — claim only; v3.3.0 (Landlock ABI v4) |
-| landlock scope: abstract unix socket | +2 | No — claim only; v3.3.0 |
-| landlock scope: signal | +2 | No — claim only; v3.3.0 |
+| TCP bind/connect port allowlist | +3 | No — claim only; v3.5.0 (Landlock ABI v4) |
+| landlock scope: abstract unix socket | +2 | No — claim only; v3.5.0 |
+| landlock scope: signal | +2 | No — claim only; v3.5.0 |
 
 ---
 
@@ -273,11 +274,11 @@ Each backend is a plug into the dispatch table. To add `<name>`:
 
 See [ADR-004](../adr/004-deferred-features.md) for rationale; [`development/roadmap.md`](../development/roadmap.md) carries the live v3.3 + Blocked queues with upstream-filing cross-links.
 
-What's still deferred at v3.3.0:
+What's still deferred at v3.4.0:
 
 | Feature | Blocking dep | Trigger condition |
 |---------|--------------|-------------------|
-| **Landlock hooks** | A `sandbox_fork_exec(args, pre_exec_fn)` helper in kavach | **v3.4.0** — `sys_landlock_*` already in stdlib; we just need the post-fork hook point |
+| **Landlock hooks** | A `sandbox_fork_exec(args, pre_exec_fn)` helper in kavach | **v3.5.0** — `sys_landlock_*` already in stdlib; we just need the post-fork hook point |
 | **Seccomp BPF filter install** | Upstream `sys_prctl` + `sys_seccomp` wrappers (filed: [cyrius issue](https://github.com/MacCracken/cyrius/blob/main/docs/development/issues/2026-05-10-kavach-sandbox-syscall-wrappers.md)) OR raw syscall in kavach | Either upstream wrappers ship OR kavach raw-syscalls them; needs the same fork-infra as Landlock |
 | **H4 binary-path TOCTOU** (ADR-005 §H4 residual) | Upstream `sys_execveat` wrapper (same filing) | Enhancement to a *closed* finding — H1-H3 already block dominant attack class |
 | **Firecracker jailer / vsock / snapshot** | Upstream `sys_setresuid` / `sys_setresgid` + robust unix-socket helpers (same filing) | Lower priority — microVM boundary already isolates without jailer |

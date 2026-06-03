@@ -59,9 +59,9 @@ the cc 6.0 symbol migration (sigil's `ct_eq` → stdlib `ct_eq_bytes_lens`;
 renamed kavach helpers that collided with new stdlib/sigil symbols), an
 agnosys `1.3.0` transitive override for cc 6.0.40 compatibility, and the
 release-benchmark discipline (a `benches/bench-history.csv` row per
-release). 384 tests, 20 benches. Landlock + `sandbox_fork_exec`
-infrastructure + OCI backend cgroup integration are pushed back one minor
-to **v3.4.0**.
+release). 384 tests, 20 benches. (The Landlock + `sandbox_fork_exec` + OCI
+cgroup feature cut deferred from here is tracked in the
+[roadmap](docs/development/roadmap.md) as v3.5.0.)
 
 **v3.2 — cgroups v2 + HTTP credential proxy.** Two new feature modules:
 [`src/cgroup.cyr`](src/cgroup.cyr) wires `SandboxPolicy.{memory_limit_mb,
@@ -95,7 +95,7 @@ for what's intentionally deferred.
 | Backends registered | 10 | 10 — full set with real dispatch contracts |
 | Scanner pipeline | 3 scanners | 3 scanners |
 | Audit chain | HMAC-SHA256 via hmac/sha2 crates | HMAC-SHA256 via [sigil](https://github.com/MacCracken/sigil) |
-| Tests | 872 | 384 |
+| Tests | 872 | 413 |
 | Async | tokio | synchronous (ADR-004 §1) |
 
 ---
@@ -135,10 +135,10 @@ cyrius deps
 cyrius build src/main.cyr build/kavach
 ./build/kavach
 
-# Run the test suite (384 tests).
+# Run the test suite (413 tests).
 cyrius test tests/kavach.tcyr
 
-# Run the bench harness (20 benches).
+# Run the bench harness (22 benches).
 cyrius bench tests/kavach.bcyr
 
 # Audit (fmt + lint + vet + deny + test + bench + doc).
