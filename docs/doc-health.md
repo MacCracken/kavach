@@ -21,7 +21,7 @@ Pattern lifted from the majra ledger ([`majra/docs/doc-health.md`](https://githu
 
 | Bucket | Count | What it means |
 |---|---|---|
-| ✅ **Fresh — touched in the v3.1.0 arc or the post-cut sweep** | 9 | `CHANGELOG.md`, `VERSION`, `cyrius.cyml` (new), `.github/workflows/{ci,release}.yml`, `docs/development/roadmap.md`, `docs/doc-health.md` (this file) — all from the modernization arc. Plus `README.md`, `CLAUDE.md`, `docs/guides/getting-started.md`, `docs/development/rust-old-removal.md` — refreshed in the post-cut sweep. All carry the cyrius-5.10.34 / sigil-2.9.0 / lib-via-`cyrius deps` reality. |
+| ✅ **Fresh — touched in the v3.1.0 arc or the post-cut sweep** | 9 | `CHANGELOG.md`, `VERSION`, `cyrius.cyml` (new), `.github/workflows/{ci,release}.yml`, `docs/development/roadmap.md`, `docs/doc-health.md` (this file) — all from the modernization arc. Plus `README.md`, `CLAUDE.md`, `docs/guides/getting-started.md`, `docs/development/rust-old-removal.md` — refreshed in the post-cut sweep. As of the v3.3.0 cut these now carry the cyrius-`6.0.40` / sigil-`3.5.9` / agnosys-`1.3.0`-override reality (was cyrius-5.10.34 / sigil-2.9.0 through v3.2.x); all still lib-via-`cyrius deps`. |
 | 🟡 **Stale — refresh in place** | 1 | `benchmarks-rust-v-cyrius.md` root file (snapshot at v3.0.0; see Tier-1 frozen note — refresh only if a new comparison snapshot is captured, otherwise treat as `📦 Frozen — snapshot`). |
 | 🟠 **Read-through outstanding** | 0 | Both queued read-through items (`docs/guides/getting-started.md`, `docs/development/rust-old-removal.md`) closed in the post-cut sweep. |
 | 🔵 **Probably evergreen** | 4 | `SECURITY.md`, `CODE_OF_CONDUCT.md`, `LICENSE`, `CONTRIBUTING.md`. No version-tied claims that drift between minor releases. Re-read pass annually. |
@@ -46,7 +46,7 @@ Pattern lifted from the majra ledger ([`majra/docs/doc-health.md`](https://githu
 - ✅ `docs/development/rust-old-removal.md` — sed recipe in § "Removal command" updated: `cyrius.toml` → `cyrius.cyml`; commit message bumped from `v3.0` → `v3.x`; new checked-off line in the Pre-removal checklist records the cyrius.cyml-migration prereq; parity checklist re-verified against the v3.0 surface — no drift caught.
 
 **Queued for follow-up (carried from v3.1.0; now sits in roadmap v3.2 under the `cyrius audit` clean item):**
-- ⚠️ **`cyrius fmt` drift** — pre-existing drift across nine src/ files and two tests/ files (see roadmap v3.2 `cyrius audit` clean item for the file list). CI runs fmt as `::warning::` informational at v3.1.0; flip to hard fail once drift is resolved against the cc 5.10.34 toolchain. Don't run `cyrius fmt` locally with a non-5.10.34 toolchain — fmt output is minor-version-sensitive and would commit new drift.
+- ⚠️ **`cyrius fmt` drift** — pre-existing drift across nine src/ files and two tests/ files (see roadmap v3.2 `cyrius audit` clean item for the file list). CI runs fmt as `::warning::` informational; flip to hard fail once drift is resolved against the pinned `6.0.40` toolchain. Don't run `cyrius fmt` locally with a non-`6.0.40` toolchain (the dev box runs `6.0.41`) — fmt output is minor-version-sensitive and would commit new drift.
 - ⚠️ **`cyrius lint` long-line warnings (37 total)** — pre-existing v3.0 content, chiefly in the scanner pattern lists: `src/scanning_code.cyr` (16) + `src/scanning_data.cyr` (16), plus stragglers in `src/backend_sgx.cyr` (3), `src/oci_spec.cyr` (1), `src/scanning_runtime.cyr` (1). CI runs lint as `::warning::` informational at v3.1.0; tracked alongside fmt in the v3.2 `cyrius audit` clean item. The lint step also handles cc's "exit code = warning count" convention via `|| true` so the loop doesn't trip `set -eo pipefail`.
 
 ---
@@ -55,7 +55,7 @@ Pattern lifted from the majra ledger ([`majra/docs/doc-health.md`](https://githu
 
 | File | Last touched | Status | Notes |
 |---|---|---|---|
-| `README.md` | 2026-05-10 | ✅ Fresh | Refreshed in the post-3.1.0 sweep + bumped at the 3.2.0 cut: status block now carries v3.2 (cgroups + HTTP credential proxy), v3.1 (modernization + closeout + upstream filings), v3.0 (port + hardening). Capability table adds rows for the cgroups limits + HTTP credential variant. Test count 349 → 386; bench count 15 → 20. |
+| `README.md` | 2026-05-10 | ✅ Fresh | Refreshed in the post-3.1.0 sweep + bumped at the 3.2.0 cut: status block now carries v3.2 (cgroups + HTTP credential proxy), v3.1 (modernization + closeout + upstream filings), v3.0 (port + hardening). Capability table adds rows for the cgroups limits + HTTP credential variant. Test count 349 → 386 → 384 (3.3.0 port); bench count 15 → 20. Status block + Build/deps sections refreshed at the v3.3.0 cut for the cc 6.0.40 / sigil 3.5.9 toolchain jump. |
 | `CHANGELOG.md` | 2026-05-10 | ✅ Fresh | v3.1.0 stanza records the modernization arc. v3.0.0 stanza unchanged. |
 | `CLAUDE.md` | 2026-05-10 | ✅ Fresh | Refreshed in the post-3.1.0 sweep; Version field bumped to v3.2.0 in the 3.2.0 final sweep. Cleanliness Check / Key Principles / DO-NOT list all carry the cyrius-shaped idioms. |
 | `CONTRIBUTING.md` | 2026-04-13 | 🔵 Evergreen | Generic contributor workflow. Re-read annually. |

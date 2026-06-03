@@ -105,8 +105,8 @@ The remaining items group around a single shared piece of infrastructure (a `san
 |---------|--------------|----------------|
 | **Landlock hooks** | Filesystem and network sandboxing via the Linux Landlock LSM — ABI v4 (TCP port restrictions) + v6 (scoping). Adds the second hardening layer to `policy_strict()` alongside the existing process-scope guards. | New `src/landlock.cyr` (struct LandlockRuleset, builder fns) + post-fork hook in `src/backend_process.cyr`. Uses `sys_landlock_create_ruleset` / `sys_landlock_add_rule` / `sys_landlock_restrict_self` from stdlib `syscalls_x86_64_linux.cyr` L614-630 (and the aarch64 peer at L665-675). Needs the fork-infra below to install the ruleset post-fork in the child. |
 | **`sandbox_fork_exec(args, pre_exec_fn)`** | Custom fork+exec helper: `sys_fork()` → in child, run async-signal-safe `pre_exec_fn` callback (landlock install, cgroup re-join when exact accounting matters, future seccomp filter), then `sys_execve`. Replaces the shell-prepend trick with a tight, no-shell-dependency path for sandboxes that need it. | New helper in `src/util.cyr` or new `src/fork_exec.cyr`. The shared infra for landlock + future seccomp. |
-| **OCI backend cgroup integration** | Populate the `resources.linux.{memory,cpu,pids}` section of the OCI runtime spec in `oci_spec.cyr` so `runc` / `crun` set up cgroups directly instead of relying on kavach-managed cgroupfs writes. | [`src/oci_spec.cyr`](../../src/oci_spec.cyr) — extend the JSON template. Independent of the fork-infra; bundled into v3.3.0 to keep the OCI-cgroup story coherent. |
-| **`cyrius fmt` clean** | Drains the v3.0-inherited fmt drift across `src/{audit,backend_sy_agnos,composite,credential,quarantine,scanning_gate,scanning_secrets}.cyr` and `tests/kavach.{tcyr,bcyr}`. | In-tree edits across the listed files. **Local-toolchain caveat**: cc 5.10.34 must be the running fmt — running 5.10.44 fmt locally and committing the result would write minor-version-sensitive drift. CI runs fmt as `::warning::` informational until cleared. |
+| **OCI backend cgroup integration** | Populate the `resources.linux.{memory,cpu,pids}` section of the OCI runtime spec in `oci_spec.cyr` so `runc` / `crun` set up cgroups directly instead of relying on kavach-managed cgroupfs writes. | [`src/oci_spec.cyr`](../../src/oci_spec.cyr) — extend the JSON template. Independent of the fork-infra; bundled into v3.4.0 to keep the OCI-cgroup story coherent. |
+| **`cyrius fmt` clean** | Drains the v3.0-inherited fmt drift across `src/{audit,backend_sy_agnos,composite,credential,quarantine,scanning_gate,scanning_secrets}.cyr` and `tests/kavach.{tcyr,bcyr}`. | In-tree edits across the listed files. **Local-toolchain caveat**: the pinned `6.0.40` fmt must be the running fmt — running a different patch locally (e.g. the `6.0.41` cycc on the dev box) and committing the result would write minor-version-sensitive drift. CI runs fmt as `::warning::` informational until cleared. |
 
 #### Blocked — actually awaiting upstream
 
@@ -148,6 +148,108 @@ Each row carries: **what it means** (the concrete kavach-side surface that gates
 - Three items reclassified out of Blocked at the cc 5.10.34 verify pass (Landlock / cgroups v2 / HTTP credential proxy). The Blocked table is now load-bearing — each row gates on a verified-absent upstream surface, not a stale assumption.
 - Upstream filings landed in 3.1.2: one cyrius issue covering the six sandbox-runtime syscall wrappers (prctl / seccomp / setresuid / setresgid / execveat / fchmod) and one sigil issue covering the SGX/SEV/TDX quote-parser + cert-chain primitives. Both filings include a **severity rationale** section letting the upstream maintainer adjust the rating; both are filed at P1 per kavach's perspective, with honest counter-cases noted (kavach raw-syscall workaround precedent for cyrius; "kavach ships fine without this today" for sigil).
 - Re-run the verify pass when the Cyrius pin moves or when sigil unblocks past 2.9.0. **(v3.3.0: pin moved to cc 6.0.40 and sigil unblocked to 3.5.9 — the 5.10.x SIGILL bisect is retired. Re-run the SGX/SEV/TDX verify pass against the cc 6.0 surface.)**
+
+---
+
+## v3.3.x — hardening + cc 6.0 modernization arc
+
+Source: post-3.3.0 audit of `src/` (memory/security/perf/correctness) plus a
+`cyrius` + `vidya` research pass for cc 6.0 idioms/APIs worth adopting now that
+we're on the 6.0 line. Items tagged **(verified)** were confirmed against the
+actual code during the audit; the rest are grounded at `file:line` and should be
+re-confirmed when picked up.
+
+### 3.3.1 — memory-safety + hardening patch
+
+This is a genuine memory-safety patch, not just cleanup — two of the findings are
+heap overflows on attacker-influenced data.
+
+- [ ] **(verified, HIGH) Off-by-one heap overflow in every exec-capture backend.**
+  Each backend does `var buf = alloc(CAP); var n = exec_capture(args, buf, CAP); … store8(buf + n, 0);`.
+  `exec_capture` (`lib/process.cyr:211-214`) fills until `total >= buflen` and can
+  return exactly `CAP`, so `store8(buf + n, 0)` writes a NUL one byte past the
+  allocation — and `n` bytes are the captured subprocess output. Sites:
+  `backend_process.cyr:104`, `backend_gvisor.cyr:74`, `backend_oci.cyr:77`,
+  `backend_wasm.cyr:148`, `backend_sy_agnos.cyr:204`, `backend_sev.cyr:83`,
+  `backend_tdx.cyr:78`, `backend_sgx.cyr:132`, `backend_firecracker.cyr:120`.
+  Fix: `alloc(CAP + 1)` or clamp `n` to `CAP - 1`; ideally once, via the shared
+  epilogue in R1 below.
+- [ ] **(verified, HIGH) Off-by-one in the three `/proc` integrity readers.** Same
+  `store8(buf + n, 0)` pattern where `file_read_all` can return the full buffer
+  length: `scanning_runtime.cyr:359-364` (`alloc(512)`/read `512`), `:377-382`
+  (`8192`), `:394-399` (`256`). Note `cgroup.cyr:35-38` got this right (reads
+  `size - 1`); these did not. Fix: read `size - 1` or `alloc(size + 1)`.
+- [ ] **(HIGH) Predictable `/tmp` workdir + non-`O_EXCL`/`O_NOFOLLOW` writes in SGX &
+  Firecracker backends (symlink TOCTOU).** `backend_sgx.cyr:116-125` /
+  `backend_firecracker.cyr:93-107` build `/tmp/kavach-{sgx,fc}-<epoch_secs>` (a
+  *predictable* name) then write via plain `file_write_all` (no `O_EXCL`/`O_NOFOLLOW`).
+  This is the symlink-preseed vector the OCI/quarantine paths were already hardened
+  against (ADR-005 §C3/§C4). Fix: name the workdir with `rand_hex_id()`/`rand_u64()`
+  and write via `file_write_secure`; abort on `mkdir` `EEXIST`.
+- [ ] **(medium) De-duplicate backend exec boilerplate (R1).** `_X_error`, the
+  guard-violation early-return, the timing block, and the capture epilogue are
+  duplicated ~8-9× across `backend_*.cyr`. This duplication is *why* the M1 overflow
+  and the unchecked-syscall issue exist in 8 places at once. Extract
+  `backend_error(msg)`, `backend_guard_check(...)`, `backend_capture_finish(buf, n, cap, start_ns)`
+  into `backend.cyr` — makes the overflow a one-line fix and prevents drift.
+- [ ] **(medium) Data scanner emits wrong evidence + full-text re-scan per finding.**
+  `scanning_data.cyr:227-281` passes single-char patterns (`"0"`,`"4"`,…) as the
+  `matched` arg, so `code_extract_evidence` (`scanning_code.cyr:61-75`) does
+  `cstr_index_of(lower, "4")` — an O(n) re-scan of the whole (up to 50 MiB) artifact
+  that returns the *first* digit, not the actual match. Correctness bug (wrong
+  snippet) + perf cost. Fix: pass the known `(start, len)` directly, like
+  `redact_evidence`.
+- [ ] **(medium, needs confirmation) `oci_generate_spec` resources buffer can
+  under-allocate when `pids` is set.** `oci_spec.cyr:116-135` sizes `alloc(64 + mem_len)`
+  but the pids branch adds ~20 fixed chars + up to 19 digits of `max_pids`. Use
+  `checked_sum4`/`alloc_checked` over the real lengths (as the outer buffer already does).
+- [ ] **(low, cheap bundle)** `credential.cyr:171-173` stdin payload → `checked_add` +
+  `alloc_checked` (M3); `backend_dispatch.cyr:34-36` bounds-check `bid` before slotting
+  the fn-pointer table (SEC3); `quarantine.cyr` null-check `_qpath` return before
+  `file_write_secure` (C2); `cgroup.cyr:39-41` controller check matches `"cpu"` as a
+  substring of `cpuset` — tokenize (SEC2); name magic syscall numbers + add the
+  `# SAFETY:` comments CLAUDE.md requires (`lifecycle.cyr:152` 228=clock_gettime,
+  `backend.cyr:50` 21=access, `error.cyr`/`main.cyr` 1=write) (S1/S2/S3).
+
+### 3.3.x — cc 6.0 stdlib/idiom adoptions (from cyrius + vidya)
+
+Note (context from the research pass): cc 6.0.0 was a *rename* release (`cc5`→`cycc`,
+`cyrc`→`cybs`), no syntax/stdlib removals — so most of these landed in 5.8.x–5.11.x and
+are "available but never adopted," not 6.0-net-new.
+
+- [ ] **(verified, trivial) Fill the `getenv` gap in the wasm backend.** `getenv(name)`
+  now ships in `lib/io.cyr:246` (reads `/proc/self/environ`; `io` already in deps).
+  Resolves the `backend_wasm.cyr:16` `# No $HOME/.cargo/bin probe yet` placeholder —
+  `getenv("HOME")` → `$HOME/.cargo/bin`. Caveat: allocates + not async-signal-safe, so
+  probe at config time, never in `pre_exec`.
+- [ ] **(verified, trivial) Dedupe `mono_now_ns` onto `chrono.clock_now_ns`.**
+  `lifecycle.cyr:152` is byte-identical to `lib/chrono.cyr:9` (chrono already in deps).
+  Replace with a thin alias to avoid touching ~22 call sites. (Note: neither checks the
+  syscall return — fold the S1 "check return + name constant" hardening into a kavach
+  wrapper if we want the guard.)
+- [ ] **(small) Adopt `random.cyr` (`getrandom(2)`) for container-ID entropy.**
+  `random_bytes(buf, len)` (cyrius `random.cyr`, v5.7.35) replaces the hand-rolled
+  `/dev/urandom` open/read/close in `util.cyr:153 read_urandom` (feeds
+  `rand_hex_id`/`rand_u64`/`rand_uuid_hex`). Better fit for a sandbox tool — works with
+  no `/dev` mounted, no fd lifecycle, strengthens ADR-005 §C3. Requires adding `random`
+  to deps; can block on early-boot entropy (don't use `GRND_INSECURE`).
+- [ ] **(medium) Result `_r` I/O variants + `?` operator on the audit/quarantine write
+  paths.** `file_open_r`/`file_read_r`/`file_write_all_r` → `Result<T, IoError>` (cyrius
+  v5.8.30; `result` already in deps). Converts the `fd < 0 → return -1` checks in
+  `util.cyr:104/126/153` and `quarantine.cyr:142` into distinguishable errors (EACCES vs
+  ENOENT) that feed the "structured logging on every external op" principle. Convert
+  leaf-by-leaf; behavior-change risk where callers test `== -1`.
+- [ ] **(medium-large, opportunistic) Typed `: Str` / `slice<T>` params with
+  bounds-checked subscripting.** The biggest idiom gap vs vidya — kavach uses zero typed
+  slices today despite vendoring `slice`/`str`. `s[i]` traps on OOB (exit 134) instead of
+  reading garbage. Adopt as pointer-arithmetic hot spots are touched (`util.cyr` hex,
+  `scanning_code.cyr` evidence). Fires on fn-local slices only.
+- **Recorded negatives (don't chase these):** no faster substring search in the stdlib —
+  `str_contains_cstr` is the *same* naive O(n·m) loop, so swapping `cstr_contains` buys
+  clarity, not speed (a real fix is a kavach-side Aho-Corasick over the literal pattern
+  set, P2). No stdlib SHA-256 (correctly staying on sigil for HMAC-SHA256). `overflow.cyr`
+  operators panic rather than returning the `-1` sentinel `alloc_checked` relies on — don't
+  swap the existing size guards.
 
 ---
 

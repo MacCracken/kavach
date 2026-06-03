@@ -31,7 +31,7 @@ exposes `GET /v1/secret/<name>` on a loopback HTTP listener with per-instance
 allowlist + audit-chain integration (closes ADR-004 §4).
 
 **v3.1 — modernization arc + closeout.** v3.1.0 brought the repo onto the
-first-party-tree baseline (Cyrius pin 5.10.44, `cyrius.cyml` manifest,
+first-party-tree baseline (Cyrius pin 5.10.34, `cyrius.cyml` manifest,
 `lib/` via `cyrius deps`, CI/release rewritten). v3.1.1 added the
 `FileInjection.mode` honoring helper (ADR-005 §M2), cleared 37 lint
 warnings, and removed the `rust-old/` archive (1.4 MB / 26K lines).
@@ -51,11 +51,11 @@ for what's intentionally deferred.
 
 | | v1.x (Rust) | v3.x (Cyrius) |
 |--|--|--|
-| Lines | ~26K | ~3K |
+| Lines | ~26K | ~6.5K |
 | Backends registered | 10 | 10 — full set with real dispatch contracts |
 | Scanner pipeline | 3 scanners | 3 scanners |
 | Audit chain | HMAC-SHA256 via hmac/sha2 crates | HMAC-SHA256 via [sigil](https://github.com/MacCracken/sigil) |
-| Tests | 872 | 349 |
+| Tests | 872 | 384 |
 | Async | tokio | synchronous (ADR-004 §1) |
 
 ---
