@@ -79,48 +79,43 @@ fn _sgx_write_manifest(workdir, sandbox, command) {
     store8(buf + pos, 0);
 
     var path = _sgx_manifest_file(workdir);
-    file_write_all(path, buf, pos);
+    # O_EXCL|O_NOFOLLOW write (ADR-005 §C4) — refuses to follow a symlink or
+    # clobber a pre-existing file at the manifest path. Paired with the
+    # unpredictable mode-0700 workdir, this closes the symlink-TOCTOU window.
+    file_write_secure(path, buf, pos);
     return path;
-}
-
-fn _sgx_error(msg) {
-    var r = exec_result_new();
-    ExecResult_set_exit_code(r, 1);
-    ExecResult_set_stdout(r, "");
-    ExecResult_set_stderr(r, msg);
-    ExecResult_set_duration_ms(r, 0);
-    ExecResult_set_timed_out(r, 0);
-    return r;
 }
 
 fn sgx_exec(sandbox, command) {
     var start_ns = mono_now_ns();
     var gramine = _sgx_gramine_path();
     if (gramine == 0) {
-        return _sgx_error("gramine-sgx not found in PATH");
+        return backend_error_result("gramine-sgx not found in PATH");
     }
     if (_sgx_device_present() == 0) {
-        return _sgx_error("SGX device /dev/sgx_enclave not found");
+        return backend_error_result("SGX device /dev/sgx_enclave not found");
     }
 
     var guard_cfg = runtime_guard_config_default();
     var violations = check_command(command, guard_cfg);
     if (vec_len(violations) > 0) {
-        var v0 = vec_get(violations, 0);
-        var r = exec_result_new();
-        ExecResult_set_exit_code(r, 126);
-        ExecResult_set_stderr(r, GuardViolation_description(v0));
-        return r;
+        return backend_guard_result(violations);
     }
 
-    var workdir = alloc(48);
+    # Unpredictable workdir name (ADR-005 §C3): a predictable
+    # /tmp/kavach-sgx-<epoch> let a local attacker pre-create the path (or a
+    # symlink at it) before we write. A 16-hex-char random id from
+    # /dev/urandom defeats the pre-seed, and mode 0700 + abort-on-EEXIST
+    # means a real collision is a hard error, never a silent reuse.
+    var rid = rand_hex_id();
     var prefix = "/tmp/kavach-sgx-";
+    var workdir = alloc(strlen(prefix) + 17);
     memcpy(workdir, prefix, strlen(prefix));
-    var ts_buf[24];
-    var ts_len = fmt_int_buf(clock_epoch_secs(), &ts_buf);
-    memcpy(workdir + strlen(prefix), &ts_buf, ts_len);
-    store8(workdir + strlen(prefix) + ts_len, 0);
-    sys_mkdir(workdir, 448);
+    memcpy(workdir + strlen(prefix), rid, 16);
+    store8(workdir + strlen(prefix) + 16, 0);
+    if (sys_mkdir(workdir, 448) < 0) {
+        return backend_error_result("failed to create SGX workdir");
+    }
 
     _sgx_write_manifest(workdir, sandbox, command);
 
@@ -138,21 +133,7 @@ fn sgx_exec(sandbox, command) {
     sys_unlink(manifest);
     sys_rmdir(workdir);
 
-    var r = exec_result_new();
-    if (n < 0) {
-        ExecResult_set_exit_code(r, 1);
-        ExecResult_set_stdout(r, "");
-        ExecResult_set_stderr(r, "gramine-sgx run failed");
-    }
-    else {
-        store8(out_buf + n, 0);
-        ExecResult_set_exit_code(r, 0);
-        ExecResult_set_stdout(r, out_buf);
-        ExecResult_set_stderr(r, "");
-    }
-    ExecResult_set_duration_ms(r, (end_ns - start_ns) / 1000000);
-    ExecResult_set_timed_out(r, 0);
-    return r;
+    return backend_capture_finish(out_buf, n, out_cap, "gramine-sgx run failed", start_ns, end_ns);
 }
 
 fn sgx_health(sandbox) {

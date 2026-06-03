@@ -12,7 +12,18 @@ classification, credential proxy, HMAC-SHA256 audit chain — all in pure Cyrius
 
 ## Status
 
-**v3.3 — Cyrius 6.0 toolchain + dependency jump.** Cyrius pin `5.10.44`
+**v3.3.1 — memory-safety + hardening patch.** Post-3.3.0 source audit: fixed a
+heap overflow in all nine exec-capture backends (NUL written one byte past the
+capture buffer on full output) and the same off-by-one in the `/proc` integrity
+readers; hardened the SGX/Firecracker `/tmp` workdir against symlink TOCTOU
+(random name + `O_EXCL|O_NOFOLLOW`); bounds-checked backend dispatch; whole-token
+cgroup controller match; corrected data-scanner evidence. Consolidated the
+duplicated exec-backend epilogue into `backend.cyr` (so the overflow fix lands
+once), and adopted the first cc 6.0 stdlib APIs (`getenv` for the wasm
+`$HOME/.cargo/bin` probe, `chrono.clock_now_ns`). 394 tests; benchmarks flat vs
+3.3.0. See CHANGELOG.
+
+**v3.3.0 — Cyrius 6.0 toolchain + dependency jump.** Cyrius pin `5.10.44`
 → `6.0.40` and sigil `2.9.0` → `3.5.9` (latest), moving the repo onto the
 cc 6.0 line and off the retired 5.10.x sigil-NI asm-offset bisect. Includes
 the cc 6.0 symbol migration (sigil's `ct_eq` → stdlib `ct_eq_bytes_lens`;

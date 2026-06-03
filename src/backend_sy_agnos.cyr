@@ -130,32 +130,18 @@ fn _sy_agnos_append_int_flag(args, flag, value, suffix) {
 
 # ---- Exec ----------------------------------------------------------------
 
-fn _sy_agnos_error(msg) {
-    var r = exec_result_new();
-    ExecResult_set_exit_code(r, 1);
-    ExecResult_set_stdout(r, "");
-    ExecResult_set_stderr(r, msg);
-    ExecResult_set_duration_ms(r, 0);
-    ExecResult_set_timed_out(r, 0);
-    return r;
-}
-
 fn sy_agnos_exec(sandbox, command) {
     var start_ns = mono_now_ns();
     var runtime = _sy_agnos_runtime();
     if (runtime == 0) {
-        return _sy_agnos_error("no container runtime (docker/podman) found");
+        return backend_error_result("no container runtime (docker/podman) found");
     }
 
     # Runtime-guard precheck — same defense-in-depth as other backends.
     var guard_cfg = runtime_guard_config_default();
     var violations = check_command(command, guard_cfg);
     if (vec_len(violations) > 0) {
-        var v0 = vec_get(violations, 0);
-        var r = exec_result_new();
-        ExecResult_set_exit_code(r, 126);
-        ExecResult_set_stderr(r, GuardViolation_description(v0));
-        return r;
+        return backend_guard_result(violations);
     }
 
     var config = Sandbox_config(sandbox);
@@ -205,21 +191,7 @@ fn sy_agnos_exec(sandbox, command) {
     var n = exec_capture(args, out_buf, out_cap);
     var end_ns = mono_now_ns();
 
-    var r = exec_result_new();
-    if (n < 0) {
-        ExecResult_set_exit_code(r, 1);
-        ExecResult_set_stdout(r, "");
-        ExecResult_set_stderr(r, "sy-agnos container run failed");
-    }
-    else {
-        store8(out_buf + n, 0);
-        ExecResult_set_exit_code(r, 0);
-        ExecResult_set_stdout(r, out_buf);
-        ExecResult_set_stderr(r, "");
-    }
-    ExecResult_set_duration_ms(r, (end_ns - start_ns) / 1000000);
-    ExecResult_set_timed_out(r, 0);
-    return r;
+    return backend_capture_finish(out_buf, n, out_cap, "sy-agnos container run failed", start_ns, end_ns);
 }
 
 fn sy_agnos_health(sandbox) {

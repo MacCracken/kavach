@@ -1460,6 +1460,51 @@ fn test_path_exists() {
     return 0;
 }
 
+# ---- 3.3.1 hardening regression tests ------------------------------------
+
+# M1: backend_capture_finish must NUL-terminate inside the buffer even when
+# the capture filled it exactly (n == out_cap) — the off-by-one heap overflow.
+fn test_backend_capture_finish_clamp() {
+    test_group("backend_capture_finish_clamp");
+    var cap = 8;
+    var buf = alloc(cap);
+    memset(buf, 65, cap);                     # fill with 'A', no NUL anywhere
+    var r = backend_capture_finish(buf, cap, cap, "fail", 0, 0);
+    assert_eq(ExecResult_exit_code(r), 0, "success path on full buffer");
+    # NUL clamped to cap-1 (in-bounds), never written at buf+cap (overflow).
+    assert_eq(load8(buf + cap - 1), 0, "NUL clamped to cap-1");
+    var r2 = backend_capture_finish(buf, 0 - 1, cap, "fail", 0, 0);
+    assert_eq(ExecResult_exit_code(r2), 1, "n<0 -> failure result");
+    return 0;
+}
+
+# SEC2: whole-token controller match — "cpu" must not match "cpuset".
+fn test_cgroup_controller_token_match() {
+    test_group("cgroup_controller_token_match");
+    assert_eq(_cgroup_has_controller("cpuset io memory pids", "cpu"), 0, "cpu absent (only cpuset)");
+    assert_eq(_cgroup_has_controller("cpuset cpu io", "cpu"), 1, "cpu present mid-list");
+    assert_eq(_cgroup_has_controller("memory cpu", "cpu"), 1, "cpu present at end");
+    assert_eq(_cgroup_has_controller("io pids", "cpu"), 0, "cpu truly absent");
+    return 0;
+}
+
+# SEC3: dispatch table bounds — out-of-range backend ids read as unregistered
+# rather than indexing the fn-pointer table out of bounds.
+fn test_backend_dispatch_bounds() {
+    test_group("backend_dispatch_bounds");
+    assert_eq(backend_is_registered(0 - 1), 0, "negative id not registered");
+    assert_eq(backend_is_registered(999), 0, "huge id not registered");
+    return 0;
+}
+
+# P1: position-based evidence extracts from the real match span (no re-scan).
+fn test_code_evidence_at() {
+    test_group("code_evidence_at");
+    var ev = code_extract_evidence_at("0123456789", 5, 2);
+    assert_eq(streq(ev, "0123456789"), 1, "evidence spans full short text");
+    return 0;
+}
+
 fn test_process_backend_real_exec() {
     test_group("process_real_exec");
     kavach_init();
@@ -1896,6 +1941,10 @@ fn main() {
     test_gvisor_exec_without_runsc();
     test_which_exists();
     test_path_exists();
+    test_backend_capture_finish_clamp();
+    test_cgroup_controller_token_match();
+    test_backend_dispatch_bounds();
+    test_code_evidence_at();
     return assert_summary();
 }
 

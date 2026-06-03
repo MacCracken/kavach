@@ -34,37 +34,23 @@ fn _gvisor_delete(runsc, container_id) {
     return 0;
 }
 
-fn _gvisor_error(msg) {
-    var r = exec_result_new();
-    ExecResult_set_exit_code(r, 1);
-    ExecResult_set_stdout(r, "");
-    ExecResult_set_stderr(r, msg);
-    ExecResult_set_duration_ms(r, 0);
-    ExecResult_set_timed_out(r, 0);
-    return r;
-}
-
 fn gvisor_exec(sandbox, command) {
     var start_ns = mono_now_ns();
     var runsc = _gvisor_runsc_path();
     if (runsc == 0) {
-        return _gvisor_error("runsc not found in PATH");
+        return backend_error_result("runsc not found in PATH");
     }
 
     var guard_cfg = runtime_guard_config_default();
     var violations = check_command(command, guard_cfg);
     if (vec_len(violations) > 0) {
-        var v0 = vec_get(violations, 0);
-        var r = exec_result_new();
-        ExecResult_set_exit_code(r, 126);
-        ExecResult_set_stderr(r, GuardViolation_description(v0));
-        return r;
+        return backend_guard_result(violations);
     }
 
     var container_id = oci_container_id("kavach-gvisor");
     var bundle = oci_prepare_bundle(container_id, sandbox, command);
     if (bundle == 0) {
-        return _gvisor_error("failed to prepare OCI bundle");
+        return backend_error_result("failed to prepare OCI bundle");
     }
 
     var policy = SandboxConfig_policy(Sandbox_config(sandbox));
@@ -78,21 +64,7 @@ fn gvisor_exec(sandbox, command) {
     _gvisor_delete(runsc, container_id);
     oci_cleanup_bundle(bundle);
 
-    var r = exec_result_new();
-    if (n < 0) {
-        ExecResult_set_exit_code(r, 1);
-        ExecResult_set_stdout(r, "");
-        ExecResult_set_stderr(r, "runsc run failed");
-    }
-    else {
-        store8(out_buf + n, 0);
-        ExecResult_set_exit_code(r, 0);
-        ExecResult_set_stdout(r, out_buf);
-        ExecResult_set_stderr(r, "");
-    }
-    ExecResult_set_duration_ms(r, (end_ns - start_ns) / 1000000);
-    ExecResult_set_timed_out(r, 0);
-    return r;
+    return backend_capture_finish(out_buf, n, out_cap, "runsc run failed", start_ns, end_ns);
 }
 
 fn gvisor_health(sandbox) {

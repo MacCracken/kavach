@@ -5,6 +5,79 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.3.1] — 2026-06-02
+
+Memory-safety + hardening patch from the post-3.3.0 source audit, plus the
+first cc 6.0 stdlib adoptions. 394 tests pass (+10 regression cases); lint 0
+warnings; vet 34 deps, 0 untrusted/missing. Benchmarks vs 3.3.0 are flat
+within measurement noise (e.g. `ct_streq_64` 227→217ns, `audit_chain_record`
+13→12µs) — the added bounds checks and clamps carry no measurable cost.
+
+### Security
+- **Heap overflow in every exec-capture backend (M1).** `exec_capture`
+  (`lib/process.cyr`) fills until `total >= buflen` and can return exactly
+  `out_cap`; the per-backend `store8(out_buf + n, 0)` then wrote a NUL one
+  byte past `alloc(out_cap)` on attacker-influenced subprocess output. Fixed
+  once in the new shared `backend_capture_finish` (see R1) by clamping `n`
+  into `[0, out_cap - 1]` before the terminator. Affected all nine capture
+  backends (process / gvisor / oci / wasm / sgx / sev / tdx / sy-agnos /
+  firecracker).
+- **Off-by-one in the three `/proc` integrity readers (M2).** `_integrity_check_{pid,mount,user}_ns`
+  in `scanning_runtime.cyr` read the full buffer length then NUL-terminated at
+  `buf + n` — OOB when the read filled the buffer. Now read `size - 1`,
+  matching `cgroup_supported`.
+- **Predictable `/tmp` workdir + symlink TOCTOU in SGX & Firecracker (SEC1).**
+  `/tmp/kavach-{sgx,fc}-<epoch_secs>` was a guessable path written via plain
+  `file_write_all`. Now uses an unpredictable `rand_hex_id()` name, mode-0700
+  `mkdir` with abort-on-`EEXIST`, and `file_write_secure` (`O_EXCL|O_NOFOLLOW`)
+  — matching the hardening already on the OCI/quarantine paths (ADR-005 §C3/§C4).
+- **Out-of-range backend id → wild fn-pointer (SEC3).** `backend_dispatch_*`
+  now route through a bounds-checked `_backend_fp(bid, offset)`; an id outside
+  `[0, BACKEND_COUNT)` reads as unregistered instead of indexing
+  `_backend_table[320]` out of bounds.
+- **cgroup controller false-positive (SEC2).** `cgroup_supported` matched
+  `"cpu"` as a substring of `cpuset`. New `_cgroup_has_controller` does a
+  whole-token match over `cgroup.subtree_control`.
+- **Overflow-checked stdin credential payload (M3).** `credential_proxy_stdin_payload`
+  now accumulates lengths via `checked_add` and allocates via `alloc_checked`.
+
+### Fixed
+- **Data-scanner evidence pointed at the wrong bytes (P1).** The structural PII
+  matchers emitted a single stand-in char (`"4"`/`"0"`/…) as the match pattern,
+  so evidence extraction re-scanned the whole (up to 50 MiB) artifact and
+  snipped around the first stray digit. New `code_emit_at` /
+  `code_extract_evidence_at` take the known `(start, len)` directly — correct
+  snippet, no per-finding re-scan.
+- **OCI `pids` limit buffer under-allocation (C1).** `oci_generate_spec` sized
+  the resources buffer as `alloc(64 + mem_len)`, ignoring `pids_len`; a large
+  `max_pids` overflowed it. Now sized with `checked_sum4`/`alloc_checked` over
+  both rendered ints.
+- **`quarantine_store` / `quarantine_update_status` now null-check `_qpath`**
+  before writing (C2).
+
+### Changed
+- **R1 — shared exec-backend epilogue.** Extracted `backend_error_result`,
+  `backend_guard_result`, and `backend_capture_finish` into `backend.cyr`; all
+  nine capture backends route through them. The ~40-line-per-backend duplication
+  (which is why M1 lived in nine places at once) is gone, so the overflow fix
+  and future changes land in one place.
+- **Raw syscalls replaced with stdlib wrappers (S2/S3).** `path_exists` now uses
+  `sys_access`; `kavach_err_print` and the `main.cyr` banner use `sys_write` —
+  dropping bare `syscall(21,…)` / `syscall(1,…)` and their magic numbers.
+- **`mono_now_ns` is now a thin alias over `chrono.clock_now_ns`** (S1) — it was
+  a byte-for-byte duplicate of the stdlib monotonic clock; chrono was already a
+  dep.
+
+### Added
+- **wasm backend resolves `$HOME/.cargo/bin/wasmtime` via stdlib `getenv`** —
+  closes the long-standing `# no getenv yet` placeholder now that `getenv`
+  ships in `lib/io.cyr`. Probed at config time only (getenv allocates and is
+  not async-signal-safe).
+- **10 regression assertions** (`tests/kavach.tcyr`): `backend_capture_finish`
+  clamp on a full buffer, cgroup controller whole-token match, dispatch-id
+  bounds, and position-based evidence extraction.
+- **`benches/bench-history.csv`** row for `3.3.1`.
+
 ## [3.3.0] — 2026-06-02
 
 Major toolchain + dependency jump to the Cyrius 6.0 line, plus the

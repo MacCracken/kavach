@@ -27,6 +27,41 @@
 
 var CGROUP_ROOT = "/sys/fs/cgroup";
 
+# Whole-token match in a whitespace-separated list. cgroup.subtree_control
+# is a space-separated controller list ("cpuset cpu io memory pids"), so a
+# naive substring check for "cpu" spuriously matches "cpuset" — reporting the
+# cpu controller present when only cpuset is. Require the token to be bounded
+# by start-of-string/whitespace on both sides.
+fn _cgroup_has_controller(list, name) {
+    var llen = strlen(list);
+    var nlen = strlen(name);
+    var i = 0;
+    while (i + nlen <= llen) {
+        var ok = 1;
+        if (i > 0) {
+            var pc = load8(list + i - 1);
+            if (pc != 32) { if (pc != 10) { if (pc != 9) { ok = 0; } } }
+        }
+        if (ok == 1) {
+            var j = 0;
+            while (j < nlen) {
+                if (load8(list + i + j) != load8(name + j)) { ok = 0; break; }
+                j = j + 1;
+            }
+            if (ok == 1) {
+                var after = i + nlen;
+                if (after < llen) {
+                    var ac = load8(list + after);
+                    if (ac != 32) { if (ac != 10) { if (ac != 9) { ok = 0; } } }
+                }
+                if (ok == 1) { return 1; }
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
 # Check whether cgroup v2 is mounted and writable. Returns 1 if the root
 # is writable AND the memory + cpu + pids controllers are enabled in the
 # root's cgroup.subtree_control (so child cgroups can use them).
@@ -36,9 +71,9 @@ fn cgroup_supported() {
     var n = file_read_all("/sys/fs/cgroup/cgroup.subtree_control", buf, 511);
     if (n <= 0) { return 0; }
     store8(buf + n, 0);
-    if (cstr_contains(buf, "memory") == 0) { return 0; }
-    if (cstr_contains(buf, "cpu") == 0) { return 0; }
-    if (cstr_contains(buf, "pids") == 0) { return 0; }
+    if (_cgroup_has_controller(buf, "memory") == 0) { return 0; }
+    if (_cgroup_has_controller(buf, "cpu") == 0) { return 0; }
+    if (_cgroup_has_controller(buf, "pids") == 0) { return 0; }
     return 1;
 }
 

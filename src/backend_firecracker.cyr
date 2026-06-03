@@ -58,53 +58,43 @@ fn _fc_generate_config(sandbox, kernel_path) {
     return buf;
 }
 
-fn _fc_error(msg) {
-    var r = exec_result_new();
-    ExecResult_set_exit_code(r, 1);
-    ExecResult_set_stdout(r, "");
-    ExecResult_set_stderr(r, msg);
-    ExecResult_set_duration_ms(r, 0);
-    ExecResult_set_timed_out(r, 0);
-    return r;
-}
-
 fn firecracker_exec(sandbox, command) {
     var start_ns = mono_now_ns();
     var fc = _fc_binary_path();
     if (fc == 0) {
-        return _fc_error("firecracker not found in PATH");
+        return backend_error_result("firecracker not found in PATH");
     }
 
     var guard_cfg = runtime_guard_config_default();
     var violations = check_command(command, guard_cfg);
     if (vec_len(violations) > 0) {
-        var v0 = vec_get(violations, 0);
-        var r = exec_result_new();
-        ExecResult_set_exit_code(r, 126);
-        ExecResult_set_stderr(r, GuardViolation_description(v0));
-        return r;
+        return backend_guard_result(violations);
     }
 
     if (path_exists(command) == 0) {
-        return _fc_error("kernel image not found");
+        return backend_error_result("kernel image not found");
     }
 
-    # Prepare workdir and config file.
-    var workdir = alloc(48);
+    # Prepare workdir and config file. Unpredictable random name + mode 0700
+    # + abort-on-EEXIST defeats the /tmp symlink-preseed vector that a
+    # predictable /tmp/kavach-fc-<epoch> exposed (ADR-005 §C3).
+    var rid = rand_hex_id();
     var prefix = "/tmp/kavach-fc-";
+    var workdir = alloc(strlen(prefix) + 17);
     memcpy(workdir, prefix, strlen(prefix));
-    var ts_buf[24];
-    var ts_len = fmt_int_buf(clock_epoch_secs(), &ts_buf);
-    memcpy(workdir + strlen(prefix), &ts_buf, ts_len);
-    store8(workdir + strlen(prefix) + ts_len, 0);
-    sys_mkdir(workdir, 448);
+    memcpy(workdir + strlen(prefix), rid, 16);
+    store8(workdir + strlen(prefix) + 16, 0);
+    if (sys_mkdir(workdir, 448) < 0) {
+        return backend_error_result("failed to create firecracker workdir");
+    }
 
     var cfg_path = alloc(strlen(workdir) + 16);
     memcpy(cfg_path, workdir, strlen(workdir));
     memcpy(cfg_path + strlen(workdir), "/config.json", 13);
 
     var cfg_json = _fc_generate_config(sandbox, command);
-    file_write_all(cfg_path, cfg_json, strlen(cfg_json));
+    # O_EXCL|O_NOFOLLOW write (ADR-005 §C4) — no symlink-follow, no clobber.
+    file_write_secure(cfg_path, cfg_json, strlen(cfg_json));
 
     var args = vec_new();
     vec_push(args, fc);
@@ -125,21 +115,7 @@ fn firecracker_exec(sandbox, command) {
     sys_unlink(cfg_path);
     sys_rmdir(workdir);
 
-    var r = exec_result_new();
-    if (n < 0) {
-        ExecResult_set_exit_code(r, 1);
-        ExecResult_set_stdout(r, "");
-        ExecResult_set_stderr(r, "firecracker run failed");
-    }
-    else {
-        store8(out_buf + n, 0);
-        ExecResult_set_exit_code(r, 0);
-        ExecResult_set_stdout(r, out_buf);
-        ExecResult_set_stderr(r, "");
-    }
-    ExecResult_set_duration_ms(r, (end_ns - start_ns) / 1000000);
-    ExecResult_set_timed_out(r, 0);
-    return r;
+    return backend_capture_finish(out_buf, n, out_cap, "firecracker run failed", start_ns, end_ns);
 }
 
 fn firecracker_health(sandbox) {

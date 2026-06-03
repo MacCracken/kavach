@@ -159,12 +159,16 @@ we're on the 6.0 line. Items tagged **(verified)** were confirmed against the
 actual code during the audit; the rest are grounded at `file:line` and should be
 re-confirmed when picked up.
 
-### 3.3.1 — memory-safety + hardening patch
+### 3.3.1 — memory-safety + hardening patch — ✅ shipped 2026-06-02
 
 This is a genuine memory-safety patch, not just cleanup — two of the findings are
-heap overflows on attacker-influenced data.
+heap overflows on attacker-influenced data. All items below landed (394 tests,
++10 regression cases; lint/vet clean; benchmarks flat vs 3.3.0). See CHANGELOG
+3.3.1. The two trivial cc 6.0 adoptions (`getenv`, `chrono.clock_now_ns`) shipped
+in the same cut; `random.cyr`, Result `_r`, and typed `Str`/`slice` remain queued
+below.
 
-- [ ] **(verified, HIGH) Off-by-one heap overflow in every exec-capture backend.**
+- [x] **(verified, HIGH) Off-by-one heap overflow in every exec-capture backend.**
   Each backend does `var buf = alloc(CAP); var n = exec_capture(args, buf, CAP); … store8(buf + n, 0);`.
   `exec_capture` (`lib/process.cyr:211-214`) fills until `total >= buflen` and can
   return exactly `CAP`, so `store8(buf + n, 0)` writes a NUL one byte past the
@@ -174,36 +178,36 @@ heap overflows on attacker-influenced data.
   `backend_tdx.cyr:78`, `backend_sgx.cyr:132`, `backend_firecracker.cyr:120`.
   Fix: `alloc(CAP + 1)` or clamp `n` to `CAP - 1`; ideally once, via the shared
   epilogue in R1 below.
-- [ ] **(verified, HIGH) Off-by-one in the three `/proc` integrity readers.** Same
+- [x] **(verified, HIGH) Off-by-one in the three `/proc` integrity readers.** Same
   `store8(buf + n, 0)` pattern where `file_read_all` can return the full buffer
   length: `scanning_runtime.cyr:359-364` (`alloc(512)`/read `512`), `:377-382`
   (`8192`), `:394-399` (`256`). Note `cgroup.cyr:35-38` got this right (reads
   `size - 1`); these did not. Fix: read `size - 1` or `alloc(size + 1)`.
-- [ ] **(HIGH) Predictable `/tmp` workdir + non-`O_EXCL`/`O_NOFOLLOW` writes in SGX &
+- [x] **(HIGH) Predictable `/tmp` workdir + non-`O_EXCL`/`O_NOFOLLOW` writes in SGX &
   Firecracker backends (symlink TOCTOU).** `backend_sgx.cyr:116-125` /
   `backend_firecracker.cyr:93-107` build `/tmp/kavach-{sgx,fc}-<epoch_secs>` (a
   *predictable* name) then write via plain `file_write_all` (no `O_EXCL`/`O_NOFOLLOW`).
   This is the symlink-preseed vector the OCI/quarantine paths were already hardened
   against (ADR-005 §C3/§C4). Fix: name the workdir with `rand_hex_id()`/`rand_u64()`
   and write via `file_write_secure`; abort on `mkdir` `EEXIST`.
-- [ ] **(medium) De-duplicate backend exec boilerplate (R1).** `_X_error`, the
+- [x] **(medium) De-duplicate backend exec boilerplate (R1).** `_X_error`, the
   guard-violation early-return, the timing block, and the capture epilogue are
   duplicated ~8-9× across `backend_*.cyr`. This duplication is *why* the M1 overflow
   and the unchecked-syscall issue exist in 8 places at once. Extract
   `backend_error(msg)`, `backend_guard_check(...)`, `backend_capture_finish(buf, n, cap, start_ns)`
   into `backend.cyr` — makes the overflow a one-line fix and prevents drift.
-- [ ] **(medium) Data scanner emits wrong evidence + full-text re-scan per finding.**
+- [x] **(medium) Data scanner emits wrong evidence + full-text re-scan per finding.**
   `scanning_data.cyr:227-281` passes single-char patterns (`"0"`,`"4"`,…) as the
   `matched` arg, so `code_extract_evidence` (`scanning_code.cyr:61-75`) does
   `cstr_index_of(lower, "4")` — an O(n) re-scan of the whole (up to 50 MiB) artifact
   that returns the *first* digit, not the actual match. Correctness bug (wrong
   snippet) + perf cost. Fix: pass the known `(start, len)` directly, like
   `redact_evidence`.
-- [ ] **(medium, needs confirmation) `oci_generate_spec` resources buffer can
+- [x] **(medium, needs confirmation) `oci_generate_spec` resources buffer can
   under-allocate when `pids` is set.** `oci_spec.cyr:116-135` sizes `alloc(64 + mem_len)`
   but the pids branch adds ~20 fixed chars + up to 19 digits of `max_pids`. Use
   `checked_sum4`/`alloc_checked` over the real lengths (as the outer buffer already does).
-- [ ] **(low, cheap bundle)** `credential.cyr:171-173` stdin payload → `checked_add` +
+- [x] **(low, cheap bundle)** `credential.cyr:171-173` stdin payload → `checked_add` +
   `alloc_checked` (M3); `backend_dispatch.cyr:34-36` bounds-check `bid` before slotting
   the fn-pointer table (SEC3); `quarantine.cyr` null-check `_qpath` return before
   `file_write_secure` (C2); `cgroup.cyr:39-41` controller check matches `"cpu"` as a
@@ -217,12 +221,12 @@ Note (context from the research pass): cc 6.0.0 was a *rename* release (`cc5`→
 `cyrc`→`cybs`), no syntax/stdlib removals — so most of these landed in 5.8.x–5.11.x and
 are "available but never adopted," not 6.0-net-new.
 
-- [ ] **(verified, trivial) Fill the `getenv` gap in the wasm backend.** `getenv(name)`
+- [x] **(verified, trivial) Fill the `getenv` gap in the wasm backend.** `getenv(name)`
   now ships in `lib/io.cyr:246` (reads `/proc/self/environ`; `io` already in deps).
   Resolves the `backend_wasm.cyr:16` `# No $HOME/.cargo/bin probe yet` placeholder —
   `getenv("HOME")` → `$HOME/.cargo/bin`. Caveat: allocates + not async-signal-safe, so
   probe at config time, never in `pre_exec`.
-- [ ] **(verified, trivial) Dedupe `mono_now_ns` onto `chrono.clock_now_ns`.**
+- [x] **(verified, trivial) Dedupe `mono_now_ns` onto `chrono.clock_now_ns`.**
   `lifecycle.cyr:152` is byte-identical to `lib/chrono.cyr:9` (chrono already in deps).
   Replace with a thin alias to avoid touching ~22 call sites. (Note: neither checks the
   syscall return — fold the S1 "check return + name constant" hardening into a kavach

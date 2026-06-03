@@ -148,13 +148,13 @@ var SANDBOX_SIZE = 48;
 # Previously a monotonic counter (deferred per ADR-004 §8); closed in
 # v3.0 now that util.cyr ships rand_u64().
 
-# Nanoseconds since boot. clock_gettime(CLOCK_MONOTONIC, &ts).
+# Monotonic nanoseconds. Thin alias over the stdlib chrono.clock_now_ns
+# (chrono is already a dep) — was a byte-for-byte duplicate of it
+# (CLOCK_MONOTONIC clock_gettime). Kept as a named wrapper so the ~22
+# backend/lifecycle call sites stay put and the raw syscall + magic 228
+# live in one upstream place (S1).
 fn mono_now_ns() {
-    var ts[16];
-    syscall(228, 1, &ts);
-    var sec = load64(&ts);
-    var nsec = load64(&ts + 8);
-    return sec * 1000000000 + nsec;
+    return clock_now_ns();
 }
 
 # Create a sandbox from config. Fails with BACKEND_UNAVAILABLE if the

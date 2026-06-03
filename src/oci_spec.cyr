@@ -117,14 +117,22 @@ fn oci_generate_spec(sandbox, command) {
         var mem_buf[32];
         var mem_bytes = mem * 1048576;
         var mem_len = fmt_int_buf(mem_bytes, &mem_buf);
-        var r = alloc(64 + mem_len);
+        # Render the pids int up front so the buffer can be sized to fit it.
+        # The fixed JSON fragments are p1(32) + optional p2(18) + p3(2) + NUL;
+        # 64 covers them with margin. The old `alloc(64 + mem_len)` ignored
+        # pids_len entirely and overflowed for max_pids > ~10 digits (C1).
+        var pids_buf[24];
+        var pids_len = 0;
+        if (pids > 0) { pids_len = fmt_int_buf(pids, &pids_buf); }
+        var rcap = checked_sum4(64, mem_len, pids_len, 0);
+        if (rcap < 0) { return 0; }
+        var r = alloc_checked(rcap);
+        if (r == 0) { return 0; }
         var rpos = 0;
         var p1 = ",\"resources\":{\"memory\":{\"limit\":";
         memcpy(r + rpos, p1, strlen(p1)); rpos = rpos + strlen(p1);
         memcpy(r + rpos, &mem_buf, mem_len); rpos = rpos + mem_len;
         if (pids > 0) {
-            var pids_buf[24];
-            var pids_len = fmt_int_buf(pids, &pids_buf);
             var p2 = "},\"pids\":{\"limit\":";
             memcpy(r + rpos, p2, strlen(p2)); rpos = rpos + strlen(p2);
             memcpy(r + rpos, &pids_buf, pids_len); rpos = rpos + pids_len;

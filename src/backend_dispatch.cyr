@@ -14,6 +14,16 @@ fn _backend_slot(backend_id) {
     return &_backend_table + backend_id * BACKEND_SLOT_SIZE;
 }
 
+# Bounds-checked fn-pointer fetch. `backend_id` flows from semi-trusted
+# config (backend_parse can yield -1); an out-of-range id would otherwise
+# index _backend_table[320] out of bounds and load a wild function pointer.
+# Returns 0 (== "no implementation") for any id outside [0, BACKEND_COUNT).
+fn _backend_fp(backend_id, offset) {
+    if (backend_id < 0) { return 0; }
+    if (backend_id >= BACKEND_COUNT) { return 0; }
+    return load64(_backend_slot(backend_id) + offset);
+}
+
 fn backend_register_exec(backend_id, fp) {
     store64(_backend_slot(backend_id) + 0, fp);
     return 0;
@@ -33,7 +43,7 @@ fn backend_register_destroy(backend_id, fp) {
 # Returns 0 on missing implementation, after logging an error.
 fn backend_dispatch_exec(sandbox, command) {
     var bid = SandboxConfig_backend(Sandbox_config(sandbox));
-    var fp = load64(_backend_slot(bid) + 0);
+    var fp = _backend_fp(bid, 0);
     if (fp == 0) {
         kavach_err_print(KavachError.BACKEND_UNAVAILABLE, backend_name(bid));
         return 0;
@@ -43,19 +53,19 @@ fn backend_dispatch_exec(sandbox, command) {
 
 fn backend_dispatch_health(sandbox) {
     var bid = SandboxConfig_backend(Sandbox_config(sandbox));
-    var fp = load64(_backend_slot(bid) + 8);
+    var fp = _backend_fp(bid, 8);
     if (fp == 0) { return 0; }
     return fncall1(fp, sandbox);
 }
 
 fn backend_dispatch_destroy(sandbox) {
     var bid = SandboxConfig_backend(Sandbox_config(sandbox));
-    var fp = load64(_backend_slot(bid) + 16);
+    var fp = _backend_fp(bid, 16);
     if (fp == 0) { return 0; }
     return fncall1(fp, sandbox);
 }
 
 fn backend_is_registered(backend_id) {
-    if (load64(_backend_slot(backend_id) + 0) != 0) { return 1; }
+    if (_backend_fp(backend_id, 0) != 0) { return 1; }
     return 0;
 }

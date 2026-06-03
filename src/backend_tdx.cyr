@@ -16,34 +16,20 @@ fn _tdx_device_present() {
     return path_exists("/dev/tdx_guest");
 }
 
-fn _tdx_error(msg) {
-    var r = exec_result_new();
-    ExecResult_set_exit_code(r, 1);
-    ExecResult_set_stdout(r, "");
-    ExecResult_set_stderr(r, msg);
-    ExecResult_set_duration_ms(r, 0);
-    ExecResult_set_timed_out(r, 0);
-    return r;
-}
-
 fn tdx_exec(sandbox, command) {
     var start_ns = mono_now_ns();
     var qemu = _tdx_qemu_path();
     if (qemu == 0) {
-        return _tdx_error("qemu-system-x86_64 not found in PATH");
+        return backend_error_result("qemu-system-x86_64 not found in PATH");
     }
     if (_tdx_device_present() == 0) {
-        return _tdx_error("TDX device /dev/tdx_guest not found");
+        return backend_error_result("TDX device /dev/tdx_guest not found");
     }
 
     var guard_cfg = runtime_guard_config_default();
     var violations = check_command(command, guard_cfg);
     if (vec_len(violations) > 0) {
-        var v0 = vec_get(violations, 0);
-        var r = exec_result_new();
-        ExecResult_set_exit_code(r, 126);
-        ExecResult_set_stderr(r, GuardViolation_description(v0));
-        return r;
+        return backend_guard_result(violations);
     }
 
     var cfg = Sandbox_config(sandbox);
@@ -79,21 +65,7 @@ fn tdx_exec(sandbox, command) {
     var n = exec_capture(args, out_buf, out_cap);
     var end_ns = mono_now_ns();
 
-    var r = exec_result_new();
-    if (n < 0) {
-        ExecResult_set_exit_code(r, 1);
-        ExecResult_set_stdout(r, "");
-        ExecResult_set_stderr(r, "qemu TDX run failed");
-    }
-    else {
-        store8(out_buf + n, 0);
-        ExecResult_set_exit_code(r, 0);
-        ExecResult_set_stdout(r, out_buf);
-        ExecResult_set_stderr(r, "");
-    }
-    ExecResult_set_duration_ms(r, (end_ns - start_ns) / 1000000);
-    ExecResult_set_timed_out(r, 0);
-    return r;
+    return backend_capture_finish(out_buf, n, out_cap, "qemu TDX run failed", start_ns, end_ns);
 }
 
 fn tdx_health(sandbox) {

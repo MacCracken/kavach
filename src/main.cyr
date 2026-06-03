@@ -40,7 +40,7 @@ include "src/sandbox_exec.cyr"
 
 fn _print_banner() {
     var banner = "kavach v3.2.0 — Cyrius port\n";
-    syscall(1, 1, banner, strlen(banner));
+    sys_write(1, banner, strlen(banner));
     return 0;
 }
 
@@ -49,17 +49,17 @@ fn _print_scoreboard() {
     var best = resolve_best_backend(p);
     var score = score_backend(best, p);
     var prefix = "  best backend: ";
-    syscall(1, 1, prefix, strlen(prefix));
+    sys_write(1, prefix, strlen(prefix));
     var name = backend_name(best);
-    syscall(1, 1, name, strlen(name));
-    syscall(1, 1, "\n", 1);
+    sys_write(1, name, strlen(name));
+    sys_write(1, "\n", 1);
     var sp = "  score: ";
-    syscall(1, 1, sp, strlen(sp));
+    sys_write(1, sp, strlen(sp));
     print_num(score);
-    syscall(1, 1, " (", 2);
+    sys_write(1, " (", 2);
     var label = score_label(score);
-    syscall(1, 1, label, strlen(label));
-    syscall(1, 1, ")\n", 2);
+    sys_write(1, label, strlen(label));
+    sys_write(1, ")\n", 2);
     return 0;
 }
 
@@ -81,11 +81,11 @@ fn main() {
     var r = sandbox_exec(sb, "echo hello");
     if (r == 0) {
         var msg = "  exec: blocked\n";
-        syscall(1, 1, msg, strlen(msg));
+        sys_write(1, msg, strlen(msg));
     }
     else {
         var msg = "  exec: passed\n";
-        syscall(1, 1, msg, strlen(msg));
+        sys_write(1, msg, strlen(msg));
     }
     sandbox_destroy(sb);
     return 0;

@@ -357,7 +357,10 @@ fn runtime_integrity_report_new() {
 # caller can't see host state anyway.
 fn _integrity_check_pid_ns() {
     var buf = alloc(512);
-    var n = file_read_all("/proc/1/cmdline", buf, 512);
+    # Read at most size-1 so the NUL terminator below always lands inside the
+    # allocation — file_read_all can fill the whole buffer otherwise, making
+    # store8(buf + n, 0) a one-byte heap overflow (matches cgroup_supported).
+    var n = file_read_all("/proc/1/cmdline", buf, 511);
     if (n <= 0) {
         return _integrity_check_new("pid_namespace", 1, "proc not readable (assume isolated)");
     }
@@ -375,7 +378,8 @@ fn _integrity_check_pid_ns() {
 # unless overlay-mounted (containers commonly overlay user dirs).
 fn _integrity_check_mount_ns() {
     var buf = alloc(8192);
-    var n = file_read_all("/proc/mounts", buf, 8192);
+    # size-1 read limit — see _integrity_check_pid_ns for the rationale.
+    var n = file_read_all("/proc/mounts", buf, 8191);
     if (n <= 0) {
         return _integrity_check_new("mount_namespace", 1, "/proc/mounts not readable");
     }
@@ -392,7 +396,8 @@ fn _integrity_check_mount_ns() {
 # user namespace is in effect.
 fn _integrity_check_user_ns() {
     var buf = alloc(256);
-    var n = file_read_all("/proc/self/uid_map", buf, 256);
+    # size-1 read limit — see _integrity_check_pid_ns for the rationale.
+    var n = file_read_all("/proc/self/uid_map", buf, 255);
     if (n <= 0) {
         return _integrity_check_new("user_namespace", 0, "no UID mapping");
     }

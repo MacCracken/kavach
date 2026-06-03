@@ -9,6 +9,14 @@ fn _dg_emit(text, lower, result, severity, category, name, matched) {
     return code_emit(text, lower, result, severity, category, name, matched);
 }
 
+# Position-aware emit for the structural PII matchers, which already know the
+# match offset+length. The old path passed a single stand-in char ("4"/"0"/…)
+# as `matched`, so evidence extraction re-scanned the whole artifact and
+# pointed the snippet at the first stray digit instead of the real match.
+fn _dg_emit_at(text, result, severity, category, name, start, len) {
+    return code_emit_at(text, result, severity, category, name, start, len);
+}
+
 # ---- Credit card matchers ------------------------------------------------
 
 # Word boundary: position 0 or preceding char is non-token.
@@ -230,43 +238,43 @@ fn _data_scan_pii(text, lower, result) {
     while (i < n) {
         var m = match_visa(text, i, n);
         if (m > 0) {
-            _dg_emit(text, lower, result, Severity.CRITICAL,
-                "pii_financial", "Credit Card (Visa)", "4");
+            _dg_emit_at(text, result, Severity.CRITICAL,
+                "pii_financial", "Credit Card (Visa)", i, m);
             i = i + m;
         }
         else {
             var mc = match_mastercard(text, i, n);
             if (mc > 0) {
-                _dg_emit(text, lower, result, Severity.CRITICAL,
-                    "pii_financial", "Credit Card (Mastercard)", "5");
+                _dg_emit_at(text, result, Severity.CRITICAL,
+                    "pii_financial", "Credit Card (Mastercard)", i, mc);
                 i = i + mc;
             }
             else {
                 var amex = match_amex(text, i, n);
                 if (amex > 0) {
-                    _dg_emit(text, lower, result, Severity.CRITICAL,
-                        "pii_financial", "Credit Card (Amex)", "3");
+                    _dg_emit_at(text, result, Severity.CRITICAL,
+                        "pii_financial", "Credit Card (Amex)", i, amex);
                     i = i + amex;
                 }
                 else {
                     var ip = match_ipv4(text, i, n);
                     if (ip > 0) {
-                        _dg_emit(text, lower, result, Severity.LOW,
-                            "pii_network", "IP Address (IPv4)", "0");
+                        _dg_emit_at(text, result, Severity.LOW,
+                            "pii_network", "IP Address (IPv4)", i, ip);
                         i = i + ip;
                     }
                     else {
                         var ib = match_iban(text, i, n);
                         if (ib > 0) {
-                            _dg_emit(text, lower, result, Severity.HIGH,
-                                "pii_financial", "IBAN", "0");
+                            _dg_emit_at(text, result, Severity.HIGH,
+                                "pii_financial", "IBAN", i, ib);
                             i = i + ib;
                         }
                         else {
                             var ph = match_us_phone(text, i, n);
                             if (ph > 0) {
-                                _dg_emit(text, lower, result, Severity.MEDIUM,
-                                    "pii", "US Phone Number", "0");
+                                _dg_emit_at(text, result, Severity.MEDIUM,
+                                    "pii", "US Phone Number", i, ph);
                                 i = i + ph;
                             }
                             else {

@@ -13,8 +13,22 @@
 fn _wasm_binary_path() {
     if (path_exists("/usr/local/bin/wasmtime") == 1) { return "/usr/local/bin/wasmtime"; }
     if (path_exists("/usr/bin/wasmtime") == 1) { return "/usr/bin/wasmtime"; }
-    # No $HOME/.cargo/bin probe yet — stdlib getenv lands later; until then
-    # only the two standard install prefixes above are checked.
+    # Fall back to a cargo-installed wasmtime under $HOME/.cargo/bin. getenv
+    # ships in the stdlib now (reads /proc/self/environ + allocates) — call it
+    # here at config time only, never post-fork (it is not async-signal-safe).
+    var home = getenv("HOME");
+    if (home != 0) {
+        var suffix = "/.cargo/bin/wasmtime";
+        var hlen = strlen(home);
+        var slen = strlen(suffix);
+        var path = alloc_checked(checked_sum4(hlen, slen, 1, 0));
+        if (path != 0) {
+            memcpy(path, home, hlen);
+            memcpy(path + hlen, suffix, slen);
+            store8(path + hlen + slen, 0);
+            if (path_exists(path) == 1) { return path; }
+        }
+    }
     return 0;
 }
 
@@ -69,16 +83,6 @@ fn _wasm_append_limits(args, policy, timeout_ms) {
     return 0;
 }
 
-fn _wasm_error(msg) {
-    var r = exec_result_new();
-    ExecResult_set_exit_code(r, 1);
-    ExecResult_set_stdout(r, "");
-    ExecResult_set_stderr(r, msg);
-    ExecResult_set_duration_ms(r, 0);
-    ExecResult_set_timed_out(r, 0);
-    return r;
-}
-
 # Trim leading/trailing ASCII whitespace. Returns allocated cstr.
 fn _wasm_trim(s) {
     var n = strlen(s);
@@ -105,16 +109,16 @@ fn wasm_exec(sandbox, command) {
     var start_ns = mono_now_ns();
     var wasmtime = _wasm_binary_path();
     if (wasmtime == 0) {
-        return _wasm_error("wasmtime not found in PATH");
+        return backend_error_result("wasmtime not found in PATH");
     }
 
     # The command is expected to be a .wasm file path.
     var wasm_path = _wasm_trim(command);
     if (strlen(wasm_path) == 0) {
-        return _wasm_error("WASM backend requires a .wasm file path as the command");
+        return backend_error_result("WASM backend requires a .wasm file path as the command");
     }
     if (path_exists(wasm_path) == 0) {
-        return _wasm_error("WASM module file not found");
+        return backend_error_result("WASM module file not found");
     }
 
     # Runtime-guard precheck is still useful — a .wasm path containing
@@ -124,11 +128,7 @@ fn wasm_exec(sandbox, command) {
     var guard_cfg = runtime_guard_config_default();
     var violations = check_command(command, guard_cfg);
     if (vec_len(violations) > 0) {
-        var v0 = vec_get(violations, 0);
-        var r = exec_result_new();
-        ExecResult_set_exit_code(r, 126);
-        ExecResult_set_stderr(r, GuardViolation_description(v0));
-        return r;
+        return backend_guard_result(violations);
     }
 
     var cfg = Sandbox_config(sandbox);
@@ -149,21 +149,7 @@ fn wasm_exec(sandbox, command) {
     var n = exec_capture(args, out_buf, out_cap);
     var end_ns = mono_now_ns();
 
-    var r = exec_result_new();
-    if (n < 0) {
-        ExecResult_set_exit_code(r, 1);
-        ExecResult_set_stdout(r, "");
-        ExecResult_set_stderr(r, "wasmtime run failed");
-    }
-    else {
-        store8(out_buf + n, 0);
-        ExecResult_set_exit_code(r, 0);
-        ExecResult_set_stdout(r, out_buf);
-        ExecResult_set_stderr(r, "");
-    }
-    ExecResult_set_duration_ms(r, (end_ns - start_ns) / 1000000);
-    ExecResult_set_timed_out(r, 0);
-    return r;
+    return backend_capture_finish(out_buf, n, out_cap, "wasmtime run failed", start_ns, end_ns);
 }
 
 fn wasm_health(sandbox) {

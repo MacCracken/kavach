@@ -86,6 +86,39 @@ fn code_emit(text, lower, result, severity, category, name, matched) {
     return 1;
 }
 
+# Extract up to 20 bytes on each side of a KNOWN match span [start, start+len)
+# in the original text. Returns a heap copy (NUL-terminated). Unlike
+# code_extract_evidence, this does NO re-scan — the caller already has the
+# position, so the snippet is taken from the actual match (not the first
+# occurrence of a stand-in pattern) and a multi-MiB artifact isn't re-walked
+# per finding.
+fn code_extract_evidence_at(text, start, len) {
+    var tlen = strlen(text);
+    var s = start - 20;
+    if (s < 0) { s = 0; }
+    var e = start + len + 20;
+    if (e > tlen) { e = tlen; }
+    var n = e - s;
+    var buf = alloc(n + 1);
+    memcpy(buf, text + s, n);
+    store8(buf + n, 0);
+    return buf;
+}
+
+# As code_emit, but for callers that already know the match position+length
+# (e.g. the structural PII matchers) — avoids the stand-in-pattern re-scan.
+fn code_emit_at(text, result, severity, category, name, start, len) {
+    var msg_buf = alloc(strlen(name) + 10);
+    var offset = 0;
+    memcpy(msg_buf, name, strlen(name));
+    offset = strlen(name);
+    memcpy(msg_buf + offset, " detected", 9);
+    store8(msg_buf + offset + 9, 0);
+    scan_result_push(result, finding_new("code", severity, category,
+        msg_buf, code_extract_evidence_at(text, start, len)));
+    return 1;
+}
+
 # ---- pattern groups -------------------------------------------------------
 # Each returns 1 if any pattern matched (one finding emitted per group).
 

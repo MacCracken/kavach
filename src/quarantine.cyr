@@ -118,9 +118,11 @@ fn quarantine_store(storage, artifact, artifact_len, scan_result, sandbox_id) {
     var base = QuarantineStorage_base_dir(storage);
 
     var art_path = _qpath(base, id, "bin");
+    if (art_path == 0) { return 0 - 1; }
     if (file_write_secure(art_path, artifact, artifact_len) < 0) { return 0 - 1; }
 
     var meta_path = _qpath(base, id, "meta");
+    if (meta_path == 0) { sys_unlink(art_path); return 0 - 1; }
     var meta = _meta_jsonl(id, sandbox_id,
                            ScanResult_verdict(scan_result),
                            QuarantineStatus.QUARANTINED);
@@ -136,6 +138,7 @@ fn quarantine_store(storage, artifact, artifact_len, scan_result, sandbox_id) {
 fn quarantine_update_status(storage, id, status) {
     var base = QuarantineStorage_base_dir(storage);
     var meta_path = _qpath(base, id, "meta");
+    if (meta_path == 0) { return KavachError.IO_ERROR; }
     # For v3.0 we just drop a new meta — readers see the latest. Parsing the
     # previous file requires a JSON parser and is deferred.
     var placeholder = _meta_jsonl(id, 0, ScanVerdict.QUARANTINE, status);

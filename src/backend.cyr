@@ -46,10 +46,11 @@ fn backend_parse(s) {
     return 0 - 1;
 }
 
-# access(path, F_OK) — syscall 21 on x86_64. Returns 1 if exists, 0 otherwise.
+# Existence check via the stdlib access(2) wrapper with F_OK (mode 0).
+# Returns 1 if the path exists, 0 otherwise. (Was a raw `syscall(21, ...)`;
+# routing through sys_access drops the bare syscall + magic number — S2.)
 fn path_exists(path) {
-    var r = syscall(21, path, 0);
-    if (r == 0) { return 1; }
+    if (sys_access(path, 0) == 0) { return 1; }
     return 0;
 }
 
@@ -106,4 +107,63 @@ fn backend_is_available(b) {
 # Iterate all 10 backends by index 0..BACKEND_COUNT.
 fn backend_at(i) {
     return i;
+}
+
+# ---- shared exec-backend epilogue ----------------------------------------
+# Every exec-capture backend (process / gvisor / oci / wasm / sgx / sev /
+# tdx / sy-agnos / firecracker) builds its ExecResult the same way. These
+# three helpers carry that shared shape so the logic — and its hardening —
+# lives in exactly one place.
+
+# Simple failure result: exit 1, no stdout, caller-supplied stderr, zero
+# duration. Replaces the per-backend `_X_error` helpers.
+fn backend_error_result(msg) {
+    var r = exec_result_new();
+    ExecResult_set_exit_code(r, 1);
+    ExecResult_set_stdout(r, "");
+    ExecResult_set_stderr(r, msg);
+    ExecResult_set_duration_ms(r, 0);
+    ExecResult_set_timed_out(r, 0);
+    return r;
+}
+
+# Runtime-guard violation result: exit 126 with the first violation's
+# description. Call only when vec_len(violations) > 0.
+fn backend_guard_result(violations) {
+    var r = exec_result_new();
+    ExecResult_set_exit_code(r, 126);
+    var v0 = vec_get(violations, 0);
+    ExecResult_set_stderr(r, GuardViolation_description(v0));
+    ExecResult_set_duration_ms(r, 0);
+    ExecResult_set_timed_out(r, 0);
+    return r;
+}
+
+# Build the success/failure ExecResult from a captured-output buffer.
+#
+# SAFETY (M1, 3.3.1): `exec_capture` fills until `total >= buflen` and can
+# return exactly `out_cap`. Writing `store8(out_buf + n, 0)` with n == out_cap
+# is one byte past `alloc(out_cap)` — a heap overflow on attacker-influenced
+# subprocess output. Clamping n into [0, out_cap - 1] before the NUL makes the
+# terminator always land inside the allocation. At the exact-fill boundary this
+# drops the final byte of an already-truncated 1 MiB capture — acceptable; the
+# alternative (reading past the buffer) is not. Centralizing here fixes the
+# off-by-one for all nine capture backends at once.
+fn backend_capture_finish(out_buf, n, out_cap, fail_msg, start_ns, end_ns) {
+    var r = exec_result_new();
+    if (n < 0) {
+        ExecResult_set_exit_code(r, 1);
+        ExecResult_set_stdout(r, "");
+        ExecResult_set_stderr(r, fail_msg);
+    }
+    else {
+        if (n >= out_cap) { n = out_cap - 1; }
+        store8(out_buf + n, 0);
+        ExecResult_set_exit_code(r, 0);
+        ExecResult_set_stdout(r, out_buf);
+        ExecResult_set_stderr(r, "");
+    }
+    ExecResult_set_duration_ms(r, (end_ns - start_ns) / 1000000);
+    ExecResult_set_timed_out(r, 0);
+    return r;
 }

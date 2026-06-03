@@ -54,21 +54,12 @@ fn process_exec(sandbox, command) {
     var guard_cfg = runtime_guard_config_default();
     var violations = check_command(command, guard_cfg);
     if (vec_len(violations) > 0) {
-        var rr = exec_result_new();
-        ExecResult_set_exit_code(rr, 126);
-        var v0 = vec_get(violations, 0);
-        ExecResult_set_stderr(rr, GuardViolation_description(v0));
-        ExecResult_set_duration_ms(rr, 0);
-        ExecResult_set_timed_out(rr, 0);
-        return rr;
+        return backend_guard_result(violations);
     }
 
     var args = _split_command(command);
     if (vec_len(args) == 0) {
-        var r = exec_result_new();
-        ExecResult_set_exit_code(r, 1);
-        ExecResult_set_stderr(r, "empty command");
-        return r;
+        return backend_error_result("empty command");
     }
 
     # Cgroup wrap: if the sandbox's policy carries any resource limit
@@ -95,21 +86,7 @@ fn process_exec(sandbox, command) {
     cgroup_teardown(cgroup_path);
     var end_ns = mono_now_ns();
 
-    var r = exec_result_new();
-    if (n < 0) {
-        ExecResult_set_exit_code(r, 1);
-        ExecResult_set_stderr(r, "exec failed");
-        ExecResult_set_stdout(r, "");
-    }
-    else {
-        store8(buf + n, 0);
-        ExecResult_set_exit_code(r, 0);
-        ExecResult_set_stdout(r, buf);
-        ExecResult_set_stderr(r, "");
-    }
-    ExecResult_set_duration_ms(r, (end_ns - start_ns) / 1000000);
-    ExecResult_set_timed_out(r, 0);
-    return r;
+    return backend_capture_finish(buf, n, PROCESS_MAX_OUTPUT, "exec failed", start_ns, end_ns);
 }
 
 fn process_health(sandbox) { return 1; }
