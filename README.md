@@ -12,6 +12,15 @@ classification, credential proxy, HMAC-SHA256 audit chain — all in pure Cyrius
 
 ## Status
 
+**v3.3.4 — bounds-checked input validation (closes the v3.3.x arc).** The
+untrusted-command-string screens (`is_safe_text`/`is_safe_argument`) now read
+through a bounds-checked `[u8]` slice — an OOB read traps instead of touching
+attacker-influenced memory. This is the last cc 6.0 modernization-arc item;
+broader slice adoption was evaluated and deliberately bounded (subscripting is
+read-only in 6.0.43; hot scanner paths excluded). 406 tests. The remaining
+audit-flagged perf item — a kavach-side Aho-Corasick to replace the scanners'
+per-pattern re-scan — is tracked as the next substantive investment.
+
 **v3.3.3 — toolchain refresh + Result `_r`.** Cyrius pin `6.0.40` → `6.0.43`
 (patch refresh, re-validated; drift warning cleared). Added a Result-returning
 hardened secure write (`file_write_secure_r`) that preserves `O_EXCL|O_NOFOLLOW`

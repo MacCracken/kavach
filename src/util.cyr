@@ -65,11 +65,18 @@ fn alloc_checked(size) {
 # Reject control chars (NUL, BEL, ESC, …) while allowing tab/newline/CR.
 # Prevents JSON injection, log forgery, and terminal escape smuggling.
 # Returns 1 if safe, 0 otherwise.
+#
+# Reads the untrusted input through a bounds-checked slice (`sl[i]` lowers to
+# the stdlib `_slice_idx_get_1`, which traps on out-of-range): on this
+# security-relevant validation path a future off-by-one becomes a clean abort
+# rather than an out-of-bounds read of attacker-influenced memory.
 fn is_safe_text(s) {
     var n = strlen(s);
+    var sl: [u8] = 0;
+    slice_set(&sl, s, n);
     var i = 0;
     while (i < n) {
-        var c = load8(s + i);
+        var c = sl[i];
         if (c < 32) {
             if (c != 9) {
                 if (c != 10) {
@@ -83,12 +90,15 @@ fn is_safe_text(s) {
 }
 
 # Stricter: reject newlines + CR too (used for command arguments where
-# each line becomes a token and could smuggle extra args).
+# each line becomes a token and could smuggle extra args). Same
+# bounds-checked-slice read of untrusted input as is_safe_text.
 fn is_safe_argument(s) {
     var n = strlen(s);
+    var sl: [u8] = 0;
+    slice_set(&sl, s, n);
     var i = 0;
     while (i < n) {
-        var c = load8(s + i);
+        var c = sl[i];
         if (c < 32) {
             if (c != 9) { return 0; }
         }

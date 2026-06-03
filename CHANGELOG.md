@@ -5,6 +5,45 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.3.4] — 2026-06-02
+
+Final cc 6.0 modernization-arc item: bounds-checked slice reads on the
+untrusted-input validation path. Closes the v3.3.x arc. 406 tests pass (+4);
+lint 0 warnings; vet 34 deps, 0 untrusted/missing; pin stays `6.0.43`.
+
+### Changed
+- **`is_safe_text` / `is_safe_argument` read untrusted input through a
+  bounds-checked slice.** These screen command strings for control-char
+  injection before tokenize/exec (ADR-005 §H3). The per-byte `load8(s + i)` is
+  now `sl[i]` over a `[u8]` slice, which lowers to the stdlib
+  `_slice_idx_get_1` — out-of-range traps (`slice bounds violation`, exit 134)
+  instead of reading attacker-influenced memory. Behavior is unchanged for
+  valid input; this is defense-in-depth against a future off-by-one on a
+  security-relevant path. Read-only, cold path — no measurable cost (benches
+  flat).
+
+### Added
+- **Regression test `is_safe_text`** (plain/tab-newline-CR/empty/ESC cases).
+
+### Notes — typed-slice adoption scope (arc close-out)
+The broader "typed `Str`/`slice` everywhere" idea from the arc plan was
+evaluated against the real cc 6.0.43 API and deliberately **bounded** to the
+above rather than swept across the codebase:
+- Slice subscripting is **read-only** — there is no `_slice_idx_set_W`, so
+  write loops (e.g. `hex_encode_bytes`' `dst[i*2] = …`) can't use it.
+- Field dot-syntax (`s.len`/`s.ptr`) is **not yet wired** in 6.0.43; the
+  `slice_len()` / `slice_ptr()` accessors are required.
+- kavach's pointer loops are already correctly bounded (`while i < n`), so
+  subscripting is future-proofing, not a live bug fix; and the highest-volume
+  reads live in the hot scanner paths, where a per-element bounds check would
+  regress throughput for little safety gain.
+The slice idiom is now established on the most appropriate surface (untrusted
+input) and can be adopted further opportunistically. The one *real* deferred
+perf finding from the post-3.3.0 audit — the scanners re-scanning the full
+buffer per pattern (O(patterns × n × m); a kavach-side Aho-Corasick would
+collapse it) — remains the higher-value next investment, tracked for a future
+cut.
+
 ## [3.3.3] — 2026-06-02
 
 Toolchain patch refresh + the next cc 6.0 stdlib adoption (Result `_r` on the

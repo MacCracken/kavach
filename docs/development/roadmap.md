@@ -151,13 +151,19 @@ Each row carries: **what it means** (the concrete kavach-side surface that gates
 
 ---
 
-## v3.3.x — hardening + cc 6.0 modernization arc
+## v3.3.x — hardening + cc 6.0 modernization arc — ✅ complete (3.3.1–3.3.4)
 
 Source: post-3.3.0 audit of `src/` (memory/security/perf/correctness) plus a
 `cyrius` + `vidya` research pass for cc 6.0 idioms/APIs worth adopting now that
 we're on the 6.0 line. Items tagged **(verified)** were confirmed against the
 actual code during the audit; the rest are grounded at `file:line` and should be
 re-confirmed when picked up.
+
+**Arc summary:** 3.3.1 memory-safety + hardening patch · 3.3.2 `getrandom`
+entropy · 3.3.3 pin → 6.0.43 + Result `_r` secure write · 3.3.4 bounds-checked
+input validation. All planned items shipped except the typed-slice *sweep*
+(deliberately bounded — see below) and the audit's P2 scanner-perf finding,
+which is promoted to "next substantive investment" below.
 
 ### 3.3.1 — memory-safety + hardening patch — ✅ shipped 2026-06-02
 
@@ -245,11 +251,11 @@ are "available but never adopted," not 6.0-net-new.
   audit append (`file_append_locked`, no stdlib `_r` peer) and the other secure-write
   callers (oci_spec/credential/sgx/firecracker) stay on the int wrapper — migrate if/when
   they grow error-specific handling.
-- [ ] **(medium-large, opportunistic) Typed `: Str` / `slice<T>` params with
-  bounds-checked subscripting.** The biggest idiom gap vs vidya — kavach uses zero typed
-  slices today despite vendoring `slice`/`str`. `s[i]` traps on OOB (exit 134) instead of
-  reading garbage. Adopt as pointer-arithmetic hot spots are touched (`util.cyr` hex,
-  `scanning_code.cyr` evidence). Fires on fn-local slices only.
+- [x] **(medium-large, opportunistic) Typed `slice` bounds-checked subscripting.** ✅ shipped 3.3.4 — scoped to the untrusted-input validation path (`is_safe_text`/`is_safe_argument` now read via `sl[i]` → bounds-checked `_slice_idx_get_1`). **Deliberately not swept** further after evaluating the real 6.0.43 API: subscripting is read-only (no `_slice_idx_set_W`, so write loops like `hex_encode_bytes` can't use it), dot-syntax (`s.len`) isn't wired yet (use `slice_len`/`slice_ptr`), kavach's loops are already correctly bounded (future-proofing, not a live fix), and the high-volume reads are in the hot scanner paths where per-element bounds checks would regress throughput. Idiom established; adopt further opportunistically.
+
+#### Next substantive investment (beyond the v3.3.x arc)
+
+- [ ] **(medium-large) Scanner multi-pattern matching — kavach-side Aho-Corasick.** The post-3.3.0 audit's P2: `code_scan`/`_data_scan_*`/phylax re-scan the full pre-lowered buffer once per literal pattern (≈150 `cstr_contains` calls in `scanning_code.cyr` alone) — O(patterns × n × m). The stdlib has no faster substring (confirmed: `str_contains_cstr` is the same naive loop), so a single-pass Aho-Corasick / trie over the literal pattern set is the real fix; collapses ~150 full-buffer scans into one. Highest-value remaining perf item; gated behind a benchmark on large (multi-MiB) artifacts to prove the win.
 - **Recorded negatives (don't chase these):** no faster substring search in the stdlib —
   `str_contains_cstr` is the *same* naive O(n·m) loop, so swapping `cstr_contains` buys
   clarity, not speed (a real fix is a kavach-side Aho-Corasick over the literal pattern

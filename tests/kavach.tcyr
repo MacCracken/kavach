@@ -769,6 +769,19 @@ fn test_is_safe_argument() {
     return 0;
 }
 
+# is_safe_text (bounds-checked slice read): tab/newline/CR allowed, other
+# control chars rejected. Empty string is trivially safe (zero-len slice).
+fn test_is_safe_text() {
+    test_group("is_safe_text");
+    assert_eq(is_safe_text("hello world"), 1, "plain text ok");
+    assert_eq(is_safe_text("a\tb\nc\rd"), 1, "tab/newline/CR allowed");
+    assert_eq(is_safe_text(""), 1, "empty ok (zero-len slice)");
+    var esc = alloc(4);
+    store8(esc, 97); store8(esc + 1, 27); store8(esc + 2, 98); store8(esc + 3, 0);  # a<ESC>b
+    assert_eq(is_safe_text(esc), 0, "ESC (0x1b) rejected");
+    return 0;
+}
+
 fn test_process_rejects_newline_smuggling() {
     test_group("process_newline_smuggle");
     kavach_init();
@@ -1957,6 +1970,7 @@ fn main() {
     test_audit_verify_constant_time();
     test_json_escape_control_chars();
     test_is_safe_argument();
+    test_is_safe_text();
     test_process_rejects_newline_smuggling();
     test_overflow_helpers();
     test_redact_evidence();
