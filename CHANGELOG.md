@@ -5,6 +5,52 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.4.1] — 2026-06-10
+
+Toolchain bump to cyrius `6.1.24` and dependency refresh (sigil `3.5.9 →
+3.7.8`, agnosys `1.3.0 → 1.4.1`). 413 tests pass; lint 0 warnings. The pin
+move surfaced — and this release fixes — a latent opt-in-stdlib gap that
+SIGILLs under cyrius 6.1.x.
+
+### Changed
+- **Cyrius pin `6.0.43 → 6.1.24`** (`cyrius.cyml`, CLAUDE.md). Validated by a
+  clean `deps → build → lint → test → bench` run on the new toolchain.
+- **sigil `3.5.9 → 3.7.8`** (latest) and **agnosys `1.3.0 → 1.4.1`** (latest).
+  sigil 3.7.8 brings ML-DSA-65 PQC default-on, the ECDSA verify scalar-mult
+  speedup, and Solinas field reduction for P-256/P-384.
+
+### Fixed
+- **Audit-chain HMAC SIGILL (exit 132) under cyrius 6.1.x.** Since sigil 3.6,
+  four stdlib modules are **opt-in** — they are *not* in the cyrius
+  auto-prepend union and the `dist/sigil.cyr` bundle does not carry them
+  (sigil README §Usage). kavach already vendored `ct`, `keccak`, and `thread`,
+  but **`thread_local` was missing from the `[deps]` list**, so it was never
+  resolved into `lib/`. Under 6.1.x cyrius only *warns* on the undefined
+  `thread_local_init/get/set` and compiles the call site to a `ud2` trap; the
+  binary builds, then SIGILLs the moment a crypto path touches it — here, the
+  first `audit_chain_record` HMAC. Adding `thread_local` to the vendored
+  stdlib closes it. (sigil's own fix for the same class of bug is its 3.7.8
+  release.)
+- **Latent `async` `ud2` on the HTTP credential-proxy path.** The refreshed
+  dependency set pulls a sandhi whose HTTP path references `async_*`; the
+  `async` stdlib module was likewise absent from `[deps]`, leaving another
+  trap one code path away. Added `async` to the vendored stdlib — the build is
+  now free of undefined-function warnings.
+
+### Notes
+- Root cause was **vendoring**, not asm-offsets. The prior manifest comments
+  framed sigil pin moves as an NI-asm-offset hazard (a cc 5.10.x-era concern);
+  the real 6.1.x requirement is declaring the opt-in stdlib modules. Comments
+  in `cyrius.cyml` updated to reflect this.
+- **Benchmark** (`bench-history.csv`, `3.4.0 → 3.4.1`): the 6.1.24 codegen is a
+  net win on real workloads — `code_scan_large_naive` 6.60 → 5.57 ms (−15.6%),
+  `score_all_backends_strict` 455 → 338 ns (−25.7%), `gate_clean_output` 370 →
+  331 µs (−10.5%), `backend_parse` 193 → 154 ns (−20.2%). A handful of
+  sub-microsecond micro-benchmarks moved the other way (`cgroup_wrap_argv` 545
+  → 740 ns, `config_builder_full` 194 → 264 ns, `policy_strict_create` 113 →
+  137 ns) — codegen variance at the few-hundred-nanosecond floor, not a real
+  regression; the larger the workload, the cleaner the win.
+
 ## [3.4.0] — 2026-06-02
 
 Aho-Corasick multi-pattern matching for the code scanner — the post-3.3.0

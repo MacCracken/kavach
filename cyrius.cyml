@@ -5,7 +5,7 @@ description = "Sandbox execution framework — 10 backends, strength scoring (0-
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/kavach"
 language = "cyrius"
-cyrius = "6.0.43"
+cyrius = "6.1.24"
 
 [build]
 entry = "src/main.cyr"
@@ -22,6 +22,7 @@ stdlib = [
     "alloc",
     "args",
     "assert",
+    "async",
     "bench",
     "bigint",
     "chrono",
@@ -49,6 +50,7 @@ stdlib = [
     "syscalls",
     "tagged",
     "thread",
+    "thread_local",
     "tls",
     "vec",
 ]
@@ -57,23 +59,26 @@ stdlib = [
 # at the pinned tag — used by src/audit.cyr for HMAC-SHA256 of the
 # audit chain and src/util.cyr for ct_eq constant-time comparisons.
 #
-# Pinned at 3.5.9 — latest. The cc 5.10.x asm-offset bisect that
-# capped sigil at 2.9.0 (2.9.1 → 3.0.1 SIGILL on the ed25519-NI path,
-# 3.1.0 on the aes-gcm-NI path) no longer applies under cc 6.0.40: the
-# NI-path offsets are stable across the sigil 3.x line on the 6.0
-# toolchain, validated by a clean build/test/bench run at this pin.
+# Pinned at 3.7.8 — latest. Since sigil 3.6 the four opt-in stdlib
+# modules (ct, keccak, thread, thread_local) are NOT in the cyrius
+# auto-prepend union and the bundle does not carry them — each must be
+# declared in [deps] above so `cyrius deps` vendors it into lib/ (cyrius
+# then auto-includes the vendored module). Omitting one compiles its call
+# site to a `ud2` trap that SIGILLs (exit 132) the first time a crypto
+# path touches it (see sigil README §Usage); that was the 3.4.1 bug —
+# thread_local was absent from [deps]. Validated by a clean
+# build/test/bench run at this pin under cc 6.1.24.
 # Bump in lockstep with the cyrius pin and re-validate.
 [deps.sigil]
 git = "https://github.com/MacCracken/sigil.git"
-tag = "3.5.9"
+tag = "3.7.8"
 modules = ["dist/sigil.cyr"]
 
-# Transitive override. sigil 3.5.9 pins agnosys 1.2.7 (authored for
-# cc 6.0.1), which fails to compile under the cc 6.0.40 toolchain
-# (6.0.x tightened slice-subscript codegen to require the lib/slice.cyr
-# helpers). 1.3.0 is the latest agnosys (cc 6.0.24) and builds clean.
-# Drop this override once sigil bumps its own agnosys pin upstream.
+# Transitive override. sigil 3.7.8 pins agnosys 1.3.2; we override to
+# 1.4.1 (latest, cc 6.1.x) so kavach tracks the current agnosys.
+# Validated by a clean build/test/bench run under cc 6.1.24.
+# Drop this override once sigil bumps its own agnosys pin to 1.4.x.
 [deps.agnosys]
 git = "https://github.com/MacCracken/agnosys.git"
-tag = "1.3.0"
+tag = "1.4.1"
 modules = ["dist/agnosys.cyr"]
