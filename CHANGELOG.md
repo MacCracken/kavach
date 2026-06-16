@@ -5,6 +5,51 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.4.2] — 2026-06-15
+
+Toolchain bump to cyrius `6.2.11` and dependency refresh (sigil `3.7.8 →
+3.7.14`, agnosys `1.4.1 → 1.4.3`). The 6.1 → 6.2 stdlib reshuffle retires the
+standalone `json` and `bigint` modules, so the vendored `[deps]` set is
+re-pointed accordingly. 413 tests pass; lint 0 warnings; vet clean. No
+benchmark regressions across the pin move.
+
+### Changed
+- **Cyrius pin `6.1.24 → 6.2.11`** (`cyrius.cyml`, CLAUDE.md). Validated by a
+  clean `deps → build → lint → vet → test → bench` run on the new toolchain.
+- **sigil `3.7.8 → 3.7.14`** (latest) and **agnosys `1.4.1 → 1.4.3`** (latest).
+  sigil 3.7.14 keeps `dist/sigil.cyr` self-contained (the SHA-NI / AES-NI banks
+  are inlined, as of 3.7.12) and its `crypto_scratch` exercises the
+  thread-local TLS path — see the SIGILL note below.
+- **Stdlib `[deps]` re-pointed for the 6.2 consolidation.** The pre-6.1
+  standalone `json` and `base64` modules were folded into the consolidated
+  **`bayan`** data module and no longer ship as separate files; `json` is
+  replaced by `bayan` in the vendored set. kavach does not parse JSON or decode
+  base64 directly — `oci_json_escape` is hand-rolled (`src/oci_spec.cyr`) — but
+  `bayan` is kept declared so `cyrius deps` resolves the union the vendored
+  sandhi/sigil bundles forward-reference under the single-pass loader.
+- **`fmt` reflow under 6.2.x** — 13 source/test files reindented. cyrius 6.2's
+  formatter flattens multi-line call-continuation arguments from paren-aligned
+  indentation to a single 4-space level under the statement. Whitespace-only;
+  behavior-preserving (rebuilt + 413 tests re-run clean after the reflow).
+
+### Removed
+- **`bigint` stdlib `[deps]` entry dropped.** The pre-6.1 `bigint` module is
+  retired — sigil 3.x bundles its own `u256`/`u384` inline and kavach has no
+  direct big-integer use, so the entry was dead. (`ganita` in 6.2.x is an
+  unrelated linear-algebra module, not a `bigint` successor.)
+
+### Notes
+- **`thread_local` stays load-bearing.** It must remain declared in `[deps]`
+  (preceding sigil in the auto-include order): sigil 3.7.14's `crypto_scratch`
+  exercises the TLS path, so without `thread_local` storage the binary links
+  clean but SIGILLs (exit 132) at first crypto use. This was latent through
+  sigil ≤3.7.12 and is the same class of bug fixed at 3.4.1 — the entry added
+  then is what keeps 3.4.2 safe under the 3.7.14 bump.
+- **Benchmark** (`bench-history.csv`, `3.4.1 → 3.4.2`): flat within measurement
+  noise across all 22 benchmarks (±a few ns / single-digit µs). The toolchain
+  and dependency refresh carries no codegen regression on the hot paths
+  (scoring, scanning, audit-chain, credential proxy).
+
 ## [3.4.1] — 2026-06-10
 
 Toolchain bump to cyrius `6.1.24` and dependency refresh (sigil `3.5.9 →
