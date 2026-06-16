@@ -121,14 +121,14 @@ for what's intentionally deferred.
 ## Build
 
 ```sh
-# Requires Cyrius 6.0.43 (pinned in cyrius.cyml; the first-party tree is
-# on the cc 6.0 line — the old 5.10.x sigil-NI asm-offset bisect is
+# Requires Cyrius 6.2.11 (pinned in cyrius.cyml; the first-party tree is
+# on the cc 6.2 line — the old 5.10.x sigil-NI asm-offset bisect is
 # retired). The pin matches the installed cycc; if cycc later drifts ahead,
 # skip local fmt writes to avoid minor-version drift.
 
-# 1. Resolve deps — populates lib/ (gitignored) with the cc 6.0.43
-#    stdlib snapshot + sigil 3.5.9 at the pinned tag (with an agnosys
-#    1.3.0 transitive override; see cyrius.cyml).
+# 1. Resolve deps — populates lib/ (gitignored) with the cc 6.2.11
+#    stdlib snapshot + sigil 3.7.14 at the pinned tag (with an agnosys
+#    1.4.3 transitive override; see cyrius.cyml).
 cyrius deps
 
 # 2. Build the binary.
@@ -146,8 +146,8 @@ cyrius audit
 ```
 
 Dependencies (declared in [`cyrius.cyml`](cyrius.cyml)):
-- **Cyrius stdlib** — `alloc, args, assert, bench, bigint, chrono, ct, dynlib, fdlopen, fmt, fnptr, freelist, fs, hashmap, hashmap_fast, io, json, keccak, mmap, net, process, result, sandhi, slice, str, string, syscalls, tagged, thread, tls, vec` (resolved by `cyrius deps` into `lib/`, which is gitignored)
-- **[sigil](https://github.com/MacCracken/sigil) 3.5.9** — SHA-256, HMAC-SHA256 (constant-time compare now via the stdlib `ct` module — sigil retired its own `ct_eq` in the 3.x line). Latest tag; the 5.10.x SIGILL bisect that capped it at 2.9.0 no longer applies under cc 6.0.40. sigil pins agnosys `1.2.7` transitively, which kavach overrides to `1.3.0` for cc 6.0.40 compatibility (see [`cyrius.cyml`](cyrius.cyml)).
+- **Cyrius stdlib** — `alloc, args, assert, async, bayan, bench, chrono, ct, dynlib, fdlopen, fmt, fnptr, freelist, fs, hashmap, hashmap_fast, io, keccak, mmap, net, process, random, result, sandhi, slice, str, string, syscalls, tagged, thread, thread_local, tls, vec` (resolved by `cyrius deps` into `lib/`, which is gitignored). The 6.2 line folded the standalone `json`/`base64` modules into `bayan` and retired `bigint` (sigil bundles its own `u256`/`u384`).
+- **[sigil](https://github.com/MacCracken/sigil) 3.7.14** — SHA-256, HMAC-SHA256 (constant-time compare now via the stdlib `ct` module — sigil retired its own `ct_eq` in the 3.x line). Latest tag; the 5.10.x SIGILL bisect that capped it at 2.9.0 no longer applies under cc 6.2.11. sigil pins agnosys `1.4.3` transitively, which kavach also declares as an explicit override (kavach uses agnosys directly; see [`cyrius.cyml`](cyrius.cyml)).
 
 ---
 

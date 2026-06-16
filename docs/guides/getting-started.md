@@ -12,23 +12,24 @@ cyrius build src/main.cyr build/kavach
 ./build/kavach                             # runs the end-to-end demo
 ```
 
-Cyrius toolchain `6.0.43` required (pinned in `cyrius.cyml`). The first-party
-tree is on the cc 6.0 line; the old 5.10.x sigil-NI asm-offset bisect is
+Cyrius toolchain `6.2.11` required (pinned in `cyrius.cyml`). The first-party
+tree is on the cc 6.2 line; the old 5.10.x sigil-NI asm-offset bisect is
 retired. The pin matches the installed `cycc`; if `cycc` later drifts ahead of
 the pin, skip local `cyrius fmt` writes to avoid minor-version drift.
 Dependencies are declared in [`cyrius.cyml`](../../cyrius.cyml):
 
-- **Cyrius stdlib** modules (alloc, args, assert, bench, bigint, chrono, ct,
-  dynlib, fdlopen, fmt, fnptr, freelist, fs, hashmap, hashmap_fast, io, json,
-  keccak, mmap, net, process, result, sandhi, slice, str, string, syscalls,
-  tagged, thread, tls, vec)
-- **[sigil](https://github.com/MacCracken/sigil) 3.5.9** for SHA-256 and
+- **Cyrius stdlib** modules (alloc, args, assert, async, bayan, bench, chrono,
+  ct, dynlib, fdlopen, fmt, fnptr, freelist, fs, hashmap, hashmap_fast, io,
+  keccak, mmap, net, process, random, result, sandhi, slice, str, string,
+  syscalls, tagged, thread, thread_local, tls, vec). The 6.2 line folded the
+  standalone `json`/`base64` modules into `bayan` and retired `bigint`.
+- **[sigil](https://github.com/MacCracken/sigil) 3.7.14** for SHA-256 and
   HMAC-SHA256 (used by `src/audit.cyr`). Constant-time compare
   (`src/util.cyr::ct_streq`) now uses the stdlib `ct` module's
   `ct_eq_bytes_lens` — sigil retired its own `ct_eq` in the 3.x line. Latest
   tag; the 5.10.x SIGILL bisect that capped sigil at 2.9.0 no longer applies
-  under cc 6.0.43. kavach adds an agnosys `1.3.0` transitive override for
-  cc 6.0.x compatibility (sigil pins 1.2.7, which is cc 6.0.1-only).
+  under cc 6.2.11. kavach declares an explicit agnosys `1.4.3` pin (it uses
+  agnosys directly; sigil 3.7.14 also pins 1.4.3 transitively).
 
 `cyrius deps` populates `lib/` (gitignored) — that directory is reproducible
 from the manifest + lockfile, not committed.

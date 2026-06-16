@@ -185,7 +185,7 @@ upstream-blocked on cyrius syscall wrappers — see the roadmap):
 - Each entry: `HMAC(key, "serial:event_type:payload:timestamp:prev_hmac")`.
 - File format: JSONL, appended with `file_append_locked` (file-locked writes).
 - Tamper detection: `audit_entry_verify(entry, key, key_len)` recomputes HMAC; chain verification walks serials + `prev_hmac` linkage.
-- Crypto via [sigil](https://github.com/MacCracken/sigil) 3.5.9 (pinned). Constant-time compare is now the stdlib `ct` module (`ct_eq_bytes_lens`) — sigil retired its own `ct_eq` in the 3.x line.
+- Crypto via [sigil](https://github.com/MacCracken/sigil) 3.7.14 (pinned). Constant-time compare is now the stdlib `ct` module (`ct_eq_bytes_lens`) — sigil retired its own `ct_eq` in the 3.x line.
 
 **Credential proxy** (`src/credential.cyr` + `src/credential_http.cyr`)
 - `CredentialProxy` keeps a `map_new()` of `name → value`.
@@ -236,10 +236,10 @@ Each backend is a plug into the dispatch table. To add `<name>`:
 
 | Dep | Version | Purpose |
 |-----|---------|---------|
-| Cyrius toolchain | 6.0.43 (pinned in `cyrius.cyml`) | First-party tree is on the cc 6.0 line; the old 5.10.x sigil-NI asm-offset bisect is retired. Pin matches the installed cycc. |
-| Cyrius stdlib | resolved by `cyrius deps` into `lib/` (gitignored) | `alloc, args, assert, bench, bigint, chrono, ct, dynlib, fdlopen, fmt, fnptr, freelist, fs, hashmap, hashmap_fast, io, json, keccak, mmap, net, process, result, sandhi, slice, str, string, syscalls, tagged, thread, tls, vec` |
-| [sigil](https://github.com/MacCracken/sigil) | 3.5.9 (pinned tag) | SHA-256, HMAC-SHA256. Constant-time compare moved to the stdlib `ct` module (`ct_eq_bytes_lens`) — sigil retired `ct_eq` in 3.x. The 5.10.x SIGILL bisect that capped sigil at 2.9.0 no longer applies under cc 6.0.43. |
-| [agnosys](https://github.com/MacCracken/agnosys) | 1.3.0 (transitive override) | sigil 3.5.9 pins agnosys 1.2.7 (cc 6.0.1), which fails to build under cc 6.0.43; kavach overrides to 1.3.0 (cc 6.0.24). Drops when sigil bumps its own pin. |
+| Cyrius toolchain | 6.2.11 (pinned in `cyrius.cyml`) | First-party tree is on the cc 6.2 line; the old 5.10.x sigil-NI asm-offset bisect is retired. Pin matches the installed cycc. |
+| Cyrius stdlib | resolved by `cyrius deps` into `lib/` (gitignored) | `alloc, args, assert, async, bayan, bench, chrono, ct, dynlib, fdlopen, fmt, fnptr, freelist, fs, hashmap, hashmap_fast, io, keccak, mmap, net, process, random, result, sandhi, slice, str, string, syscalls, tagged, thread, thread_local, tls, vec`. The 6.2 line folded `json`/`base64` into `bayan` and retired `bigint`. |
+| [sigil](https://github.com/MacCracken/sigil) | 3.7.14 (pinned tag) | SHA-256, HMAC-SHA256. Constant-time compare moved to the stdlib `ct` module (`ct_eq_bytes_lens`) — sigil retired `ct_eq` in 3.x. The 5.10.x SIGILL bisect that capped sigil at 2.9.0 no longer applies under cc 6.2.11. |
+| [agnosys](https://github.com/MacCracken/agnosys) | 1.4.3 (explicit pin / override) | sigil 3.7.14 already pins agnosys 1.4.3; kavach declares its own pin because it uses agnosys directly (`src/sandbox_exec.cyr`, `backend_sy_agnos.cyr`) and tracks the current agnosys independently of sigil's transitive choice. |
 
 ---
 

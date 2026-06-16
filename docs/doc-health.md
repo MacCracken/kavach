@@ -6,7 +6,7 @@ type: state
 
 # Documentation Health — kavach
 
-> **Last refresh**: 2026-06-02 — current through **v3.4.0** (Aho-Corasick code scanner; pin cc `6.0.43`, sigil `3.5.9`; 413 tests, 22 benches). This refresh also made `roadmap.md` **future-facing only** (shipped 3.0→3.4.0 work moved to CHANGELOG) and swept stale version labels — the deferred Landlock/`sandbox_fork_exec`/OCI-cgroup feature cut is now **v3.5.0** (was mislabeled v3.3.0/v3.4.0 in README + overview), and test/bench counts updated to 413/22. **Per-version history lives in [CHANGELOG.md](../../CHANGELOG.md)** — this ledger tracks doc *currency*, not release notes. | **Refresh cadence**: when docs are touched, update the affected row. Pair with the release dance, but no hard release attachment.
+> **Last refresh**: 2026-06-15 — current through **v3.4.2** (toolchain + dependency refresh; pin cc `6.1.24 → 6.2.11`, sigil `3.7.8 → 3.7.14`, agnosys `1.4.1 → 1.4.3`; 413 tests, 22 benches). This refresh swept the toolchain/dependency pins that had gone stale since v3.4.0 (README, `overview.md`, `getting-started.md`, `cyrius.cyml` comments still read cc `6.0.43` / sigil `3.5.9`) up to current, and re-pointed the documented stdlib set for the 6.2 consolidation (`json`/`base64` → `bayan`, `bigint` retired). **Per-version history lives in [CHANGELOG.md](../../CHANGELOG.md)** — this ledger tracks doc *currency*, not release notes. | **Refresh cadence**: when docs are touched, update the affected row. Pair with the release dance, but no hard release attachment.
 > **Scope**: This repo only (`kavach`) — root-level files (README, CHANGELOG, CLAUDE.md, etc.) plus the entire `docs/` tree, plus `benchmarks-rust-v-cyrius.md` at the root. The `rust-old/` tree is **deliberately excluded** — it's the pre-v3.0 Rust archive (slated for removal, see roadmap) and its inline docs are not maintained.
 
 This is a **ledger**, not a one-time audit. Rewrite-in-place as docs change. Kavach is the sandbox-execution primitive for SY, stiva, kiran, AgnosAI, hoosh, bote, and aethersafta; stale backend / policy / scanner docs propagate downstream as consumer-side mis-integrations, so doc currency carries weight even though the doc surface is small (~22 files).
@@ -21,7 +21,7 @@ Pattern lifted from the majra ledger ([`majra/docs/doc-health.md`](https://githu
 
 | Bucket | Count | What it means |
 |---|---|---|
-| ✅ **Fresh — touched in the v3.1.0 arc or the post-cut sweep** | 9 | `CHANGELOG.md`, `VERSION`, `cyrius.cyml` (new), `.github/workflows/{ci,release}.yml`, `docs/development/roadmap.md`, `docs/doc-health.md` (this file) — all from the modernization arc. Plus `README.md`, `CLAUDE.md`, `docs/guides/getting-started.md`, `docs/development/rust-old-removal.md` — refreshed in the post-cut sweep. As of v3.4.0 these carry the cyrius-`6.0.43` / sigil-`3.5.9` / agnosys-`1.3.0`-override reality (was cyrius-5.10.x / sigil-2.9.0 through v3.2.x); all still lib-via-`cyrius deps`. |
+| ✅ **Fresh — touched in the v3.1.0 arc or the post-cut sweep** | 9 | `CHANGELOG.md`, `VERSION`, `cyrius.cyml` (new), `.github/workflows/{ci,release}.yml`, `docs/development/roadmap.md`, `docs/doc-health.md` (this file) — all from the modernization arc. Plus `README.md`, `CLAUDE.md`, `docs/guides/getting-started.md`, `docs/development/rust-old-removal.md` — refreshed in the post-cut sweep. As of v3.4.2 these carry the cyrius-`6.2.11` / sigil-`3.7.14` / agnosys-`1.4.3` reality (was cyrius-5.10.x / sigil-2.9.0 through v3.2.x; cyrius-`6.0.43` / sigil-`3.5.9` through v3.4.0); all still lib-via-`cyrius deps`. |
 | 🟡 **Stale — refresh in place** | 1 | `benchmarks-rust-v-cyrius.md` root file (snapshot at v3.0.0; see Tier-1 frozen note — refresh only if a new comparison snapshot is captured, otherwise treat as `📦 Frozen — snapshot`). |
 | 🟠 **Read-through outstanding** | 0 | Both queued read-through items (`docs/guides/getting-started.md`, `docs/development/rust-old-removal.md`) closed in the post-cut sweep. |
 | 🔵 **Probably evergreen** | 4 | `SECURITY.md`, `CODE_OF_CONDUCT.md`, `LICENSE`, `CONTRIBUTING.md`. No version-tied claims that drift between minor releases. Re-read pass annually. |
@@ -46,7 +46,7 @@ Pattern lifted from the majra ledger ([`majra/docs/doc-health.md`](https://githu
 - ✅ `docs/development/rust-old-removal.md` — sed recipe in § "Removal command" updated: `cyrius.toml` → `cyrius.cyml`; commit message bumped from `v3.0` → `v3.x`; new checked-off line in the Pre-removal checklist records the cyrius.cyml-migration prereq; parity checklist re-verified against the v3.0 surface — no drift caught.
 
 **Queued for follow-up (carried from v3.1.0; now sits in roadmap v3.2 under the `cyrius audit` clean item):**
-- ⚠️ **`cyrius fmt` drift** — pre-existing drift across nine src/ files and two tests/ files (see roadmap v3.2 `cyrius audit` clean item for the file list). CI runs fmt as `::warning::` informational; flip to hard fail once drift is resolved against the pinned `6.0.43` toolchain. Don't run `cyrius fmt` locally with a non-`6.0.43` toolchain — fmt output is minor-version-sensitive and would commit new drift.
+- ✅ **`cyrius fmt` drift — resolved at v3.4.2.** The 6.1 → 6.2 pin move reflowed multi-line call-continuation arguments (paren-aligned → flat 4-space); 13 src/ + tests/ files were re-formatted under the pinned `6.2.11` toolchain and the tree is now fmt-clean. Don't run `cyrius fmt` locally with a non-`6.2.11` toolchain — fmt output is minor-version-sensitive and would commit new drift.
 - ⚠️ **`cyrius lint` long-line warnings (37 total)** — pre-existing v3.0 content, chiefly in the scanner pattern lists: `src/scanning_code.cyr` (16) + `src/scanning_data.cyr` (16), plus stragglers in `src/backend_sgx.cyr` (3), `src/oci_spec.cyr` (1), `src/scanning_runtime.cyr` (1). CI runs lint as `::warning::` informational at v3.1.0; tracked alongside fmt in the v3.2 `cyrius audit` clean item. The lint step also handles cc's "exit code = warning count" convention via `|| true` so the loop doesn't trip `set -eo pipefail`.
 
 ---
@@ -55,15 +55,15 @@ Pattern lifted from the majra ledger ([`majra/docs/doc-health.md`](https://githu
 
 | File | Last touched | Status | Notes |
 |---|---|---|---|
-| `README.md` | 2026-06-02 | ✅ Fresh | Status block carries the v3.4.0 (Aho-Corasick) → v3.2 (cgroups + HTTP proxy) stack; older per-version blocks duplicate CHANGELOG. Build/deps sections + Rust-vs-Cyrius comparison table on cc `6.0.43` / sigil `3.5.9`; test/bench counts **413 / 22**. The deferred-feature forward-reference now points to the roadmap (v3.5.0) instead of a hardcoded version. |
+| `README.md` | 2026-06-15 | ✅ Fresh | Status block carries the v3.4.0 (Aho-Corasick) → v3.2 (cgroups + HTTP proxy) stack; older per-version blocks duplicate CHANGELOG. Build/deps sections refreshed to cc `6.2.11` / sigil `3.7.14` / agnosys `1.4.3` at v3.4.2 (stdlib list re-pointed: `json`→`bayan`, `bigint` dropped); test/bench counts **413 / 22**. The deferred-feature forward-reference now points to the roadmap (v3.5.0) instead of a hardcoded version. |
 | `CHANGELOG.md` | 2026-05-10 | ✅ Fresh | v3.1.0 stanza records the modernization arc. v3.0.0 stanza unchanged. |
-| `CLAUDE.md` | 2026-05-10 | ✅ Fresh | Refreshed in the post-3.1.0 sweep; Version field bumped to v3.2.0 in the 3.2.0 final sweep. Cleanliness Check / Key Principles / DO-NOT list all carry the cyrius-shaped idioms. |
+| `CLAUDE.md` | 2026-06-15 | ✅ Fresh | Refreshed in the post-3.1.0 sweep; Version field bumped to v3.2.0 in the 3.2.0 final sweep. Language/pin notes updated to cc `6.2.11` + the 6.2 stdlib-consolidation hazard (`json`/`base64`→`bayan`, `bigint` retired) at v3.4.2. Cleanliness Check / Key Principles / DO-NOT list all carry the cyrius-shaped idioms. |
 | `CONTRIBUTING.md` | 2026-04-13 | 🔵 Evergreen | Generic contributor workflow. Re-read annually. |
 | `SECURITY.md` | 2026-04-13 | 🔵 Evergreen | Reporting policy + scope. Re-read annually. |
 | `CODE_OF_CONDUCT.md` | 2026-04-13 | 🔵 Evergreen | Standard. |
-| `VERSION` | 2026-05-10 | ✅ Fresh | `3.2.0` — single source of truth, read into `cyrius.cyml` via `${file:VERSION}`. |
+| `VERSION` | 2026-06-15 | ✅ Fresh | `3.4.2` — single source of truth, read into `cyrius.cyml` via `${file:VERSION}`. |
 | `LICENSE` | (initial commit) | 🔵 Evergreen | GPL-3.0-only. |
-| `cyrius.cyml` | 2026-06-02 | ✅ Fresh | cc pin `6.0.43` (was 5.10.34 at v3.1.0; → 6.0.40 at v3.3.0; → 6.0.43 at v3.3.3), sigil pin `3.5.9` (was 2.9.0), agnosys `1.3.0` transitive override, stdlib list mirrors src/ (incl. `ct`/`json`/`keccak`/`slice`/`thread`/`random` added across the 3.3.x arc). |
+| `cyrius.cyml` | 2026-06-15 | ✅ Fresh | cc pin `6.2.11` (was 5.10.34 at v3.1.0; → 6.0.43 at v3.3.3; → 6.1.24 at v3.4.1; → 6.2.11 at v3.4.2), sigil pin `3.7.14` (was 2.9.0), agnosys `1.4.3` explicit pin, stdlib list mirrors src/. v3.4.2 re-pointed for the 6.2 consolidation: `json`→`bayan`, `bigint` dropped (sigil bundles its own `u256`/`u384`); `ct`/`keccak`/`thread`/`thread_local`/`async` stay declared (opt-in modules — a missing one SIGILLs at runtime). |
 | `benchmarks-rust-v-cyrius.md` | 2026-04-13 | 📦 Frozen — snapshot | v2.0.0-Rust ↔ v3.0.0-Cyrius release comparison. Don't refresh in place; the next cross-language comparison (if any) gets a new dated file. Today the numbers stand as the cutover headliner. |
 
 ---
@@ -72,7 +72,7 @@ Pattern lifted from the majra ledger ([`majra/docs/doc-health.md`](https://githu
 
 | File | Last touched | Status | Notes |
 |---|---|---|---|
-| `overview.md` | 2026-06-02 | ✅ Fresh | Module map carries `aho_corasick.cyr` (v3.4.0) + cgroup/credential_http; dependency table on cc `6.0.43` / sigil `3.5.9` / agnosys `1.3.0` override; constant-time compare via stdlib `ct`. Policy-modifier + deferred-surface tables updated — Landlock/scope rows → **v3.5.0**, seccomp → upstream-blocked (corrected from the stale v3.3.0/v3.4.0 labels in the 2026-06-02 sweep). |
+| `overview.md` | 2026-06-15 | ✅ Fresh | Module map carries `aho_corasick.cyr` (v3.4.0) + cgroup/credential_http; dependency table refreshed to cc `6.2.11` / sigil `3.7.14` / agnosys `1.4.3` (stdlib row re-pointed `json`/`base64`→`bayan`, `bigint` retired) at v3.4.2; constant-time compare via stdlib `ct`. Policy-modifier + deferred-surface tables updated — Landlock/scope rows → **v3.5.0**, seccomp → upstream-blocked (corrected from the stale v3.3.0/v3.4.0 labels in the 2026-06-02 sweep). |
 
 ---
 
@@ -97,7 +97,7 @@ Decision velocity is low. Open a new ADR only when a load-bearing decision is re
 
 | File | Last touched | Status | Notes |
 |---|---|---|---|
-| `roadmap.md` | 2026-06-02 | ✅ Fresh | Rewritten **future-facing only** at v3.4.0 — all shipped items (v3.0 port, v3.1 modernization, v3.2 cgroups/HTTP-proxy, the v3.3.x hardening arc, v3.4.0 Aho-Corasick) dropped to CHANGELOG. Remaining sections: **Next** (3.4.1 = extend AC to data/phylax · tech-debt `cyrius fmt` clean · recorded-negatives), **v3.5.0** feature cut (Landlock + `sandbox_fork_exec` + OCI cgroups — re-targeted from the stale v3.4.0 label), **Open questions** (`[lib]` profile), **Blocked — awaiting upstream** (seccomp / Firecracker jailer / H4 TOCTOU / SGX-SEV-TDX attestation / Stiva OCI), then the standing big-vision sections (Agent Injection Defense L4, Foreign Platform Containers, Advanced Isolation, Cross-Platform, Polymorphic, Non-Goals). |
+| `roadmap.md` | 2026-06-15 | ✅ Fresh | Header "Current release" line refreshed to v3.4.2 / cc `6.2.11` / sigil `3.7.14` / agnosys `1.4.3` at v3.4.2. Rewritten **future-facing only** at v3.4.0 — all shipped items (v3.0 port, v3.1 modernization, v3.2 cgroups/HTTP-proxy, the v3.3.x hardening arc, v3.4.0 Aho-Corasick) dropped to CHANGELOG. Remaining sections: **Next** (3.4.1 = extend AC to data/phylax · tech-debt `cyrius fmt` clean · recorded-negatives), **v3.5.0** feature cut (Landlock + `sandbox_fork_exec` + OCI cgroups — re-targeted from the stale v3.4.0 label), **Open questions** (`[lib]` profile), **Blocked — awaiting upstream** (seccomp / Firecracker jailer / H4 TOCTOU / SGX-SEV-TDX attestation / Stiva OCI), then the standing big-vision sections (Agent Injection Defense L4, Foreign Platform Containers, Advanced Isolation, Cross-Platform, Polymorphic, Non-Goals). |
 | `rust-old-removal.md` | 2026-05-10 | 📦 Frozen — historical | Doc fulfilled its purpose at v3.1.1: rust-old/ tree deleted (1.4 MB / 25,935 lines), parity audit re-verified, sed recipe applied to `src/main.cyr` header. Keep as historical reference (per-symbol Rust→Cyrius mapping is still useful archaeology). No refresh owed; if rust-old/ is restored from git history for any reason, re-open. |
 | `stiva.md` | 2026-04-13 | 📁 Supplementary | Integration note for the stiva consumer. Refresh when stiva's Cyrius port lands (tracked in roadmap v3.2 blocked queue). |
 
@@ -108,7 +108,7 @@ Decision velocity is low. Open a new ADR only when a load-bearing decision is re
 | File | Last touched | Status | Notes |
 |---|---|---|---|
 | `README.md` | 2026-04-13 | 📁 Supplementary | Index. |
-| `getting-started.md` | 2026-06-02 | ✅ Fresh | § "Build + install" carries the `cyrius deps` step + `lib/`-gitignored model; toolchain line on cc `6.0.43` (pin matches installed cycc); deps list incl. the 3.3.x stdlib additions; sigil `3.5.9` with the constant-time-via-`ct` + agnosys-`1.3.0`-override notes. Build → configure → execute walkthrough still tracks src/. |
+| `getting-started.md` | 2026-06-15 | ✅ Fresh | § "Build + install" carries the `cyrius deps` step + `lib/`-gitignored model; toolchain line refreshed to cc `6.2.11` (pin matches installed cycc) at v3.4.2; deps list re-pointed for the 6.2 consolidation (`json`/`base64`→`bayan`, `bigint` retired); sigil `3.7.14` with the constant-time-via-`ct` + agnosys-`1.4.3` notes. Build → configure → execute walkthrough still tracks src/. |
 | `composite-backends.md` | 2026-04-13 | 📁 Supplementary | Defense-in-depth merge rules. No manifest references; content tracks `src/composite.cyr`. |
 | `threat-tracking.md` | 2026-04-13 | 📁 Supplementary | Intent scoring + OffenderTracker + decay tuning. No manifest references; content tracks `src/scanning_threat.cyr`. |
 

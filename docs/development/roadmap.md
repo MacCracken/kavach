@@ -2,7 +2,7 @@
 
 > **Principle**: Security correctness first, then backend breadth, then performance. Every sandbox gets a number.
 
-This roadmap is **future-facing only** — shipped work lives in [CHANGELOG.md](../../CHANGELOG.md). Current release: v3.4.0 (Aho-Corasick code scanner). Toolchain pin: cc `6.0.43`; sigil `3.5.9`.
+This roadmap is **future-facing only** — shipped work lives in [CHANGELOG.md](../../CHANGELOG.md). Current release: v3.4.2 (toolchain + dependency refresh). Toolchain pin: cc `6.2.11`; sigil `3.7.14`, agnosys `1.4.3`.
 
 ---
 
