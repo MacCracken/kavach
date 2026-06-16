@@ -1090,14 +1090,14 @@ fn test_sgx_report_verify_structure() {
     assert_eq(sgx_report_verify_structure(r), 0, "empty report rejected");
     # Valid measurements + signature
     SgxAttestationReport_set_mrenclave_hex(r,
-        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
     SgxAttestationReport_set_mrsigner_hex(r,
-        "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210");
+    "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210");
     SgxAttestationReport_set_ias_signature(r, "base64signatureblobthatisatleast32chars...");
     assert_eq(sgx_report_verify_structure(r), 1, "valid structure");
     # Non-hex measurement fails
     SgxAttestationReport_set_mrenclave_hex(r,
-        "XYZ456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0");
+    "XYZ456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0");
     assert_eq(sgx_report_verify_structure(r), 0, "non-hex rejected");
     return 0;
 }

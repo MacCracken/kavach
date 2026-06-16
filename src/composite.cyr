@@ -57,48 +57,48 @@ fn _and_bool(a, b) {
 fn merge_policies(base, overlay) {
     var out = policy_new();
     SandboxPolicy_set_seccomp_enabled(out,
-        _or_bool(SandboxPolicy_seccomp_enabled(base),
-                 SandboxPolicy_seccomp_enabled(overlay)));
+    _or_bool(SandboxPolicy_seccomp_enabled(base),
+    SandboxPolicy_seccomp_enabled(overlay)));
     SandboxPolicy_set_seccomp_profile(out,
-        _stricter_profile(SandboxPolicy_seccomp_profile(base),
-                          SandboxPolicy_seccomp_profile(overlay)));
+    _stricter_profile(SandboxPolicy_seccomp_profile(base),
+    SandboxPolicy_seccomp_profile(overlay)));
 
     # Network: both must enable. Default disabled wins.
     SandboxPolicy_set_network_enabled(out,
-        _and_bool(SandboxPolicy_network_enabled(base),
-                  SandboxPolicy_network_enabled(overlay)));
+    _and_bool(SandboxPolicy_network_enabled(base),
+    SandboxPolicy_network_enabled(overlay)));
 
     SandboxPolicy_set_read_only_rootfs(out,
-        _or_bool(SandboxPolicy_read_only_rootfs(base),
-                 SandboxPolicy_read_only_rootfs(overlay)));
+    _or_bool(SandboxPolicy_read_only_rootfs(base),
+    SandboxPolicy_read_only_rootfs(overlay)));
 
     SandboxPolicy_set_landlock_rules_len(out,
-        SandboxPolicy_landlock_rules_len(base)
-      + SandboxPolicy_landlock_rules_len(overlay));
+    SandboxPolicy_landlock_rules_len(base)
+    + SandboxPolicy_landlock_rules_len(overlay));
 
     SandboxPolicy_set_landlock_abstract_unix(out,
-        _or_bool(SandboxPolicy_landlock_abstract_unix(base),
-                 SandboxPolicy_landlock_abstract_unix(overlay)));
+    _or_bool(SandboxPolicy_landlock_abstract_unix(base),
+    SandboxPolicy_landlock_abstract_unix(overlay)));
     SandboxPolicy_set_landlock_signal(out,
-        _or_bool(SandboxPolicy_landlock_signal(base),
-                 SandboxPolicy_landlock_signal(overlay)));
+    _or_bool(SandboxPolicy_landlock_signal(base),
+    SandboxPolicy_landlock_signal(overlay)));
 
     SandboxPolicy_set_memory_limit_mb(out,
-        _min_nz(SandboxPolicy_memory_limit_mb(base),
-                SandboxPolicy_memory_limit_mb(overlay)));
+    _min_nz(SandboxPolicy_memory_limit_mb(base),
+    SandboxPolicy_memory_limit_mb(overlay)));
     SandboxPolicy_set_cpu_limit_tenths(out,
-        _min_nz(SandboxPolicy_cpu_limit_tenths(base),
-                SandboxPolicy_cpu_limit_tenths(overlay)));
+    _min_nz(SandboxPolicy_cpu_limit_tenths(base),
+    SandboxPolicy_cpu_limit_tenths(overlay)));
     SandboxPolicy_set_max_pids(out,
-        _min_nz(SandboxPolicy_max_pids(base),
-                SandboxPolicy_max_pids(overlay)));
+    _min_nz(SandboxPolicy_max_pids(base),
+    SandboxPolicy_max_pids(overlay)));
 
     SandboxPolicy_set_network_tcp_bind_len(out,
-        _max(SandboxPolicy_network_tcp_bind_len(base),
-             SandboxPolicy_network_tcp_bind_len(overlay)));
+    _max(SandboxPolicy_network_tcp_bind_len(base),
+    SandboxPolicy_network_tcp_bind_len(overlay)));
     SandboxPolicy_set_network_tcp_connect_len(out,
-        _max(SandboxPolicy_network_tcp_connect_len(base),
-             SandboxPolicy_network_tcp_connect_len(overlay)));
+    _max(SandboxPolicy_network_tcp_connect_len(base),
+    SandboxPolicy_network_tcp_connect_len(overlay)));
     return out;
 }
 

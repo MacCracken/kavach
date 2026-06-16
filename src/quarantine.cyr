@@ -78,7 +78,7 @@ fn _meta_jsonl(id, sandbox_id, verdict, status) {
     var ts_len = fmt_int_buf(clock_epoch_secs(), &ts_buf);
 
     var user_lens = checked_sum4(id_len, strlen(sid), strlen(vn),
-                                 strlen(sn) + ts_len);
+    strlen(sn) + ts_len);
     if (user_lens < 0) { return 0; }
     var cap = checked_add(user_lens, 256);
     if (cap < 0) { return 0; }
@@ -131,8 +131,8 @@ fn quarantine_store(storage, artifact, artifact_len, scan_result, sandbox_id) {
     var meta_path = _qpath(base, id, "meta");
     if (meta_path == 0) { sys_unlink(art_path); return 0 - 1; }
     var meta = _meta_jsonl(id, sandbox_id,
-                           ScanResult_verdict(scan_result),
-                           QuarantineStatus.QUARANTINED);
+    ScanResult_verdict(scan_result),
+    QuarantineStatus.QUARANTINED);
     var mw = file_write_secure_r(meta_path, meta, strlen(meta));
     if (is_err_result(mw) == 1) {
         kavach_err_print(KavachError.IO_ERROR, io_error_name(err_code_of(mw)));

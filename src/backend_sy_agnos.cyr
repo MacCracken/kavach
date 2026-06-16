@@ -58,7 +58,7 @@ fn _sy_agnos_runtime() {
 
 fn _phylax_emit(text, lower, result, category, matched) {
     return code_emit(text, lower, result, Severity.CRITICAL, category,
-        "Phylax indicator", matched);
+    "Phylax indicator", matched);
 }
 
 fn phylax_scan(text, result) {

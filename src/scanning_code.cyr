@@ -82,7 +82,7 @@ fn code_emit(text, lower, result, severity, category, name, matched) {
     memcpy(msg_buf + offset, " detected", 9);
     store8(msg_buf + offset + 9, 0);
     scan_result_push(result, finding_new("code", severity, category,
-        msg_buf, code_extract_evidence(text, lower, matched)));
+    msg_buf, code_extract_evidence(text, lower, matched)));
     return 1;
 }
 
@@ -115,7 +115,7 @@ fn code_emit_at(text, result, severity, category, name, start, len) {
     memcpy(msg_buf + offset, " detected", 9);
     store8(msg_buf + offset + 9, 0);
     scan_result_push(result, finding_new("code", severity, category,
-        msg_buf, code_extract_evidence_at(text, start, len)));
+    msg_buf, code_extract_evidence_at(text, start, len)));
     return 1;
 }
 
@@ -280,15 +280,15 @@ fn _cg_hit(lit) {
 fn _cg_shell_exec(text, lower, result) {
     if (_cg_hit("exec(") == 1) {
         return code_emit(text, lower, result,
-            Severity.CRITICAL, "command_injection", "Shell exec", "exec(");
+        Severity.CRITICAL, "command_injection", "Shell exec", "exec(");
     }
     if (_cg_hit("execsync(") == 1) {
         return code_emit(text, lower, result,
-            Severity.CRITICAL, "command_injection", "Shell exec", "execsync(");
+        Severity.CRITICAL, "command_injection", "Shell exec", "execsync(");
     }
     if (_cg_hit("child_process") == 1) {
         return code_emit(text, lower, result,
-            Severity.CRITICAL, "command_injection", "Shell exec", "child_process");
+        Severity.CRITICAL, "command_injection", "Shell exec", "child_process");
     }
     return 0;
 }
@@ -296,11 +296,11 @@ fn _cg_shell_exec(text, lower, result) {
 fn _cg_process_spawn(text, lower, result) {
     if (_cg_hit("spawn(") == 1) {
         return code_emit(text, lower, result,
-            Severity.CRITICAL, "command_injection", "Process spawn", "spawn(");
+        Severity.CRITICAL, "command_injection", "Process spawn", "spawn(");
     }
     if (_cg_hit("spawnsync(") == 1) {
         return code_emit(text, lower, result,
-            Severity.CRITICAL, "command_injection", "Process spawn", "spawnsync(");
+        Severity.CRITICAL, "command_injection", "Process spawn", "spawnsync(");
     }
     return 0;
 }
@@ -308,11 +308,11 @@ fn _cg_process_spawn(text, lower, result) {
 fn _cg_eval_exec(text, lower, result) {
     if (_cg_hit("eval(") == 1) {
         return code_emit(text, lower, result,
-            Severity.CRITICAL, "command_injection", "Eval execution", "eval(");
+        Severity.CRITICAL, "command_injection", "Eval execution", "eval(");
     }
     if (_cg_hit("function(") == 1) {
         return code_emit(text, lower, result,
-            Severity.CRITICAL, "command_injection", "Eval execution", "function(");
+        Severity.CRITICAL, "command_injection", "Eval execution", "function(");
     }
     return 0;
 }
@@ -320,23 +320,23 @@ fn _cg_eval_exec(text, lower, result) {
 fn _cg_shell_invoc(text, lower, result) {
     if (_cg_hit("/bin/sh") == 1) {
         return code_emit(text, lower, result,
-            Severity.HIGH, "command_injection", "Shell invocation", "/bin/sh");
+        Severity.HIGH, "command_injection", "Shell invocation", "/bin/sh");
     }
     if (_cg_hit("/bin/bash") == 1) {
         return code_emit(text, lower, result,
-            Severity.HIGH, "command_injection", "Shell invocation", "/bin/bash");
+        Severity.HIGH, "command_injection", "Shell invocation", "/bin/bash");
     }
     if (_cg_hit("/bin/zsh") == 1) {
         return code_emit(text, lower, result,
-            Severity.HIGH, "command_injection", "Shell invocation", "/bin/zsh");
+        Severity.HIGH, "command_injection", "Shell invocation", "/bin/zsh");
     }
     if (_cg_hit("cmd.exe") == 1) {
         return code_emit(text, lower, result,
-            Severity.HIGH, "command_injection", "Shell invocation", "cmd.exe");
+        Severity.HIGH, "command_injection", "Shell invocation", "cmd.exe");
     }
     if (_cg_hit("powershell") == 1) {
         return code_emit(text, lower, result,
-            Severity.HIGH, "command_injection", "Shell invocation", "powershell");
+        Severity.HIGH, "command_injection", "Shell invocation", "powershell");
     }
     return 0;
 }
@@ -344,39 +344,39 @@ fn _cg_shell_invoc(text, lower, result) {
 fn _cg_shell_meta(text, lower, result) {
     if (_cg_hit("$(") == 1) {
         return code_emit(text, lower, result,
-            Severity.HIGH, "command_injection", "Shell metacharacters", "$(");
+        Severity.HIGH, "command_injection", "Shell metacharacters", "$(");
     }
     if (_cg_hit("${") == 1) {
         return code_emit(text, lower, result,
-            Severity.HIGH, "command_injection", "Shell metacharacters", "${");
+        Severity.HIGH, "command_injection", "Shell metacharacters", "${");
     }
     if (_cg_hit("| sh") == 1) {
         return code_emit(text, lower, result,
-            Severity.HIGH, "command_injection", "Shell metacharacters", "| sh");
+        Severity.HIGH, "command_injection", "Shell metacharacters", "| sh");
     }
     if (_cg_hit("| bash") == 1) {
         return code_emit(text, lower, result,
-            Severity.HIGH, "command_injection", "Shell metacharacters", "| bash");
+        Severity.HIGH, "command_injection", "Shell metacharacters", "| bash");
     }
     if (_cg_hit("; sh") == 1) {
         return code_emit(text, lower, result,
-            Severity.HIGH, "command_injection", "Shell metacharacters", "; sh");
+        Severity.HIGH, "command_injection", "Shell metacharacters", "; sh");
     }
     if (_cg_hit("; bash") == 1) {
         return code_emit(text, lower, result,
-            Severity.HIGH, "command_injection", "Shell metacharacters", "; bash");
+        Severity.HIGH, "command_injection", "Shell metacharacters", "; bash");
     }
     if (_cg_hit("/dev/tcp") == 1) {
         return code_emit(text, lower, result,
-            Severity.HIGH, "command_injection", "Shell metacharacters", "/dev/tcp");
+        Severity.HIGH, "command_injection", "Shell metacharacters", "/dev/tcp");
     }
     if (_cg_hit("<(") == 1) {
         return code_emit(text, lower, result,
-            Severity.HIGH, "command_injection", "Shell metacharacters", "<(");
+        Severity.HIGH, "command_injection", "Shell metacharacters", "<(");
     }
     if (_cg_hit(">(") == 1) {
         return code_emit(text, lower, result,
-            Severity.HIGH, "command_injection", "Shell metacharacters", ">(");
+        Severity.HIGH, "command_injection", "Shell metacharacters", ">(");
     }
     return 0;
 }
@@ -384,19 +384,19 @@ fn _cg_shell_meta(text, lower, result) {
 fn _cg_pipe_shell(text, lower, result) {
     if (_cg_hit("curl | sh") == 1) {
         return code_emit(text, lower, result,
-            Severity.CRITICAL, "command_injection", "Pipe to shell", "curl | sh");
+        Severity.CRITICAL, "command_injection", "Pipe to shell", "curl | sh");
     }
     if (_cg_hit("curl | bash") == 1) {
         return code_emit(text, lower, result,
-            Severity.CRITICAL, "command_injection", "Pipe to shell", "curl | bash");
+        Severity.CRITICAL, "command_injection", "Pipe to shell", "curl | bash");
     }
     if (_cg_hit("wget | sh") == 1) {
         return code_emit(text, lower, result,
-            Severity.CRITICAL, "command_injection", "Pipe to shell", "wget | sh");
+        Severity.CRITICAL, "command_injection", "Pipe to shell", "wget | sh");
     }
     if (_cg_hit("wget | bash") == 1) {
         return code_emit(text, lower, result,
-            Severity.CRITICAL, "command_injection", "Pipe to shell", "wget | bash");
+        Severity.CRITICAL, "command_injection", "Pipe to shell", "wget | bash");
     }
     return 0;
 }
@@ -404,19 +404,19 @@ fn _cg_pipe_shell(text, lower, result) {
 fn _cg_http_req(text, lower, result) {
     if (_cg_hit("fetch(") == 1) {
         return code_emit(text, lower, result,
-            Severity.MEDIUM, "data_exfiltration", "HTTP request", "fetch(");
+        Severity.MEDIUM, "data_exfiltration", "HTTP request", "fetch(");
     }
     if (_cg_hit("axios.") == 1) {
         return code_emit(text, lower, result,
-            Severity.MEDIUM, "data_exfiltration", "HTTP request", "axios.");
+        Severity.MEDIUM, "data_exfiltration", "HTTP request", "axios.");
     }
     if (_cg_hit("http.request(") == 1) {
         return code_emit(text, lower, result,
-            Severity.MEDIUM, "data_exfiltration", "HTTP request", "http.request(");
+        Severity.MEDIUM, "data_exfiltration", "HTTP request", "http.request(");
     }
     if (_cg_hit("https.request(") == 1) {
         return code_emit(text, lower, result,
-            Severity.MEDIUM, "data_exfiltration", "HTTP request", "https.request(");
+        Severity.MEDIUM, "data_exfiltration", "HTTP request", "https.request(");
     }
     return 0;
 }
@@ -424,19 +424,19 @@ fn _cg_http_req(text, lower, result) {
 fn _cg_dns_exfil(text, lower, result) {
     if (_cg_hit("dns.resolve") == 1) {
         return code_emit(text, lower, result,
-            Severity.HIGH, "data_exfiltration", "DNS exfil", "dns.resolve");
+        Severity.HIGH, "data_exfiltration", "DNS exfil", "dns.resolve");
     }
     if (_cg_hit("dns.lookup") == 1) {
         return code_emit(text, lower, result,
-            Severity.HIGH, "data_exfiltration", "DNS exfil", "dns.lookup");
+        Severity.HIGH, "data_exfiltration", "DNS exfil", "dns.lookup");
     }
     if (_cg_hit("nslookup") == 1) {
         return code_emit(text, lower, result,
-            Severity.HIGH, "data_exfiltration", "DNS exfil", "nslookup");
+        Severity.HIGH, "data_exfiltration", "DNS exfil", "nslookup");
     }
     if (_cg_hit("dig ") == 1) {
         return code_emit(text, lower, result,
-            Severity.HIGH, "data_exfiltration", "DNS exfil", "dig ");
+        Severity.HIGH, "data_exfiltration", "DNS exfil", "dig ");
     }
     return 0;
 }
@@ -444,27 +444,27 @@ fn _cg_dns_exfil(text, lower, result) {
 fn _cg_reverse_shell(text, lower, result) {
     if (_cg_hit("mkfifo") == 1) {
         return code_emit(text, lower, result,
-            Severity.CRITICAL, "data_exfiltration", "Reverse shell", "mkfifo");
+        Severity.CRITICAL, "data_exfiltration", "Reverse shell", "mkfifo");
     }
     if (_cg_hit("/dev/tcp/") == 1) {
         return code_emit(text, lower, result,
-            Severity.CRITICAL, "data_exfiltration", "Reverse shell", "/dev/tcp/");
+        Severity.CRITICAL, "data_exfiltration", "Reverse shell", "/dev/tcp/");
     }
     if (_cg_hit("nc -e") == 1) {
         return code_emit(text, lower, result,
-            Severity.CRITICAL, "data_exfiltration", "Reverse shell", "nc -e");
+        Severity.CRITICAL, "data_exfiltration", "Reverse shell", "nc -e");
     }
     if (_cg_hit("ncat -e") == 1) {
         return code_emit(text, lower, result,
-            Severity.CRITICAL, "data_exfiltration", "Reverse shell", "ncat -e");
+        Severity.CRITICAL, "data_exfiltration", "Reverse shell", "ncat -e");
     }
     if (_cg_hit("socat exec:") == 1) {
         return code_emit(text, lower, result,
-            Severity.CRITICAL, "data_exfiltration", "Reverse shell", "socat exec:");
+        Severity.CRITICAL, "data_exfiltration", "Reverse shell", "socat exec:");
     }
     if (_cg_hit("bash -i >& /dev/tcp") == 1) {
         return code_emit(text, lower, result,
-            Severity.CRITICAL, "data_exfiltration", "Reverse shell", "bash -i >& /dev/tcp");
+        Severity.CRITICAL, "data_exfiltration", "Reverse shell", "bash -i >& /dev/tcp");
     }
     return 0;
 }
@@ -472,23 +472,23 @@ fn _cg_reverse_shell(text, lower, result) {
 fn _cg_net_tools(text, lower, result) {
     if (_cg_hit("nc ") == 1) {
         return code_emit(text, lower, result,
-            Severity.HIGH, "data_exfiltration", "Network tools", "nc ");
+        Severity.HIGH, "data_exfiltration", "Network tools", "nc ");
     }
     if (_cg_hit("ncat ") == 1) {
         return code_emit(text, lower, result,
-            Severity.HIGH, "data_exfiltration", "Network tools", "ncat ");
+        Severity.HIGH, "data_exfiltration", "Network tools", "ncat ");
     }
     if (_cg_hit("socat ") == 1) {
         return code_emit(text, lower, result,
-            Severity.HIGH, "data_exfiltration", "Network tools", "socat ");
+        Severity.HIGH, "data_exfiltration", "Network tools", "socat ");
     }
     if (_cg_hit("telnet ") == 1) {
         return code_emit(text, lower, result,
-            Severity.HIGH, "data_exfiltration", "Network tools", "telnet ");
+        Severity.HIGH, "data_exfiltration", "Network tools", "telnet ");
     }
     if (_cg_hit("nmap ") == 1) {
         return code_emit(text, lower, result,
-            Severity.HIGH, "data_exfiltration", "Network tools", "nmap ");
+        Severity.HIGH, "data_exfiltration", "Network tools", "nmap ");
     }
     return 0;
 }
@@ -496,15 +496,15 @@ fn _cg_net_tools(text, lower, result) {
 fn _cg_sudo(text, lower, result) {
     if (_cg_hit("sudo ") == 1) {
         return code_emit(text, lower, result,
-            Severity.CRITICAL, "privilege_escalation", "Sudo/su", "sudo ");
+        Severity.CRITICAL, "privilege_escalation", "Sudo/su", "sudo ");
     }
     if (_cg_hit("su -") == 1) {
         return code_emit(text, lower, result,
-            Severity.CRITICAL, "privilege_escalation", "Sudo/su", "su -");
+        Severity.CRITICAL, "privilege_escalation", "Sudo/su", "su -");
     }
     if (_cg_hit("su root") == 1) {
         return code_emit(text, lower, result,
-            Severity.CRITICAL, "privilege_escalation", "Sudo/su", "su root");
+        Severity.CRITICAL, "privilege_escalation", "Sudo/su", "su root");
     }
     return 0;
 }
@@ -512,23 +512,23 @@ fn _cg_sudo(text, lower, result) {
 fn _cg_perm_change(text, lower, result) {
     if (_cg_hit("chmod ") == 1) {
         return code_emit(text, lower, result,
-            Severity.HIGH, "privilege_escalation", "Permission change", "chmod ");
+        Severity.HIGH, "privilege_escalation", "Permission change", "chmod ");
     }
     if (_cg_hit("chown ") == 1) {
         return code_emit(text, lower, result,
-            Severity.HIGH, "privilege_escalation", "Permission change", "chown ");
+        Severity.HIGH, "privilege_escalation", "Permission change", "chown ");
     }
     if (_cg_hit("chgrp ") == 1) {
         return code_emit(text, lower, result,
-            Severity.HIGH, "privilege_escalation", "Permission change", "chgrp ");
+        Severity.HIGH, "privilege_escalation", "Permission change", "chgrp ");
     }
     if (_cg_hit("setuid") == 1) {
         return code_emit(text, lower, result,
-            Severity.HIGH, "privilege_escalation", "Permission change", "setuid");
+        Severity.HIGH, "privilege_escalation", "Permission change", "setuid");
     }
     if (_cg_hit("setgid") == 1) {
         return code_emit(text, lower, result,
-            Severity.HIGH, "privilege_escalation", "Permission change", "setgid");
+        Severity.HIGH, "privilege_escalation", "Permission change", "setgid");
     }
     return 0;
 }
@@ -536,15 +536,15 @@ fn _cg_perm_change(text, lower, result) {
 fn _cg_kernel_mod(text, lower, result) {
     if (_cg_hit("insmod ") == 1) {
         return code_emit(text, lower, result,
-            Severity.CRITICAL, "privilege_escalation", "Kernel module", "insmod ");
+        Severity.CRITICAL, "privilege_escalation", "Kernel module", "insmod ");
     }
     if (_cg_hit("modprobe ") == 1) {
         return code_emit(text, lower, result,
-            Severity.CRITICAL, "privilege_escalation", "Kernel module", "modprobe ");
+        Severity.CRITICAL, "privilege_escalation", "Kernel module", "modprobe ");
     }
     if (_cg_hit("rmmod ") == 1) {
         return code_emit(text, lower, result,
-            Severity.CRITICAL, "privilege_escalation", "Kernel module", "rmmod ");
+        Severity.CRITICAL, "privilege_escalation", "Kernel module", "rmmod ");
     }
     return 0;
 }
@@ -552,15 +552,15 @@ fn _cg_kernel_mod(text, lower, result) {
 fn _cg_mount(text, lower, result) {
     if (_cg_hit("mount ") == 1) {
         return code_emit(text, lower, result,
-            Severity.CRITICAL, "privilege_escalation", "Mount operation", "mount ");
+        Severity.CRITICAL, "privilege_escalation", "Mount operation", "mount ");
     }
     if (_cg_hit("umount ") == 1) {
         return code_emit(text, lower, result,
-            Severity.CRITICAL, "privilege_escalation", "Mount operation", "umount ");
+        Severity.CRITICAL, "privilege_escalation", "Mount operation", "umount ");
     }
     if (_cg_hit("mount(") == 1) {
         return code_emit(text, lower, result,
-            Severity.CRITICAL, "privilege_escalation", "Mount operation", "mount(");
+        Severity.CRITICAL, "privilege_escalation", "Mount operation", "mount(");
     }
     return 0;
 }
@@ -568,15 +568,15 @@ fn _cg_mount(text, lower, result) {
 fn _cg_capability(text, lower, result) {
     if (_cg_hit("setcap ") == 1) {
         return code_emit(text, lower, result,
-            Severity.CRITICAL, "privilege_escalation", "Capability manipulation", "setcap ");
+        Severity.CRITICAL, "privilege_escalation", "Capability manipulation", "setcap ");
     }
     if (_cg_hit("getcap ") == 1) {
         return code_emit(text, lower, result,
-            Severity.CRITICAL, "privilege_escalation", "Capability manipulation", "getcap ");
+        Severity.CRITICAL, "privilege_escalation", "Capability manipulation", "getcap ");
     }
     if (_cg_hit("capsh ") == 1) {
         return code_emit(text, lower, result,
-            Severity.CRITICAL, "privilege_escalation", "Capability manipulation", "capsh ");
+        Severity.CRITICAL, "privilege_escalation", "Capability manipulation", "capsh ");
     }
     return 0;
 }
@@ -584,43 +584,43 @@ fn _cg_capability(text, lower, result) {
 fn _cg_pkg_install(text, lower, result) {
     if (_cg_hit("npm install") == 1) {
         return code_emit(text, lower, result,
-            Severity.HIGH, "supply_chain", "Package install", "npm install");
+        Severity.HIGH, "supply_chain", "Package install", "npm install");
     }
     if (_cg_hit("pip install") == 1) {
         return code_emit(text, lower, result,
-            Severity.HIGH, "supply_chain", "Package install", "pip install");
+        Severity.HIGH, "supply_chain", "Package install", "pip install");
     }
     if (_cg_hit("gem install") == 1) {
         return code_emit(text, lower, result,
-            Severity.HIGH, "supply_chain", "Package install", "gem install");
+        Severity.HIGH, "supply_chain", "Package install", "gem install");
     }
     if (_cg_hit("cargo install") == 1) {
         return code_emit(text, lower, result,
-            Severity.HIGH, "supply_chain", "Package install", "cargo install");
+        Severity.HIGH, "supply_chain", "Package install", "cargo install");
     }
     if (_cg_hit("go install") == 1) {
         return code_emit(text, lower, result,
-            Severity.HIGH, "supply_chain", "Package install", "go install");
+        Severity.HIGH, "supply_chain", "Package install", "go install");
     }
     if (_cg_hit("apt install") == 1) {
         return code_emit(text, lower, result,
-            Severity.HIGH, "supply_chain", "Package install", "apt install");
+        Severity.HIGH, "supply_chain", "Package install", "apt install");
     }
     if (_cg_hit("apt-get install") == 1) {
         return code_emit(text, lower, result,
-            Severity.HIGH, "supply_chain", "Package install", "apt-get install");
+        Severity.HIGH, "supply_chain", "Package install", "apt-get install");
     }
     if (_cg_hit("yum install") == 1) {
         return code_emit(text, lower, result,
-            Severity.HIGH, "supply_chain", "Package install", "yum install");
+        Severity.HIGH, "supply_chain", "Package install", "yum install");
     }
     if (_cg_hit("dnf install") == 1) {
         return code_emit(text, lower, result,
-            Severity.HIGH, "supply_chain", "Package install", "dnf install");
+        Severity.HIGH, "supply_chain", "Package install", "dnf install");
     }
     if (_cg_hit("pacman -s") == 1) {
         return code_emit(text, lower, result,
-            Severity.HIGH, "supply_chain", "Package install", "pacman -s");
+        Severity.HIGH, "supply_chain", "Package install", "pacman -s");
     }
     return 0;
 }
@@ -628,19 +628,19 @@ fn _cg_pkg_install(text, lower, result) {
 fn _cg_remote_script(text, lower, result) {
     if (_cg_hit("curl | sh") == 1) {
         return code_emit(text, lower, result,
-            Severity.CRITICAL, "supply_chain", "Remote script execution", "curl | sh");
+        Severity.CRITICAL, "supply_chain", "Remote script execution", "curl | sh");
     }
     if (_cg_hit("curl | bash") == 1) {
         return code_emit(text, lower, result,
-            Severity.CRITICAL, "supply_chain", "Remote script execution", "curl | bash");
+        Severity.CRITICAL, "supply_chain", "Remote script execution", "curl | bash");
     }
     if (_cg_hit("wget -o - |") == 1) {
         return code_emit(text, lower, result,
-            Severity.CRITICAL, "supply_chain", "Remote script execution", "wget -o - |");
+        Severity.CRITICAL, "supply_chain", "Remote script execution", "wget -o - |");
     }
     if (_cg_hit("curl -ssl |") == 1) {
         return code_emit(text, lower, result,
-            Severity.CRITICAL, "supply_chain", "Remote script execution", "curl -ssl |");
+        Severity.CRITICAL, "supply_chain", "Remote script execution", "curl -ssl |");
     }
     return 0;
 }
@@ -648,15 +648,15 @@ fn _cg_remote_script(text, lower, result) {
 fn _cg_dyn_import(text, lower, result) {
     if (_cg_hit("require(") == 1) {
         return code_emit(text, lower, result,
-            Severity.MEDIUM, "supply_chain", "Dynamic require/import", "require(");
+        Severity.MEDIUM, "supply_chain", "Dynamic require/import", "require(");
     }
     if (_cg_hit("import(") == 1) {
         return code_emit(text, lower, result,
-            Severity.MEDIUM, "supply_chain", "Dynamic require/import", "import(");
+        Severity.MEDIUM, "supply_chain", "Dynamic require/import", "import(");
     }
     if (_cg_hit("__import__(") == 1) {
         return code_emit(text, lower, result,
-            Severity.MEDIUM, "supply_chain", "Dynamic require/import", "__import__(");
+        Severity.MEDIUM, "supply_chain", "Dynamic require/import", "__import__(");
     }
     return 0;
 }
@@ -664,19 +664,19 @@ fn _cg_dyn_import(text, lower, result) {
 fn _cg_base64(text, lower, result) {
     if (_cg_hit("atob(") == 1) {
         return code_emit(text, lower, result,
-            Severity.MEDIUM, "obfuscation", "Base64 decode", "atob(");
+        Severity.MEDIUM, "obfuscation", "Base64 decode", "atob(");
     }
     if (_cg_hit("base64 -d") == 1) {
         return code_emit(text, lower, result,
-            Severity.MEDIUM, "obfuscation", "Base64 decode", "base64 -d");
+        Severity.MEDIUM, "obfuscation", "Base64 decode", "base64 -d");
     }
     if (_cg_hit("base64 --decode") == 1) {
         return code_emit(text, lower, result,
-            Severity.MEDIUM, "obfuscation", "Base64 decode", "base64 --decode");
+        Severity.MEDIUM, "obfuscation", "Base64 decode", "base64 --decode");
     }
     if (_cg_hit("b64decode") == 1) {
         return code_emit(text, lower, result,
-            Severity.MEDIUM, "obfuscation", "Base64 decode", "b64decode");
+        Severity.MEDIUM, "obfuscation", "Base64 decode", "b64decode");
     }
     return 0;
 }
@@ -684,15 +684,15 @@ fn _cg_base64(text, lower, result) {
 fn _cg_unicode_esc(text, lower, result) {
     if (_cg_hit("\\u00") == 1) {
         return code_emit(text, lower, result,
-            Severity.MEDIUM, "obfuscation", "Unicode escape", "\\u00");
+        Severity.MEDIUM, "obfuscation", "Unicode escape", "\\u00");
     }
     if (_cg_hit("\\x00") == 1) {
         return code_emit(text, lower, result,
-            Severity.MEDIUM, "obfuscation", "Unicode escape", "\\x00");
+        Severity.MEDIUM, "obfuscation", "Unicode escape", "\\x00");
     }
     if (_cg_hit("string.fromcharcode") == 1) {
         return code_emit(text, lower, result,
-            Severity.MEDIUM, "obfuscation", "Unicode escape", "string.fromcharcode");
+        Severity.MEDIUM, "obfuscation", "Unicode escape", "string.fromcharcode");
     }
     return 0;
 }
@@ -700,15 +700,15 @@ fn _cg_unicode_esc(text, lower, result) {
 fn _cg_hex_enc(text, lower, result) {
     if (_cg_hit("\\x") == 1) {
         return code_emit(text, lower, result,
-            Severity.LOW, "obfuscation", "Hex encoding", "\\x");
+        Severity.LOW, "obfuscation", "Hex encoding", "\\x");
     }
     if (_cg_hit("fromhex(") == 1) {
         return code_emit(text, lower, result,
-            Severity.LOW, "obfuscation", "Hex encoding", "fromhex(");
+        Severity.LOW, "obfuscation", "Hex encoding", "fromhex(");
     }
     if (_cg_hit("hex.decode") == 1) {
         return code_emit(text, lower, result,
-            Severity.LOW, "obfuscation", "Hex encoding", "hex.decode");
+        Severity.LOW, "obfuscation", "Hex encoding", "hex.decode");
     }
     return 0;
 }
@@ -716,43 +716,43 @@ fn _cg_hex_enc(text, lower, result) {
 fn _cg_sens_path(text, lower, result) {
     if (_cg_hit("/etc/shadow") == 1) {
         return code_emit(text, lower, result,
-            Severity.CRITICAL, "filesystem_abuse", "Sensitive path access", "/etc/shadow");
+        Severity.CRITICAL, "filesystem_abuse", "Sensitive path access", "/etc/shadow");
     }
     if (_cg_hit("/etc/passwd") == 1) {
         return code_emit(text, lower, result,
-            Severity.CRITICAL, "filesystem_abuse", "Sensitive path access", "/etc/passwd");
+        Severity.CRITICAL, "filesystem_abuse", "Sensitive path access", "/etc/passwd");
     }
     if (_cg_hit("/etc/sudoers") == 1) {
         return code_emit(text, lower, result,
-            Severity.CRITICAL, "filesystem_abuse", "Sensitive path access", "/etc/sudoers");
+        Severity.CRITICAL, "filesystem_abuse", "Sensitive path access", "/etc/sudoers");
     }
     if (_cg_hit("/.ssh/") == 1) {
         return code_emit(text, lower, result,
-            Severity.CRITICAL, "filesystem_abuse", "Sensitive path access", "/.ssh/");
+        Severity.CRITICAL, "filesystem_abuse", "Sensitive path access", "/.ssh/");
     }
     if (_cg_hit("/.gnupg/") == 1) {
         return code_emit(text, lower, result,
-            Severity.CRITICAL, "filesystem_abuse", "Sensitive path access", "/.gnupg/");
+        Severity.CRITICAL, "filesystem_abuse", "Sensitive path access", "/.gnupg/");
     }
     if (_cg_hit("/.aws/") == 1) {
         return code_emit(text, lower, result,
-            Severity.CRITICAL, "filesystem_abuse", "Sensitive path access", "/.aws/");
+        Severity.CRITICAL, "filesystem_abuse", "Sensitive path access", "/.aws/");
     }
     if (_cg_hit("/.kube/") == 1) {
         return code_emit(text, lower, result,
-            Severity.CRITICAL, "filesystem_abuse", "Sensitive path access", "/.kube/");
+        Severity.CRITICAL, "filesystem_abuse", "Sensitive path access", "/.kube/");
     }
     if (_cg_hit("/dev/mem") == 1) {
         return code_emit(text, lower, result,
-            Severity.CRITICAL, "filesystem_abuse", "Sensitive path access", "/dev/mem");
+        Severity.CRITICAL, "filesystem_abuse", "Sensitive path access", "/dev/mem");
     }
     if (_cg_hit("/dev/kmem") == 1) {
         return code_emit(text, lower, result,
-            Severity.CRITICAL, "filesystem_abuse", "Sensitive path access", "/dev/kmem");
+        Severity.CRITICAL, "filesystem_abuse", "Sensitive path access", "/dev/kmem");
     }
     if (_cg_hit("/proc/kcore") == 1) {
         return code_emit(text, lower, result,
-            Severity.CRITICAL, "filesystem_abuse", "Sensitive path access", "/proc/kcore");
+        Severity.CRITICAL, "filesystem_abuse", "Sensitive path access", "/proc/kcore");
     }
     return 0;
 }
@@ -760,11 +760,11 @@ fn _cg_sens_path(text, lower, result) {
 fn _cg_traversal(text, lower, result) {
     if (_cg_hit("../") == 1) {
         return code_emit(text, lower, result,
-            Severity.HIGH, "filesystem_abuse", "Path traversal", "../");
+        Severity.HIGH, "filesystem_abuse", "Path traversal", "../");
     }
     if (_cg_hit("..\\") == 1) {
         return code_emit(text, lower, result,
-            Severity.HIGH, "filesystem_abuse", "Path traversal", "..\\");
+        Severity.HIGH, "filesystem_abuse", "Path traversal", "..\\");
     }
     return 0;
 }
@@ -772,19 +772,19 @@ fn _cg_traversal(text, lower, result) {
 fn _cg_destructive(text, lower, result) {
     if (_cg_hit("rm -rf") == 1) {
         return code_emit(text, lower, result,
-            Severity.CRITICAL, "filesystem_abuse", "Destructive operation", "rm -rf");
+        Severity.CRITICAL, "filesystem_abuse", "Destructive operation", "rm -rf");
     }
     if (_cg_hit("dd if=") == 1) {
         return code_emit(text, lower, result,
-            Severity.CRITICAL, "filesystem_abuse", "Destructive operation", "dd if=");
+        Severity.CRITICAL, "filesystem_abuse", "Destructive operation", "dd if=");
     }
     if (_cg_hit("mkfs.") == 1) {
         return code_emit(text, lower, result,
-            Severity.CRITICAL, "filesystem_abuse", "Destructive operation", "mkfs.");
+        Severity.CRITICAL, "filesystem_abuse", "Destructive operation", "mkfs.");
     }
     if (_cg_hit("shred ") == 1) {
         return code_emit(text, lower, result,
-            Severity.CRITICAL, "filesystem_abuse", "Destructive operation", "shred ");
+        Severity.CRITICAL, "filesystem_abuse", "Destructive operation", "shred ");
     }
     return 0;
 }
@@ -792,11 +792,11 @@ fn _cg_destructive(text, lower, result) {
 fn _cg_weak_hash(text, lower, result) {
     if (_cg_hit("md5(") == 1) {
         return code_emit(text, lower, result,
-            Severity.MEDIUM, "crypto_misuse", "Weak hash", "md5(");
+        Severity.MEDIUM, "crypto_misuse", "Weak hash", "md5(");
     }
     if (_cg_hit("sha1(") == 1) {
         return code_emit(text, lower, result,
-            Severity.MEDIUM, "crypto_misuse", "Weak hash", "sha1(");
+        Severity.MEDIUM, "crypto_misuse", "Weak hash", "sha1(");
     }
     return 0;
 }
@@ -804,15 +804,15 @@ fn _cg_weak_hash(text, lower, result) {
 fn _cg_hardcoded_key(text, lower, result) {
     if (_cg_hit("aes_key =") == 1) {
         return code_emit(text, lower, result,
-            Severity.HIGH, "crypto_misuse", "Hardcoded key", "aes_key =");
+        Severity.HIGH, "crypto_misuse", "Hardcoded key", "aes_key =");
     }
     if (_cg_hit("encryption_key =") == 1) {
         return code_emit(text, lower, result,
-            Severity.HIGH, "crypto_misuse", "Hardcoded key", "encryption_key =");
+        Severity.HIGH, "crypto_misuse", "Hardcoded key", "encryption_key =");
     }
     if (_cg_hit("secret_key =") == 1) {
         return code_emit(text, lower, result,
-            Severity.HIGH, "crypto_misuse", "Hardcoded key", "secret_key =");
+        Severity.HIGH, "crypto_misuse", "Hardcoded key", "secret_key =");
     }
     return 0;
 }

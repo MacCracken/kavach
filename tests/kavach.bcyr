@@ -227,7 +227,7 @@ fn bench_audit_chain_record() {
 # Constant-time HMAC verify (just the compare, not full verify path).
 fn bench_ct_streq_64() {
     ct_streq("abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
-             "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789");
+    "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789");
     return 0;
 }
 

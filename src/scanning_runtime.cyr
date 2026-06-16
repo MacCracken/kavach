@@ -210,7 +210,7 @@ fn _check_sensitive_paths(cmd_lower, out_vec) {
     }
     if (cstr_contains(cmd_lower, "/proc/sysrq-trigger") == 1) {
         vec_push(out_vec, guard_violation_new(
-            ViolationType.SENSITIVE_PATH, "sensitive path access: /proc/sysrq-trigger"));
+        ViolationType.SENSITIVE_PATH, "sensitive path access: /proc/sysrq-trigger"));
         n = n + 1;
     }
     if (cstr_contains(cmd_lower, "/sys/firmware/efi/efivars") == 1) {
