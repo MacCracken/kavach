@@ -84,7 +84,7 @@ stdlib = [
 # Bump in lockstep with the cyrius pin and re-validate.
 [deps.sigil]
 git = "https://github.com/MacCracken/sigil.git"
-tag = "3.7.14"
+tag = "3.8.1"
 modules = ["dist/sigil.cyr"]
 
 # Transitive override. sigil 3.7.14 already pins agnosys 1.4.3, but
@@ -92,7 +92,7 @@ modules = ["dist/sigil.cyr"]
 # so it declares its own pin to track the current agnosys (1.4.3, latest,
 # cc 6.2.x) independent of sigil's transitive choice.
 # Validated by a clean build/test/bench run under cc 6.2.11.
-[deps.agnosys]
-git = "https://github.com/MacCracken/agnosys.git"
-tag = "1.4.3"
-modules = ["dist/agnosys.cyr"]
+# (agnosys dep dropped — kavach internalized the Linux security backends it used
+# (security/mac/kernel_audit + sys_error/sys_util + sys_security_syscalls) as src
+# modules; the landlock/prctl syscall numbers come from cyrius's lib/syscalls.
+# Part of the agnosys → agnodrm decomposition.)

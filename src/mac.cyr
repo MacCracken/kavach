@@ -1,0 +1,528 @@
+# mac.cyr — Mandatory Access Control (MAC) interface
+# Ported from rust-old/src/mac.rs
+#
+# Auto-detects the active Linux Security Module (SELinux or AppArmor)
+# and provides security context / profile management.
+#
+# Reads /sys/kernel/security/lsm for LSM detection. SELinux mode from
+# /sys/fs/selinux/enforce. AppArmor profiles via /proc/self/attr/current.
+#
+# Requires: lib/syscalls.cyr, lib/string.cyr, lib/str.cyr, src/error.cyr
+
+#define LINUX
+include "lib/string.cyr"
+include "lib/alloc.cyr"
+include "lib/str.cyr"
+include "lib/tagged.cyr"
+include "lib/syscalls.cyr"
+
+# ================================================================
+# MAC system constants
+# ================================================================
+
+enum MacSystem {
+    MAC_NONE = 0;
+    MAC_SELINUX = 1;
+    MAC_APPARMOR = 2;
+}
+
+# ================================================================
+# SELinux mode constants
+# ================================================================
+
+enum SELinuxMode {
+    SELINUX_ENFORCING = 1;
+    SELINUX_PERMISSIVE = 2;
+    SELINUX_DISABLED = 3;
+}
+
+# ================================================================
+# AppArmor profile state constants
+# ================================================================
+
+enum AppArmorState {
+    AA_ENFORCE = 1;
+    AA_COMPLAIN = 2;
+    AA_UNCONFINED = 3;
+}
+
+# ================================================================
+# File read helper — read a small file into a Str
+# Returns Result: Ok(str_ptr) or Err(syserr)
+# ================================================================
+
+fn mac_read_file(path): i64 {
+    var fd = sys_open(path, O_RDONLY, 0);
+    if (fd < 0) {
+        return err_io(0 - fd, path);
+    }
+    defer { sys_close(fd); }
+    # Read up to 4096 bytes (plenty for sysfs/procfs files)
+    var buf = alloc(4097);
+    memset(buf, 0, 4097);
+    var n = sys_read(fd, buf, 4096);
+    if (n < 0) {
+        return err_io(0 - n, path);
+    }
+    # Null-terminate
+    store8(buf + n, 0);
+    # Create Str from buffer
+    var s = str_new(buf, n);
+    return Ok(s);
+}
+
+# ================================================================
+# File write helper — write a C string to a file
+# Returns Result: Ok(0) or Err(syserr)
+# ================================================================
+
+fn mac_write_file(path, data, data_len): i64 {
+    var fd = sys_open(path, O_WRONLY, 0);
+    if (fd < 0) {
+        var errno = 0 - fd;
+        if (errno == EPERM) { return err_permission_denied(path); }
+        if (errno == EACCES) { return err_permission_denied(path); }
+        return err_io(errno, path);
+    }
+    defer { sys_close(fd); }
+    var n = sys_write(fd, data, data_len);
+    if (n < 0) {
+        var werrno = 0 - n;
+        if (werrno == EPERM) { return err_permission_denied(path); }
+        if (werrno == EACCES) { return err_permission_denied(path); }
+        return err_io(werrno, path);
+    }
+    return Ok(0);
+}
+
+# ================================================================
+# File existence check — returns 1 if file exists, 0 otherwise
+# ================================================================
+
+fn mac_file_exists(path): i64 {
+    # F_OK = 0
+    return sys_access(path, 0) == 0;
+}
+
+# ================================================================
+# Detect which MAC system is active on this kernel
+# Reads /sys/kernel/security/lsm — returns MAC_SELINUX, MAC_APPARMOR,
+# or MAC_NONE.
+# ================================================================
+
+fn mac_detect_system(): i64 {
+    var res = mac_read_file("/sys/kernel/security/lsm");
+    if (is_err_result(res) == 1) {
+        # Cannot read LSM file — no MAC detection available
+        return MAC_NONE;
+    }
+    var contents = payload(res);
+
+    # Check SELinux first (higher priority if both are listed)
+    if (str_contains(contents, str_from("selinux")) == 1) {
+        return MAC_SELINUX;
+    }
+    # Also check uppercase variant
+    if (str_contains(contents, str_from("SELinux")) == 1) {
+        return MAC_SELINUX;
+    }
+
+    if (str_contains(contents, str_from("apparmor")) == 1) {
+        return MAC_APPARMOR;
+    }
+    if (str_contains(contents, str_from("AppArmor")) == 1) {
+        return MAC_APPARMOR;
+    }
+
+    return MAC_NONE;
+}
+
+# ================================================================
+# SELinux mode query
+# Reads /sys/fs/selinux/enforce.
+# Returns Result: Ok(mode) where mode is SELINUX_ENFORCING,
+# SELINUX_PERMISSIVE, or SELINUX_DISABLED.
+# ================================================================
+
+fn mac_get_selinux_mode(): i64 {
+    var enforce_path = "/sys/fs/selinux/enforce";
+
+    if (mac_file_exists(enforce_path) == 0) {
+        return Ok(SELINUX_DISABLED);
+    }
+
+    var res = mac_read_file(enforce_path);
+    if (is_err_result(res) == 1) { return res; }
+
+    var contents = payload(res);
+    var trimmed = str_trim(contents);
+    var data = str_data(trimmed);
+    var tlen = str_len(trimmed);
+
+    # "1" = enforcing, "0" = permissive
+    if (tlen >= 1) {
+        var ch = load8(data);
+        if (ch == 49) { return Ok(SELINUX_ENFORCING); }
+        if (ch == 48) { return Ok(SELINUX_PERMISSIVE); }
+    }
+
+    return Ok(SELINUX_DISABLED);
+}
+
+# ================================================================
+# Set SELinux enforcement mode
+# Writes to /sys/fs/selinux/enforce. Requires CAP_MAC_ADMIN.
+# Returns Result: Ok(0) or Err.
+# ================================================================
+
+fn mac_set_selinux_mode(mode): i64 {
+    var enforce_path = "/sys/fs/selinux/enforce";
+
+    if (mac_file_exists(enforce_path) == 0) {
+        return err_not_supported("selinux");
+    }
+
+    if (mode == SELINUX_DISABLED) {
+        return err_invalid_argument("cannot disable SELinux at runtime; use kernel boot parameter");
+    }
+
+    if (mode == SELINUX_ENFORCING) {
+        return mac_write_file(enforce_path, "1", 1);
+    }
+    if (mode == SELINUX_PERMISSIVE) {
+        return mac_write_file(enforce_path, "0", 1);
+    }
+
+    return err_invalid_argument("invalid SELinux mode");
+}
+
+# ================================================================
+# Get the current SELinux security context of this process
+# Reads /proc/self/attr/current.
+# Returns Result: Ok(str_ptr) or Err.
+# ================================================================
+
+fn mac_get_selinux_context(): i64 {
+    var path = "/proc/self/attr/current";
+
+    if (mac_file_exists(path) == 0) {
+        return err_not_supported("selinux");
+    }
+
+    var res = mac_read_file(path);
+    if (is_err_result(res) == 1) { return res; }
+
+    var raw = payload(res);
+    # Trim trailing nulls and whitespace
+    var trimmed = str_trim(raw);
+    return Ok(trimmed);
+}
+
+# ================================================================
+# Set the SELinux security context for this process
+# context: null-terminated C string (user:role:type:level)
+# on_exec: if 1, apply on next exec (writes /proc/self/attr/exec)
+#          if 0, apply immediately (writes /proc/self/attr/current)
+# Returns Result: Ok(0) or Err.
+# ================================================================
+
+fn mac_set_selinux_context(context, on_exec): i64 {
+    if (strlen(context) == 0) {
+        return err_invalid_argument("SELinux context cannot be empty");
+    }
+
+    # Validate format: must have at least 3 colons (user:role:type:level)
+    var ctx_len = strlen(context);
+    var colon_count = 0;
+    var vi = 0;
+    while (vi < ctx_len) {
+        if (load8(context + vi) == 58) {
+            colon_count = colon_count + 1;
+        }
+        vi = vi + 1;
+    }
+    if (colon_count < 3) {
+        return err_invalid_argument(
+        "invalid SELinux context format (expected user:role:type:level)");
+    }
+
+    var path = "/proc/self/attr/current";
+    if (on_exec == 1) {
+        path = "/proc/self/attr/exec";
+    }
+
+    if (mac_file_exists(path) == 0) {
+        return err_not_supported("selinux");
+    }
+
+    return mac_write_file(path, context, ctx_len);
+}
+
+# ================================================================
+# Get the current AppArmor mode/profile of this process
+# Reads /proc/self/attr/current.
+# Returns Result: Ok(state) where state is AA_ENFORCE, AA_COMPLAIN,
+# or AA_UNCONFINED.
+# ================================================================
+
+fn mac_get_apparmor_mode(): i64 {
+    var path = "/proc/self/attr/current";
+
+    if (mac_file_exists(path) == 0) {
+        return err_not_supported("apparmor");
+    }
+
+    var res = mac_read_file(path);
+    if (is_err_result(res) == 1) { return res; }
+
+    var raw = payload(res);
+    var trimmed = str_trim(raw);
+
+    # AppArmor format: "profile_name (mode)" or "unconfined"
+    if (str_contains(trimmed, str_from("unconfined")) == 1) {
+        return Ok(AA_UNCONFINED);
+    }
+    if (str_contains(trimmed, str_from("enforce")) == 1) {
+        return Ok(AA_ENFORCE);
+    }
+    if (str_contains(trimmed, str_from("complain")) == 1) {
+        return Ok(AA_COMPLAIN);
+    }
+
+    # Default: if we got a non-empty profile, assume enforce mode
+    if (str_len(trimmed) > 0) {
+        return Ok(AA_ENFORCE);
+    }
+
+    return Ok(AA_UNCONFINED);
+}
+
+# ================================================================
+# Change the AppArmor profile of the current process
+# Writes "changeprofile <name>" to /proc/self/attr/current.
+# profile_name: null-terminated C string.
+# Returns Result: Ok(0) or Err.
+# ================================================================
+
+fn mac_apparmor_change_profile(profile_name): i64 {
+    var name_len = strlen(profile_name);
+
+    if (name_len == 0) {
+        return err_invalid_argument("AppArmor profile name cannot be empty");
+    }
+
+    # Validate: no slashes or nulls in profile name
+    var ci = 0;
+    while (ci < name_len) {
+        var ch = load8(profile_name + ci);
+        if (ch == 47) {
+            return err_invalid_argument("invalid AppArmor profile name: contains /");
+        }
+        if (ch == 0) {
+            return err_invalid_argument("invalid AppArmor profile name: contains null");
+        }
+        ci = ci + 1;
+    }
+
+    var attr_path = "/proc/self/attr/current";
+    if (mac_file_exists(attr_path) == 0) {
+        return err_not_supported("apparmor");
+    }
+
+    # Build "changeprofile <name>" command
+    var prefix = "changeprofile ";
+    var prefix_len = strlen(prefix);
+    var cmd_len = prefix_len + name_len;
+    var cmd = alloc(cmd_len + 1);
+    memcpy(cmd, prefix, prefix_len);
+    memcpy(cmd + prefix_len, profile_name, name_len);
+    store8(cmd + cmd_len, 0);
+
+    return mac_write_file(attr_path, cmd, cmd_len);
+}
+
+# ================================================================
+# Agent MAC profile struct
+# Each field is a pointer to a null-terminated C string (or 0 for none).
+# Total: 24 bytes (3 * 8). Accessors auto-generated:
+#   getters: mac_profile_<field>(p)
+#   setters: mac_profile_set_<field>(p, v)
+# ================================================================
+
+#derive(accessors)
+struct mac_profile { agent_type; selinux_ctx; apparmor_name; }
+
+fn mac_profile_new(agent_type): i64 {
+    var p = alloc(24);
+    mac_profile_set_agent_type(p, agent_type);
+    mac_profile_set_selinux_ctx(p, 0);
+    mac_profile_set_apparmor_name(p, 0);
+    return p;
+}
+
+# Hand-rolled JSON serializer (cyrius v5.10.15 #derive(Serialize)
+# doesn't support cstring-pointer fields; cyrius issue filed
+# 2026-05-09). Mirrors the codegen output shape for migration when
+# cstring support lands.
+fn mac_profile_to_json(p, sb): i64 {
+    str_builder_add_cstr(sb, "{\"agent_type\":");
+    agnosys_json_emit_cstr_or_null(sb, mac_profile_agent_type(p));
+    str_builder_add_cstr(sb, ",\"selinux_ctx\":");
+    agnosys_json_emit_cstr_or_null(sb, mac_profile_selinux_ctx(p));
+    str_builder_add_cstr(sb, ",\"apparmor_name\":");
+    agnosys_json_emit_cstr_or_null(sb, mac_profile_apparmor_name(p));
+    str_builder_add_cstr(sb, "}");
+    return 0;
+}
+
+# ================================================================
+# Create a default agent MAC profile from an agent type string
+# Generates standard SELinux context and AppArmor profile name.
+# agent_type: null-terminated C string (e.g. "user", "service", "system")
+# ================================================================
+
+fn mac_default_profile(agent_type): i64 {
+    var p = mac_profile_new(agent_type);
+    var tlen = strlen(agent_type);
+
+    # Build SELinux context: "system_u:system_r:agnos_agent_<type>_t:s0"
+    # Max: 29 + 32 (type) + 5 = 66 bytes
+    var ctx_prefix = "system_u:system_r:agnos_agent_";
+    var ctx_suffix = "_t:s0";
+    var cplen = 29;
+    var cslen = 5;
+    # Build straight into the heap allocation (caller may hold the pointer
+    # beyond alloc_reset). Skips a static staging buffer + the extra
+    # buffer→heap copy, and avoids the function-scoped `var buf[N]`
+    # static-data hazard.
+    var ctx_total = cplen + tlen + cslen;
+    var ctx = alloc(ctx_total + 1);
+    memcpy(ctx, ctx_prefix, cplen);
+    memcpy(ctx + cplen, agent_type, tlen);
+    memcpy(ctx + cplen + tlen, ctx_suffix, cslen);
+    store8(ctx + cplen + tlen + cslen, 0);
+    mac_profile_set_selinux_ctx(p, ctx);
+
+    # Build AppArmor profile: "agnos-agent-<type>"
+    var aa_prefix = "agnos-agent-";
+    var aplen = 12;
+    var aa_total = aplen + tlen;
+    var aa = alloc(aa_total + 1);
+    memcpy(aa, aa_prefix, aplen);
+    memcpy(aa + aplen, agent_type, tlen);
+    store8(aa + aplen + tlen, 0);
+    mac_profile_set_apparmor_name(p, aa);
+
+    return p;
+}
+
+# ================================================================
+# Validate an agent MAC profile for a given MAC system
+# Returns Result: Ok(0) on valid, Err on invalid.
+# ================================================================
+
+fn mac_profile_validate(profile, mac_system): i64 {
+    var agent_type = mac_profile_agent_type(profile);
+    if (agent_type == 0) {
+        return err_invalid_argument("agent type cannot be empty");
+    }
+    if (strlen(agent_type) == 0) {
+        return err_invalid_argument("agent type cannot be empty");
+    }
+
+    if (mac_system == MAC_SELINUX) {
+        var ctx = mac_profile_selinux_ctx(profile);
+        if (ctx == 0) {
+            return err_invalid_argument("SELinux context required but not set");
+        }
+        var ctx_len = strlen(ctx);
+        if (ctx_len == 0) {
+            return err_invalid_argument("SELinux context required but not set");
+        }
+        # Count colons — must have at least 3 (user:role:type:level)
+        var colon_count = 0;
+        var vi = 0;
+        while (vi < ctx_len) {
+            if (load8(ctx + vi) == 58) { colon_count = colon_count + 1; }
+            vi = vi + 1;
+        }
+        if (colon_count < 3) {
+            return err_invalid_argument("invalid SELinux context format");
+        }
+    }
+
+    if (mac_system == MAC_APPARMOR) {
+        var aa_name = mac_profile_apparmor_name(profile);
+        if (aa_name == 0) {
+            return err_invalid_argument("AppArmor profile name required but not set");
+        }
+        var aa_len = strlen(aa_name);
+        if (aa_len == 0) {
+            return err_invalid_argument("AppArmor profile name required but not set");
+        }
+        # No slashes or nulls allowed
+        var ai = 0;
+        while (ai < aa_len) {
+            if (load8(aa_name + ai) == 47) {
+                return err_invalid_argument("invalid AppArmor profile name");
+            }
+            ai = ai + 1;
+        }
+    }
+
+    return Ok(0);
+}
+
+# ================================================================
+# Apply agent MAC profile based on detected MAC system
+# Detects the active MAC system, finds the matching profile,
+# validates it, and applies it.
+# agent_type: C string of agent type to match
+# profiles: vec of mac_profile pointers
+# profile_count: number of profiles
+# Returns Result: Ok(0) or Err.
+# ================================================================
+
+fn mac_apply_agent_profile(agent_type, profiles, profile_count): i64 {
+    var mac_system = mac_detect_system();
+
+    if (mac_system == MAC_NONE) {
+        # No MAC system active — nothing to do
+        return Ok(0);
+    }
+
+    # Find matching profile
+    var found = 0;
+    var idx = 0;
+    while (idx < profile_count) {
+        var p = vec_get(profiles, idx);
+        var ptype = mac_profile_agent_type(p);
+        if (streq(ptype, agent_type) == 1) {
+            found = p;
+            idx = profile_count;  # match found — end the loop (no break in var-loop)
+        } else {
+            idx = idx + 1;
+        }
+    }
+
+    if (found == 0) {
+        return err_invalid_argument("no MAC profile found for agent type");
+    }
+
+    # Validate the profile
+    var vres = mac_profile_validate(found, mac_system);
+    if (is_err_result(vres) == 1) { return vres; }
+
+    if (mac_system == MAC_SELINUX) {
+        var ctx = mac_profile_selinux_ctx(found);
+        # Apply on next exec
+        return mac_set_selinux_context(ctx, 1);
+    }
+
+    if (mac_system == MAC_APPARMOR) {
+        var aa_name = mac_profile_apparmor_name(found);
+        return mac_apparmor_change_profile(aa_name);
+    }
+
+    return err_unknown("cannot apply MAC profile: unknown MAC system");
+}

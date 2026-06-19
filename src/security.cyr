@@ -1,0 +1,377 @@
+# security.cyr — Landlock, seccomp BPF, namespace creation
+# Ported from rust-old/src/security.rs
+#
+# Provides Landlock filesystem sandboxing, seccomp-BPF syscall filtering,
+# and Linux namespace creation via raw syscalls.
+
+#define LINUX
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/tagged.cyr"
+include "lib/syscalls.cyr"
+include "lib/hashmap.cyr"
+
+# ================================================================
+# Landlock constants (kernel 5.13+)
+# ================================================================
+#
+# SYS_LANDLOCK_* numbers are arch-invariant and now provided by
+# lib/syscalls.cyr (cyrius 5.7.x). SYS_PRCTL is arch-varying and
+# supplied by src/syscall_arch.cyr.
+
+enum LandlockConst {
+    LANDLOCK_ACCESS_FS_READ_FILE = 4;
+    LANDLOCK_ACCESS_FS_READ_DIR = 8;
+    LANDLOCK_ACCESS_FS_WRITE_FILE = 2;
+    LANDLOCK_RULE_PATH_BENEATH = 1;
+}
+
+# Filesystem access levels
+enum FsAccess {
+    FS_NO_ACCESS = 0;
+    FS_READ_ONLY = 1;
+    FS_READ_WRITE = 2;
+}
+
+# Filesystem rule: { path_ptr, access }
+# path_ptr is a null-terminated C string pointer
+fn security_fs_rule_new(path, access): i64 {
+    var r = alloc(16);
+    store64(r, path);
+    store64(r + 8, access);
+    return r;
+}
+
+fn security_fs_rule_path(r): i64 { return load64(r); }
+fn security_fs_rule_access(r): i64 { return load64(r + 8); }
+
+fn security_fs_rule_read_only(path): i64 { return security_fs_rule_new(path, FS_READ_ONLY); }
+fn security_fs_rule_read_write(path): i64 { return security_fs_rule_new(path, FS_READ_WRITE); }
+
+# ================================================================
+# Apply Landlock filesystem restrictions
+# ================================================================
+
+# rules: vec of fs_rule pointers, count: number of rules
+# Returns Result: Ok(0) on success, Err on failure.
+fn security_apply_landlock(rules, count): i64 {
+    if (count == 0) { return Ok(0); }
+
+    var handled_access = LANDLOCK_ACCESS_FS_READ_FILE
+    | LANDLOCK_ACCESS_FS_READ_DIR | LANDLOCK_ACCESS_FS_WRITE_FILE;
+
+    # LandlockRulesetAttr: { handled_access_fs: u64 } = 8 bytes
+    var attr[1];
+    store64(&attr, handled_access);
+
+    var ruleset_fd = syscall(SYS_LANDLOCK_CREATE_RULESET, &attr, 8, 0);
+    if (ruleset_fd < 0) {
+        var errno = 0 - ruleset_fd;
+        if (errno == ENOSYS) { return Ok(0); }
+        if (errno == EOPNOTSUPP) { return Ok(0); }
+        return err_syscall_failed(errno, "landlock_create_ruleset failed");
+    }
+    defer { syscall(SYS_CLOSE, ruleset_fd); }
+
+    var idx = 0;
+    while (idx < count) {
+        var rule = vec_get(rules, idx);
+        var access = security_fs_rule_access(rule);
+
+        var allowed_access = 0;
+        if (access == FS_READ_ONLY) {
+            allowed_access = LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR;
+        }
+        elif (access == FS_READ_WRITE) {
+            allowed_access = LANDLOCK_ACCESS_FS_READ_FILE
+            | LANDLOCK_ACCESS_FS_READ_DIR | LANDLOCK_ACCESS_FS_WRITE_FILE;
+        }
+
+        if (allowed_access != 0) {
+            var path = security_fs_rule_path(rule);
+            # O_PATH = 0x200000, O_CLOEXEC = 0x80000
+            var path_fd = sys_open(path, 0x280000, 0);
+            if (path_fd < 0) {
+                return err_syscall_failed(0 - path_fd, "landlock open path failed");
+            }
+
+            # LandlockPathBeneathAttr: { allowed_access: u64, parent_fd: i32 }
+            # Layout: 8 bytes access + 4 bytes fd = 12 bytes (pad to 16)
+            var beneath[16];
+            store64(&beneath, allowed_access);
+            store32(&beneath + 8, path_fd);
+
+            var ret = syscall(SYS_LANDLOCK_ADD_RULE,
+            ruleset_fd, LANDLOCK_RULE_PATH_BENEATH, &beneath, 0);
+            syscall(SYS_CLOSE, path_fd);
+
+            if (ret < 0) {
+                return err_syscall_failed(0 - ret, "landlock_add_rule failed");
+            }
+        }
+        idx = idx + 1;
+    }
+
+    # Set no_new_privs (required by Landlock)
+    var ret = syscall(SYS_PRCTL, 38, 1, 0, 0, 0);
+    if (ret < 0) {
+        return err_syscall_failed(0 - ret, "PR_SET_NO_NEW_PRIVS failed");
+    }
+
+    ret = syscall(SYS_LANDLOCK_RESTRICT_SELF, ruleset_fd, 0);
+    if (ret < 0) {
+        return err_syscall_failed(0 - ret, "landlock_restrict_self failed");
+    }
+
+    return Ok(0);
+}
+
+# ================================================================
+# Seccomp BPF
+# ================================================================
+
+# BPF instruction constants
+enum BpfConst {
+    BPF_LD_W_ABS = 0x20;
+    BPF_JMP_JEQ_K = 0x15;
+    BPF_RET_K = 0x06;
+    SECCOMP_RET_ALLOW = 0x7FFF0000;
+    SECCOMP_RET_KILL_PROCESS = 0x80000000;
+    SECCOMP_RET_TRAP = 0x00030000;
+    BPF_MAXINSNS = 4096;
+    PR_SET_NO_NEW_PRIVS = 38;
+    PR_SET_SECCOMP = 22;
+    SECCOMP_MODE_FILTER = 2;
+}
+
+# BPF sock_filter instruction — kernel ABI struct (8 bytes).
+# Layout enforced by per-field widths; pointer-to-struct dot syntax
+# emits store16/store8/store32 at the kernel-correct offsets.
+struct bpf_insn {
+    code: i16;
+    jt: i8;
+    jf: i8;
+    k: i32;
+}
+
+# Write a BPF sock_filter instruction (8 bytes) to buf at offset.
+fn security_bpf_write_insn(buf, offset, code, jt, jf, k): i64 {
+    var insn: bpf_insn = buf + offset;
+    insn.code = code;
+    insn.jt = jt;
+    insn.jf = jf;
+    insn.k = k;
+    return 0;
+}
+
+# Load a seccomp-BPF filter into the calling process.
+# filter: pointer to BPF bytecode, filter_len: total bytes.
+# Returns Result.
+fn security_load_seccomp(filter, filter_len): i64 {
+    if (filter_len == 0) {
+        return err_invalid_argument("empty seccomp filter");
+    }
+    if (filter_len % 8 != 0) {
+        return err_invalid_argument("filter size not multiple of 8");
+    }
+    var num_insns = filter_len / 8;
+    if (num_insns > BPF_MAXINSNS) {
+        return err_invalid_argument("seccomp filter too large");
+    }
+
+    # Set no_new_privs
+    var ret = syscall(SYS_PRCTL, PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+    if (ret < 0) {
+        return err_syscall_failed(0 - ret, "PR_SET_NO_NEW_PRIVS failed");
+    }
+
+    # sock_fprog: { u16 len, pad[6], u64 filter_ptr }
+    # On x86_64: { u16 len (2 bytes), 6 pad, ptr (8 bytes) } = 16 bytes
+    var prog[16];
+    store16(&prog, num_insns);
+    store64(&prog + 8, filter);
+
+    ret = syscall(SYS_PRCTL, PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog, 0, 0);
+    if (ret < 0) {
+        return err_syscall_failed(0 - ret, "PR_SET_SECCOMP failed");
+    }
+
+    return Ok(0);
+}
+
+# Create a basic seccomp filter allowing safe syscalls.
+# Returns Result: Ok(filter_ptr) where payload is {ptr, len}.
+# The caller must use the returned pointer and length with security_load_seccomp.
+fn security_create_basic_seccomp_filter(): i64 {
+    # Pre-computed BPF filter: 23 instructions x 8 bytes = 184 bytes.
+    # Layout per insn: u16 code, u8 jt, u8 jf, u32 k (little-endian).
+    # 20 allowlisted syscalls: read(0), write(1), close(3), fstat(5),
+    # mmap(9), mprotect(10), munmap(11), brk(12), rt_sigreturn(15),
+    # exit(60), sigaltstack(131), arch_prctl(158), gettid(186),
+    # futex(202), set_tid_address(218), exit_group(231),
+    # set_robust_list(273), getrandom(318), clock_gettime(228), rseq(334).
+    var filter_size = 184;
+    var filter = alloc(filter_size);
+
+    # Insn 0: BPF_LD_W_ABS, k=0 (load syscall nr)
+    security_bpf_write_insn(filter, 0, 0x20, 0, 0, 0);
+    # Insns 1-20: JEQ for each syscall, jt = skip to ALLOW
+    security_bpf_write_insn(filter, 8,   0x15, 20, 0, 0);     # read
+    security_bpf_write_insn(filter, 16,  0x15, 19, 0, 1);     # write
+    security_bpf_write_insn(filter, 24,  0x15, 18, 0, 3);     # close
+    security_bpf_write_insn(filter, 32,  0x15, 17, 0, 5);     # fstat
+    security_bpf_write_insn(filter, 40,  0x15, 16, 0, 9);     # mmap
+    security_bpf_write_insn(filter, 48,  0x15, 15, 0, 10);    # mprotect
+    security_bpf_write_insn(filter, 56,  0x15, 14, 0, 11);    # munmap
+    security_bpf_write_insn(filter, 64,  0x15, 13, 0, 12);    # brk
+    security_bpf_write_insn(filter, 72,  0x15, 12, 0, 15);    # rt_sigreturn
+    security_bpf_write_insn(filter, 80,  0x15, 11, 0, 60);    # exit
+    security_bpf_write_insn(filter, 88,  0x15, 10, 0, 131);   # sigaltstack
+    security_bpf_write_insn(filter, 96,  0x15, 9,  0, 158);   # arch_prctl
+    security_bpf_write_insn(filter, 104, 0x15, 8,  0, 186);   # gettid
+    security_bpf_write_insn(filter, 112, 0x15, 7,  0, 202);   # futex
+    security_bpf_write_insn(filter, 120, 0x15, 6,  0, 218);   # set_tid_address
+    security_bpf_write_insn(filter, 128, 0x15, 5,  0, 231);   # exit_group
+    security_bpf_write_insn(filter, 136, 0x15, 4,  0, 273);   # set_robust_list
+    security_bpf_write_insn(filter, 144, 0x15, 3,  0, 318);   # getrandom
+    security_bpf_write_insn(filter, 152, 0x15, 2,  0, 228);   # clock_gettime
+    security_bpf_write_insn(filter, 160, 0x15, 1,  0, 334);   # rseq
+    # Insn 21: default KILL
+    security_bpf_write_insn(filter, 168, 0x06, 0, 0, 0x80000000);
+    # Insn 22: ALLOW
+    security_bpf_write_insn(filter, 176, 0x06, 0, 0, 0x7FFF0000);
+
+    var info = alloc(16);
+    store64(info, filter);
+    store64(info + 8, filter_size);
+    return Ok(info);
+}
+
+# Get filter pointer from security_create_basic_seccomp_filter result
+fn security_seccomp_filter_ptr(info): i64 { return load64(info); }
+fn security_seccomp_filter_len(info): i64 { return load64(info + 8); }
+
+# ================================================================
+# Namespace creation
+# ================================================================
+
+enum CloneFlag {
+    CLONE_NEWNET = 0x40000000;
+    CLONE_NEWNS = 0x00020000;
+    CLONE_NEWPID = 0x20000000;
+    CLONE_NEWUSER = 0x10000000;
+}
+
+enum NsFlag {
+    NS_NETWORK = 1;
+    NS_MOUNT = 2;
+    NS_PID = 4;
+    NS_USER = 8;
+}
+
+# SYS_UNSHARE is arch-varying and supplied via src/syscall_arch.cyr.
+
+# Create new namespace(s) with specified flags.
+# flags: bitwise OR of NS_NETWORK, NS_MOUNT, NS_PID, NS_USER
+# Returns Result.
+fn security_create_namespace(flags): i64 {
+    var sflags = 0;
+    if ((flags & NS_NETWORK) != 0) { sflags = sflags | CLONE_NEWNET; }
+    if ((flags & NS_MOUNT) != 0) { sflags = sflags | CLONE_NEWNS; }
+    if ((flags & NS_PID) != 0) { sflags = sflags | CLONE_NEWPID; }
+    if ((flags & NS_USER) != 0) { sflags = sflags | CLONE_NEWUSER; }
+
+    var ret = syscall(SYS_UNSHARE, sflags);
+    if (ret < 0) {
+        var errno = 0 - ret;
+        if (errno == EPERM) { return err_permission_denied("security_create_namespace"); }
+        if (errno == EINVAL) { return err_invalid_argument("security_create_namespace: invalid flags"); }
+        return err_syscall_failed(errno, "unshare failed");
+    }
+
+    return Ok(0);
+}
+
+# ================================================================
+# Syscall name to number mapping (hashmap, O(1) lookup)
+# ================================================================
+
+var _syscall_map = 0;
+
+fn security_syscall_map_reset(): i64 { _syscall_map = 0; return 0; }
+
+fn _syscall_map_init(): i64 {
+    if (_syscall_map != 0) { return 0; }
+    _syscall_map = map_new();
+    map_set(_syscall_map, "read", 0);
+    map_set(_syscall_map, "write", 1);
+    map_set(_syscall_map, "open", 2);
+    map_set(_syscall_map, "close", 3);
+    map_set(_syscall_map, "stat", 4);
+    map_set(_syscall_map, "fstat", 5);
+    map_set(_syscall_map, "lseek", 8);
+    map_set(_syscall_map, "mmap", 9);
+    map_set(_syscall_map, "mprotect", 10);
+    map_set(_syscall_map, "munmap", 11);
+    map_set(_syscall_map, "brk", 12);
+    map_set(_syscall_map, "rt_sigreturn", 15);
+    map_set(_syscall_map, "ioctl", 16);
+    map_set(_syscall_map, "access", 21);
+    map_set(_syscall_map, "pipe", 22);
+    map_set(_syscall_map, "dup", 32);
+    map_set(_syscall_map, "dup2", 33);
+    map_set(_syscall_map, "getpid", 39);
+    map_set(_syscall_map, "socket", 41);
+    map_set(_syscall_map, "connect", 42);
+    map_set(_syscall_map, "accept", 43);
+    map_set(_syscall_map, "sendto", 44);
+    map_set(_syscall_map, "recvfrom", 45);
+    map_set(_syscall_map, "bind", 49);
+    map_set(_syscall_map, "listen", 50);
+    map_set(_syscall_map, "fork", 57);
+    map_set(_syscall_map, "execve", 59);
+    map_set(_syscall_map, "exit", 60);
+    map_set(_syscall_map, "wait4", 61);
+    map_set(_syscall_map, "kill", 62);
+    map_set(_syscall_map, "fcntl", 72);
+    map_set(_syscall_map, "fsync", 74);
+    map_set(_syscall_map, "getcwd", 79);
+    map_set(_syscall_map, "chdir", 80);
+    map_set(_syscall_map, "mkdir", 83);
+    map_set(_syscall_map, "rmdir", 84);
+    map_set(_syscall_map, "unlink", 87);
+    map_set(_syscall_map, "chmod", 90);
+    map_set(_syscall_map, "getuid", 102);
+    map_set(_syscall_map, "getgid", 104);
+    map_set(_syscall_map, "geteuid", 107);
+    map_set(_syscall_map, "getegid", 108);
+    map_set(_syscall_map, "getppid", 110);
+    map_set(_syscall_map, "setsid", 112);
+    map_set(_syscall_map, "prctl", 157);
+    map_set(_syscall_map, "mount", 165);
+    map_set(_syscall_map, "umount2", 166);
+    map_set(_syscall_map, "gettid", 186);
+    map_set(_syscall_map, "futex", 202);
+    map_set(_syscall_map, "getdents64", 217);
+    map_set(_syscall_map, "set_tid_address", 218);
+    map_set(_syscall_map, "clock_gettime", 228);
+    map_set(_syscall_map, "exit_group", 231);
+    map_set(_syscall_map, "openat", 257);
+    map_set(_syscall_map, "set_robust_list", 273);
+    map_set(_syscall_map, "pipe2", 293);
+    map_set(_syscall_map, "epoll_create1", 291);
+    map_set(_syscall_map, "getrandom", 318);
+    map_set(_syscall_map, "rseq", 334);
+    return 0;
+}
+
+# Map a syscall name to its x86_64 number. Returns -1 if not found.
+fn security_syscall_name_to_nr(name): i64 {
+    _syscall_map_init();
+    if (map_has(_syscall_map, name) == 1) {
+        return map_get(_syscall_map, name);
+    }
+    return 0 - 1;
+}

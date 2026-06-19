@@ -1,0 +1,103 @@
+# agnosys — shared cross-module utilities
+#
+# Small helpers that several modules need identically. Kept here (rather
+# than copied per-module) so a single definition is audited and tested
+# once. Public `agnosys_*` prefix per the project's prefix discipline.
+#
+# Placed in [lib.core] so every profile bundle (core + domain) resolves
+# these — consumers span security/storage/trust/system profiles.
+
+# Emit a JSON value for a possibly-null C string into a str_builder:
+# `null` when the pointer is 0, otherwise a JSON-quoted/escaped string.
+# Replaces the per-module `_<mod>_emit_cstr_or_null` shims (mac, dmverity,
+# drm, certpin, update) that were byte-identical.
+fn agnosys_json_emit_cstr_or_null(sb, c): i64 {
+    if (c == 0) {
+        str_builder_add_cstr(sb, "null");
+    } else {
+        str_builder_add_json_str(sb, str_from(c));
+    }
+    return 0;
+}
+
+# Is `ch` an ASCII hex digit (0-9, a-f, A-F)? Single definition shared by
+# the hash/digest validators in ima, dmverity, tpm, update.
+fn agnosys_is_hex_char(ch): i64 {
+    if (ch >= 48 && ch <= 57) { return 1; }   # 0-9
+    if (ch >= 65 && ch <= 70) { return 1; }   # A-F
+    if (ch >= 97 && ch <= 102) { return 1; }  # a-f
+    return 0;
+}
+
+# Is `ch` valid in a device-mapper / volume name (alphanumeric, `-`, `_`)?
+# Single source for the dm-name allowlist shared by dmverity and luks.
+fn agnosys_is_name_char(ch): i64 {
+    if (ch >= 48 && ch <= 57) { return 1; }   # 0-9
+    if (ch >= 65 && ch <= 90) { return 1; }   # A-Z
+    if (ch >= 97 && ch <= 122) { return 1; }  # a-z
+    if (ch == 45) { return 1; }               # -
+    if (ch == 95) { return 1; }               # _
+    return 0;
+}
+
+# Does C string `str` start with C string `prefix`? Single-pass: walks
+# `prefix` and compares, stopping at the first mismatch, the prefix
+# terminator, or the str terminator — no up-front strlen of either side
+# (the previous per-module copies scanned both strings fully first).
+fn agnosys_cstr_starts_with(str, prefix): i64 {
+    var i = 0;
+    var pc = load8(prefix);
+    while (pc != 0) {
+        var sc = load8(str + i);
+        if (sc == 0) { return 0; }
+        if (sc != pc) { return 0; }
+        i = i + 1;
+        pc = load8(prefix + i);
+    }
+    return 1;
+}
+
+# Run a subprocess (cstr argv vec) and capture stdout into a caller buffer.
+# Returns Ok(bytes_read) or Err(errmsg) on exec failure. `errmsg` is the
+# per-tool diagnostic. Shared by dmverity/luks/tpm `*_run_capture`.
+fn agnosys_run_capture(args, buf, buflen, errmsg): i64 {
+    var n = exec_capture(args, buf, buflen);
+    if (n < 0) {
+        return err_unknown(errmsg);
+    }
+    return Ok(n);
+}
+
+# Run a subprocess (cstr argv vec) and check for a zero exit code.
+# Returns Ok(0) or Err(errmsg) on non-zero exit / exec failure. Shared by
+# dmverity/luks/tpm `*_run_checked`.
+fn agnosys_run_checked(args, errmsg): i64 {
+    var rc = exec_vec(args);
+    if (rc != 0) {
+        return err_unknown(errmsg);
+    }
+    return Ok(0);
+}
+
+# Read up to `cap` bytes from `fd` into a fresh heap buffer, NUL-terminate,
+# and return it as a Str (also valid as a cstr). Drains short reads. The
+# buffer is `cap + 1` bytes so the terminator never writes past the end
+# even at a full read (the per-module copies alloc'd exactly `cap`, a
+# latent 1-byte overflow when the file filled the buffer). Shared by the
+# pam config / passwd readers.
+fn agnosys_read_fd_to_str(fd, cap): i64 {
+    var buf = alloc(cap + 1);
+    var total = 0;
+    var rgo = 1;
+    while (rgo == 1) {
+        var n = sys_read(fd, buf + total, cap - total);
+        if (n <= 0) {
+            rgo = 0;
+        } else {
+            total = total + n;
+            if (total >= cap) { rgo = 0; }
+        }
+    }
+    store8(buf + total, 0);
+    return str_new(buf, total);
+}

@@ -1,0 +1,695 @@
+# audit.cyr — Linux Audit Subsystem interface
+# Ported from rust-old/src/audit.rs
+#
+# Provides netlink audit socket management, event sending, status queries,
+# rule add/delete, and AGNOS /proc audit reading.
+#
+# Requires CAP_AUDIT_CONTROL for configuration and CAP_AUDIT_WRITE for events.
+#
+# Requires: lib/syscalls.cyr, lib/string.cyr, lib/str.cyr,
+#           lib/net.cyr, src/error.cyr
+
+#define LINUX
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/tagged.cyr"
+include "lib/syscalls.cyr"
+include "lib/net.cyr"
+include "lib/process.cyr"
+
+# ================================================================
+# Netlink / audit constants
+# ================================================================
+
+enum AuditConst {
+    AF_NETLINK = 16;
+    SOCK_RAW = 3;
+    SOCK_CLOEXEC = 524288;
+    NETLINK_AUDIT = 9;
+    NLMSG_HDRLEN = 16;
+    NLM_F_REQUEST = 1;
+    NLMSG_NOOP = 1;
+    NLMSG_ERROR = 2;
+    NLMSG_DONE = 3;
+    AUDIT_GET = 1000;
+    AUDIT_SET = 1001;
+    AUDIT_USER = 1005;
+    AUDIT_ADD_RULE = 1011;
+    AUDIT_DEL_RULE = 1012;
+    SYS_AGNOS_AUDIT_LOG = 520;
+    AUDIT_MAX_MSG_LEN = 8192;
+    AUDIT_MAX_KEY_LEN = 256;
+    AUDIT_STATUS_ENABLED = 1;
+    EPROTONOSUPPORT = 93;
+}
+
+# Socket-syscall numbers (SYS_SOCKET_NR/SYS_BIND_NR/SYS_SENDTO_NR/
+# SYS_RECVFROM_NR) are arch-varying and now supplied via
+# src/syscall_arch.cyr's per-arch peer.
+
+# ================================================================
+# Audit rule type constants
+# ================================================================
+
+enum AuditRuleType {
+    AUDIT_RULE_FILE_WATCH = 1;
+    AUDIT_RULE_SYSCALL_WATCH = 2;
+}
+
+# ================================================================
+# Audit config struct — 3 fields * 8 = 24 bytes.
+# 1.0 surface uses asymmetric setter names: getters keep the `use_`
+# prefix (`audit_config_use_netlink/use_proc`) but setters drop it
+# (`audit_config_set_netlink/set_proc`). Field names match the
+# getters; the asymmetric setters stay as thin hand-written wrappers
+# delegating through the derive-generated `set_use_*`.
+# ================================================================
+
+#derive(accessors)
+struct audit_config { use_netlink; use_proc; proc_path; }
+
+fn audit_config_new(): i64 {
+    var c = alloc(24);
+    audit_config_set_use_netlink(c, 1);
+    audit_config_set_use_proc(c, 0);
+    audit_config_set_proc_path(c, "/proc/agnos/audit");
+    return c;
+}
+
+# 1.0 API preservation — asymmetric setter names delegate to derive.
+fn audit_config_set_netlink(c, val): i64 { return audit_config_set_use_netlink(c, val); }
+fn audit_config_set_proc(c, val): i64 { return audit_config_set_use_proc(c, val); }
+
+# ================================================================
+# Audit handle struct — 2 fields * 8 = 16 bytes.
+# ================================================================
+
+#derive(accessors)
+struct audit_handle { fd; config; }
+
+fn audit_handle_new(fd, config): i64 {
+    var h = alloc(16);
+    audit_handle_set_fd(h, fd);
+    audit_handle_set_config(h, config);
+    return h;
+}
+
+# ================================================================
+# Audit status struct — 6 i64 fields * 8 = 48 bytes.
+# ================================================================
+
+#derive(accessors)
+#derive(Serialize)
+struct audit_status { enabled; failure_action; pid; backlog_limit; lost; backlog; }
+
+fn audit_status_new(): i64 {
+    var s = alloc(48);
+    audit_status_set_enabled(s, 0);
+    audit_status_set_failure_action(s, 1);    # printk
+    audit_status_set_pid(s, 0);
+    audit_status_set_backlog_limit(s, 8192);
+    audit_status_set_lost(s, 0);
+    audit_status_set_backlog(s, 0);
+    return s;
+}
+
+# ================================================================
+# Audit rule struct — 4 fields * 8 = 32 bytes.
+# 1.0 surface uses `audit_rule_syscall(r)` as the getter, but
+# `syscall` is a cyrius builtin so it can't be a struct field name.
+# Field is named `syscall_nr` (matches the constructor arg);
+# the 1.0 `audit_rule_syscall(r)` getter stays as a thin wrapper.
+# ================================================================
+
+#derive(accessors)
+struct audit_rule { type; path; syscall_nr; key; }
+
+fn audit_rule_new(rule_type, path, syscall_nr, key): i64 {
+    var r = alloc(32);
+    audit_rule_set_type(r, rule_type);
+    audit_rule_set_path(r, path);
+    audit_rule_set_syscall_nr(r, syscall_nr);
+    audit_rule_set_key(r, key);
+    return r;
+}
+
+# 1.0 API preservation — `syscall` getter delegates to `syscall_nr`.
+fn audit_rule_syscall(r): i64 { return audit_rule_syscall_nr(r); }
+
+# Create a file watch rule
+fn audit_rule_file_watch(path, key): i64 {
+    return audit_rule_new(AUDIT_RULE_FILE_WATCH, path, 0, key);
+}
+
+# Create a syscall watch rule
+fn audit_rule_syscall_watch(syscall_nr, key): i64 {
+    return audit_rule_new(AUDIT_RULE_SYSCALL_WATCH, 0, syscall_nr, key);
+}
+
+# ================================================================
+# Rule validation
+# Returns Result: Ok(0) if valid, Err if not.
+# ================================================================
+
+fn audit_rule_validate(rule): i64 {
+    var key = audit_rule_key(rule);
+    if (key == 0) {
+        return err_invalid_argument("audit rule key cannot be empty");
+    }
+    var key_len = strlen(key);
+    if (key_len == 0) {
+        return err_invalid_argument("audit rule key cannot be empty");
+    }
+    if (key_len > AUDIT_MAX_KEY_LEN) {
+        return err_invalid_argument("audit rule key too long (max 256)");
+    }
+
+    var rtype = audit_rule_type(rule);
+    if (rtype == AUDIT_RULE_FILE_WATCH) {
+        var path = audit_rule_path(rule);
+        if (path == 0) {
+            return err_invalid_argument("FileWatch rule requires a path");
+        }
+        var path_len = strlen(path);
+        if (path_len == 0) {
+            return err_invalid_argument("FileWatch path cannot be empty");
+        }
+        # Path must be absolute (start with '/')
+        if (load8(path) != 47) {
+            return err_invalid_argument("FileWatch path must be absolute");
+        }
+        # Reject path traversal via ".." components
+        var pi = 0;
+        while (pi < path_len - 1) {
+            if (load8(path + pi) == 46 && load8(path + pi + 1) == 46) {
+                return err_invalid_argument("audit path contains ..");
+            }
+            pi = pi + 1;
+        }
+    }
+    elif (rtype == AUDIT_RULE_SYSCALL_WATCH) {
+        # syscall_nr is stored directly, 0 is a valid syscall (read)
+        # so we just accept it
+    }
+    else {
+        return err_invalid_argument("unknown audit rule type");
+    }
+
+    return Ok(0);
+}
+
+# ================================================================
+# Kernel-ABI structs — typed fields enforce the byte layout the
+# kernel expects via syscall (sockaddr_nl: 12 B; nlmsghdr: 16 B;
+# audit_kstatus: 32 B). Pointer-to-struct dot syntax produces
+# tight-packed kernel-correct offsets; using `var s: <struct> = buf;`
+# avoids derive(accessors) which lays fields out at i64 slots.
+# Width-correct codegen (cyrius 5.8.16+) emits the right
+# store16/store32/load32 instructions automatically.
+# ================================================================
+
+struct sockaddr_nl {
+    nl_family: i16;
+    nl_pad: i16;
+    nl_pid: i32;
+    nl_groups: i32;
+}
+
+struct nlmsghdr {
+    nlmsg_len: i32;
+    nlmsg_type: i16;
+    nlmsg_flags: i16;
+    nlmsg_seq: i32;
+    nlmsg_pid: i32;
+}
+
+# Kernel `struct audit_status` (first 32 bytes — agnosys reads/writes
+# the fields it needs; kernel struct continues with additional fields
+# we currently don't touch).
+struct audit_kstatus {
+    mask: i32;
+    enabled: i32;
+    failure: i32;
+    pid: i32;
+    rate_limit: i32;
+    backlog_limit: i32;
+    lost: i32;
+    backlog: i32;
+}
+
+fn audit_sockaddr_nl(pid): i64 {
+    var buf = alloc(12);
+    memset(buf, 0, 12);
+    var sa: sockaddr_nl = buf;
+    sa.nl_family = AF_NETLINK;
+    sa.nl_pid = pid;
+    return buf;
+}
+
+# ================================================================
+# Build a netlink message header + payload
+# Returns pointer to the buffer (stores total length at the head).
+# ================================================================
+
+fn audit_build_nlmsg(msg_type, payload_ptr, payload_len): i64 {
+    var total_len = NLMSG_HDRLEN + payload_len;
+    var buf = alloc(total_len);
+    memset(buf, 0, total_len);
+
+    var hdr: nlmsghdr = buf;
+    hdr.nlmsg_len = total_len;
+    hdr.nlmsg_type = msg_type;
+    hdr.nlmsg_flags = NLM_F_REQUEST;
+    hdr.nlmsg_seq = 1;
+    hdr.nlmsg_pid = sys_getpid();
+
+    if (payload_len > 0) {
+        memcpy(buf + NLMSG_HDRLEN, payload_ptr, payload_len);
+    }
+
+    return buf;
+}
+
+# Get total length of a built nlmsg (read from the header)
+fn audit_nlmsg_len(buf): i64 {
+    return load32(buf);
+}
+
+# ================================================================
+# Open an audit connection
+# config: pointer to audit_config struct
+# Returns Result: Ok(handle_ptr) or Err.
+# ================================================================
+
+fn audit_open(config): i64 {
+    var fd = 0 - 1;
+
+    if (audit_config_use_netlink(config) == 1) {
+        # socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_AUDIT)
+        var sock_flags = SOCK_RAW | SOCK_CLOEXEC;
+        fd = syscall(SYS_SOCKET_NR, AF_NETLINK, sock_flags, NETLINK_AUDIT);
+        if (fd < 0) {
+            var errno = 0 - fd;
+            if (errno == EPERM) {
+                return err_permission_denied("open_audit netlink socket");
+            }
+            if (errno == EACCES) {
+                return err_permission_denied("open_audit netlink socket");
+            }
+            if (errno == EPROTONOSUPPORT) {
+                return err_not_supported("NETLINK_AUDIT");
+            }
+            return err_syscall_failed(errno, "socket(NETLINK_AUDIT) failed");
+        }
+
+        # Bind the socket
+        var sa = audit_sockaddr_nl(sys_getpid());
+        var ret = syscall(SYS_BIND_NR, fd, sa, 12);
+        if (ret < 0) {
+            sys_close(fd);
+            return err_syscall_failed(0 - ret, "bind(NETLINK_AUDIT) failed");
+        }
+    }
+
+    # Verify proc path if configured
+    if (audit_config_use_proc(config) == 1) {
+        var proc_path = audit_config_proc_path(config);
+        # Non-fatal: netlink still works even if the proc path is unreadable.
+        # (agnosys log_warn dropped in the agnosys→kavach fold — no kavach logger
+        # wired yet; rewire to kavach's logging when one exists.)
+    }
+
+    var handle = audit_handle_new(fd, config);
+    return Ok(handle);
+}
+
+# ================================================================
+# Close an audit handle
+# Closes the netlink socket if open.
+# ================================================================
+
+fn audit_close(handle): i64 {
+    var fd = audit_handle_fd(handle);
+    if (fd >= 0) {
+        syscall(SYS_CLOSE, fd);
+    }
+    return 0;
+}
+
+# ================================================================
+# Send raw netlink message on audit socket
+# Returns Result: Ok(bytes_sent) or Err.
+# ================================================================
+
+fn audit_send_raw(handle, buf, buf_len): i64 {
+    var fd = audit_handle_fd(handle);
+    if (fd < 0) {
+        return err_invalid_argument("audit handle has no netlink socket");
+    }
+
+    # sendto(fd, buf, len, 0, NULL, 0)
+    var ret = syscall(SYS_SENDTO_NR, fd, buf, buf_len, 0, 0, 0);
+    if (ret < 0) {
+        return err_syscall_failed(0 - ret, "send(audit) failed");
+    }
+    return Ok(ret);
+}
+
+# ================================================================
+# Receive raw netlink message from audit socket
+# buf: receive buffer, buf_len: buffer capacity
+# Returns Result: Ok(bytes_received) or Err.
+# ================================================================
+
+fn audit_recv_raw(handle, buf, buf_len): i64 {
+    var fd = audit_handle_fd(handle);
+    if (fd < 0) {
+        return err_invalid_argument("audit handle has no netlink socket");
+    }
+
+    # recvfrom(fd, buf, len, 0, NULL, NULL)
+    var ret = syscall(SYS_RECVFROM_NR, fd, buf, buf_len, 0, 0, 0);
+    if (ret < 0) {
+        return err_syscall_failed(0 - ret, "recv(audit) failed");
+    }
+    return Ok(ret);
+}
+
+# ================================================================
+# Send an audit user event
+# event_type: C string (e.g. "AGENT_START")
+# message: C string payload
+# Returns Result: Ok(0) or Err.
+# ================================================================
+
+fn audit_send_event(handle, event_type, message): i64 {
+    var fd = audit_handle_fd(handle);
+    if (fd < 0) {
+        return err_invalid_argument("audit handle has no netlink socket");
+    }
+
+    if (strlen(event_type) == 0) {
+        return err_invalid_argument("event type cannot be empty");
+    }
+
+    var msg_len = strlen(message);
+    if (msg_len > AUDIT_MAX_MSG_LEN) {
+        return err_invalid_argument("audit message too large (max 8192)");
+    }
+
+    # Build payload: "op=<event_type> <message>"
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "op=");
+    str_builder_add_cstr(sb, event_type);
+    str_builder_add_cstr(sb, " ");
+    str_builder_add_cstr(sb, message);
+    var payload = str_builder_build(sb);
+
+    var payload_data = str_data(payload);
+    var payload_len = str_len(payload);
+
+    # Build netlink message with AUDIT_USER type
+    var nlmsg = audit_build_nlmsg(AUDIT_USER, payload_data, payload_len);
+    var total_len = audit_nlmsg_len(nlmsg);
+
+    var res = audit_send_raw(handle, nlmsg, total_len);
+    if (is_err_result(res) == 1) { return res; }
+
+    return Ok(0);
+}
+
+# ================================================================
+# Get audit subsystem status (AUDIT_GET)
+# Returns Result: Ok(audit_status_ptr) or Err.
+# ================================================================
+
+fn audit_get_status(handle): i64 {
+    var fd = audit_handle_fd(handle);
+    if (fd < 0) {
+        return err_invalid_argument("audit handle has no netlink socket");
+    }
+
+    # Send AUDIT_GET request (no payload)
+    var nlmsg = audit_build_nlmsg(AUDIT_GET, 0, 0);
+    var total_len = audit_nlmsg_len(nlmsg);
+
+    var sres = audit_send_raw(handle, nlmsg, total_len);
+    if (is_err_result(sres) == 1) { return sres; }
+
+    # Receive response
+    var recv_buf = alloc(4096);
+    memset(recv_buf, 0, 4096);
+
+    var rres = audit_recv_raw(handle, recv_buf, 4096);
+    if (is_err_result(rres) == 1) { return rres; }
+
+    var nbytes = payload(rres);
+    # Audit F-6 (2026-04-26): validate the full nlmsghdr, not just length.
+    # Per CVE-2026-31495 (ctnetlink) and the broader netlink validation
+    # CVE class, defensive parsers must verify type + seq match the
+    # request and surface NLMSG_ERROR replies as structured errors
+    # instead of treating them as success.
+    if (nbytes < NLMSG_HDRLEN) {
+        return err_unknown("AUDIT_GET reply truncated (no nlmsghdr)");
+    }
+    var hdr: nlmsghdr = recv_buf;
+    if (hdr.nlmsg_len > nbytes) {
+        return err_unknown("AUDIT_GET reply nlmsg_len exceeds bytes received");
+    }
+    if (hdr.nlmsg_seq != 1) {
+        return err_unknown("AUDIT_GET reply seq mismatch (expected 1)");
+    }
+    if (hdr.nlmsg_type == NLMSG_ERROR) {
+        # struct nlmsgerr { s32 error; struct nlmsghdr msg; }
+        if (nbytes < NLMSG_HDRLEN + 4) {
+            return err_unknown("NLMSG_ERROR reply truncated (no error code)");
+        }
+        var nerr = load32(recv_buf + NLMSG_HDRLEN);  # negative errno
+        if (nerr == 0) {
+            return err_unknown("NLMSG_ERROR with zero error (ack-only)");
+        }
+        return err_syscall_failed(0 - nerr, "AUDIT_GET kernel returned NLMSG_ERROR");
+    }
+    if (hdr.nlmsg_type != AUDIT_GET) {
+        return err_unknown("AUDIT_GET reply unexpected nlmsg_type");
+    }
+    if (nbytes < NLMSG_HDRLEN + 24) {
+        return err_unknown("AUDIT_GET response too short for audit_status");
+    }
+
+    # Parse audit_status from payload after nlmsghdr.
+    var ks: audit_kstatus = recv_buf + NLMSG_HDRLEN;
+    var status = audit_status_new();
+    audit_status_set_enabled(status, ks.enabled);
+    audit_status_set_failure_action(status, ks.failure);
+    audit_status_set_pid(status, ks.pid);
+    audit_status_set_backlog_limit(status, ks.backlog_limit);
+    audit_status_set_lost(status, ks.lost);
+    audit_status_set_backlog(status, ks.backlog);
+
+    return Ok(status);
+}
+
+# ================================================================
+# Enable or disable the audit subsystem (AUDIT_SET)
+# enabled: 1 to enable, 0 to disable
+# Returns Result: Ok(0) or Err.
+# ================================================================
+
+fn audit_set_enabled(handle, enabled): i64 {
+    var fd = audit_handle_fd(handle);
+    if (fd < 0) {
+        return err_invalid_argument("audit handle has no netlink socket");
+    }
+
+    # Build audit_status payload — set mask=AUDIT_STATUS_ENABLED (1)
+    # and the enabled field; other fields stay zero.
+    var pld_len = 32;
+    var pld = alloc(pld_len);
+    memset(pld, 0, pld_len);
+    var ks: audit_kstatus = pld;
+    ks.mask = AUDIT_STATUS_ENABLED;
+    ks.enabled = enabled;
+
+    var nlmsg = audit_build_nlmsg(AUDIT_SET, pld, pld_len);
+    var total_len = audit_nlmsg_len(nlmsg);
+
+    var res = audit_send_raw(handle, nlmsg, total_len);
+    if (is_err_result(res) == 1) { return res; }
+
+    return Ok(0);
+}
+
+# ================================================================
+# Send an audit rule message (add or delete)
+# msg_type: AUDIT_ADD_RULE or AUDIT_DEL_RULE
+# rule: pointer to audit rule struct
+# Returns Result: Ok(0) or Err.
+# ================================================================
+
+fn audit_send_rule_msg(handle, rule, msg_type): i64 {
+    var fd = audit_handle_fd(handle);
+    if (fd < 0) {
+        return err_invalid_argument("audit handle has no netlink socket");
+    }
+
+    # Build rule text payload
+    var sb = str_builder_new();
+    var rtype = audit_rule_type(rule);
+
+    if (rtype == AUDIT_RULE_FILE_WATCH) {
+        str_builder_add_cstr(sb, "watch=");
+        var path = audit_rule_path(rule);
+        if (path != 0) {
+            str_builder_add_cstr(sb, path);
+        }
+        str_builder_add_cstr(sb, " key=");
+        str_builder_add_cstr(sb, audit_rule_key(rule));
+    }
+    elif (rtype == AUDIT_RULE_SYSCALL_WATCH) {
+        str_builder_add_cstr(sb, "syscall=");
+        str_builder_add_int(sb, audit_rule_syscall(rule));
+        str_builder_add_cstr(sb, " key=");
+        str_builder_add_cstr(sb, audit_rule_key(rule));
+    }
+
+    var rule_text = str_builder_build(sb);
+    var rule_data = str_data(rule_text);
+    var rule_len = str_len(rule_text);
+
+    var nlmsg = audit_build_nlmsg(msg_type, rule_data, rule_len);
+    var total_len = audit_nlmsg_len(nlmsg);
+
+    var res = audit_send_raw(handle, nlmsg, total_len);
+    if (is_err_result(res) == 1) { return res; }
+
+    return Ok(0);
+}
+
+# ================================================================
+# Add an audit rule
+# Returns Result: Ok(0) or Err.
+# ================================================================
+
+fn audit_add_rule(handle, rule): i64 {
+    var vres = audit_rule_validate(rule);
+    if (is_err_result(vres) == 1) { return vres; }
+
+    return audit_send_rule_msg(handle, rule, AUDIT_ADD_RULE);
+}
+
+# ================================================================
+# Delete an audit rule
+# Returns Result: Ok(0) or Err.
+# ================================================================
+
+fn audit_delete_rule(handle, rule): i64 {
+    var vres = audit_rule_validate(rule);
+    if (is_err_result(vres) == 1) { return vres; }
+
+    return audit_send_rule_msg(handle, rule, AUDIT_DEL_RULE);
+}
+
+# ================================================================
+# Read audit events from /proc/agnos/audit
+# Reads the file line-by-line and returns a vec of raw line Str pointers.
+# (Full JSON parsing is beyond Cyrius scope — consumers parse the Strs.)
+# proc_path: C string path to the proc file
+# Returns Result: Ok(vec_of_strs) or Err.
+# ================================================================
+
+fn audit_read_proc_events(proc_path): i64 {
+    # Check if file exists
+    if (sys_access(proc_path, 0) != 0) {
+        # File does not exist — return empty vec
+        return Ok(vec_new());
+    }
+
+    var fd = sys_open(proc_path, O_RDONLY, 0);
+    if (fd < 0) {
+        return err_io(0 - fd, proc_path);
+    }
+    defer { sys_close(fd); }
+
+    # Read entire file (up to 64KB)
+    var buf_size = 65536;
+    var buf = alloc(buf_size + 1);
+    memset(buf, 0, buf_size + 1);
+    var total_read = 0;
+
+    var rgo = 1;
+    while (rgo == 1) {
+        var n = sys_read(fd, buf + total_read, buf_size - total_read);
+        if (n <= 0) {
+            rgo = 0;
+        } else {
+            total_read = total_read + n;
+            if (total_read >= buf_size) { rgo = 0; }
+        }
+    }
+
+    if (total_read == 0) {
+        return Ok(vec_new());
+    }
+
+    # Null-terminate
+    store8(buf + total_read, 0);
+
+    # Split into lines (by newline = 10)
+    var contents = str_new(buf, total_read);
+    var lines = str_split(contents, 10);
+    var entries = vec_new();
+
+    var line_count = vec_len(lines);
+    var li = 0;
+    while (li < line_count) {
+        var line = vec_get(lines, li);
+        var trimmed = str_trim(line);
+        if (str_len(trimmed) > 0) {
+            vec_push(entries, trimmed);
+        }
+        li = li + 1;
+    }
+
+    return Ok(entries);
+}
+
+# ================================================================
+# Log via AGNOS custom syscall (SYS_AGNOS_AUDIT_LOG = 520)
+# action: C string (max 256 bytes)
+# data: C string (max 4096 bytes)
+# result_code: integer result code (0 = success)
+# Returns Result: Ok(0) or Err.
+# ================================================================
+
+fn audit_agnos_log(action, data, result_code): i64 {
+    var action_len = strlen(action);
+    if (action_len == 0) {
+        return err_invalid_argument("audit action cannot be empty");
+    }
+    if (action_len > 256) {
+        return err_invalid_argument("audit action too long (max 256)");
+    }
+
+    var data_len = strlen(data);
+    if (data_len > 4096) {
+        return err_invalid_argument("audit data too long (max 4096)");
+    }
+
+    var ret = syscall(SYS_AGNOS_AUDIT_LOG, action, data, result_code);
+    if (ret < 0) {
+        var errno = 0 - ret;
+        if (errno == ENOSYS) {
+            return err_not_supported("SYS_AGNOS_AUDIT_LOG");
+        }
+        if (errno == EPERM) {
+            return err_permission_denied("agnos_audit_log");
+        }
+        return err_syscall_failed(errno, "SYS_AGNOS_AUDIT_LOG failed");
+    }
+
+    return Ok(0);
+}

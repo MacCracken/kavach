@@ -5,6 +5,17 @@
 
 include "src/util.cyr"
 include "src/error.cyr"
+# Internalized agnosys Linux security backends (Landlock/seccomp = security.cyr,
+# SELinux/AppArmor = mac.cyr, Linux audit = kernel_audit.cyr) + sys_error/sys_util
+# support + the 6 agnos-only security syscall consts — the agnosys → agnodrm
+# decomposition (kavach owns the LSM/MAC/audit backends it already consumed; the
+# landlock/prctl numbers come from cyrius's lib/syscalls). Before their users.
+include "src/sys_security_syscalls.cyr"
+include "src/sys_error.cyr"
+include "src/sys_util.cyr"
+include "src/security.cyr"
+include "src/mac.cyr"
+include "src/kernel_audit.cyr"
 include "src/backend.cyr"
 include "src/policy.cyr"
 include "src/scoring.cyr"

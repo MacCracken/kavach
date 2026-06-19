@@ -1,0 +1,274 @@
+# error.cyr — unified error type with errno mapping
+# Ported from rust-old/src/error.rs
+#
+# In Cyrius, errors are integer codes. The SysError "enum" becomes
+# integer constants, and error messages are string pointers.
+#
+# Error representation: a Result (tagged union from lib/tagged.cyr)
+# where Err payload is a pointer to an error struct:
+#   { kind: i64, errno: i64, message: *str }
+#
+# Convention: all agnosys functions return Result values.
+# Ok(value) on success, Err(err_ptr) on failure.
+
+# ================================================================
+# Error kind constants (maps to Rust SysError variants)
+# ================================================================
+
+enum SysErrorKind {
+    ERR_SYSCALL_FAILED = 1;
+    ERR_INVALID_ARGUMENT = 2;
+    ERR_PERMISSION_DENIED = 3;
+    ERR_WOULD_BLOCK = 4;
+    ERR_MODULE_NOT_LOADED = 5;
+    ERR_NOT_SUPPORTED = 6;
+    ERR_UNKNOWN = 7;
+    ERR_IO = 8;
+}
+
+# ================================================================
+# Errno constants (Linux x86_64)
+# ================================================================
+
+enum Errno {
+    EPERM = 1;
+    ENOENT = 2;
+    ESRCH = 3;
+    EINTR = 4;
+    EIO = 5;
+    ENXIO = 6;
+    EBADF = 9;
+    EAGAIN = 11;
+    ENOMEM = 12;
+    EACCES = 13;
+    EFAULT = 14;
+    EBUSY = 16;
+    EEXIST = 17;
+    ENODEV = 19;
+    ENOTDIR = 20;
+    EISDIR = 21;
+    EINVAL = 22;
+    EMFILE = 24;
+    ENOSPC = 28;
+    EPIPE = 32;
+    ERANGE = 34;
+    ENOSYS = 38;
+    ENOTEMPTY = 39;
+    ENODATA = 61;
+    EOVERFLOW = 75;
+    EOPNOTSUPP = 95;
+    EADDRINUSE = 98;
+    ECONNREFUSED = 111;
+    ETIMEDOUT = 110;
+}
+
+# ================================================================
+# Error struct: { kind, errno, message_ptr }
+# Layout: kind at +0, errno at +8, message at +16. Total: 24 bytes.
+# ================================================================
+
+# ================================================================
+# Error representation — dual encoding
+# ================================================================
+#
+# Packed error: kind << 16 | errno (no message, no heap, value < 0x100000)
+# Heap error:   pointer to { kind, errno, message_ptr } (24 bytes, value >= 0x100000)
+#
+# syserr_kind/errno/message dispatch on the value automatically.
+
+# Pack kind + errno into a single integer (zero allocation)
+fn syserr_pack(kind, errno): i64 {
+    return kind << 16 | errno;
+}
+
+# Create a new error with message (heap-allocated, cold path)
+fn syserr_new(kind, errno, message): i64 {
+    var e = alloc(24);
+    store64(e, kind);
+    store64(e + 8, errno);
+    store64(e + 16, message);
+    return e;
+}
+
+# Get error kind (works for both packed and heap errors)
+fn syserr_kind(e): i64 {
+    if (e < 0x100000) { return e >> 16; }
+    return load64(e);
+}
+
+# Get errno value (works for both packed and heap errors)
+fn syserr_errno(e): i64 {
+    if (e < 0x100000) { return e & 0xFFFF; }
+    return load64(e + 8);
+}
+
+# Get error message pointer (0 for packed errors)
+fn syserr_message(e): i64 {
+    if (e < 0x100000) { return 0; }
+    return load64(e + 16);
+}
+
+# ================================================================
+# Error constructors — packed (fast, no alloc)
+# ================================================================
+
+fn err_syscall_failed_nr(errno): i64 {
+    return Err(syserr_pack(ERR_SYSCALL_FAILED, errno));
+}
+
+fn err_permission_denied_nr(errno): i64 {
+    return Err(syserr_pack(ERR_PERMISSION_DENIED, errno));
+}
+
+fn err_would_block(): i64 {
+    return Err(syserr_pack(ERR_WOULD_BLOCK, EAGAIN));
+}
+
+fn err_invalid_argument_nr(): i64 {
+    return Err(syserr_pack(ERR_INVALID_ARGUMENT, EINVAL));
+}
+
+fn err_not_supported_nr(): i64 {
+    return Err(syserr_pack(ERR_NOT_SUPPORTED, ENOSYS));
+}
+
+# ================================================================
+# Error constructors — with message (heap, cold path)
+# ================================================================
+
+fn err_syscall_failed(errno, message): i64 {
+    return Err(syserr_new(ERR_SYSCALL_FAILED, errno, message));
+}
+
+fn err_invalid_argument(message): i64 {
+    return Err(syserr_new(ERR_INVALID_ARGUMENT, EINVAL, message));
+}
+
+fn err_permission_denied(operation): i64 {
+    return Err(syserr_new(ERR_PERMISSION_DENIED, EPERM, operation));
+}
+
+fn err_module_not_loaded(module): i64 {
+    return Err(syserr_new(ERR_MODULE_NOT_LOADED, ENODEV, module));
+}
+
+fn err_not_supported(feature): i64 {
+    return Err(syserr_new(ERR_NOT_SUPPORTED, ENOSYS, feature));
+}
+
+fn err_unknown(message): i64 {
+    return Err(syserr_new(ERR_UNKNOWN, 0, message));
+}
+
+fn err_io(errno, message): i64 {
+    return Err(syserr_new(ERR_IO, errno, message));
+}
+
+# ================================================================
+# Errno-based error creation — packed (zero alloc, hot path)
+# ================================================================
+
+fn err_from_errno(errno): i64 {
+    if (errno == EPERM) { return err_permission_denied_nr(EPERM); }
+    if (errno == EACCES) { return err_permission_denied_nr(EACCES); }
+    if (errno == EAGAIN) { return err_would_block(); }
+    if (errno == EINVAL) { return err_invalid_argument_nr(); }
+    if (errno == ENOSYS) { return err_not_supported_nr(); }
+    return err_syscall_failed_nr(errno);
+}
+
+fn err_from_syscall_ret(ret): i64 {
+    var errno = 0 - ret;
+    return err_from_errno(errno);
+}
+
+# ================================================================
+# Error printing
+# ================================================================
+
+fn syserr_print(e): i64 {
+    var kind = syserr_kind(e);
+    var msg = syserr_message(e);
+    var msglen = 0;
+    if (msg != 0) { msglen = strlen(msg); }
+
+    # Exhaustive match — every SysErrorKind variant explicit so cyrius
+    # lint catches any future addition that misses a handler. No
+    # `_ =>` opt-out: a missing variant should fail loud (fall through
+    # to the trailing newline + return) rather than silently degrade.
+    match kind {
+        ERR_SYSCALL_FAILED => {
+            sys_write(2, "syscall failed (errno ", 22);
+            var ebuf[24];
+            var elen = fmt_int_buf(syserr_errno(e), &ebuf);
+            sys_write(2, &ebuf, elen);
+            sys_write(2, "): ", 3);
+            sys_write(2, msg, msglen);
+        }
+        ERR_INVALID_ARGUMENT => {
+            sys_write(2, "invalid argument: ", 18);
+            sys_write(2, msg, msglen);
+        }
+        ERR_PERMISSION_DENIED => {
+            sys_write(2, "permission denied: ", 19);
+            sys_write(2, msg, msglen);
+        }
+        ERR_WOULD_BLOCK => {
+            sys_write(2, "resource temporarily unavailable", 32);
+        }
+        ERR_MODULE_NOT_LOADED => {
+            sys_write(2, "kernel module not loaded: ", 25);
+            sys_write(2, msg, msglen);
+        }
+        ERR_NOT_SUPPORTED => {
+            sys_write(2, "feature not supported: ", 23);
+            sys_write(2, msg, msglen);
+        }
+        ERR_UNKNOWN => {
+            sys_write(2, "unknown error: ", 15);
+            sys_write(2, msg, msglen);
+        }
+        ERR_IO => {
+            sys_write(2, "io error (errno ", 16);
+            var ibuf[24];
+            var ilen = fmt_int_buf(syserr_errno(e), &ibuf);
+            sys_write(2, &ibuf, ilen);
+            sys_write(2, "): ", 3);
+            sys_write(2, msg, msglen);
+        }
+    }
+    sys_write(2, "\n", 1);
+    return 0;
+}
+
+# Print error from a Result if it's Err, then return the error code.
+# Returns 0 if the Result is Ok.
+fn result_print_err(res): i64 {
+    if (is_ok(res) == 1) { return 0; }
+    var e = payload(res);
+    syserr_print(e);
+    return syserr_errno(e);
+}
+
+# ================================================================
+# Result helpers for agnosys convention
+# ================================================================
+
+# Propagate error: if res is Err, return it immediately.
+# Use at top of functions: var val = try_unwrap(res); if (val == 0) { ... }
+# Note: Cyrius has no ? operator, so error propagation is manual.
+# Pattern:
+#   var res = some_call();
+#   if (is_err_result(res) == 1) { return res; }
+#   var val = payload(res);
+
+# Check if a syscall return value indicates error (negative = errno)
+fn is_syscall_err(ret): i64 {
+    return ret < 0;
+}
+
+# Wrap a raw syscall return: Ok(ret) if >= 0, Err(from_errno) if < 0
+fn wrap_syscall(ret): i64 {
+    if (ret < 0) { return err_from_syscall_ret(ret); }
+    return Ok(ret);
+}

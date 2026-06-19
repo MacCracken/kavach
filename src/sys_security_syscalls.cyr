@@ -1,0 +1,13 @@
+# sys_security_syscalls.cyr — the agnos-only x86_64 syscall numbers the
+# internalized security/mac/kernel_audit backends need. The landlock / prctl /
+# close numbers come from cyrius's lib/syscalls; only these are agnosys-only.
+# Extracted (NOT the whole per-arch layer) with the agnosys → agnodrm
+# decomposition, to avoid duplicating cyrius's syscall layer.
+enum SecuritySyscall {
+    SYS_UNSHARE = 272;
+    SYS_SOCKET_NR = 41;
+    SYS_BIND_NR = 49;
+    SYS_SENDTO_NR = 44;
+    SYS_RECVFROM_NR = 45;
+    SYS_AGNOS_AUDIT_LOG = 520;
+}

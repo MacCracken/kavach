@@ -5,6 +5,33 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.5.0] — 2026-06-19
+
+**Internalizes the Linux security backends — kavach drops its agnosys dependency.**
+Part of the `agnosys → agnodrm` ecosystem decomposition (agnosys narrows to the
+device model; its subsystems fold to their proper homes). kavach was the heavy
+consumer of agnosys's Landlock/seccomp, MAC, and Linux-audit code (landlock 37×,
+mac 21×, audit 24×) — it now owns those backends directly.
+
+### Changed
+
+- **Internalized agnosys's security backends**: `security.cyr` (Landlock/seccomp/
+  namespaces), `mac.cyr` (SELinux/AppArmor), `kernel_audit.cyr` (Linux audit) +
+  their `sys_error.cyr`/`sys_util.cyr` support, plus `sys_security_syscalls.cyr` —
+  the 6 agnos-only syscall numbers (`SYS_UNSHARE`, the `*_NR` socket nums,
+  `SYS_AGNOS_AUDIT_LOG`). The landlock/prctl/close numbers come from cyrius's
+  `lib/syscalls`, so the full per-arch syscall layer is **not** duplicated.
+- **Dropped `[deps.agnosys]`** (was bundling the entire agnosys distribution).
+- **`[deps.sigil]` 3.7.14 → 3.8.1** — picks up sigil's own agnosys drop, which
+  clears the transitive agnosys that collided with the internalized `sys_error`.
+
+### Notes
+
+- The advisory `log_warn` in `kernel_audit.cyr` (agnosys logging) was dropped —
+  rewire to kavach's logger when one is wired (logging folds to sakshi separately).
+- Verified: `cyrius build src/main.cyr` clean (no duplicate-fn/undefined in the
+  aggregated build).
+
 ## [3.4.2] — 2026-06-15
 
 Toolchain bump to cyrius `6.2.11` and dependency refresh (sigil `3.7.8 →
