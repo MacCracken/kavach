@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.5.2] — 2026-06-22
+
+### Changed
+
+- **cyrius toolchain pin `6.2.11` → `6.2.36`** — aligns with the latest cyrius. Host +
+  `--agnos` builds re-verified clean (the 3.5.1 Linux-MAC agnos gating holds at 6.2.36).
+
 ## [3.5.1] — 2026-06-22
 
 ### Changed
