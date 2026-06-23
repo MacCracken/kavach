@@ -5,6 +5,27 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [3.5.1] — 2026-06-22
+
+### Changed
+
+- **AGNOS build support — gate the Linux MAC stack behind `err_not_supported`** (`src/security.cyr`).
+  AGNOS has none of **Landlock** (FS-confinement), **seccomp-BPF** (syscall-surface
+  filtering), or **namespaces/`unshare`** (isolation), and the unconditional
+  `SYS_LANDLOCK_*` / `SYS_PRCTL` / `SYS_UNSHARE` references made an agnos build fail to
+  even **link**. Each of the three is now `#ifdef CYRIUS_TARGET_AGNOS`-gated to return a
+  structured `err_not_supported("LANDLOCK" | "SECCOMP" | "NAMESPACES")` — the same pattern
+  `mac.cyr` (SELinux/AppArmor) and `kernel_audit.cyr` (NETLINK_AUDIT) already use — so the
+  agnos build **compiles** and the system process gets a clear "this Linux MAC mechanism is
+  unavailable here" signal instead of a build break or a silent `Ok(0)` no-op that would
+  falsely imply confinement was applied. On AGNOS, sandbox confinement is the **capability
+  layer's** responsibility. **Transitional** until AGNOS ships native confinement primitives
+  (tracked in the agnos kernel roadmap's *Deferred* table). Linux behaviour is byte-unchanged
+  (each body lives under `#ifndef CYRIUS_TARGET_AGNOS`). kavach now builds clean for both host
+  and `--agnos`.
+
 ## [3.5.0] — 2026-06-19
 
 **Internalizes the Linux security backends — kavach drops its agnosys dependency.**

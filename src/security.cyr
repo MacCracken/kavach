@@ -59,6 +59,19 @@ fn security_fs_rule_read_write(path): i64 { return security_fs_rule_new(path, FS
 fn security_apply_landlock(rules, count): i64 {
     if (count == 0) { return Ok(0); }
 
+    #ifdef CYRIUS_TARGET_AGNOS
+    # AGNOS has no Landlock (a Linux LSM/MAC primitive). FS confinement on AGNOS
+    # is the capability layer's responsibility, so report a structured "unsupported
+    # on this platform" the system process can surface + branch on — the same way
+    # mac.cyr handles SELinux/AppArmor and kernel_audit.cyr handles NETLINK_AUDIT.
+    # This is deliberately NOT a silent Ok(0): a silent success would falsely imply
+    # the sandbox's FS rules were enforced. Transitional — until AGNOS ships its own
+    # FS-confinement mechanism (the native capability-layer Landlock-equivalent),
+    # at which point this branch calls that instead of returning unsupported.
+    return err_not_supported("LANDLOCK");
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+
     var handled_access = LANDLOCK_ACCESS_FS_READ_FILE
     | LANDLOCK_ACCESS_FS_READ_DIR | LANDLOCK_ACCESS_FS_WRITE_FILE;
 
@@ -126,6 +139,7 @@ fn security_apply_landlock(rules, count): i64 {
     }
 
     return Ok(0);
+    #endif
 }
 
 # ================================================================
@@ -181,6 +195,17 @@ fn security_load_seccomp(filter, filter_len): i64 {
         return err_invalid_argument("seccomp filter too large");
     }
 
+    #ifdef CYRIUS_TARGET_AGNOS
+    # AGNOS has no seccomp-BPF (a Linux syscall-filtering facility). Syscall-surface
+    # restriction on AGNOS is the capability layer's job, so report a structured
+    # "unsupported on this platform" (same pattern as Landlock above) rather than a
+    # silent Ok(0) that would falsely imply the syscall surface was filtered. The
+    # filter is still validated above. Transitional — until AGNOS provides native
+    # syscall-surface filtering, at which point this branch calls that instead.
+    return err_not_supported("SECCOMP");
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+
     # Set no_new_privs
     var ret = syscall(SYS_PRCTL, PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
     if (ret < 0) {
@@ -199,6 +224,7 @@ fn security_load_seccomp(filter, filter_len): i64 {
     }
 
     return Ok(0);
+    #endif
 }
 
 # Create a basic seccomp filter allowing safe syscalls.
@@ -277,6 +303,15 @@ enum NsFlag {
 # flags: bitwise OR of NS_NETWORK, NS_MOUNT, NS_PID, NS_USER
 # Returns Result.
 fn security_create_namespace(flags): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    # AGNOS has no Linux namespaces / unshare(2). Process isolation on AGNOS is the
+    # capability layer's job, so report a structured "unsupported on this platform"
+    # (same pattern as Landlock/seccomp) rather than a silent Ok(0) that would falsely
+    # imply isolation was applied. Transitional — until AGNOS provides native
+    # isolation primitives, at which point this branch calls those instead.
+    return err_not_supported("NAMESPACES");
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
     var sflags = 0;
     if ((flags & NS_NETWORK) != 0) { sflags = sflags | CLONE_NEWNET; }
     if ((flags & NS_MOUNT) != 0) { sflags = sflags | CLONE_NEWNS; }
@@ -292,6 +327,7 @@ fn security_create_namespace(flags): i64 {
     }
 
     return Ok(0);
+    #endif
 }
 
 # ================================================================

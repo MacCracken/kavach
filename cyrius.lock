@@ -1,3 +1,5 @@
+commit	9fbf6e7d8e2c958f4394abf2a471b66bfded7215	sigil	https://github.com/MacCracken/sigil.git	3.8.1
+commit	c64b4b6407dec88558305c410ed38bb6af6a2273	sakshi	https://github.com/MacCracken/sakshi.git	2.3.0
 d9f3b17ddbbe1bba48917c3a679807b01c39c4a1ce776efdbdfbb7a1680e86e4  lib/tagged.cyr
 b0d475d8facaa8ab281bba5d411add5af2bdb595d69f5da28db27cc847ae353a  lib/net.cyr
 d7a14f337a9e8c67ac95023cddf58614a21d8aacd2eb1736da798843ccf0deba  lib/syscalls_macos.cyr
