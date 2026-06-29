@@ -12,6 +12,27 @@ classification, credential proxy, HMAC-SHA256 audit chain — all in pure Cyrius
 
 ## Status
 
+**v3.5.2 — cyrius toolchain pin `6.2.11` → `6.2.36`.** Aligns with the latest
+cyrius. Host + `--agnos` builds re-verified clean (the 3.5.1 Linux-MAC agnos
+gating holds at 6.2.36).
+
+**v3.5.1 — AGNOS build support.** The Linux MAC stack (Landlock / seccomp-BPF /
+namespaces) in `src/security.cyr` is now `#ifdef CYRIUS_TARGET_AGNOS`-gated to
+return a structured `err_not_supported` — AGNOS has none of these mechanisms, so
+the unconditional `SYS_LANDLOCK_*` / `SYS_PRCTL` / `SYS_UNSHARE` references made
+an agnos build fail to even link. On AGNOS, sandbox confinement is the
+**capability layer's** responsibility; this is transitional until AGNOS ships
+native confinement primitives. Linux behaviour is byte-unchanged. kavach now
+builds clean for both host and `--agnos`.
+
+**v3.5.0 — internalizes the Linux security backends; drops the agnosys
+dependency.** Part of the `agnosys → agnodrm` ecosystem decomposition. kavach was
+the heavy consumer of agnosys's Landlock/seccomp, MAC, and Linux-audit code and
+now owns those backends directly: `security.cyr` (Landlock/seccomp/namespaces),
+`mac.cyr` (SELinux/AppArmor), `kernel_audit.cyr` (Linux audit) + their
+`sys_error`/`sys_util` support and `sys_security_syscalls.cyr`. `[deps.agnosys]`
+dropped; `[deps.sigil]` `3.7.14` → `3.8.1` (picks up sigil's own agnosys drop).
+
 **v3.4.0 — Aho-Corasick scanner.** New `src/aho_corasick.cyr` (trie + failure
 + dict links, single O(n) pass). The code scanner's ~109 per-pattern
 `cstr_contains` re-scans (O(patterns × n × m)) collapse into one pass +
@@ -121,14 +142,14 @@ for what's intentionally deferred.
 ## Build
 
 ```sh
-# Requires Cyrius 6.2.11 (pinned in cyrius.cyml; the first-party tree is
+# Requires Cyrius 6.2.36 (pinned in cyrius.cyml; the first-party tree is
 # on the cc 6.2 line — the old 5.10.x sigil-NI asm-offset bisect is
 # retired). The pin matches the installed cycc; if cycc later drifts ahead,
 # skip local fmt writes to avoid minor-version drift.
 
-# 1. Resolve deps — populates lib/ (gitignored) with the cc 6.2.11
-#    stdlib snapshot + sigil 3.7.14 at the pinned tag (with an agnosys
-#    1.4.3 transitive override; see cyrius.cyml).
+# 1. Resolve deps — populates lib/ (gitignored) with the cc 6.2.36
+#    stdlib snapshot + sigil 3.8.1 at the pinned tag (the agnosys
+#    dependency was dropped at 3.5.0; see cyrius.cyml).
 cyrius deps
 
 # 2. Build the binary.
@@ -147,7 +168,7 @@ cyrius audit
 
 Dependencies (declared in [`cyrius.cyml`](cyrius.cyml)):
 - **Cyrius stdlib** — `alloc, args, assert, async, bayan, bench, chrono, ct, dynlib, fdlopen, fmt, fnptr, freelist, fs, hashmap, hashmap_fast, io, keccak, mmap, net, process, random, result, sandhi, slice, str, string, syscalls, tagged, thread, thread_local, tls, vec` (resolved by `cyrius deps` into `lib/`, which is gitignored). The 6.2 line folded the standalone `json`/`base64` modules into `bayan` and retired `bigint` (sigil bundles its own `u256`/`u384`).
-- **[sigil](https://github.com/MacCracken/sigil) 3.7.14** — SHA-256, HMAC-SHA256 (constant-time compare now via the stdlib `ct` module — sigil retired its own `ct_eq` in the 3.x line). Latest tag; the 5.10.x SIGILL bisect that capped it at 2.9.0 no longer applies under cc 6.2.11. sigil pins agnosys `1.4.3` transitively, which kavach also declares as an explicit override (kavach uses agnosys directly; see [`cyrius.cyml`](cyrius.cyml)).
+- **[sigil](https://github.com/MacCracken/sigil) 3.8.1** — SHA-256, HMAC-SHA256 (constant-time compare now via the stdlib `ct` module — sigil retired its own `ct_eq` in the 3.x line). Latest tag; the 5.10.x SIGILL bisect that capped it at 2.9.0 no longer applies under cc 6.2.36. The agnosys dependency was dropped at 3.5.0 — kavach internalized the Linux security backends it used (Landlock/seccomp, MAC, Linux-audit) as `src/` modules; see [`cyrius.cyml`](cyrius.cyml).
 
 ---
 

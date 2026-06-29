@@ -7,7 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [3.5.2] — 2026-06-22
+## [3.5.3] — 2026-06-29
+
+### Fixed
+
+- **AGNOS build — gate `kernel_audit.cyr`'s raw netlink/`syscall()` paths behind
+  `#ifdef CYRIUS_TARGET_AGNOS`** (the same `err_not_supported` pattern `security.cyr`
+  already uses for LANDLOCK/SECCOMP/NAMESPACES). The 3.5.1 CHANGELOG *claimed*
+  `kernel_audit.cyr` already used this gating — it did not; only `security.cyr` was
+  gated. `kernel_audit.cyr`'s `audit_open` / `audit_send_raw` / `audit_recv_raw` /
+  `audit_agnos_log` issued **raw Linux x86_64 syscall numbers** (`socket=41`,
+  `bind=49`, `sendto=44`, `recvfrom=45`, plus `SYS_AGNOS_AUDIT_LOG=520`) that are
+  **catastrophically aliased** on agnos's own 0-62 table — `#41=sleep_ms`,
+  `#44=unassigned`, `#45=getrandom`, `#49=sock_recv`, `#272`/`#520` out of range. On
+  an agnos build a `syscall(49, fd, sockaddr, 12)` would invoke **`sock_recv` with a
+  sockaddr pointer as a destination buffer** — silently memory-unsafe, not merely
+  unsupported. The four entry points now return `err_not_supported("NETLINK_AUDIT" |
+  "SYS_AGNOS_AUDIT_LOG")` on agnos and never reach the aliased numbers; the Linux
+  bodies are unchanged under `#ifndef CYRIUS_TARGET_AGNOS`. The sovereign audit path
+  on agnos is the HMAC-SHA256 hash chain in `audit.cyr` (pure-userspace), not netlink.
+- **`sys_security_syscalls.cyr` — correct the dangerously-misleading header comment.**
+  It described these as "the agnos-only x86_64 syscall numbers"; they are plain
+  **Linux x86_64** numbers, and that mislabel is precisely the confusion that bred
+  the aliasing hazard. The comment now states they are Linux-host numbers, documents
+  the per-number agnos aliasing, and records the invariant: every consumer must
+  reference them **only** inside `#ifndef CYRIUS_TARGET_AGNOS`.
+
+### Notes
+
+- Host build + 413/413 tests green. The `--agnos` build still has a **separate,
+  pre-existing** blocker — `file_append_locked` / `sys_access` resolve in the vendored
+  `lib/io.cyr` only on Linux/macOS/aarch64 syscall layers, not the agnos target (a
+  cyrius-stdlib surface gap under the installed 6.3.5 vs pin 6.2.36). That is a
+  cyrius-side concern, unrelated to this fix, which removes the syscall-aliasing
+  hazard regardless. On agnos, sandbox confinement remains the capability layer's job.
 
 ### Changed
 

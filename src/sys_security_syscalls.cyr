@@ -1,13 +1,26 @@
-# sys_security_syscalls.cyr — the agnos-only x86_64 syscall numbers the
-# internalized security/mac/kernel_audit backends need. The landlock / prctl /
-# close numbers come from cyrius's lib/syscalls; only these are agnosys-only.
-# Extracted (NOT the whole per-arch layer) with the agnosys → agnodrm
-# decomposition, to avoid duplicating cyrius's syscall layer.
+# sys_security_syscalls.cyr — raw x86_64 *LINUX* syscall numbers the
+# internalized security/mac/kernel_audit backends need on the LINUX HOST target.
+# (The prior comment mislabeled these "agnos-only" — they are plain Linux
+# x86_64 numbers; that mislabel is exactly the confusion the 3.5.3 fix corrects.)
+# The landlock / prctl / close numbers come from cyrius's lib/syscalls; only
+# these are kept here. Extracted (NOT the whole per-arch layer) with the
+# agnosys → agnodrm decomposition, to avoid duplicating cyrius's syscall layer.
+#
+# ⚠ DANGER ON AGNOS — these numbers ALIAS catastrophically on agnos's own 0-62
+# syscall table (#41=sleep_ms, #44=unassigned, #45=getrandom, #49=sock_recv;
+# #272/#520 are out of range). A raw syscall() with any of them on agnos would
+# invoke the WRONG sovereign syscall (e.g. syscall(49,fd,sockaddr,12) → sock_recv
+# with a sockaddr pointer as a destination buffer = memory-unsafe garbage).
+# Therefore EVERY consumer of these constants — kernel_audit.cyr
+# (audit_open/send_raw/recv_raw/agnos_log) and security.cyr (unshare) — MUST
+# reference them ONLY inside a `#ifndef CYRIUS_TARGET_AGNOS` branch; the agnos
+# branch returns err_not_supported (the security.cyr precedent). Confinement on
+# agnos is the capability layer's job, not these Linux syscalls.
 enum SecuritySyscall {
-    SYS_UNSHARE = 272;
-    SYS_SOCKET_NR = 41;
-    SYS_BIND_NR = 49;
-    SYS_SENDTO_NR = 44;
-    SYS_RECVFROM_NR = 45;
-    SYS_AGNOS_AUDIT_LOG = 520;
+    SYS_UNSHARE = 272;          # Linux x86_64 unshare   (out of agnos 0-62 range)
+    SYS_SOCKET_NR = 41;         # Linux x86_64 socket    (agnos #41 = sleep_ms!)
+    SYS_BIND_NR = 49;           # Linux x86_64 bind      (agnos #49 = sock_recv!)
+    SYS_SENDTO_NR = 44;         # Linux x86_64 sendto    (agnos #44 = unassigned)
+    SYS_RECVFROM_NR = 45;       # Linux x86_64 recvfrom  (agnos #45 = getrandom!)
+    SYS_AGNOS_AUDIT_LOG = 520;  # claimed-custom; NONEXISTENT on agnos (out of range)
 }
