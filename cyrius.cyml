@@ -5,7 +5,7 @@ description = "Sandbox execution framework — 10 backends, strength scoring (0-
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/kavach"
 language = "cyrius"
-cyrius = "6.2.36"
+cyrius = "6.3.15"
 
 [build]
 entry = "src/main.cyr"
@@ -84,7 +84,8 @@ stdlib = [
 # Bump in lockstep with the cyrius pin and re-validate.
 [deps.sigil]
 git = "https://github.com/MacCracken/sigil.git"
-tag = "3.8.1"
+path = "../sigil"
+tag = "3.9.8"
 modules = ["dist/sigil.cyr"]
 
 # Transitive override. sigil 3.7.14 already pins agnosys 1.4.3, but

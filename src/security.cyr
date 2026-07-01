@@ -75,8 +75,12 @@ fn security_apply_landlock(rules, count): i64 {
     var handled_access = LANDLOCK_ACCESS_FS_READ_FILE
     | LANDLOCK_ACCESS_FS_READ_DIR | LANDLOCK_ACCESS_FS_WRITE_FILE;
 
-    # LandlockRulesetAttr: { handled_access_fs: u64 } = 8 bytes
-    var attr[1];
+    # LandlockRulesetAttr: { handled_access_fs: u64 } = 8 bytes.
+    # Function-local `var X[N]` is N BYTES (cyrius 6.3.13 moved these to
+    # the guard-paged thread stack), so this must be [8] to hold the u64
+    # store64 below — `var attr[1]` was a 1-byte local taking an 8-byte
+    # write, a latent stack smash that 6.3.13+ turns into a hard fault.
+    var attr[8];
     store64(&attr, handled_access);
 
     var ruleset_fd = syscall(SYS_LANDLOCK_CREATE_RULESET, &attr, 8, 0);

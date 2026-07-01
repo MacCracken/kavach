@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.5.4] — 2026-06-30
+
+Tier-4 (consumer) step of the coordinated base-security-stack migration
+to cyrius **6.3.15**. Toolchain pin + sigil refresh, plus one var-bomb
+fix the 6.3.13 stack-locals change turns from latent to fatal. All 413
+assertions pass on the new stack.
+
+### Changed
+
+- **Cyrius toolchain pin: 6.2.36 → 6.3.15.**
+- **Dependency**: sigil **3.9.8** (was 3.8.1).
+
+### Fixed
+
+- **Landlock ruleset-attr stack smash** (`src/security.cyr`,
+  non-agnos path). `var attr[1]` is a **1-byte** function-local (cyrius
+  6.3.13 moved these to the guard-paged thread stack, where a local
+  `var X[N]` allocates N bytes), but the code does `store64(&attr,
+  handled_access)` — an 8-byte write — and passes `&attr, 8` to
+  `SYS_LANDLOCK_CREATE_RULESET`. Benign before (scribbled an adjacent
+  local), a hard fault under 6.3.13+. Sized to `var attr[8]` to hold the
+  u64 `LandlockRulesetAttr`.
+
 ## [3.5.3] — 2026-06-29
 
 ### Fixed
