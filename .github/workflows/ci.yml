@@ -127,6 +127,23 @@ jobs:
       - name: Verify ELF
         run: xxd -l 4 build/kavach | grep -q "7f45 4c46"
 
+      - name: Verify dist bundle fresh
+        # kavach is consumable as a source-level library: the committed
+        # single-file bundle `dist/kavach.cyr` + its `dist/kavach.deps`
+        # stdlib sidecar are what downstream (mehman's M1 host, …) import
+        # via `[deps.kavach] modules = ["dist/kavach.cyr"]`. `cyrius
+        # distlib` regenerates both from the `[lib]` modules in
+        # cyrius.cyml; regenerate here so the gate can't pass on a stale
+        # committed bundle. Same pattern as sigil / bhumi CI.
+        run: |
+          cyrius distlib
+          if ! git diff --quiet dist/kavach.cyr dist/kavach.deps; then
+            echo "dist/kavach.cyr or dist/kavach.deps is stale — run \`cyrius distlib\` and commit"
+            git --no-pager diff --stat dist/kavach.cyr dist/kavach.deps
+            exit 1
+          fi
+          echo "dist bundle is fresh"
+
       - name: Smoke test
         run: |
           ./build/kavach > /tmp/kavach_out 2>&1 || true

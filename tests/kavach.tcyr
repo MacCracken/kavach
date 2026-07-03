@@ -131,9 +131,9 @@ fn test_score_modifiers() {
 
 fn test_err_names() {
     test_group("error_names");
-    assert_eq(streq(kavach_err_name(KavachError.OK), "ok"), 1, "OK → ok");
-    assert_eq(streq(kavach_err_name(KavachError.TIMEOUT), "sandbox timeout"), 1, "TIMEOUT → sandbox timeout");
-    assert_eq(streq(kavach_err_name(KavachError.POLICY_VIOLATION), "policy violation"), 1, "POLICY → policy violation");
+    assert_eq(streq(kavach_err_name(KAVACH_ERR_OK), "ok"), 1, "OK → ok");
+    assert_eq(streq(kavach_err_name(KAVACH_ERR_TIMEOUT), "sandbox timeout"), 1, "TIMEOUT → sandbox timeout");
+    assert_eq(streq(kavach_err_name(KAVACH_ERR_POLICY_VIOLATION), "policy violation"), 1, "POLICY → policy violation");
     return 0;
 }
 
@@ -201,18 +201,18 @@ fn test_sandbox_create_and_transition() {
     assert_eq(Sandbox_state(sb), SandboxState.CREATED, "initial state created");
     assert_eq(Sandbox_started_at(sb), 0, "started_at unset");
 
-    assert_eq(sandbox_transition(sb, SandboxState.RUNNING), KavachError.OK, "start");
+    assert_eq(sandbox_transition(sb, SandboxState.RUNNING), KAVACH_ERR_OK, "start");
     assert_eq(Sandbox_state(sb), SandboxState.RUNNING, "state running");
     assert(Sandbox_started_at(sb) != 0, "started_at set");
 
     # Invalid jump running -> created
-    assert_eq(sandbox_transition(sb, SandboxState.CREATED), KavachError.INVALID_TRANSITION, "running->created rejected");
+    assert_eq(sandbox_transition(sb, SandboxState.CREATED), KAVACH_ERR_INVALID_TRANSITION, "running->created rejected");
     assert_eq(Sandbox_state(sb), SandboxState.RUNNING, "state unchanged on reject");
 
-    assert_eq(sandbox_transition(sb, SandboxState.STOPPED), KavachError.OK, "stop");
+    assert_eq(sandbox_transition(sb, SandboxState.STOPPED), KAVACH_ERR_OK, "stop");
     assert(Sandbox_stopped_at(sb) != 0, "stopped_at set");
 
-    assert_eq(sandbox_transition(sb, SandboxState.DESTROYED), KavachError.OK, "destroy");
+    assert_eq(sandbox_transition(sb, SandboxState.DESTROYED), KAVACH_ERR_OK, "destroy");
     assert_eq(Sandbox_state(sb), SandboxState.DESTROYED, "state destroyed");
     return 0;
 }
@@ -223,7 +223,7 @@ fn test_sandbox_destroy_from_running() {
     config_backend(c, Backend.NOOP);
     var sb = sandbox_create(c);
     sandbox_transition(sb, SandboxState.RUNNING);
-    assert_eq(sandbox_destroy(sb), KavachError.OK, "destroy from running");
+    assert_eq(sandbox_destroy(sb), KAVACH_ERR_OK, "destroy from running");
     assert_eq(Sandbox_state(sb), SandboxState.DESTROYED, "destroyed");
     return 0;
 }
@@ -240,7 +240,7 @@ fn test_sandbox_pool() {
     assert(s1 != 0, "claim 1");
     assert_eq(sandbox_pool_available(pool), 2, "2 left");
 
-    assert_eq(sandbox_pool_replenish(pool), KavachError.OK, "replenish");
+    assert_eq(sandbox_pool_replenish(pool), KAVACH_ERR_OK, "replenish");
     assert_eq(sandbox_pool_available(pool), 3, "refilled to 3");
     return 0;
 }

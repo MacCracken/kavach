@@ -45,7 +45,7 @@ fn backend_dispatch_exec(sandbox, command) {
     var bid = SandboxConfig_backend(Sandbox_config(sandbox));
     var fp = _backend_fp(bid, 0);
     if (fp == 0) {
-        kavach_err_print(KavachError.BACKEND_UNAVAILABLE, backend_name(bid));
+        kavach_err_print(KAVACH_ERR_BACKEND_UNAVAILABLE, backend_name(bid));
         return 0;
     }
     return fncall2(fp, sandbox, command);

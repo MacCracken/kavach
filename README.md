@@ -170,6 +170,86 @@ Dependencies (declared in [`cyrius.cyml`](cyrius.cyml)):
 - **Cyrius stdlib** — `alloc, args, assert, async, bayan, bench, chrono, ct, dynlib, fdlopen, fmt, fnptr, freelist, fs, hashmap, hashmap_fast, io, keccak, mmap, net, process, random, result, sandhi, slice, str, string, syscalls, tagged, thread, thread_local, tls, vec` (resolved by `cyrius deps` into `lib/`, which is gitignored). The 6.2 line folded the standalone `json`/`base64` modules into `bayan` and retired `bigint` (sigil bundles its own `u256`/`u384`).
 - **[sigil](https://github.com/MacCracken/sigil) 3.8.1** — SHA-256, HMAC-SHA256 (constant-time compare now via the stdlib `ct` module — sigil retired its own `ct_eq` in the 3.x line). Latest tag; the 5.10.x SIGILL bisect that capped it at 2.9.0 no longer applies under cc 6.2.36. The agnosys dependency was dropped at 3.5.0 — kavach internalized the Linux security backends it used (Landlock/seccomp, MAC, Linux-audit) as `src/` modules; see [`cyrius.cyml`](cyrius.cyml).
 
+## Consume kavach as a library (v3.6.0+)
+
+kavach ships a committed single-file source bundle, `dist/kavach.cyr`, so
+downstream Cyrius projects can embed the sandbox surface at the source
+level (the same shape the tree uses for sigil/patra/bhumi). In the
+consumer's `cyrius.cyml`:
+
+```toml
+[deps.kavach]
+git     = "https://github.com/MacCracken/kavach.git"
+path    = "../kavach"          # local sibling checkout (optional)
+tag     = "3.6.0"
+modules = ["dist/kavach.cyr"]
+
+# REQUIRED: kavach's transitive stdlib. `cyrius distlib` records only
+# kavach's *direct* leaves in dist/kavach.deps; the bundle also pulls sigil
+# (crypto: ct/keccak/thread/thread_local) and, via the credential proxy,
+# sandhi (→ tls, and async) + bayan + the dynlib/fdlopen/mmap load paths.
+# Per the Cyrius model the CONSUMER declares stdlib (distlib prints "stdlib
+# is supplied by the consumer's [deps] stdlib list"); a consumer that omits
+# these fails to LINK — undefined thread_local_* / sandhi_server_* /
+# async_* / fdlopen_* / TLS_BACKEND_LIBSSL. Curating a minimal subset is
+# fragile (the transitive needs cascade), so mirror kavach's own
+# [deps].stdlib. The verified-working set (kavach's [deps].stdlib minus the
+# test-only args/assert/bench) is:
+[deps]
+stdlib = [
+    "alloc", "async", "bayan", "chrono", "ct", "dynlib", "fdlopen", "fmt",
+    "fnptr", "freelist", "fs", "hashmap", "hashmap_fast", "io", "keccak",
+    "mmap", "net", "process", "random", "result", "sandhi", "slice", "str",
+    "string", "syscalls", "tagged", "thread", "thread_local", "tls", "vec",
+]
+```
+
+Then `cyrius deps` materializes the bundle as the consumer's
+`lib/kavach.cyr` and vendors the stdlib above (the transitive **sigil**
+dep — and its own transitive sandhi/sakshi — resolve from kavach's
+`[deps.sigil]`). Source-include it and call the surface:
+
+```cyrius
+include "lib/kavach.cyr"
+
+fn app() {
+    kavach_init();
+    var cfg = config_new();
+    config_backend(cfg, Backend.PROCESS);
+    var sb = sandbox_create(cfg);
+    sandbox_transition(sb, SandboxState.RUNNING);
+    var r = sandbox_exec(sb, "echo hello");
+    sandbox_destroy(sb);
+    return 0;
+}
+```
+
+The bundle excludes the program surface (`main()`, the demo, the top-level
+`syscall(SYS_EXIT)`) that lives in `src/main.cyr`. Maintainers regenerate
+the bundle after any `[lib]` module change with **`cyrius distlib`** (the
+standard first-party dist flow, same as sigil/patra/bhumi); CI gates its
+freshness. See
+[ADR-006](docs/adr/006-library-surface-and-bundle-generation.md).
+
+**Known integration caveats** (kavach is a heavy security engine — see
+ADR-006 §Consequences):
+
+- **Benign symbol overlaps.** kavach and sigil each internalized an
+  `sys_error`/`sys_util` (the agnosys→agnodrm split), so a consumer sees
+  `duplicate fn 'err_*' / 'agnosys_*' / 'syserr_*'` (`last definition
+  wins`) warnings — the same ones kavach's own build emits. Non-fatal.
+- **Namespaced error kinds (no `ERR_UNKNOWN` collision).** kavach's
+  `SysErrorKind` members are prefixed `KAVACH_ERR_*` — e.g.
+  `KAVACH_ERR_UNKNOWN = 7`, `KAVACH_ERR_SYSCALL_FAILED = 1` — precisely so
+  they cannot collide with the generic `ERR_*` constants other deps mint,
+  notably sakshi (sigil's tracing dep), whose `ERR_UNKNOWN = 1` would
+  otherwise clash under last-def-wins. A consumer can distinguish every
+  kavach error kind, and the generic `ERR_*` names stay free for sakshi and
+  friends. (The constructor/accessor API — `err_unknown()`, `syserr_kind()`,
+  … — is unchanged; only the enum constant names carry the prefix.)
+- **~13 MB static scan tables** ride along; build with `CYRIUS_DCE=1` to
+  drop the unreachable surface.
+
 ---
 
 ## Quick start

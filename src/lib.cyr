@@ -1,0 +1,83 @@
+# lib.cyr — kavach public library entry point
+#
+# Sandbox execution framework — 10 backends, strength scoring (0-100),
+# 3-scanner externalization gate, HMAC audit chain, threat classification.
+#
+# This is the LIBRARY aggregation header: the domain `src/*.cyr` modules
+# in dependency order WITHOUT the program surface (no `main()`, no demo,
+# no top-level `syscall(SYS_EXIT)`) — that program surface lives in
+# `src/main.cyr`, which is the in-tree smoke/demo entry and is
+# intentionally NOT part of the library.
+#
+# Consumers do NOT include this file directly. They depend on the
+# committed single-file bundle:
+#
+#     [deps.kavach]
+#     git     = "https://github.com/MacCracken/kavach.git"
+#     path    = "../kavach"
+#     tag     = "<VERSION>"
+#     modules = ["dist/kavach.cyr"]
+#
+# `cyrius deps` materializes that bundle into the consumer's
+# `lib/kavach.cyr` (and, via `dist/kavach.deps`, vendors the stdlib
+# leaves the bundle needs; the transitive sigil dep resolves from the
+# `[deps.sigil]` entry in this repo's cyrius.cyml). The consumer then
+# `include`s `lib/kavach.cyr`.
+#
+# Stdlib is NOT hand-included here: like `src/main.cyr`, this header
+# relies on the cyrius auto-prepend union declared in `[deps].stdlib`.
+# Validate the header in-tree with:
+#
+#     cyrius check --with-deps src/lib.cyr
+#
+# The module ORDER below mirrors the `[lib].modules` list in cyrius.cyml,
+# which is what `cyrius distlib` reads to (re)build `dist/kavach.cyr` +
+# `dist/kavach.deps`. `[lib].modules` is the generator's source of truth;
+# keep this header in the same order so the two stay legible together.
+
+include "src/util.cyr"
+include "src/error.cyr"
+# Internalized agnosys Linux security backends (Landlock/seccomp = security.cyr,
+# SELinux/AppArmor = mac.cyr, Linux audit = kernel_audit.cyr) + sys_error/sys_util
+# support + the 6 agnos-only security syscall consts — the agnosys → agnodrm
+# decomposition (kavach owns the LSM/MAC/audit backends it already consumed; the
+# landlock/prctl numbers come from cyrius's lib/syscalls). Before their users.
+include "src/sys_security_syscalls.cyr"
+include "src/sys_error.cyr"
+include "src/sys_util.cyr"
+include "src/security.cyr"
+include "src/mac.cyr"
+include "src/kernel_audit.cyr"
+include "src/backend.cyr"
+include "src/policy.cyr"
+include "src/scoring.cyr"
+include "src/lifecycle.cyr"
+include "src/scanning_types.cyr"
+include "src/aho_corasick.cyr"
+include "src/scanning_secrets.cyr"
+include "src/scanning_code.cyr"
+include "src/scanning_data.cyr"
+include "src/scanning_gate.cyr"
+include "src/scanning_runtime.cyr"
+include "src/scanning_threat.cyr"
+include "src/audit.cyr"
+include "src/credential.cyr"
+include "src/credential_http.cyr"
+include "src/quarantine.cyr"
+include "src/cgroup.cyr"
+include "src/oci_spec.cyr"
+include "src/backend_dispatch.cyr"
+include "src/backend_noop.cyr"
+include "src/backend_process.cyr"
+include "src/backend_gvisor.cyr"
+include "src/backend_oci.cyr"
+include "src/backend_wasm.cyr"
+include "src/backend_sy_agnos.cyr"
+include "src/backend_sgx.cyr"
+include "src/backend_sev.cyr"
+include "src/backend_tdx.cyr"
+include "src/backend_firecracker.cyr"
+include "src/composite.cyr"
+include "src/observability.cyr"
+include "src/attestation.cyr"
+include "src/sandbox_exec.cyr"

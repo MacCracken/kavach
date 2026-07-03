@@ -16,14 +16,14 @@
 # ================================================================
 
 enum SysErrorKind {
-    ERR_SYSCALL_FAILED = 1;
-    ERR_INVALID_ARGUMENT = 2;
-    ERR_PERMISSION_DENIED = 3;
-    ERR_WOULD_BLOCK = 4;
-    ERR_MODULE_NOT_LOADED = 5;
-    ERR_NOT_SUPPORTED = 6;
-    ERR_UNKNOWN = 7;
-    ERR_IO = 8;
+    KAVACH_ERR_SYSCALL_FAILED = 1;
+    KAVACH_ERR_INVALID_ARGUMENT = 2;
+    KAVACH_ERR_PERMISSION_DENIED = 3;
+    KAVACH_ERR_WOULD_BLOCK = 4;
+    KAVACH_ERR_MODULE_NOT_LOADED = 5;
+    KAVACH_ERR_NOT_SUPPORTED = 6;
+    KAVACH_ERR_UNKNOWN = 7;
+    KAVACH_ERR_IO = 8;
 }
 
 # ================================================================
@@ -113,23 +113,23 @@ fn syserr_message(e): i64 {
 # ================================================================
 
 fn err_syscall_failed_nr(errno): i64 {
-    return Err(syserr_pack(ERR_SYSCALL_FAILED, errno));
+    return Err(syserr_pack(KAVACH_ERR_SYSCALL_FAILED, errno));
 }
 
 fn err_permission_denied_nr(errno): i64 {
-    return Err(syserr_pack(ERR_PERMISSION_DENIED, errno));
+    return Err(syserr_pack(KAVACH_ERR_PERMISSION_DENIED, errno));
 }
 
 fn err_would_block(): i64 {
-    return Err(syserr_pack(ERR_WOULD_BLOCK, EAGAIN));
+    return Err(syserr_pack(KAVACH_ERR_WOULD_BLOCK, EAGAIN));
 }
 
 fn err_invalid_argument_nr(): i64 {
-    return Err(syserr_pack(ERR_INVALID_ARGUMENT, EINVAL));
+    return Err(syserr_pack(KAVACH_ERR_INVALID_ARGUMENT, EINVAL));
 }
 
 fn err_not_supported_nr(): i64 {
-    return Err(syserr_pack(ERR_NOT_SUPPORTED, ENOSYS));
+    return Err(syserr_pack(KAVACH_ERR_NOT_SUPPORTED, ENOSYS));
 }
 
 # ================================================================
@@ -137,31 +137,31 @@ fn err_not_supported_nr(): i64 {
 # ================================================================
 
 fn err_syscall_failed(errno, message): i64 {
-    return Err(syserr_new(ERR_SYSCALL_FAILED, errno, message));
+    return Err(syserr_new(KAVACH_ERR_SYSCALL_FAILED, errno, message));
 }
 
 fn err_invalid_argument(message): i64 {
-    return Err(syserr_new(ERR_INVALID_ARGUMENT, EINVAL, message));
+    return Err(syserr_new(KAVACH_ERR_INVALID_ARGUMENT, EINVAL, message));
 }
 
 fn err_permission_denied(operation): i64 {
-    return Err(syserr_new(ERR_PERMISSION_DENIED, EPERM, operation));
+    return Err(syserr_new(KAVACH_ERR_PERMISSION_DENIED, EPERM, operation));
 }
 
 fn err_module_not_loaded(module): i64 {
-    return Err(syserr_new(ERR_MODULE_NOT_LOADED, ENODEV, module));
+    return Err(syserr_new(KAVACH_ERR_MODULE_NOT_LOADED, ENODEV, module));
 }
 
 fn err_not_supported(feature): i64 {
-    return Err(syserr_new(ERR_NOT_SUPPORTED, ENOSYS, feature));
+    return Err(syserr_new(KAVACH_ERR_NOT_SUPPORTED, ENOSYS, feature));
 }
 
 fn err_unknown(message): i64 {
-    return Err(syserr_new(ERR_UNKNOWN, 0, message));
+    return Err(syserr_new(KAVACH_ERR_UNKNOWN, 0, message));
 }
 
 fn err_io(errno, message): i64 {
-    return Err(syserr_new(ERR_IO, errno, message));
+    return Err(syserr_new(KAVACH_ERR_IO, errno, message));
 }
 
 # ================================================================
@@ -197,7 +197,7 @@ fn syserr_print(e): i64 {
     # `_ =>` opt-out: a missing variant should fail loud (fall through
     # to the trailing newline + return) rather than silently degrade.
     match kind {
-        ERR_SYSCALL_FAILED => {
+        KAVACH_ERR_SYSCALL_FAILED => {
             sys_write(2, "syscall failed (errno ", 22);
             var ebuf[24];
             var elen = fmt_int_buf(syserr_errno(e), &ebuf);
@@ -205,30 +205,30 @@ fn syserr_print(e): i64 {
             sys_write(2, "): ", 3);
             sys_write(2, msg, msglen);
         }
-        ERR_INVALID_ARGUMENT => {
+        KAVACH_ERR_INVALID_ARGUMENT => {
             sys_write(2, "invalid argument: ", 18);
             sys_write(2, msg, msglen);
         }
-        ERR_PERMISSION_DENIED => {
+        KAVACH_ERR_PERMISSION_DENIED => {
             sys_write(2, "permission denied: ", 19);
             sys_write(2, msg, msglen);
         }
-        ERR_WOULD_BLOCK => {
+        KAVACH_ERR_WOULD_BLOCK => {
             sys_write(2, "resource temporarily unavailable", 32);
         }
-        ERR_MODULE_NOT_LOADED => {
+        KAVACH_ERR_MODULE_NOT_LOADED => {
             sys_write(2, "kernel module not loaded: ", 25);
             sys_write(2, msg, msglen);
         }
-        ERR_NOT_SUPPORTED => {
+        KAVACH_ERR_NOT_SUPPORTED => {
             sys_write(2, "feature not supported: ", 23);
             sys_write(2, msg, msglen);
         }
-        ERR_UNKNOWN => {
+        KAVACH_ERR_UNKNOWN => {
             sys_write(2, "unknown error: ", 15);
             sys_write(2, msg, msglen);
         }
-        ERR_IO => {
+        KAVACH_ERR_IO => {
             sys_write(2, "io error (errno ", 16);
             var ibuf[24];
             var ilen = fmt_int_buf(syserr_errno(e), &ibuf);

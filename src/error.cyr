@@ -1,32 +1,42 @@
 # kavach — error codes
 # Ported from rust-old/src/error.rs
+#
+# Members are namespaced `KAVACH_ERR_*` — the same crate-name prefix
+# convention as `SysErrorKind` (src/sys_error.cyr). Cyrius hoists enum
+# members to global constants under "last definition wins", and qualified
+# `KavachError.X` access is only sugar for that hoisted global (verified:
+# a two-enum consumer probe had `KavachError.OK` resolve to a later dep's
+# generic `OK`, not 0). Bare generic names (`OK`, `TIMEOUT`, `IO_ERROR`,
+# `OTHER`) would therefore silently collide with any dep minting the same
+# names — in either direction. The `KAVACH_ERR_*` prefix keeps every member
+# globally unique so no consumer surface can clash. See ADR-006 §4.
 
 enum KavachError {
-    OK = 0;
-    BACKEND_UNAVAILABLE = 1;
-    CREATION_FAILED = 2;
-    EXEC_FAILED = 3;
-    TIMEOUT = 4;
-    POLICY_VIOLATION = 5;
-    CREDENTIAL_ERROR = 6;
-    INVALID_TRANSITION = 7;
-    EXTERNALIZATION_BLOCKED = 8;
-    IO_ERROR = 9;
-    OTHER = 10;
+    KAVACH_ERR_OK = 0;
+    KAVACH_ERR_BACKEND_UNAVAILABLE = 1;
+    KAVACH_ERR_CREATION_FAILED = 2;
+    KAVACH_ERR_EXEC_FAILED = 3;
+    KAVACH_ERR_TIMEOUT = 4;
+    KAVACH_ERR_POLICY_VIOLATION = 5;
+    KAVACH_ERR_CREDENTIAL_ERROR = 6;
+    KAVACH_ERR_INVALID_TRANSITION = 7;
+    KAVACH_ERR_EXTERNALIZATION_BLOCKED = 8;
+    KAVACH_ERR_IO_ERROR = 9;
+    KAVACH_ERR_OTHER = 10;
 }
 
 fn kavach_err_name(code) {
-    if (code == KavachError.OK) { return "ok"; }
-    if (code == KavachError.BACKEND_UNAVAILABLE) { return "backend not available"; }
-    if (code == KavachError.CREATION_FAILED) { return "sandbox creation failed"; }
-    if (code == KavachError.EXEC_FAILED) { return "sandbox execution failed"; }
-    if (code == KavachError.TIMEOUT) { return "sandbox timeout"; }
-    if (code == KavachError.POLICY_VIOLATION) { return "policy violation"; }
-    if (code == KavachError.CREDENTIAL_ERROR) { return "credential error"; }
-    if (code == KavachError.INVALID_TRANSITION) { return "lifecycle error"; }
-    if (code == KavachError.EXTERNALIZATION_BLOCKED) { return "externalization blocked"; }
-    if (code == KavachError.IO_ERROR) { return "i/o error"; }
-    if (code == KavachError.OTHER) { return "error"; }
+    if (code == KAVACH_ERR_OK) { return "ok"; }
+    if (code == KAVACH_ERR_BACKEND_UNAVAILABLE) { return "backend not available"; }
+    if (code == KAVACH_ERR_CREATION_FAILED) { return "sandbox creation failed"; }
+    if (code == KAVACH_ERR_EXEC_FAILED) { return "sandbox execution failed"; }
+    if (code == KAVACH_ERR_TIMEOUT) { return "sandbox timeout"; }
+    if (code == KAVACH_ERR_POLICY_VIOLATION) { return "policy violation"; }
+    if (code == KAVACH_ERR_CREDENTIAL_ERROR) { return "credential error"; }
+    if (code == KAVACH_ERR_INVALID_TRANSITION) { return "lifecycle error"; }
+    if (code == KAVACH_ERR_EXTERNALIZATION_BLOCKED) { return "externalization blocked"; }
+    if (code == KAVACH_ERR_IO_ERROR) { return "i/o error"; }
+    if (code == KAVACH_ERR_OTHER) { return "error"; }
     return "unknown error";
 }
 

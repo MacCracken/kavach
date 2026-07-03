@@ -193,7 +193,7 @@ fn audit_chain_record(chain, event_type, payload) {
     # wrapper is scheduled for Cyrius stdlib 4.4.0; until then this
     # best-effort chmod is the hardening path — see ADR-005 §C4.)
     if (file_append_locked(AuditChain_log_path(chain), line, strlen(line)) < 0) {
-        kavach_err_print(KavachError.IO_ERROR, "audit chain write failed");
+        kavach_err_print(KAVACH_ERR_IO_ERROR, "audit chain write failed");
         return 0;
     }
     file_restrict_mode(AuditChain_log_path(chain));

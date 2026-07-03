@@ -162,7 +162,7 @@ fn mono_now_ns() {
 fn sandbox_create(config) {
     var b = SandboxConfig_backend(config);
     if (backend_is_available(b) == 0) {
-        kavach_err_print(KavachError.BACKEND_UNAVAILABLE, backend_name(b));
+        kavach_err_print(KAVACH_ERR_BACKEND_UNAVAILABLE, backend_name(b));
         return 0;
     }
     var s = alloc(SANDBOX_SIZE);
@@ -175,12 +175,12 @@ fn sandbox_create(config) {
     return s;
 }
 
-# Transition to a new state. Returns KavachError.OK on success,
-# KavachError.INVALID_TRANSITION otherwise.
+# Transition to a new state. Returns KAVACH_ERR_OK on success,
+# KAVACH_ERR_INVALID_TRANSITION otherwise.
 fn sandbox_transition(s, to) {
     var from = Sandbox_state(s);
     if (valid_transition(from, to) == 0) {
-        return KavachError.INVALID_TRANSITION;
+        return KAVACH_ERR_INVALID_TRANSITION;
     }
     Sandbox_set_state(s, to);
     if (to == SandboxState.RUNNING) {
@@ -188,7 +188,7 @@ fn sandbox_transition(s, to) {
     }
     if (to == SandboxState.STOPPED) { Sandbox_set_stopped_at(s, mono_now_ns()); }
     if (to == SandboxState.DESTROYED) { Sandbox_set_stopped_at(s, mono_now_ns()); }
-    return KavachError.OK;
+    return KAVACH_ERR_OK;
 }
 
 # Destroy the sandbox. Transitions through STOPPED if still running.
@@ -242,10 +242,10 @@ fn sandbox_pool_replenish(p) {
     var target = SandboxPool_warm_count(p);
     while (vec_len(v) < target) {
         var sb = sandbox_create(SandboxPool_template(p));
-        if (sb == 0) { return KavachError.CREATION_FAILED; }
+        if (sb == 0) { return KAVACH_ERR_CREATION_FAILED; }
         vec_push(v, sb);
     }
-    return KavachError.OK;
+    return KAVACH_ERR_OK;
 }
 
 fn sandbox_pool_available(p) {

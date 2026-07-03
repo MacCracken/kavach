@@ -11,6 +11,74 @@ cyrius = "6.3.15"
 entry = "src/main.cyr"
 output = "build/kavach"
 
+# ── Library surface ──────────────────────────────────────────────
+# kavach is consumable at the source level as a single-file bundle,
+# `dist/kavach.cyr` (committed). `modules` lists the domain `src/*.cyr`
+# files, in dependency order, that `cyrius distlib` concatenates to
+# (re)build that bundle (and its `dist/kavach.deps` stdlib sidecar).
+# This is the standard first-party dist flow — same as sigil, patra,
+# and bhumi: `[lib].modules` here is the generator's single source of
+# truth; `src/lib.cyr` mirrors this order as the human-facing header.
+#
+# Regenerate with `cyrius distlib` after changing any [lib] module; CI
+# gates freshness (.github/workflows/ci.yml "Verify dist bundle fresh":
+# runs distlib, fails if dist/ differs). scripts/version-bump.sh also
+# re-runs distlib so the bundle header restamps the version.
+#
+# src/main.cyr is INTENTIONALLY excluded — it is the in-tree program
+# entry (its own `main()` + end-to-end demo + top-level
+# `syscall(SYS_EXIT)`); bundling it would inline a `main()` and a demo
+# into every consumer and duplicate the module bodies (same lesson
+# bhumi/agnosys learned). src/lib.cyr is also excluded: it is a pure
+# aggregation header (only `include` directives), so bundling it would
+# add unresolved `include "src/..."` lines to the flat bundle.
+[lib]
+modules = [
+    "src/util.cyr",
+    "src/error.cyr",
+    # Internalized agnosys Linux security backends + sys_error/sys_util
+    # support + the agnos-only security syscall consts. Before their users.
+    "src/sys_security_syscalls.cyr",
+    "src/sys_error.cyr",
+    "src/sys_util.cyr",
+    "src/security.cyr",
+    "src/mac.cyr",
+    "src/kernel_audit.cyr",
+    "src/backend.cyr",
+    "src/policy.cyr",
+    "src/scoring.cyr",
+    "src/lifecycle.cyr",
+    "src/scanning_types.cyr",
+    "src/aho_corasick.cyr",
+    "src/scanning_secrets.cyr",
+    "src/scanning_code.cyr",
+    "src/scanning_data.cyr",
+    "src/scanning_gate.cyr",
+    "src/scanning_runtime.cyr",
+    "src/scanning_threat.cyr",
+    "src/audit.cyr",
+    "src/credential.cyr",
+    "src/credential_http.cyr",
+    "src/quarantine.cyr",
+    "src/cgroup.cyr",
+    "src/oci_spec.cyr",
+    "src/backend_dispatch.cyr",
+    "src/backend_noop.cyr",
+    "src/backend_process.cyr",
+    "src/backend_gvisor.cyr",
+    "src/backend_oci.cyr",
+    "src/backend_wasm.cyr",
+    "src/backend_sy_agnos.cyr",
+    "src/backend_sgx.cyr",
+    "src/backend_sev.cyr",
+    "src/backend_tdx.cyr",
+    "src/backend_firecracker.cyr",
+    "src/composite.cyr",
+    "src/observability.cyr",
+    "src/attestation.cyr",
+    "src/sandbox_exec.cyr",
+]
+
 # ── Dependencies ─────────────────────────────────────────────────
 # Cyrius-stdlib modules vendored into lib/ by `cyrius deps`. kavach
 # includes them transitively via the modules under src/; the list

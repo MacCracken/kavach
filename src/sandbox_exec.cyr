@@ -52,7 +52,7 @@ fn _audit_record_if(chain, event_type, payload) {
 # Returns ExecResult* on PASS/WARN, 0 on BLOCK/QUARANTINE/error.
 fn sandbox_exec(sandbox, command) {
     if (Sandbox_state(sandbox) != SandboxState.RUNNING) {
-        kavach_err_print(KavachError.EXEC_FAILED, "sandbox not running");
+        kavach_err_print(KAVACH_ERR_EXEC_FAILED, "sandbox not running");
         return 0;
     }
 
@@ -85,11 +85,11 @@ fn sandbox_exec(sandbox, command) {
     }
 
     if (verdict == ScanVerdict.BLOCK) {
-        kavach_err_print(KavachError.EXTERNALIZATION_BLOCKED, "blocked by gate");
+        kavach_err_print(KAVACH_ERR_EXTERNALIZATION_BLOCKED, "blocked by gate");
         return 0;
     }
     if (verdict == ScanVerdict.QUARANTINE) {
-        kavach_err_print(KavachError.EXTERNALIZATION_BLOCKED, "quarantined");
+        kavach_err_print(KAVACH_ERR_EXTERNALIZATION_BLOCKED, "quarantined");
         return 0;
     }
     return result;

@@ -50,7 +50,7 @@ parsing (needs `sigil` EAR helpers).
 **Mitigation today**: `backend_is_available(b)` returns 0 for
 unregistered backends; `resolve_best_backend()` skips them. Consumers
 targeting Process get a working path; consumers targeting others get an
-explicit `BACKEND_UNAVAILABLE` error.
+explicit `KAVACH_ERR_BACKEND_UNAVAILABLE` error.
 
 ### 3. Seccomp / Landlock / cgroups hooks
 

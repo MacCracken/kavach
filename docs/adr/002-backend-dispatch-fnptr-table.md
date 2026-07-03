@@ -45,7 +45,7 @@ fn backend_dispatch_exec(sandbox, command) {
     var bid = SandboxConfig_backend(Sandbox_config(sandbox));
     var fp = load64(&_backend_table + bid * 32 + 0);
     if (fp == 0) {
-        kavach_err_print(KavachError.BACKEND_UNAVAILABLE, backend_name(bid));
+        kavach_err_print(KAVACH_ERR_BACKEND_UNAVAILABLE, backend_name(bid));
         return 0;
     }
     return fncall2(fp, sandbox, command);
@@ -64,13 +64,13 @@ register fn; adding a new backend is a 3-line change.
 - **Extensible without touching dispatch code** — new backends just register.
 - **Fail-closed by construction** — unregistered slots contain 0 (zero-initialised
   BSS), dispatch returns 0, which propagates as
-  `KavachError.BACKEND_UNAVAILABLE`.
+  `KAVACH_ERR_BACKEND_UNAVAILABLE`.
 - Compiles and runs cleanly on Cyrius 4.0.0 (no advanced features needed).
 
 **Negative**
 - **No compile-time check** that backend has a fn registered. A typo in the
   backend id, or forgetting to call register, surfaces at runtime as
-  `BACKEND_UNAVAILABLE`. Mitigated by `test_dispatch_noop_registered`.
+  `KAVACH_ERR_BACKEND_UNAVAILABLE`. Mitigated by `test_dispatch_noop_registered`.
 - **No per-backend state**: the trait pattern in Rust let each backend store
   config (e.g., `GVisorBackend{ runsc_path, ... }`). The fn-table version
   requires backends to stash per-instance state elsewhere — today we pass
