@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.6.1] — 2026-07-03
+
+### Changed
+- Toolchain pin `6.3.15` → `6.3.40`, catching kavach up to the current ecosystem
+  (aethersafha / mehman are on 6.3.40). Purely a maintenance bump: no source or
+  API change — build + the full **413-assertion** suite verified green under
+  6.3.40, and the `dist/kavach.cyr` consumable surface is unchanged, so downstream
+  consumers (mehman) are unaffected.
+
 ## [3.6.0] — 2026-07-02
 
 Kavach becomes **consumable as a Cyrius source-level library**. Downstream
