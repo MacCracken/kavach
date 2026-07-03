@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.7.0] — 2026-07-03
+
+### Added
+- **Persistent guest execution** (`src/persistent.cyr`) — a sandboxed guest that
+  stays alive with **live stdin/stdout pipes**, so a host can stream input to a
+  running guest and read its output over time (the execution primitive the
+  swallow stage's protocol shim delivers events over). API: `persistent_spawn`
+  (fork + dup2 + execve with two pipes, after the same `is_safe_argument` +
+  `check_command` runtime-guard checks the one-shot path enforces),
+  `persistent_send` / `persistent_read` / `persistent_terminate` (SIGKILL +
+  `waitpid` reap) + `persistent_pid` / `persistent_alive`. Verified end-to-end
+  with a `/bin/cat` round-trip (send bytes → read the echo back); **422-assertion
+  suite green**.
+- **Security note**: the persistent path applies the pre-exec command-safety
+  checks but **not** the externalization gate (which scans a full captured buffer
+  — meaningless for an open-ended stream), so persistent-guest stdout is raw. It
+  is for trusted-shape guests behind the consumer's capability contract. SIGPIPE
+  on writing to a self-exited guest is a documented limitation (send guards on the
+  alive flag).
+
 ## [3.6.1] — 2026-07-03
 
 ### Changed

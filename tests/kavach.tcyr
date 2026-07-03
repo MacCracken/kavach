@@ -31,6 +31,7 @@ include "src/backend_sgx.cyr"
 include "src/backend_sev.cyr"
 include "src/backend_tdx.cyr"
 include "src/backend_firecracker.cyr"
+include "src/persistent.cyr"
 include "src/composite.cyr"
 include "src/observability.cyr"
 include "src/attestation.cyr"
@@ -1910,6 +1911,25 @@ fn test_credential_http_listen_close() {
     return 0;
 }
 
+# Persistent guest: spawn /bin/cat with live pipes, stream bytes to its stdin,
+# read the echo back, terminate + reap. Proves the M3-delivery execution model.
+fn test_persistent_guest() {
+    test_group("persistent guest (live stdin/stdout)");
+    var g = persistent_spawn("/bin/cat");
+    assert_neq(g, 0, "persistent_spawn /bin/cat");
+    assert_eq(persistent_alive(g), 1, "guest alive after spawn");
+    assert_eq(persistent_send(g, "AB", 2), 2, "sent 2 bytes to guest stdin");
+    var buf[16];
+    assert_eq(persistent_read(g, &buf, 16), 2, "read 2 bytes back from guest stdout");
+    assert_eq(load8(&buf + 0), 65, "echoed byte 0 = 'A'");
+    assert_eq(load8(&buf + 1), 66, "echoed byte 1 = 'B'");
+    persistent_terminate(g);
+    assert_eq(persistent_alive(g), 0, "guest terminated + reaped");
+    assert_eq(persistent_send(g, "AB", 2), 0 - 1, "send to terminated guest rejected");
+    assert_eq(persistent_spawn(""), 0, "spawn empty command rejected");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_backend_parse();
@@ -2050,6 +2070,7 @@ fn main() {
     test_fill_random_entropy();
     test_file_write_secure_r();
     test_aho_corasick();
+    test_persistent_guest();
     return assert_summary();
 }
 
