@@ -12,8 +12,8 @@ cyrius build src/main.cyr build/kavach
 ./build/kavach                             # runs the end-to-end demo
 ```
 
-Cyrius toolchain `6.2.11` required (pinned in `cyrius.cyml`). The first-party
-tree is on the cc 6.2 line; the old 5.10.x sigil-NI asm-offset bisect is
+Cyrius toolchain `6.4.62` required (pinned in `cyrius.cyml`). The first-party
+tree is on the cc 6.4 line; the old 5.10.x sigil-NI asm-offset bisect is
 retired. The pin matches the installed `cycc`; if `cycc` later drifts ahead of
 the pin, skip local `cyrius fmt` writes to avoid minor-version drift.
 Dependencies are declared in [`cyrius.cyml`](../../cyrius.cyml):
@@ -23,13 +23,15 @@ Dependencies are declared in [`cyrius.cyml`](../../cyrius.cyml):
   keccak, mmap, net, process, random, result, sandhi, slice, str, string,
   syscalls, tagged, thread, thread_local, tls, vec). The 6.2 line folded the
   standalone `json`/`base64` modules into `bayan` and retired `bigint`.
-- **[sigil](https://github.com/MacCracken/sigil) 3.7.14** for SHA-256 and
+- **[sigil](https://github.com/MacCracken/sigil) 3.11.1** for SHA-256 and
   HMAC-SHA256 (used by `src/audit.cyr`). Constant-time compare
   (`src/util.cyr::ct_streq`) now uses the stdlib `ct` module's
   `ct_eq_bytes_lens` — sigil retired its own `ct_eq` in the 3.x line. Latest
   tag; the 5.10.x SIGILL bisect that capped sigil at 2.9.0 no longer applies
-  under cc 6.2.11. kavach declares an explicit agnosys `1.4.3` pin (it uses
-  agnosys directly; sigil 3.7.14 also pins 1.4.3 transitively).
+  under cc 6.4.62. The agnosys dependency was dropped at v3.5.0 — kavach
+  internalized the Linux security backends it used (Landlock/seccomp, MAC,
+  Linux-audit) as `src/` modules (the `agnosys → agnodrm` decomposition);
+  see [`cyrius.cyml`](../../cyrius.cyml).
 
 `cyrius deps` populates `lib/` (gitignored) — that directory is reproducible
 from the manifest + lockfile, not committed.

@@ -7,6 +7,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.7.1] — 2026-07-13
+
+Toolchain + dependency refresh. Pin cyrius `6.3.40` → `6.4.62` and sigil
+`3.9.8` → `3.11.1`, both to the current ecosystem. **No source or API change**:
+the `dist/kavach.cyr` consumable surface is byte-identical apart from the
+version-header restamp, so downstream consumers (mehman) are unaffected.
+Build + the full **422-assertion** suite verified green under cc `6.4.62`.
+
+### Changed
+
+- **Cyrius pin `6.3.40` → `6.4.62`.** Clean pin move — all 33 kavach-declared
+  `[deps].stdlib` modules exist unchanged in the 6.4.62 snapshot (no rename /
+  retirement this move, unlike the 6.1 → 6.2 `json`→`bayan` / `bigint`-drop
+  reshuffle). Re-vendored via `rm -f lib/*.cyr cyrius.lock && cyrius deps`
+  (65 deps locked, 1 commit-pinned = sakshi transitively via sigil);
+  `cyrius deps --verify` green (65 verified, 0 failed).
+- **sigil `3.9.8` → `3.11.1`** (latest). Consumed as the committed
+  `dist/sigil.cyr` bundle. The benign `sys_error`/`sys_util` symbol overlap
+  (`duplicate fn 'err_*' / 'agnosys_*' / 'syserr_*'`, `last definition wins`)
+  is unchanged from 3.9.8 — documented in [ADR-006](docs/adr/006-library-surface-and-bundle-generation.md)
+  §4 and the README integration caveats. `thread_local` stays declared in
+  `[deps]` (opt-in module preceding sigil in the auto-include order; its
+  absence SIGILLs at first crypto use).
+- Validated the pin move with the CLAUDE.md pipeline: `deps → build → lint
+  (0 warnings) → vet (42 deps, 0 untrusted, 0 missing) → test (422/422) →
+  bench (22 recorded)`.
+
+### Performance
+
+- 22 benchmarks recorded for 3.7.1 in `benches/bench-history.csv`. The prior
+  recorded baseline is **3.4.2** (cc 6.2.11) — releases 3.5.0–3.7.0 shipped
+  without a bench row (a process gap, now re-established). Source is unchanged
+  from 3.7.0 (the 422 assertions are identical), so the deltas below are
+  toolchain/dependency-driven, not algorithmic. CPU-bound micro-ops improved
+  substantially under the newer toolchain:
+  `config_builder_full` 268 → 158 ns (**−41%**),
+  `policy_strict_create` 140 → 87 ns (**−38%**),
+  `http_path_extract` 154 → 99 ns (**−36%**),
+  `cgroup_wrap_argv` 738 → 478 ns (**−35%**),
+  `http_allowlist_hit` 82 → 63 ns (**−23%**),
+  `score_backend_process_strict` 37 → 33 ns (**−11%**). The syscall/IO-bound
+  benches (`health_check_noop`, `secrets_redact`, `sandbox_full_lifecycle`)
+  move within their usual ±10–20% run-to-run noise (µs/ms-scale).
+
+### Docs
+
+- **`agnosys (agnodrm)` naming.** The internalized Linux security backends are
+  now written as `agnosys (agnodrm)` at their identity / dependency sites
+  (`cyrius.cyml` `[lib]` + `[deps]` comments, `src/main.cyr`, `src/lib.cyr`) —
+  their post-decomposition home is agnodrm, not agnosys. The `agnosys →
+  agnodrm` arrow (naming the split itself) and the historical v3.5.0 release
+  notes are left unchanged.
+- Swept stale toolchain/dependency version references (last refreshed at
+  v3.4.2) across `README.md`, `docs/architecture/overview.md`,
+  `docs/guides/getting-started.md`, `docs/development/roadmap.md`,
+  `docs/doc-health.md`, `CLAUDE.md`, and the `cyrius.cyml` comment blocks —
+  many still read cc `6.2.11` / sigil `3.7.14` / agnosys `1.4.3` (an external
+  dep dropped at v3.5.0) and now carry cc `6.4.62` / sigil `3.11.1`.
+
 ## [3.7.0] — 2026-07-03
 
 ### Added

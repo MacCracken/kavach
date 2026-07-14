@@ -5,7 +5,7 @@ description = "Sandbox execution framework — 10 backends, strength scoring (0-
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/kavach"
 language = "cyrius"
-cyrius = "6.3.40"
+cyrius = "6.4.62"
 
 [build]
 entry = "src/main.cyr"
@@ -36,7 +36,7 @@ output = "build/kavach"
 modules = [
     "src/util.cyr",
     "src/error.cyr",
-    # Internalized agnosys Linux security backends + sys_error/sys_util
+    # Internalized agnosys (agnodrm) Linux security backends + sys_error/sys_util
     # support + the agnos-only security syscall consts. Before their users.
     "src/sys_security_syscalls.cyr",
     "src/sys_error.cyr",
@@ -134,7 +134,7 @@ stdlib = [
 # at the pinned tag — used by src/audit.cyr for HMAC-SHA256 of the
 # audit chain and src/util.cyr for ct_eq constant-time comparisons.
 #
-# Pinned at 3.7.14 — latest. Since sigil 3.6 the four opt-in stdlib
+# Pinned at 3.11.1 — latest. Since sigil 3.6 the four opt-in stdlib
 # modules (ct, keccak, thread, thread_local) are NOT in the cyrius
 # auto-prepend union and the bundle does not carry them — each must be
 # declared in [deps] above so `cyrius deps` vendors it into lib/ (cyrius
@@ -142,27 +142,25 @@ stdlib = [
 # site to a `ud2` trap that SIGILLs (exit 132) the first time a crypto
 # path touches it (see sigil README §Usage); that was the 3.4.1 bug —
 # thread_local was absent from [deps]. thread_local MUST stay declared
-# (it precedes sigil in the auto-include order): sigil 3.7.14's
-# crypto_scratch exercises the TLS path, so without thread_local storage
-# the binary links clean but SIGILLs at first crypto use (latent through
-# sigil ≤3.7.12, surfaced by the 3.7.14 bump — see bote 2.7.6 / libro
-# 2.7.4). The pre-6.1 `bigint` stdlib module is RETIRED — sigil 3.x
-# bundles its own u256/u384 inline and kavach has no direct big-integer
-# use, so the old `bigint` [deps] entry was dropped at 3.4.2.
-# Validated by a clean build/test/bench run at this pin under cc 6.2.11.
+# (it precedes sigil in the auto-include order): sigil's crypto_scratch
+# exercises the TLS path, so without thread_local storage the binary
+# links clean but SIGILLs at first crypto use (latent through sigil
+# ≤3.7.12, surfaced by the 3.7.14 bump — see bote 2.7.6 / libro 2.7.4).
+# The pre-6.1 `bigint` stdlib module is RETIRED — sigil 3.x bundles its
+# own u256/u384 inline and kavach has no direct big-integer use, so the
+# old `bigint` [deps] entry was dropped at 3.4.2.
+# Validated by a clean build/test/bench run at this pin under cc 6.4.62.
 # Bump in lockstep with the cyrius pin and re-validate.
 [deps.sigil]
 git = "https://github.com/MacCracken/sigil.git"
 path = "../sigil"
-tag = "3.9.8"
+tag = "3.11.1"
 modules = ["dist/sigil.cyr"]
 
-# Transitive override. sigil 3.7.14 already pins agnosys 1.4.3, but
-# kavach uses agnosys directly (src/sandbox_exec.cyr, backend_sy_agnos.cyr)
-# so it declares its own pin to track the current agnosys (1.4.3, latest,
-# cc 6.2.x) independent of sigil's transitive choice.
-# Validated by a clean build/test/bench run under cc 6.2.11.
-# (agnosys dep dropped — kavach internalized the Linux security backends it used
-# (security/mac/kernel_audit + sys_error/sys_util + sys_security_syscalls) as src
-# modules; the landlock/prctl syscall numbers come from cyrius's lib/syscalls.
-# Part of the agnosys → agnodrm decomposition.)
+# No external agnosys (agnodrm) dep. kavach internalized the Linux security
+# backends it used (security/mac/kernel_audit + sys_error/sys_util +
+# sys_security_syscalls) as src modules — the security subsystems from the
+# agnosys → agnodrm decomposition (agnosys narrowed to the device model; its
+# security subsystems became agnodrm). The landlock/prctl syscall numbers come
+# from cyrius's lib/syscalls; kavach consumes only sigil's committed
+# dist/sigil.cyr bundle.

@@ -12,6 +12,12 @@ classification, credential proxy, HMAC-SHA256 audit chain — all in pure Cyrius
 
 ## Status
 
+**v3.7.1 — toolchain + dependency refresh.** Cyrius pin `6.3.40` → `6.4.62`
+and sigil `3.9.8` → `3.11.1`, both to the latest ecosystem. No source or API
+change; the `dist/kavach.cyr` consumable surface is byte-identical apart from
+the version-header restamp. Build + the **422-assertion** suite green under cc
+`6.4.62`; 22 benches recorded.
+
 **v3.5.2 — cyrius toolchain pin `6.2.11` → `6.2.36`.** Aligns with the latest
 cyrius. Host + `--agnos` builds re-verified clean (the 3.5.1 Linux-MAC agnos
 gating holds at 6.2.36).
@@ -116,7 +122,7 @@ for what's intentionally deferred.
 | Backends registered | 10 | 10 — full set with real dispatch contracts |
 | Scanner pipeline | 3 scanners | 3 scanners |
 | Audit chain | HMAC-SHA256 via hmac/sha2 crates | HMAC-SHA256 via [sigil](https://github.com/MacCracken/sigil) |
-| Tests | 872 | 413 |
+| Tests | 872 | 422 |
 | Async | tokio | synchronous (ADR-004 §1) |
 
 ---
@@ -142,13 +148,13 @@ for what's intentionally deferred.
 ## Build
 
 ```sh
-# Requires Cyrius 6.2.36 (pinned in cyrius.cyml; the first-party tree is
-# on the cc 6.2 line — the old 5.10.x sigil-NI asm-offset bisect is
+# Requires Cyrius 6.4.62 (pinned in cyrius.cyml; the first-party tree is
+# on the cc 6.4 line — the old 5.10.x sigil-NI asm-offset bisect is
 # retired). The pin matches the installed cycc; if cycc later drifts ahead,
 # skip local fmt writes to avoid minor-version drift.
 
-# 1. Resolve deps — populates lib/ (gitignored) with the cc 6.2.36
-#    stdlib snapshot + sigil 3.8.1 at the pinned tag (the agnosys
+# 1. Resolve deps — populates lib/ (gitignored) with the cc 6.4.62
+#    stdlib snapshot + sigil 3.11.1 at the pinned tag (the agnosys
 #    dependency was dropped at 3.5.0; see cyrius.cyml).
 cyrius deps
 
@@ -156,7 +162,7 @@ cyrius deps
 cyrius build src/main.cyr build/kavach
 ./build/kavach
 
-# Run the test suite (413 tests).
+# Run the test suite (422 tests).
 cyrius test tests/kavach.tcyr
 
 # Run the bench harness (22 benches).
@@ -168,7 +174,7 @@ cyrius audit
 
 Dependencies (declared in [`cyrius.cyml`](cyrius.cyml)):
 - **Cyrius stdlib** — `alloc, args, assert, async, bayan, bench, chrono, ct, dynlib, fdlopen, fmt, fnptr, freelist, fs, hashmap, hashmap_fast, io, keccak, mmap, net, process, random, result, sandhi, slice, str, string, syscalls, tagged, thread, thread_local, tls, vec` (resolved by `cyrius deps` into `lib/`, which is gitignored). The 6.2 line folded the standalone `json`/`base64` modules into `bayan` and retired `bigint` (sigil bundles its own `u256`/`u384`).
-- **[sigil](https://github.com/MacCracken/sigil) 3.8.1** — SHA-256, HMAC-SHA256 (constant-time compare now via the stdlib `ct` module — sigil retired its own `ct_eq` in the 3.x line). Latest tag; the 5.10.x SIGILL bisect that capped it at 2.9.0 no longer applies under cc 6.2.36. The agnosys dependency was dropped at 3.5.0 — kavach internalized the Linux security backends it used (Landlock/seccomp, MAC, Linux-audit) as `src/` modules; see [`cyrius.cyml`](cyrius.cyml).
+- **[sigil](https://github.com/MacCracken/sigil) 3.11.1** — SHA-256, HMAC-SHA256 (constant-time compare now via the stdlib `ct` module — sigil retired its own `ct_eq` in the 3.x line). Latest tag; the 5.10.x SIGILL bisect that capped it at 2.9.0 no longer applies under cc 6.4.62. The agnosys dependency was dropped at 3.5.0 — kavach internalized the Linux security backends it used (Landlock/seccomp, MAC, Linux-audit) as `src/` modules; see [`cyrius.cyml`](cyrius.cyml).
 
 ## Consume kavach as a library (v3.6.0+)
 

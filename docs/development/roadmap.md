@@ -2,7 +2,7 @@
 
 > **Principle**: Security correctness first, then backend breadth, then performance. Every sandbox gets a number.
 
-This roadmap is **future-facing only** — shipped work lives in [CHANGELOG.md](../../CHANGELOG.md). Current release: v3.4.2 (toolchain + dependency refresh). Toolchain pin: cc `6.2.11`; sigil `3.7.14`, agnosys `1.4.3`.
+This roadmap is **future-facing only** — shipped work lives in [CHANGELOG.md](../../CHANGELOG.md). Current release: v3.7.1 (toolchain + dependency refresh). Toolchain pin: cc `6.4.62`; sigil `3.11.1` (agnosys dropped at v3.5.0 — its security backends are internalized).
 
 ---
 
