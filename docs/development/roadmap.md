@@ -37,6 +37,53 @@ The next *capability* cut (vs the 3.3.x/3.4.x hardening + perf work). These grou
 
 ---
 
+## v3.8.0 — detached policy-threaded spawn (`sandbox_spawn`)
+
+**Requested by the stiva Cyrius port (v3.1 async milestone) — the one kavach-side blocker for a
+properly-isolated `stiva run -d`.** stiva's synchronous `run` already gets full policy via
+`sandbox_exec`; a detached `run -d` has no policy-applying spawn today, so it can't ship without
+silently dropping isolation. `persistent_spawn` is raw fork+exec with **no** policy, and
+`SpawnedProcess` is an inert `{pid, backend, started_at}` record with no wait/kill — so this cut
+adds a **detached twin of `sandbox_exec`** plus the process handle's lifecycle ops. A full,
+code-grounded draft (4 files + tests + 5 design decisions) exists in the stiva port planning;
+summarized here.
+
+**Shares the v3.5.0 fork-infra.** The spawn child body (dup2 stdio → log fd, `close(3..)`,
+`PR_SET_NO_NEW_PRIVS`, and later landlock/seccomp) is exactly a `pre_exec_fn`, so build
+`process_spawn`'s child on `sandbox_fork_exec(args, pre_exec_fn)` (v3.5.0 above) in a **detached**
+flavor (no `waitpid`). Interim if the fork-infra isn't landed yet: hand-roll the fork/exec
+(mirroring `persistent_spawn`) and refactor onto `sandbox_fork_exec` when it arrives. When the
+Seccomp-hooks blocker (below) clears, the same shared `pre_exec_fn` hardens `exec` **and** `spawn`
+identically — no drift.
+
+| Item | What it adds | Where |
+|------|--------------|-------|
+| **spawn vtable slot** | `backend_register_spawn` + `backend_dispatch_spawn(sandbox, command, log_fd)` using the free `reserved` slot @24 of the 32-byte backend table; returns 0 for non-spawnable backends (noop/wasm) → caller falls back to `exec` (the existing `SpawnedProcess` doc contract). | [`src/backend_dispatch.cyr`](../../src/backend_dispatch.cyr) |
+| **`process_spawn(sandbox, command, log_fd)`** | The heart: same policy as `process_exec` (control-char guard + runtime guard + cgroup limits) but fork+exec's **detached** — child `dup2`s `log_fd`→1/2, `/dev/null`→0, `close(3..)` [CVE-2024-21626], `PR_SET_NO_NEW_PRIVS`, `execve`; parent returns a `SpawnedProcess`. Cgroup is torn down at **reap**, not after fork (the daemon lives in it). Register via `backend_register_spawn(Backend.PROCESS, …)`; oci/gvisor/firecracker get their own `*_spawn` later. | [`src/backend_process.cyr`](../../src/backend_process.cyr) |
+| **`sandbox_spawn(sandbox, command, log_fd)`** | Entry point / twin of `sandbox_exec`: verify `RUNNING` → `backend_dispatch_spawn` → live `SpawnedProcess` (0 → caller falls back to `exec`). No externalization gate at spawn time (a daemon's output is scanned as the log is read). | [`src/sandbox_exec.cyr`](../../src/sandbox_exec.cyr) |
+| **`SpawnedProcess` lifecycle** | Add a `cgroup` field (24→32 bytes) for reap-time teardown; add `spawned_wait` (block → `ExecResult`), `spawned_try_wait` (`WNOHANG` → exit code \| still-running sentinel), `spawned_kill(grace_ms)` (SIGTERM → poll ≤ grace → SIGKILL → reap). | [`src/observability.cyr`](../../src/observability.cyr) |
+
+**Design decisions (from the draft, open for sign-off):** (1) policy level = **parity with
+`sandbox_exec` today** (guard + cgroups; seccomp/landlock arrive together with the fork-infra +
+the Seccomp-hooks unblock, applied to both via the shared `pre_exec_fn`); (2) the spawn child adds
+`close(3..)` + NO_NEW_PRIVS — slightly **more** than exec's current child, justified because a
+daemon outlives the parent (candidate to backport to exec); (3) cgroup teardown at **reap** via
+the new struct field (alternative: hang it on the `Sandbox` and free it in `sandbox_destroy`);
+(4) stdio → a **caller-provided `log_fd`** (this is what lets stiva's `logs -f` work with no
+streaming machinery — the daemon writes its log directly).
+
+**Tests:** mostly no-priv/deterministic — `sandbox_spawn` on a not-RUNNING sandbox → 0; spawn
+`/bin/echo` with a temp `log_fd` → pid > 0, `spawned_wait` exit 0, the log file holds the output
+(proves dup2-to-log); guard-reject never forks; an fd-leak assertion for `close(3..)`. Gated
+rootful test: a `pids.max=1` policy caps a fork bomb and the cgroup dir is gone after reap.
+
+**Consumer payoff:** stiva `spawn_container` becomes ~10 lines (`build_sandbox` → `sandbox_spawn`
+→ `DaemonHandle{sp, sandbox}`), `DaemonHandle.wait/try_wait/kill` wrap `spawned_*`, and `run -d`
+stops printing "deferred to v3.1". **Do not ship a half-isolated interim over `persistent_spawn`**
+— it threads no policy and would be strictly less isolated than the sync `run`.
+
+---
+
 ## Open questions
 
 - [ ] **`[lib]` profile + `dist/kavach.cyr` bundle.** kavach is binary-only today and no consumer (SY / stiva / kiran / AgnosAI / hoosh / bote / aethersafta) embeds it at source level. Open the profile when the first consumer asks — adding a bundle pre-demand creates a maintenance commitment with no current consumer benefit.
@@ -76,8 +123,8 @@ Each row carries **what it means** (the concrete kavach-side surface that gates 
 ### Stiva OCI backend
 
 - **What it means.** Today `backend_oci.cyr::_oci_runtime_path()` returns the first of `runc` / `crun` found in PATH. ADR-004 §7 plans to prepend stiva when available, so the kavach OCI backend transparently uses stiva's hardened OCI runtime instead of upstream runc.
-- **Who owns it.** Upstream — there's no stiva Cyrius port yet (the Rust-era stiva is at the genesis repo; the port hasn't started).
-- **Trigger condition.** stiva Cyrius port ships v1.0.0 with a stable `stiva` CLI entry point. Single-line addition to `_oci_runtime_path()` once it does. No upstream filing — there's no repo to file against yet.
+- **Who owns it.** Upstream — the **stiva Cyrius port**, now live at **v3.0.0** (a synchronous single-node OCI runtime with a 19-verb `stiva` CLI: run/ps/stop/rm/inspect/images/…). What kavach's OCI backend needs, though, is stiva as a **runc-compatible OCI runtime** — the `stiva create/start/state/kill/delete` CLI over a bundle — which the port does **not** expose yet. The OCI state/bundle primitives (`parse_bundle` / `build_state` / `to_oci_status`) **are** ported (stiva `oci` module); the runc-drop-in CLI + the container lifecycle it drives (`start` = run the container) are the **stiva v3.1 async milestone**.
+- **Trigger condition.** stiva ships a stable OCI-runtime CLI (`stiva create/start/state/kill/delete` over a bundle — the runc drop-in), i.e. the stiva v3.1+ lifecycle surface. Single-line addition to `_oci_runtime_path()` once it does. No upstream filing needed — stiva is a sibling repo, tracked in its own roadmap.
 
 ---
 
