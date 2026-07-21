@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.8.1] — 2026-07-21
+
+**samay dep `1.0.0` → `1.0.1`.** Picks up samay's symbol-hygiene fix (its `uuid_v4` was
+renamed to `samay_uuid_v4` to avoid a last-def-wins collision with libro's incompatible
+`uuid_v4(buf)`). No effect on kavach's `samay_bridge` surface — the rename is internal to
+samay's task construction. Full suite (436 assertions) green against the updated dist.
+
 ## [3.8.0] — 2026-07-21
 
 **samay integration — size sandboxes from scheduler placements.** kavach now

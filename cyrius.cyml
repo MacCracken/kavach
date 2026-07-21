@@ -169,7 +169,7 @@ modules = ["dist/ai-hwaccel.cyr"]
 [deps.samay]
 git = "https://github.com/MacCracken/samay.git"
 path = "../samay"
-tag = "0.7.0"
+tag = "1.0.1"
 modules = ["dist/samay.cyr"]
 
 # No external agnosys (agnodrm) dep. kavach internalized the Linux security
