@@ -39,7 +39,7 @@ The next *capability* cut (vs the 3.3.x/3.4.x hardening + perf work). These grou
 
 ## v3.8.0 — detached policy-threaded spawn (`sandbox_spawn`)
 
-**Requested by the stiva Cyrius port (v3.1 async milestone) — the one kavach-side blocker for a
+**Requested by the stiva Cyrius port (its v3.1 blocked residue — detached `run -d`) — the one kavach-side blocker for a
 properly-isolated `stiva run -d`.** stiva's synchronous `run` already gets full policy via
 `sandbox_exec`; a detached `run -d` has no policy-applying spawn today, so it can't ship without
 silently dropping isolation. `persistent_spawn` is raw fork+exec with **no** policy, and
@@ -123,8 +123,8 @@ Each row carries **what it means** (the concrete kavach-side surface that gates 
 ### Stiva OCI backend
 
 - **What it means.** Today `backend_oci.cyr::_oci_runtime_path()` returns the first of `runc` / `crun` found in PATH. ADR-004 §7 plans to prepend stiva when available, so the kavach OCI backend transparently uses stiva's hardened OCI runtime instead of upstream runc.
-- **Who owns it.** Upstream — the **stiva Cyrius port**, now live at **v3.0.0** (a synchronous single-node OCI runtime with a 19-verb `stiva` CLI: run/ps/stop/rm/inspect/images/…). What kavach's OCI backend needs, though, is stiva as a **runc-compatible OCI runtime** — the `stiva create/start/state/kill/delete` CLI over a bundle — which the port does **not** expose yet. The OCI state/bundle primitives (`parse_bundle` / `build_state` / `to_oci_status`) **are** ported (stiva `oci` module); the runc-drop-in CLI + the container lifecycle it drives (`start` = run the container) are the **stiva v3.1 async milestone**.
-- **Trigger condition.** stiva ships a stable OCI-runtime CLI (`stiva create/start/state/kill/delete` over a bundle — the runc drop-in), i.e. the stiva v3.1+ lifecycle surface. Single-line addition to `_oci_runtime_path()` once it does. No upstream filing needed — stiva is a sibling repo, tracked in its own roadmap.
+- **Who owns it.** Upstream — the **stiva Cyrius port**, now live at **v3.0.0** (a synchronous single-node OCI runtime with a 19-verb `stiva` CLI: run/ps/stop/rm/inspect/images/…). What kavach's OCI backend needs, though, is stiva as a **runc-compatible OCI runtime** — the `stiva create/start/state/kill/delete` CLI over a bundle — which the port does **not** expose yet. The OCI state/bundle primitives (`parse_bundle` / `build_state` / `to_oci_status`) **are** ported (stiva `oci` module); the container lifecycle it drives (`start` = run the container) is the **stiva v3.0.x runtime-completion line** (blocking, over the ported sync core), with detached `run -d` specifically being stiva's v3.1 residue blocked on this issue's `sandbox_spawn`; a runc-compatible OCI-runtime CLI on top is not yet scoped in stiva's roadmap.
+- **Trigger condition.** stiva ships a stable OCI-runtime CLI (`stiva create/start/state/kill/delete` over a bundle — the runc drop-in) wrapping its v3.0.x lifecycle. Single-line addition to `_oci_runtime_path()` once it does. No upstream filing needed — stiva is a sibling repo, tracked in its own roadmap.
 
 ---
 

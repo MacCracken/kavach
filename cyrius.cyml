@@ -5,7 +5,7 @@ description = "Sandbox execution framework — 10 backends, strength scoring (0-
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/kavach"
 language = "cyrius"
-cyrius = "6.4.62"
+cyrius = "6.4.69"
 
 [build]
 entry = "src/main.cyr"
@@ -113,6 +113,9 @@ stdlib = [
     "hashmap_fast",
     "io",
     "keccak",
+    "math",
+    "sakshi",
+    "atomic",
     "mmap",
     "net",
     "process",
@@ -156,6 +159,18 @@ git = "https://github.com/MacCracken/sigil.git"
 path = "../sigil"
 tag = "3.11.1"
 modules = ["dist/sigil.cyr"]
+
+[deps.ai-hwaccel]
+git = "https://github.com/MacCracken/ai-hwaccel.git"
+path = "../ai-hwaccel"
+tag = "2.3.15"
+modules = ["dist/ai-hwaccel.cyr"]
+
+[deps.samay]
+git = "https://github.com/MacCracken/samay.git"
+path = "../samay"
+tag = "0.7.0"
+modules = ["dist/samay.cyr"]
 
 # No external agnosys (agnodrm) dep. kavach internalized the Linux security
 # backends it used (security/mac/kernel_audit + sys_error/sys_util +

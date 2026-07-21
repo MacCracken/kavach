@@ -1,0 +1,38 @@
+# samay_bridge.cyr — size a kavach sandbox from a samay task's resources.
+#
+# Realises the AGNOS split "samay decides placement, kavach executes": the
+# scheduler's per-task `ResourceReq` (from `dist/samay.cyr`, `[deps.samay]`)
+# becomes the sandbox's cgroup limits, layered on kavach's hardened strict
+# baseline. Added at kavach 3.8.0.
+#
+# NOTE ON LAYERING: this module depends on samay and is therefore *excluded*
+# from kavach's own dist bundle (`[lib].modules`), so downstream kavach
+# consumers are not forced to carry samay + its transitive deps (ai-hwaccel,
+# bayan, math). It is compiled into callers that opt in (and exercised by
+# `tests/samay_integration.tcyr`). samay accessors used here — `ResourceReq_*`,
+# constructors — resolve from the vendored samay dist.
+
+# Map a samay `ResourceReq` -> a hardened `SandboxPolicy` sized to it.
+# cpu_cores (f64, samay) -> cpu_limit_tenths (kavach; 10 = 1.0 core),
+# memory_mb -> memory_limit_mb, and the network requirement gates the
+# sandbox's network namespace. Everything else keeps kavach's strict
+# defaults (seccomp, read-only rootfs, pid cap).
+fn sandbox_policy_from_samay_req(req): i64 {
+    var p = policy_strict();
+    # f64 cpu_cores -> integer tenths, rounded; floor at 1 tenth so a task
+    # always gets a non-zero cpu slice.
+    var tenths = f64_to(f64_round(f64_mul(ResourceReq_cpu_cores(req), f64_from(10))));
+    if (tenths < 1) { tenths = 1; }
+    SandboxPolicy_set_cpu_limit_tenths(p, tenths);
+    # Honour an explicit memory request; keep the strict 512 MB default at 0.
+    var mem = ResourceReq_memory_mb(req);
+    if (mem > 0) { SandboxPolicy_set_memory_limit_mb(p, mem); }
+    # A task that declares no network need runs with the namespace closed.
+    SandboxPolicy_set_network_enabled(p, ResourceReq_network(req));
+    return p;
+}
+
+# Convenience: size a sandbox directly from a scheduled task's requirements.
+fn sandbox_policy_from_samay_task(task): i64 {
+    return sandbox_policy_from_samay_req(ScheduledTask_resource_requirements(task));
+}

@@ -1,0 +1,69 @@
+# samay_integration.tcyr — kavach sizes a sandbox from a samay ResourceReq.
+#
+# Proves kavach is green against dist/samay.cyr: it builds against the vendored
+# samay dist (lib/samay.cyr + its ai-hwaccel dep), constructs real samay
+# scheduler types, and maps them through src/samay_bridge.cyr onto a kavach
+# SandboxPolicy. stdlib + declared deps (samay, ai-hwaccel) auto-prepend from
+# cyrius.cyml — do not include lib/ here (same as kavach's own tests).
+
+include "src/policy.cyr"
+include "src/samay_bridge.cyr"
+
+# A 2-core / 4096 MB / networked task -> policy limits track it.
+fn test_bridge_maps_resources() {
+    test_group("samay_bridge");
+    var req = resource_req_new(f64_from(2), 4096, REQ_NONE, 0, 1, 0);
+    var p = sandbox_policy_from_samay_req(req);
+    assert_eq(SandboxPolicy_cpu_limit_tenths(p), 20, "2.0 cores -> 20 tenths");
+    assert_eq(SandboxPolicy_memory_limit_mb(p), 4096, "4096 MB honoured");
+    assert_eq(SandboxPolicy_network_enabled(p), 1, "network requirement propagated");
+    # strict baseline preserved
+    assert_eq(SandboxPolicy_seccomp_enabled(p), 1, "seccomp still on");
+    assert_eq(SandboxPolicy_read_only_rootfs(p), 1, "read-only rootfs still on");
+    return 0;
+}
+
+# Fractional cpu rounds to tenths; no-network task closes the namespace;
+# unspecified memory keeps kavach's strict default.
+fn test_bridge_fractional_and_defaults() {
+    test_group("samay_bridge_frac");
+    var req = resource_req_new(f64_div(f64_from(1), f64_from(2)), 0, REQ_NONE, 0, 0, 0);
+    var p = sandbox_policy_from_samay_req(req);
+    assert_eq(SandboxPolicy_cpu_limit_tenths(p), 5, "0.5 cores -> 5 tenths");
+    assert_eq(SandboxPolicy_memory_limit_mb(p), 512, "unspecified memory keeps strict 512");
+    assert_eq(SandboxPolicy_network_enabled(p), 0, "no-network task closes namespace");
+    return 0;
+}
+
+# A tiny cpu share still yields at least one tenth (never zero-cpu).
+fn test_bridge_cpu_floor() {
+    test_group("samay_bridge_floor");
+    var req = resource_req_new(f64_div(f64_from(1), f64_from(1000)), 128, REQ_GPU, 0, 0, 0);
+    var p = sandbox_policy_from_samay_req(req);
+    assert_eq(SandboxPolicy_cpu_limit_tenths(p), 1, "0.001 cores floored to 1 tenth");
+    assert_eq(SandboxPolicy_memory_limit_mb(p), 128, "128 MB honoured");
+    return 0;
+}
+
+# The task-level convenience path pulls the requirements off a ScheduledTask.
+fn test_bridge_from_task() {
+    test_group("samay_bridge_task");
+    var task = scheduled_task_new(str_from("t"), str_from("d"), str_from("a"), 6,
+        resource_req_new(f64_from(4), 8192, REQ_NONE, 0, 1, 0));
+    var p = sandbox_policy_from_samay_task(task);
+    assert_eq(SandboxPolicy_cpu_limit_tenths(p), 40, "4.0 cores -> 40 tenths");
+    assert_eq(SandboxPolicy_memory_limit_mb(p), 8192, "8192 MB from task");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_bridge_maps_resources();
+    test_bridge_fractional_and_defaults();
+    test_bridge_cpu_floor();
+    test_bridge_from_task();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

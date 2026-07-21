@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.8.0] — 2026-07-21
+
+**samay integration — size sandboxes from scheduler placements.** kavach now
+consumes samay (`[deps.samay]`, `dist/samay.cyr`), realising the AGNOS split
+"samay decides placement, kavach executes": a task's samay `ResourceReq`
+(cpu_cores / memory_mb / network) maps onto the sandbox's `SandboxPolicy`
+cgroup limits, layered on the hardened strict baseline.
+
+### Added
+
+- `src/samay_bridge.cyr` — `sandbox_policy_from_samay_req(req)` /
+  `sandbox_policy_from_samay_task(task)`: map a samay `ResourceReq` →
+  `SandboxPolicy` (f64 cpu_cores → cpu_limit_tenths with a 1-tenth floor,
+  memory_mb → memory_limit_mb, network → the network namespace gate). The
+  module is **excluded from `[lib].modules`**, so kavach's own dist bundle
+  does not force samay + its transitive deps (ai-hwaccel/bayan/math) on
+  downstream consumers of kavach.
+- `tests/samay_integration.tcyr` — 12 assertions building against the vendored
+  samay dist (real `resource_req_new` / `scheduled_task_new`), covering the
+  resource mapping, fractional-cpu rounding, the cpu floor, and the task path.
+
+### Changed
+
+- **Cyrius pin `6.4.62` → `6.4.69`** — samay's `#derive(Serialize)` f64 codec
+  requires it (6.4.69 Grisu2). Full suite verified green (**436 assertions**).
+- `[deps]`: added `math`, `sakshi`, `atomic` (samay's stdlib closure) and the
+  first-party deps `[deps.samay]` (0.7.0) + `[deps.ai-hwaccel]` (2.3.15). No
+  symbol collisions with kavach's 442-fn surface (verified).
+
 ## [3.7.1] — 2026-07-13
 
 Toolchain + dependency refresh. Pin cyrius `6.3.40` → `6.4.62` and sigil
