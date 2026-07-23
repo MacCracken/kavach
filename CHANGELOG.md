@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.8.3] — 2026-07-22
+
+**samay + ai-hwaccel are now `optional` — consumers stop paying for a bridge kavach
+does not ship.** 3.8.0 added `[deps.samay]` (which pulls `[deps.ai-hwaccel]`) as
+always-on dependencies. cyrius auto-includes every **active** `[deps.*]` module into
+every compilation unit, so every downstream consumer linked ~279 KB of scheduler and
+accelerator symbols — for a bridge that is deliberately excluded from `[lib].modules`:
+`src/samay_bridge.cyr` is test-only, and `grep samay dist/kavach.cyr` returns nothing.
+
+That cost was not theoretical. In stiva it pushed `tests/stiva.tcyr` past cycc's
+identifier cap — `identifier buffer full (261893/262144)`, a hard compile error — and
+dragged in ai-hwaccel's `backend_name`, which collided with kavach's own (fixed in
+3.8.2 by renaming ours to `os_backend_name`).
+
+- Changed: `[deps.samay]` and `[deps.ai-hwaccel]` are `optional = true`, activated by a
+  new default-on `scheduler` feature (`[features] default = ["scheduler"]`). kavach's own
+  build and tests are unaffected — `tests/samay_integration.tcyr` still compiles and runs.
+  **Consumers are no longer given either bundle**: transitive `[features]` tables are not
+  parsed, so an optional dep stays inactive downstream — no clone, no module copy, no
+  auto-include. A consumer that genuinely wants samay now declares it directly and on its
+  own terms. Same lever libro uses for `sigil-tpm` and mehman for `kavach`.
+- No source change; `dist/kavach.cyr` is unchanged apart from its version header.
+- Full suite (436 assertions) green.
+
 ## [3.8.2] — 2026-07-22
 
 **`backend_name` → `os_backend_name` — symbol-hygiene fix for a silent
