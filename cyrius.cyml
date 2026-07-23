@@ -160,17 +160,41 @@ path = "../sigil"
 tag = "3.11.1"
 modules = ["dist/sigil.cyr"]
 
+# ── Feature gating for the samay bridge ──────────────────────────
+# cyrius auto-includes every ACTIVE [deps.*] module into the compilation unit.
+# samay (72 KB) + its transitive ai-hwaccel (207 KB) were always-on, so every
+# kavach consumer linked ~279 KB of scheduler/accelerator symbols — for a bridge
+# kavach does not even ship: `src/samay_bridge.cyr` is excluded from
+# [lib].modules, and `dist/kavach.cyr` contains zero samay references.
+#
+# That cost was not theoretical: it pushed stiva's `tests/stiva.tcyr` past
+# cycc's identifier cap (261893/262144 — a hard compile error), and dragged in
+# ai-hwaccel's `backend_name`, which collided with ours (fixed in 3.8.2 by
+# renaming ours to `os_backend_name`).
+#
+# Both deps are now OPTIONAL behind the default-on `samay` feature. kavach's own
+# build/tests keep it, so tests/samay_integration.tcyr still compiles. CONSUMERS
+# are unaffected: transitive [features] tables are not parsed, so an optional dep
+# stays inactive downstream — no clone, no module copy, no auto-include. A
+# consumer that actually wants samay declares it directly (as stiva does for its
+# roadmap §H/§I work). Same lever libro uses for sigil-tpm and mehman for kavach.
+[features]
+default = ["scheduler"]
+scheduler = ["samay", "ai-hwaccel"]
+
 [deps.ai-hwaccel]
 git = "https://github.com/MacCracken/ai-hwaccel.git"
 path = "../ai-hwaccel"
 tag = "2.3.15"
 modules = ["dist/ai-hwaccel.cyr"]
+optional = true
 
 [deps.samay]
 git = "https://github.com/MacCracken/samay.git"
 path = "../samay"
 tag = "1.0.1"
 modules = ["dist/samay.cyr"]
+optional = true
 
 # No external agnosys (agnodrm) dep. kavach internalized the Linux security
 # backends it used (security/mac/kernel_audit + sys_error/sys_util +
