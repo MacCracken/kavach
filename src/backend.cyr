@@ -16,7 +16,14 @@ enum Backend {
 
 var BACKEND_COUNT = 10;
 
-fn backend_name(b) {
+# Renamed from `backend_name` (3.8.2): ai-hwaccel — pulled transitively via
+# [deps.samay] since 3.8.0 — defines its own `backend_name(b)` over a DIFFERENT
+# enum (BACKEND_CUDA..BACKEND_WINDOWS, 17 hardware-detection backends). Both
+# enums start at 0, cycc resolves duplicate fns last-definition-wins, and
+# ai-hwaccel sorts after kavach — so the collision silently returned hardware
+# names for OS backends (`backend_name(Backend.OCI)` → "intel-npu"). `os_`
+# marks this as the OS/isolation-backend namer; ai-hwaccel keeps the bare name.
+fn os_backend_name(b) {
     if (b == Backend.PROCESS) { return "process"; }
     if (b == Backend.GVISOR) { return "gvisor"; }
     if (b == Backend.FIRECRACKER) { return "firecracker"; }

@@ -63,7 +63,7 @@ fn _print_scoreboard() {
     var score = score_backend(best, p);
     var prefix = "  best backend: ";
     sys_write(1, prefix, strlen(prefix));
-    var name = backend_name(best);
+    var name = os_backend_name(best);
     sys_write(1, name, strlen(name));
     sys_write(1, "\n", 1);
     var sp = "  score: ";

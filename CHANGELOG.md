@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.8.2] — 2026-07-22
+
+**`backend_name` → `os_backend_name` — symbol-hygiene fix for a silent
+last-def-wins collision.** Since 3.8.0 pulled `[deps.samay]`, consumers also
+receive samay's transitive `[deps.ai-hwaccel]`, which defines its **own**
+`backend_name(b)` over an unrelated enum (`BACKEND_CUDA`..`BACKEND_WINDOWS`,
+17 hardware-detection backends). Both enums start at `0`, cycc resolves
+duplicate fns last-definition-wins, and ai-hwaccel sorts after kavach — so in
+any consumer pulling both, kavach's OS-backend namer was silently replaced by
+the hardware one: `backend_name(Backend.OCI)` returned `"intel-npu"`, and
+`backend_name(Backend.PROCESS)` returned `"cuda"`. Reproduced end-to-end in
+stiva, whose `stiva info` logged `computing security strength score: intel-npu`
+instead of `oci`.
+
+The collision also corrupted kavach's **own** error paths — `lifecycle.cyr:165`
+and `backend_dispatch.cyr:48` both pass the result to
+`kavach_err_print(KAVACH_ERR_BACKEND_UNAVAILABLE, …)` — so a consumer-side
+workaround was not possible; the rename had to land here.
+
+`os_` marks this as the OS/isolation-backend namer and leaves the bare
+`backend_name` to ai-hwaccel. Same class and resolution as samay's 1.0.1
+`uuid_v4` → `samay_uuid_v4` fix, and shipped the same way, as a patch.
+
+**Breaking for direct callers** (one line each): `stiva/src/runtime.cyr:841,955`
+and `mehman/src/sandbox.cyr:88`. `backend_parse`, `backend_is_available`, and
+`score_backend` are unchanged.
+
+- Changed: `src/backend.cyr:26` `backend_name` → `os_backend_name`; internal
+  callers updated at `src/lifecycle.cyr:165`, `src/backend_dispatch.cyr:48`,
+  `src/main.cyr:66`. `dist/kavach.cyr` regenerated.
+- Note: kavach's 3.8.0 claim "No symbol collisions with kavach's 442-fn surface
+  (verified)" was true of kavach vs samay, but did not cover the **transitive**
+  closure a consumer actually links. `backend_name` and `path_exists` both
+  collide with ai-hwaccel; `path_exists` is benign (identical 1/0 semantics).
+- Full suite (436 assertions) green.
+
 ## [3.8.1] — 2026-07-21
 
 **samay dep `1.0.0` → `1.0.1`.** Picks up samay's symbol-hygiene fix (its `uuid_v4` was

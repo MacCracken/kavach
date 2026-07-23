@@ -162,7 +162,7 @@ fn mono_now_ns() {
 fn sandbox_create(config) {
     var b = SandboxConfig_backend(config);
     if (backend_is_available(b) == 0) {
-        kavach_err_print(KAVACH_ERR_BACKEND_UNAVAILABLE, backend_name(b));
+        kavach_err_print(KAVACH_ERR_BACKEND_UNAVAILABLE, os_backend_name(b));
         return 0;
     }
     var s = alloc(SANDBOX_SIZE);
