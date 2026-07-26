@@ -7,6 +7,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.9.1] — 2026-07-25
+
+### Fixed — a sandbox could not say WHICH filesystem to run in, so every payload ran on the host
+`SandboxConfig` had no rootfs field. A container runtime consuming this API could unpack an image,
+materialize a rootfs, and hand kavach a command — and kavach would `execve` it **on the host
+filesystem**. A payload that exists only in the image simply did not run; one that happens to exist
+on the host (`/bin/sh`, `/bin/true`) ran the HOST copy. Reported by stiva, where
+`stiva run <image> /bin/ticker` exited 0 having executed nothing.
+
+- **`config_rootfs(cfg, path)`** — `SandboxConfig.rootfs`, appended at offset 64 so no existing
+  field offset moves. 0 keeps the previous behaviour.
+- **`src/confine.cyr`** (new) — the child-side confinement sequence, shared by every backend that
+  forks. Extracted from `spawn.cyr` because `backend_process.cyr` is included *before* it, and
+  without the split only DETACHED containers would have entered their rootfs — a stranger bug than
+  the one being fixed.
+- Both paths now enter the rootfs: `sandbox_spawn`'s child, and a new `confine_capture` for the
+  blocking path (the stdlib's `exec_capture` forks and execs on the host with no child-side seam).
+
+Entry is `unshare(CLONE_NEWUSER|CLONE_NEWNS)` → uid/gid map → `mount(/, MS_REC|MS_PRIVATE)` →
+`chroot` → `chdir("/")`. Ordering is load-bearing: rootfs entry precedes **landlock** (whose path
+rules resolve against the current root) and **seccomp** (which denies `mount`/`chroot` to the
+payload — correctly, but it would also deny this).
+
+Uses `chroot(2)`, not `pivot_root(2)`. chroot is escapable by a process holding CAP_SYS_CHROOT
+*and* a directory fd outside the new root — which is why inherited descriptors are closed first and
+why the payload is left with no capability to re-chroot. **pivot_root is the stronger primitive and
+is the next increment**; it wants the rootfs to be a mount point of its own, which is a behaviour
+change rather than a silent upgrade.
+
+Unprivileged callers get the mount namespace via a user namespace, the same pairing 3.9.0 added
+for the network namespace. Without the uid/gid map every file reads as owned by `nobody`, so
+anything expecting uid 0 fails in a way that looks like a corrupt image.
+
+### Fixed — the OCI backend ran every container in an empty throwaway rootfs
+`oci_prepare_bundle` created a fresh EMPTY directory under `/tmp` and pointed `config.json` at it
+(`"root":{"path":"rootfs"}`), ignoring the sandbox entirely. On any host with `runc`/`crun`
+installed — where `backend_is_available(OCI)` selects this backend over PROCESS — a container ran
+with no filesystem at all. Four defects had to fall for a payload to actually run, each hidden
+behind the last:
+
+1. **`root.path` now points at the sandbox's rootfs** (absolute; runc accepts that, so no bind
+   mount), and the throwaway directory is only staged when no rootfs is configured.
+2. **A minimal `mounts` list.** Without `/proc` runc panics inside its own init ("at least one
+   candidate /proc/thread-self path should work"); without a `/dev` tmpfs it fails setting up the
+   standard `/dev` symlinks. An image rootfs supplies neither. The previous spec emitted no mounts
+   at all, survivable only because it also pointed at an empty rootfs and never got that far.
+3. **Rootless support.** An unprivileged runc refuses outright — *"rootless container requires
+   user namespaces"* — unless the spec declares a user namespace **and** uid/gid mappings. Emitted
+   now when `getuid() != 0`.
+4. **`process.args` is real argv, not `/bin/sh -c <string>`**, when the sandbox names a rootfs.
+   The shell wrapper made every container depend on the IMAGE shipping `/bin/sh`, so a distroless
+   or scratch image — or a single static binary — could not run. `_split_command` moved to
+   `util.cyr` so the spec generator and the process backend share one splitter.
+
+Plus: **`runc` is invoked with an explicit `--root`**. The child is exec'd with an empty
+environment (deliberate — kavach does not leak the caller's env into a sandbox), and an
+unprivileged runc with no `XDG_RUNTIME_DIR` defaults its state root to `/run/runc` and dies with
+`mkdir /run/runc: permission denied`. That went to stderr, which the capture sends to `/dev/null`,
+so the container produced nothing and reported success.
+
+### Fixed — a failed `execve` was swallowed into exit 0
+The blocking capture path reported success for a command that never ran, which is a large part of
+why the missing-rootfs bug stayed invisible. `confine_capture` records the child's real status and
+`process_exec` surfaces it, so a missing binary now reports **127**.
+
 ## [3.9.0] — 2026-07-25
 
 ### Security — seccomp filters were never actually applied

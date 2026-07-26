@@ -62,6 +62,7 @@ modules = [
     "src/quarantine.cyr",
     "src/cgroup.cyr",
     "src/oci_spec.cyr",
+    "src/confine.cyr",
     "src/backend_dispatch.cyr",
     "src/backend_noop.cyr",
     "src/backend_process.cyr",

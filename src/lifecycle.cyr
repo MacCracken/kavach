@@ -77,6 +77,15 @@ fn exec_result_new() {
 
 # ---- SandboxConfig --------------------------------------------------------
 
+# `rootfs` (3.9.1): the filesystem the payload runs INSIDE, or 0 to run on the
+# host filesystem — which is what every release before 3.9.1 did unconditionally,
+# so a container runtime consuming this API had no way to say "run in this
+# rootfs" and its containers silently executed host binaries. Appended at offset
+# 64 so no existing field offset moves.
+#
+# NB: keep field comments OUT of this struct body — `#derive(accessors)` reads
+# each line as a field, so a continuation comment becomes a field named `#` and
+# generates `SandboxConfig_set_#`.
 #derive(accessors)
 struct SandboxConfig {
     backend;
@@ -87,9 +96,10 @@ struct SandboxConfig {
     hostname;
     domainname;
     workdir;
+    rootfs;
 }
 
-var SANDBOX_CONFIG_SIZE = 64;
+var SANDBOX_CONFIG_SIZE = 72;
 
 # Defaults match Rust's SandboxConfig::default():
 #   backend=Process, policy=basic(), timeout_ms=30000, inner_backend=-1 (none)
@@ -114,6 +124,12 @@ fn config_agent_id(c, s)       { SandboxConfig_set_agent_id(c, s); return c; }
 fn config_hostname(c, s)       { SandboxConfig_set_hostname(c, s); return c; }
 fn config_domainname(c, s)     { SandboxConfig_set_domainname(c, s); return c; }
 fn config_workdir(c, s)        { SandboxConfig_set_workdir(c, s); return c; }
+
+# The filesystem the payload runs INSIDE (3.9.1). Absent (0) means the payload
+# execs on the host filesystem, which is what every release before 3.9.1 did
+# unconditionally — a container runtime consuming this API had no way to say
+# "run in this rootfs", so its containers silently ran host binaries.
+fn config_rootfs(c, path)      { SandboxConfig_set_rootfs(c, path); return c; }
 
 # Convenience: enable seccomp with a profile name on the config's policy.
 fn config_policy_seccomp(c, profile) {

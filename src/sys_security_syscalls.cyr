@@ -23,4 +23,6 @@ enum SecuritySyscall {
     SYS_SENDTO_NR = 44;         # Linux x86_64 sendto    (agnos #44 = unassigned)
     SYS_RECVFROM_NR = 45;       # Linux x86_64 recvfrom  (agnos #45 = getrandom!)
     SYS_AGNOS_AUDIT_LOG = 520;  # claimed-custom; NONEXISTENT on agnos (out of range)
+    SYS_CHROOT_NR = 161;        # Linux x86_64 chroot     (agnos #161 out of range)
+    SYS_PIVOT_ROOT_NR = 155;    # Linux x86_64 pivot_root (agnos #155 out of range)
 }

@@ -9,32 +9,6 @@ var PROCESS_MAX_OUTPUT = 1048576;
 
 # Whitespace-split command into a vec of cstrs. No quote handling —
 # callers with quoted args should build the vec themselves and bypass.
-fn _split_command(cmdline) {
-    var args = vec_new();
-    var n = strlen(cmdline);
-    var i = 0;
-    while (i < n) {
-        while (i < n) {
-            var c = load8(cmdline + i);
-            if (c != 32) { if (c != 9) { break; } }
-            i = i + 1;
-        }
-        if (i >= n) { break; }
-        var start = i;
-        while (i < n) {
-            var c = load8(cmdline + i);
-            if (c == 32) { break; }
-            if (c == 9) { break; }
-            i = i + 1;
-        }
-        var len = i - start;
-        var tok = alloc(len + 1);
-        memcpy(tok, cmdline + start, len);
-        store8(tok + len, 0);
-        vec_push(args, tok);
-    }
-    return args;
-}
 
 fn process_exec(sandbox, command) {
     var start_ns = mono_now_ns();
@@ -82,7 +56,33 @@ fn process_exec(sandbox, command) {
     }
 
     var buf = alloc(PROCESS_MAX_OUTPUT);
-    var n = exec_capture(args, buf, PROCESS_MAX_OUTPUT);
+    var n = 0;
+    # A sandbox naming a rootfs must run INSIDE it. The stdlib's exec_capture
+    # forks and execs on the host with no child-side seam, so a rootfs-bearing
+    # sandbox takes kavach's own confined capture instead. Before 3.9.1 there was
+    # no rootfs field at all and every container ran host binaries.
+    var rootfs = 0;
+    if (cfg != 0) { rootfs = SandboxConfig_rootfs(cfg); }
+    if (rootfs != 0) {
+        var pol = 0;
+        if (cfg != 0) { pol = SandboxConfig_policy(cfg); }
+        var sec = 0;
+        if (pol != 0) {
+            if (SandboxPolicy_seccomp_enabled(pol) == 1) {
+                var sres = security_create_exec_seccomp_filter();
+                if (is_ok(sres) == 1) { sec = result_unwrap(sres); }
+            }
+        }
+        n = confine_capture(args, pol, rootfs, cgroup_path, sec, buf, PROCESS_MAX_OUTPUT);
+        cgroup_teardown(cgroup_path);
+        var end_rf = mono_now_ns();
+        var rr = backend_capture_finish(buf, n, PROCESS_MAX_OUTPUT, "exec failed", start_ns, end_rf);
+        # Surface the payload's real exit code. Reporting 0 for a command that
+        # never ran is how the missing-rootfs bug looked healthy for so long.
+        if (rr != 0) { ExecResult_set_exit_code(rr, confine_last_exit()); }
+        return rr;
+    }
+    n = exec_capture(args, buf, PROCESS_MAX_OUTPUT);
     cgroup_teardown(cgroup_path);
     var end_ns = mono_now_ns();
 

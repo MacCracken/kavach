@@ -1,0 +1,272 @@
+# confine.cyr — the child-side confinement sequence, shared by every backend
+# that forks (3.9.1).
+#
+# Extracted from spawn.cyr so the BLOCKING exec path can use it too:
+# `backend_process.cyr` is included before `spawn.cyr` (spawn needs its
+# `_split_command`), so it cannot reach into spawn — and without this split only
+# detached containers would enter their rootfs, which would be a stranger bug
+# than the one being fixed.
+#
+# Everything here runs in the CHILD, after fork and before execve.
+
+# Highest fd we scan when clearing inherited descriptors. close_range(2) would
+# be tidier but is not in the frozen syscall surface this module may use.
+var SPAWN_MAX_FD = 1024;
+
+# O_WRONLY|O_CREAT|O_APPEND, mode 0644. Append rather than truncate: a restarted
+# container should extend its log, not silently erase the evidence of why the
+# previous attempt died.
+var SPAWN_LOG_FLAGS = 1089;
+var SPAWN_LOG_MODE = 420;
+
+# Child exit codes for a confinement step that could not be applied. The child
+# _exits rather than execing, so the payload never runs less confined than the
+# policy promised — and the specific code says which primitive was missing.
+enum SpawnExit {
+    SPAWN_EXIT_STDIO = 120;
+    SPAWN_EXIT_CGROUP = 121;
+    SPAWN_EXIT_NNP = 122;
+    SPAWN_EXIT_NS = 123;
+    SPAWN_EXIT_LANDLOCK = 124;
+    SPAWN_EXIT_SECCOMP = 125;
+    SPAWN_EXIT_ROOTFS = 119;
+}
+
+# Namespace flags implied by the policy.
+#
+# `network_enabled == 0` asks for a private network namespace. Note this reads a
+# field that `policy_new` zero-fills, so the DEFAULT policy requests network
+# isolation — that is the intended default for a sandbox, and the exec path's
+# failure to act on it is a gap there, not a licence to ignore it here.
+#
+# Unprivileged `unshare(CLONE_NEWNET)` is EPERM: an unprivileged process may
+# only create a network namespace as part of a NEW USER namespace, which is
+# exactly how rootless containers get one. So when we are not root we pair
+# NS_USER with it. Running as root, the user namespace is unnecessary and adds a
+# uid-mapping step nothing here needs, so it is omitted.
+#[must_use]
+fn _spawn_ns_flags(policy, rootfs) {
+    var f = 0;
+    if (policy != 0) {
+        if (SandboxPolicy_network_enabled(policy) == 0) { f = f | NS_NETWORK; }
+    }
+    # Entering a rootfs needs a mount namespace of our own, or making `/`
+    # private and chrooting would affect the host.
+    if (rootfs != 0) { f = f | NS_MOUNT; }
+    if (f == 0) { return 0; }
+    # Unprivileged, neither a network nor a mount namespace is obtainable on its
+    # own — both require being in a NEW USER namespace, which is how rootless
+    # containers get them. As root the user namespace is unnecessary.
+    if (sys_getuid() != 0) { f = f | NS_USER; }
+    return f;
+}
+
+# mount(2) flags used to detach our mount namespace from the host's.
+var MS_REC_PRIVATE = 278528;        # MS_REC (0x4000) | MS_PRIVATE (0x40000)
+
+# Map our uid/gid to root INSIDE the new user namespace.
+#
+# Without this every file in the rootfs is owned by `nobody` from the payload's
+# point of view, and anything needing uid 0 (most container images) fails in a
+# way that looks like a corrupt image rather than a missing mapping.
+# `setgroups=deny` first is mandatory for an unprivileged writer of gid_map —
+# the kernel refuses the gid_map otherwise.
+fn _spawn_write_idmaps(uid, gid) {
+    file_write_all("/proc/self/setgroups", "deny", 4);
+    var ub[64];
+    var un = fmt_int_buf(0, &ub);
+    store8(&ub + un, 32);
+    un = un + 1 + fmt_int_buf(uid, &ub + un + 1);
+    store8(&ub + un, 32);
+    store8(&ub + un + 1, 49);                       # '1'
+    if (file_write_all("/proc/self/uid_map", &ub, un + 2) < 0) { return 0 - 1; }
+    var gb[64];
+    var gn = fmt_int_buf(0, &gb);
+    store8(&gb + gn, 32);
+    gn = gn + 1 + fmt_int_buf(gid, &gb + gn + 1);
+    store8(&gb + gn, 32);
+    store8(&gb + gn + 1, 49);
+    if (file_write_all("/proc/self/gid_map", &gb, gn + 2) < 0) { return 0 - 1; }
+    return 0;
+}
+
+# Enter `rootfs` — the step whose absence made every container before 3.9.1 run
+# host binaries.
+#
+# Requires a mount namespace already unshared (the caller does that with
+# NS_MOUNT), or the private-mount call below would alter the HOST's propagation.
+#
+# Uses chroot(2), not pivot_root(2). chroot is escapable by a process that holds
+# CAP_SYS_CHROOT *and* a directory fd outside the new root — which is exactly why
+# the caller closes inherited descriptors first, and why the payload is left with
+# no capability to re-chroot. pivot_root is the stronger primitive and wants the
+# rootfs to be a mount point of its own; that is the follow-up, and it is a
+# behaviour change worth its own increment rather than a silent upgrade here.
+fn _spawn_enter_rootfs(rootfs) {
+    if (rootfs == 0) { return 0; }
+    # Detach propagation, or our mounts (and the chroot) leak to the host.
+    if (sys_mount(0, "/", 0, MS_REC_PRIVATE, 0) < 0) { return 0 - 1; }
+    if (syscall(SYS_CHROOT_NR, rootfs) < 0) { return 0 - 1; }
+    # chroot does NOT move cwd; leaving it outside the new root is itself an
+    # escape route.
+    if (syscall(SYS_CHDIR, "/") < 0) { return 0 - 1; }
+    return 0;
+}
+
+# Close every descriptor from `from` up to SPAWN_MAX_FD. Errors are expected
+# and ignored — most of the range is simply not open.
+fn _spawn_close_inherited(from) {
+    var fd = from;
+    while (fd < SPAWN_MAX_FD) {
+        sys_close(fd);
+        fd = fd + 1;
+    }
+    return 0;
+}
+
+# Put the CALLING process into `cgroup_path`. Returns 0 on success, -1 on
+# failure. Called in the child, so "the calling process" is the payload.
+fn _spawn_cgroup_join(cgroup_path) {
+    if (cgroup_path == 0) { return 0; }
+    var fpath = _cgroup_file(cgroup_path, "cgroup.procs");
+    var buf[32];
+    var len = fmt_int_buf(sys_getpid(), &buf);
+    if (file_write_all(fpath, &buf, len) < 0) { return 0 - 1; }
+    return 0;
+}
+
+# Redirect stdio for the detached child: stdin from /dev/null, stdout+stderr to
+# `log_path` (or /dev/null when none was given). Returns 0 / -1.
+fn _spawn_redirect_stdio(log_path) {
+    var devnull = sys_open("/dev/null", 0, 0);          # O_RDONLY
+    if (devnull < 0) { return 0 - 1; }
+    sys_dup2(devnull, 0);
+    sys_close(devnull);
+
+    var out = 0 - 1;
+    if (log_path != 0) {
+        out = sys_open(log_path, SPAWN_LOG_FLAGS, SPAWN_LOG_MODE);
+    }
+    if (out < 0) {
+        out = sys_open("/dev/null", 1, 0);              # O_WRONLY
+        if (out < 0) { return 0 - 1; }
+    }
+    sys_dup2(out, 1);
+    sys_dup2(out, 2);
+    if (out > 2) { sys_close(out); }
+    return 0;
+}
+
+# Apply the whole confinement sequence in the child. Returns 0, or does not
+# return (each step _exits with its own code so a caller can tell which
+# primitive was unavailable).
+#
+# Order is security-relevant and is the reason this is one function rather than
+# a checklist each backend re-implements:
+#   fds -> cgroup -> NO_NEW_PRIVS -> namespaces (+idmap) -> rootfs -> landlock
+#   -> seccomp
+# seccomp is last because it denies mount/chroot/unshare; rootfs entry precedes
+# landlock because landlock path rules resolve against the current root.
+fn confine_child(policy, rootfs, cgroup_path, uid, gid, seccomp_info) {
+    _spawn_close_inherited(3);
+    if (_spawn_cgroup_join(cgroup_path) != 0) { sys_exit(SPAWN_EXIT_CGROUP); }
+    if (syscall(SYS_PRCTL, 38, 1, 0, 0, 0) < 0) { sys_exit(SPAWN_EXIT_NNP); }
+
+    var nsf = _spawn_ns_flags(policy, rootfs);
+    if (nsf != 0) {
+        if (is_ok(security_create_namespace(nsf)) == 0) { sys_exit(SPAWN_EXIT_NS); }
+        if ((nsf & NS_USER) != 0) {
+            if (_spawn_write_idmaps(uid, gid) != 0) { sys_exit(SPAWN_EXIT_NS); }
+        }
+    }
+    if (_spawn_enter_rootfs(rootfs) != 0) { sys_exit(SPAWN_EXIT_ROOTFS); }
+
+    if (policy != 0) {
+        if (SandboxPolicy_landlock_rules_len(policy) > 0) {
+            if (is_ok(security_apply_landlock(0, 0)) == 0) { sys_exit(SPAWN_EXIT_LANDLOCK); }
+        }
+    }
+    if (seccomp_info != 0) {
+        if (is_ok(security_load_seccomp(security_seccomp_filter_ptr(seccomp_info),
+        security_seccomp_filter_len(seccomp_info))) == 0) {
+            sys_exit(SPAWN_EXIT_SECCOMP);
+        }
+    }
+    return 0;
+}
+
+# Fork, confine, exec, and capture stdout — the blocking counterpart of
+# sandbox_spawn, used when the sandbox names a rootfs.
+#
+# The stdlib's `exec_capture` forks and execs on the HOST; it has no seam for a
+# child-side confinement step, which is why a rootfs-bearing sandbox needs its
+# own fork here rather than a flag passed down.
+#
+# Returns bytes captured, or -1.
+fn confine_capture(args, policy, rootfs, cgroup_path, seccomp_info, buf, buflen) {
+    var argc = vec_len(args);
+    if (argc < 1) { return 0 - 1; }
+    var argv = alloc((argc + 1) * 8);
+    var i = 0;
+    while (i < argc) {
+        store64(argv + i * 8, vec_get(args, i));
+        i = i + 1;
+    }
+    store64(argv + argc * 8, 0);
+    var envp = alloc(8);
+    store64(envp, 0);
+
+    # Read the ids in the PARENT — inside the new user namespace getuid()
+    # reports the mapped id, not the one the map must be written against.
+    var uid = sys_getuid();
+    var gid = sys_getgid();
+
+    var pipefd[16];
+    sys_pipe(&pipefd);
+    var rfd = load32(&pipefd);
+    var wfd = load32(&pipefd + 4);
+    var pid = sys_fork();
+    if (pid < 0) { sys_close(rfd); sys_close(wfd); return 0 - 1; }
+    if (pid == 0) {
+        sys_close(rfd);
+        sys_dup2(wfd, 1);
+        sys_dup2(wfd, 2);
+        sys_close(wfd);
+        confine_child(policy, rootfs, cgroup_path, uid, gid, seccomp_info);
+        sys_execve(vec_get(args, 0), argv, envp);
+        # execve failed — 127 is the shell's "command not found", and it is
+        # visible to the caller instead of being swallowed into a success.
+        sys_exit(127);
+    }
+    sys_close(wfd);
+    var total = 0;
+    var rgo = 1;
+    while (rgo == 1) {
+        var n = sys_read(rfd, buf + total, buflen - total);
+        if (n <= 0) { rgo = 0; }
+        else {
+            total = total + n;
+            if (total >= buflen) { rgo = 0; }
+        }
+    }
+    sys_close(rfd);
+    var stbuf[4];
+    store32(&stbuf, 0);
+    sys_waitpid(pid, &stbuf, 0);
+    var status = load32(&stbuf);
+    var sig = status & 127;
+    var code = 0;
+    if (sig == 0) { code = (status >> 8) & 255; }
+    else { code = 128 + sig; }
+    _confine_last_exit = code;
+    return total;
+}
+
+# Exit code of the most recent confine_capture. The capture returns a byte
+# count, and a caller that only looked at that would report success for a
+# payload that never ran — which is exactly how the missing-rootfs bug stayed
+# invisible.
+var _confine_last_exit = 0;
+
+#[must_use]
+fn confine_last_exit() { return _confine_last_exit; }

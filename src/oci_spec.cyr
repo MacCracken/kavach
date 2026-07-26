@@ -106,6 +106,7 @@ fn oci_generate_spec(sandbox, command) {
     var config = Sandbox_config(sandbox);
     var policy = SandboxConfig_policy(config);
     var cmd_escaped = oci_json_escape(command);
+    var cfg_rootfs_for_args = SandboxConfig_rootfs(config);
 
     var mem = SandboxPolicy_memory_limit_mb(policy);
     var pids = SandboxPolicy_max_pids(policy);
@@ -149,23 +150,103 @@ fn oci_generate_spec(sandbox, command) {
     var cap = checked_add(strlen(cmd_escaped), strlen(resources));
     if (cap < 0) { return 0; }
     cap = checked_add(cap, 2048);
+    var scfg_cap = Sandbox_config(sandbox);
+    if (scfg_cap != 0) {
+        var rf_cap = SandboxConfig_rootfs(scfg_cap);
+        if (rf_cap != 0) { cap = checked_add(cap, strlen(rf_cap) * 2 + 64); }
+    }
+    if (cap < 0) { return 0; }
+    cap = checked_add(cap, 512);        # rootless user-ns + id mappings + mounts
     if (cap < 0) { return 0; }
     var buf = alloc_checked(cap);
     if (buf == 0) { return 0; }
     var pos = 0;
-    var head = "{\"ociVersion\":\"1.0.2\",\"process\":{\"terminal\":false,\"args\":[\"/bin/sh\",\"-c\",\"";
+    var head = "{\"ociVersion\":\"1.0.2\",\"process\":{\"terminal\":false,\"args\":[";
     memcpy(buf + pos, head, strlen(head)); pos = pos + strlen(head);
-    memcpy(buf + pos, cmd_escaped, strlen(cmd_escaped)); pos = pos + strlen(cmd_escaped);
-    var mid1a = "\"],\"env\":[\"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\",\"TERM=xterm\"],";
+    # argv, not `/bin/sh -c <string>`.
+    #
+    # The shell wrapper made every OCI container depend on the IMAGE shipping
+    # /bin/sh — so a distroless or scratch image, or a single static binary,
+    # could not run at all, and the failure looked like the payload doing
+    # nothing. A rootfs-bearing sandbox gets real argv; without a rootfs the
+    # legacy wrapper is kept, since a caller relying on shell syntax there has
+    # a host shell by definition.
+    if (cfg_rootfs_for_args != 0) {
+        var av = _split_command(command);
+        var ai = 0;
+        while (ai < vec_len(av)) {
+            if (ai > 0) { store8(buf + pos, 44); pos = pos + 1; }        # ','
+            store8(buf + pos, 34); pos = pos + 1;                        # '"'
+            var tok = oci_json_escape(vec_get(av, ai));
+            memcpy(buf + pos, tok, strlen(tok)); pos = pos + strlen(tok);
+            store8(buf + pos, 34); pos = pos + 1;                        # '"'
+            ai = ai + 1;
+        }
+    } else {
+        var shw = "\"/bin/sh\",\"-c\",\"";
+        memcpy(buf + pos, shw, strlen(shw)); pos = pos + strlen(shw);
+        memcpy(buf + pos, cmd_escaped, strlen(cmd_escaped)); pos = pos + strlen(cmd_escaped);
+        store8(buf + pos, 34); pos = pos + 1;                            # closing '"'
+    }
+    var mid1a = "],\"env\":[\"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\",\"TERM=xterm\"],";
+    # root.path: the sandbox's OWN rootfs when it has one, else the bundle's
+    # empty "rootfs" dir. The relative form is what every release before 3.9.1
+    # emitted unconditionally — an EMPTY directory — so an OCI-backed container
+    # ran with no filesystem and any payload from the image silently did
+    # nothing. runc accepts an absolute root.path, so no bind mount is needed.
+    var cfg_rf = 0;
+    var scfg = Sandbox_config(sandbox);
+    if (scfg != 0) { cfg_rf = SandboxConfig_rootfs(scfg); }
     var mid1b = "\"cwd\":\"/\"},\"root\":{\"path\":\"rootfs\",\"readonly\":";
+    if (cfg_rf != 0) { mid1b = "\"cwd\":\"/\"},\"root\":{\"path\":\""; }
     memcpy(buf + pos, mid1a, strlen(mid1a)); pos = pos + strlen(mid1a);
     memcpy(buf + pos, mid1b, strlen(mid1b)); pos = pos + strlen(mid1b);
+    if (cfg_rf != 0) {
+        var rf_esc = oci_json_escape(cfg_rf);
+        memcpy(buf + pos, rf_esc, strlen(rf_esc)); pos = pos + strlen(rf_esc);
+        var rf_tail = "\",\"readonly\":";
+        memcpy(buf + pos, rf_tail, strlen(rf_tail)); pos = pos + strlen(rf_tail);
+    }
     memcpy(buf + pos, readonly, strlen(readonly)); pos = pos + strlen(readonly);
-    var mid2 = "},\"linux\":{\"namespaces\":[";
+    # A minimal mounts list. Without /proc runc panics in its own init
+    # ("at least one candidate /proc/thread-self path should work"); without a
+    # /dev tmpfs it fails setting up the standard /dev symlinks. Neither is
+    # optional, and an image rootfs supplies neither — the previous spec emitted
+    # no mounts at all, which is survivable only because it also pointed at an
+    # empty rootfs and therefore never got far enough to care.
+    var mounts = "},\"mounts\":[{\"destination\":\"/proc\",\"type\":\"proc\",\"source\":\"proc\"},{\"destination\":\"/dev\",\"type\":\"tmpfs\",\"source\":\"tmpfs\",\"options\":[\"nosuid\",\"strictatime\",\"mode=755\",\"size=65536k\"]}]";
+    memcpy(buf + pos, mounts, strlen(mounts)); pos = pos + strlen(mounts);
+    var mid2 = ",\"linux\":{\"namespaces\":[";
     memcpy(buf + pos, mid2, strlen(mid2)); pos = pos + strlen(mid2);
     memcpy(buf + pos, netns, strlen(netns)); pos = pos + strlen(netns);
     var ns_rest = "{\"type\":\"pid\"},{\"type\":\"ipc\"},{\"type\":\"uts\"},{\"type\":\"mount\"}]";
+    # ROOTLESS: an unprivileged runc refuses outright — "rootless container
+    # requires user namespaces" — unless the spec declares a user namespace AND
+    # id mappings. Without this every OCI-backed container failed for a
+    # non-root caller, and the failure was invisible because a runc that never
+    # starts writes nothing to the captured stdout.
+    if (sys_getuid() != 0) {
+        var ns_user = "{\"type\":\"user\"},";
+        # Insert the user namespace FIRST — runc requires it before the others
+        # it will create inside it.
+        memcpy(buf + pos, ns_user, strlen(ns_user)); pos = pos + strlen(ns_user);
+    }
     memcpy(buf + pos, ns_rest, strlen(ns_rest)); pos = pos + strlen(ns_rest);
+    if (sys_getuid() != 0) {
+        # Map our uid/gid to 0 inside, so image files owned by root are usable.
+        var m1 = ",\"uidMappings\":[{\"containerID\":0,\"hostID\":";
+        memcpy(buf + pos, m1, strlen(m1)); pos = pos + strlen(m1);
+        var ub[24];
+        var ulen = fmt_int_buf(sys_getuid(), &ub);
+        memcpy(buf + pos, &ub, ulen); pos = pos + ulen;
+        var m2 = ",\"size\":1}],\"gidMappings\":[{\"containerID\":0,\"hostID\":";
+        memcpy(buf + pos, m2, strlen(m2)); pos = pos + strlen(m2);
+        var gb[24];
+        var glen = fmt_int_buf(sys_getgid(), &gb);
+        memcpy(buf + pos, &gb, glen); pos = pos + glen;
+        var m3 = ",\"size\":1}]";
+        memcpy(buf + pos, m3, strlen(m3)); pos = pos + strlen(m3);
+    }
     memcpy(buf + pos, resources, strlen(resources)); pos = pos + strlen(resources);
     var tail = "}}";
     memcpy(buf + pos, tail, strlen(tail)); pos = pos + strlen(tail);
@@ -189,10 +270,17 @@ fn oci_prepare_bundle(container_id, sandbox, command) {
     # signal, not natural occurrence).
     if (sys_mkdir(bundle, 448) < 0) { return 0; }
 
+    # Only stage an empty bundle rootfs when the sandbox has none of its own;
+    # with a configured rootfs the spec points at it absolutely.
+    var cfg_rootfs = 0;
+    var pb_cfg = Sandbox_config(sandbox);
+    if (pb_cfg != 0) { cfg_rootfs = SandboxConfig_rootfs(pb_cfg); }
     var rootfs = alloc(strlen(bundle) + 8);
     memcpy(rootfs, bundle, strlen(bundle));
     memcpy(rootfs + strlen(bundle), "/rootfs", 8);
-    if (sys_mkdir(rootfs, 448) < 0) { sys_rmdir(bundle); return 0; }
+    if (cfg_rootfs == 0) {
+        if (sys_mkdir(rootfs, 448) < 0) { sys_rmdir(bundle); return 0; }
+    }
 
     var cfg_path = alloc(strlen(bundle) + 16);
     memcpy(cfg_path, bundle, strlen(bundle));

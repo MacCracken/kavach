@@ -35,6 +35,7 @@ include "src/backend_sgx.cyr"
 include "src/backend_sev.cyr"
 include "src/backend_tdx.cyr"
 include "src/backend_firecracker.cyr"
+include "src/confine.cyr"
 include "src/persistent.cyr"
 include "src/spawn.cyr"
 include "src/composite.cyr"
@@ -2186,6 +2187,41 @@ fn test_spawn_null_handles() {
     return 0;
 }
 
+# ══ rootfs entry (3.9.1) ═════════════════════════════════
+
+fn test_rootfs_config_field() {
+    test_group("rootfs_config_field");
+    var c = config_new();
+    assert_eq(SandboxConfig_rootfs(c), 0, "defaults to 0 — host filesystem, the pre-3.9.1 behaviour");
+    config_rootfs(c, "/tmp/somewhere");
+    assert(streq(SandboxConfig_rootfs(c), "/tmp/somewhere") == 1, "setter round-trips");
+    # Appending the field must not have moved any existing offset.
+    var c2 = config_new();
+    config_backend(c2, Backend.NOOP);
+    config_timeout_ms(c2, 4242);
+    config_workdir(c2, "/w");
+    assert_eq(SandboxConfig_backend(c2), Backend.NOOP, "backend still at its offset");
+    assert_eq(SandboxConfig_timeout_ms(c2), 4242, "timeout_ms still at its offset");
+    assert(streq(SandboxConfig_workdir(c2), "/w") == 1, "workdir still at its offset");
+    return 0;
+}
+
+fn test_ns_flags_for_rootfs() {
+    test_group("ns_flags_for_rootfs");
+    # A rootfs needs a MOUNT namespace, and unprivileged that is only obtainable
+    # inside a new USER namespace.
+    var p = policy_basic();
+    SandboxPolicy_set_network_enabled(p, 1);          # no netns wanted
+    var f = _spawn_ns_flags(p, "/tmp/x");
+    assert((f & NS_MOUNT) != 0, "rootfs implies a mount namespace");
+    if (sys_getuid() != 0) {
+        assert((f & NS_USER) != 0, "unprivileged: paired with a user namespace");
+    }
+    # No rootfs and networking allowed -> nothing to unshare.
+    assert_eq(_spawn_ns_flags(p, 0), 0, "no rootfs, network allowed -> no namespaces");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_backend_parse();
@@ -2338,6 +2374,8 @@ fn main() {
     test_exec_seccomp_filter_shape();
     test_spawn_terminate_escalates();
     test_spawn_null_handles();
+    test_rootfs_config_field();
+    test_ns_flags_for_rootfs();
     return assert_summary();
 }
 

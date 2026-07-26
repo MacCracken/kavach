@@ -19,9 +19,34 @@ fn _oci_runtime_path() {
     return 0;
 }
 
+# runc's state directory.
+#
+# The child is exec'd with an EMPTY environment (deliberate — kavach does not
+# leak the caller's env into a sandbox), and an unprivileged runc with no
+# XDG_RUNTIME_DIR defaults its state root to /run/runc, where it fails with
+# "mkdir /run/runc: permission denied". That error went to stderr, which the
+# capture sends to /dev/null, so the whole container silently produced nothing
+# and reported success. Passing --root explicitly removes the dependency on
+# environment entirely rather than re-introducing env inheritance.
+#[must_use]
+fn _oci_state_root() {
+    var prefix = "/tmp/kavach-runc-";
+    var b[32];
+    var n = fmt_int_buf(sys_getuid(), &b);
+    var plen = strlen(prefix);
+    var p = alloc(plen + n + 1);
+    memcpy(p, prefix, plen);
+    memcpy(p + plen, &b, n);
+    store8(p + plen + n, 0);
+    sys_mkdir(p, 448);                      # 0700; EEXIST is fine
+    return p;
+}
+
 fn _oci_run(runtime, bundle, container_id, out_buf, out_cap) {
     var args = vec_new();
     vec_push(args, runtime);
+    vec_push(args, "--root");
+    vec_push(args, _oci_state_root());
     vec_push(args, "run");
     vec_push(args, "--bundle");
     vec_push(args, bundle);
@@ -32,6 +57,8 @@ fn _oci_run(runtime, bundle, container_id, out_buf, out_cap) {
 fn _oci_delete(runtime, container_id) {
     var args = vec_new();
     vec_push(args, runtime);
+    vec_push(args, "--root");
+    vec_push(args, _oci_state_root());
     vec_push(args, "delete");
     vec_push(args, "--force");
     vec_push(args, container_id);

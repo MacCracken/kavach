@@ -279,3 +279,36 @@ fn strieq(a, b) {
     }
     return 0;
 }
+
+# Split a command line on runs of spaces/tabs into a vec of cstr tokens.
+#
+# Lives here rather than in a backend because BOTH the process backend and the
+# OCI spec generator need it — the OCI spec must emit `process.args` as real
+# argv, not a `/bin/sh -c` string, or any image without a shell (distroless,
+# scratch, a single static binary) cannot run.
+fn _split_command(cmdline) {
+    var args = vec_new();
+    var n = strlen(cmdline);
+    var i = 0;
+    while (i < n) {
+        while (i < n) {
+            var c = load8(cmdline + i);
+            if (c != 32) { if (c != 9) { break; } }
+            i = i + 1;
+        }
+        if (i >= n) { break; }
+        var start = i;
+        while (i < n) {
+            var c = load8(cmdline + i);
+            if (c == 32) { break; }
+            if (c == 9) { break; }
+            i = i + 1;
+        }
+        var len = i - start;
+        var tok = alloc(len + 1);
+        memcpy(tok, cmdline + start, len);
+        store8(tok + len, 0);
+        vec_push(args, tok);
+    }
+    return args;
+}

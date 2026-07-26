@@ -34,6 +34,9 @@
 #   7. landlock        — path rules; also sets NO_NEW_PRIVS itself.
 #   8. execve.
 #
+#   8. rootfs entry    — chroot into the container filesystem, before landlock
+#                        (path rules resolve against the current root) and
+#                        before seccomp (which denies mount/chroot).
 #   9. seccomp         — applied LAST, or it would filter the confinement steps
 #                        above it. Uses the exec-safe DENY-list profile; the
 #                        20-syscall allowlist cannot be used pre-exec because it
@@ -55,92 +58,6 @@ struct SpawnedProcess {
     log_path;
 }
 var SPAWNED_PROCESS_SIZE = 40;
-
-# Highest fd we scan when clearing inherited descriptors. close_range(2) would
-# be tidier but is not in the frozen syscall surface this module may use.
-var SPAWN_MAX_FD = 1024;
-
-# O_WRONLY|O_CREAT|O_APPEND, mode 0644. Append rather than truncate: a restarted
-# container should extend its log, not silently erase the evidence of why the
-# previous attempt died.
-var SPAWN_LOG_FLAGS = 1089;
-var SPAWN_LOG_MODE = 420;
-
-# Child exit codes for a confinement step that could not be applied. The child
-# _exits rather than execing, so the payload never runs less confined than the
-# policy promised — and the specific code says which primitive was missing.
-enum SpawnExit {
-    SPAWN_EXIT_STDIO = 120;
-    SPAWN_EXIT_CGROUP = 121;
-    SPAWN_EXIT_NNP = 122;
-    SPAWN_EXIT_NS = 123;
-    SPAWN_EXIT_LANDLOCK = 124;
-    SPAWN_EXIT_SECCOMP = 125;
-}
-
-# Namespace flags implied by the policy.
-#
-# `network_enabled == 0` asks for a private network namespace. Note this reads a
-# field that `policy_new` zero-fills, so the DEFAULT policy requests network
-# isolation — that is the intended default for a sandbox, and the exec path's
-# failure to act on it is a gap there, not a licence to ignore it here.
-#
-# Unprivileged `unshare(CLONE_NEWNET)` is EPERM: an unprivileged process may
-# only create a network namespace as part of a NEW USER namespace, which is
-# exactly how rootless containers get one. So when we are not root we pair
-# NS_USER with it. Running as root, the user namespace is unnecessary and adds a
-# uid-mapping step nothing here needs, so it is omitted.
-#[must_use]
-fn _spawn_ns_flags(policy) {
-    if (policy == 0) { return 0; }
-    if (SandboxPolicy_network_enabled(policy) != 0) { return 0; }
-    if (sys_getuid() == 0) { return NS_NETWORK; }
-    return NS_USER | NS_NETWORK;
-}
-
-# Close every descriptor from `from` up to SPAWN_MAX_FD. Errors are expected
-# and ignored — most of the range is simply not open.
-fn _spawn_close_inherited(from) {
-    var fd = from;
-    while (fd < SPAWN_MAX_FD) {
-        sys_close(fd);
-        fd = fd + 1;
-    }
-    return 0;
-}
-
-# Put the CALLING process into `cgroup_path`. Returns 0 on success, -1 on
-# failure. Called in the child, so "the calling process" is the payload.
-fn _spawn_cgroup_join(cgroup_path) {
-    if (cgroup_path == 0) { return 0; }
-    var fpath = _cgroup_file(cgroup_path, "cgroup.procs");
-    var buf[32];
-    var len = fmt_int_buf(sys_getpid(), &buf);
-    if (file_write_all(fpath, &buf, len) < 0) { return 0 - 1; }
-    return 0;
-}
-
-# Redirect stdio for the detached child: stdin from /dev/null, stdout+stderr to
-# `log_path` (or /dev/null when none was given). Returns 0 / -1.
-fn _spawn_redirect_stdio(log_path) {
-    var devnull = sys_open("/dev/null", 0, 0);          # O_RDONLY
-    if (devnull < 0) { return 0 - 1; }
-    sys_dup2(devnull, 0);
-    sys_close(devnull);
-
-    var out = 0 - 1;
-    if (log_path != 0) {
-        out = sys_open(log_path, SPAWN_LOG_FLAGS, SPAWN_LOG_MODE);
-    }
-    if (out < 0) {
-        out = sys_open("/dev/null", 1, 0);              # O_WRONLY
-        if (out < 0) { return 0 - 1; }
-    }
-    sys_dup2(out, 1);
-    sys_dup2(out, 2);
-    if (out > 2) { sys_close(out); }
-    return 0;
-}
 
 # Spawn `command` detached under `sandbox`'s policy, with stdout+stderr appended
 # to `log_path` (0 → /dev/null). Returns SpawnedProcess*, or 0.
@@ -174,8 +91,16 @@ fn sandbox_spawn(sandbox, command, log_path) {
     }
 
     var policy = 0;
+    var rootfs = 0;
     var cfg = Sandbox_config(sandbox);
-    if (cfg != 0) { policy = SandboxConfig_policy(cfg); }
+    if (cfg != 0) {
+        policy = SandboxConfig_policy(cfg);
+        rootfs = SandboxConfig_rootfs(cfg);
+    }
+    # Read the ids in the PARENT: inside the new user namespace getuid() would
+    # report the mapped id, not the one the map has to be written against.
+    var spawn_uid = sys_getuid();
+    var spawn_gid = sys_getgid();
 
     # Build the seccomp filter in the PARENT: alloc in the child after fork is
     # fine here, but a filter that fails to build should refuse the spawn rather
@@ -229,32 +154,7 @@ fn sandbox_spawn(sandbox, command, log_path) {
         # "not found".
         sys_setsid();
         if (_spawn_redirect_stdio(log_path) != 0) { sys_exit(SPAWN_EXIT_STDIO); }
-        _spawn_close_inherited(3);
-        if (_spawn_cgroup_join(cgroup_path) != 0) { sys_exit(SPAWN_EXIT_CGROUP); }
-
-        # NO_NEW_PRIVS before anything that depends on it.
-        if (syscall(SYS_PRCTL, 38, 1, 0, 0, 0) < 0) { sys_exit(SPAWN_EXIT_NNP); }
-
-        var nsf = _spawn_ns_flags(policy);
-        if (nsf != 0) {
-            if (is_ok(security_create_namespace(nsf)) == 0) { sys_exit(SPAWN_EXIT_NS); }
-        }
-        if (policy != 0) {
-            if (SandboxPolicy_landlock_rules_len(policy) > 0) {
-                if (is_ok(security_apply_landlock(0, 0)) == 0) { sys_exit(SPAWN_EXIT_LANDLOCK); }
-            }
-        }
-        # Seccomp LAST among the confinements: everything above it (unshare,
-        # landlock_restrict_self, prctl) would itself be filtered otherwise.
-        # The exec-safe profile permits execve by construction — see
-        # security_create_exec_seccomp_filter for why the basic allowlist cannot
-        # be used here.
-        if (seccomp_info != 0) {
-            if (is_ok(security_load_seccomp(security_seccomp_filter_ptr(seccomp_info),
-            security_seccomp_filter_len(seccomp_info))) == 0) {
-                sys_exit(SPAWN_EXIT_SECCOMP);
-            }
-        }
+        confine_child(policy, rootfs, cgroup_path, spawn_uid, spawn_gid, seccomp_info);
         sys_execve(vec_get(args, 0), argv, envp);
         sys_exit(127);
     }
