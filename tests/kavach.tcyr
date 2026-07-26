@@ -2,6 +2,10 @@
 
 include "src/util.cyr"
 include "src/error.cyr"
+include "src/sys_security_syscalls.cyr"
+include "src/sys_error.cyr"
+include "src/sys_util.cyr"
+include "src/security.cyr"
 include "src/backend.cyr"
 include "src/policy.cyr"
 include "src/scoring.cyr"
@@ -32,6 +36,7 @@ include "src/backend_sev.cyr"
 include "src/backend_tdx.cyr"
 include "src/backend_firecracker.cyr"
 include "src/persistent.cyr"
+include "src/spawn.cyr"
 include "src/composite.cyr"
 include "src/observability.cyr"
 include "src/attestation.cyr"
@@ -1930,6 +1935,257 @@ fn test_persistent_guest() {
     return 0;
 }
 
+# ══ sandbox_spawn (3.9.0) ════════════════════════════════
+
+fn _spawn_running_sandbox(policy) {
+    var c = config_new();
+    config_backend(c, Backend.PROCESS);
+    if (policy != 0) { config_policy(c, policy); }
+    var sb = sandbox_create(c);
+    sandbox_transition(sb, SandboxState.RUNNING);
+    return sb;
+}
+
+fn test_spawn_lifecycle() {
+    test_group("sandbox_spawn_lifecycle");
+    var log = "/tmp/kavach_spawn_log.txt";
+    xunlink(log);
+    var sb = _spawn_running_sandbox(0);
+    var sp = sandbox_spawn(sb, "/bin/true", log);
+    assert(sp != 0, "spawned");
+    assert(spawned_pid(sp) > 0, "has a real pid");
+    assert_eq(spawned_alive(sp), 1, "alive before reaping");
+    assert_eq(spawned_exit_code(sp), 0 - 1, "exit code unknown until reaped");
+
+    assert_eq(spawned_wait(sp), 0, "/bin/true exits 0");
+    assert_eq(spawned_alive(sp), 0, "dead after wait");
+    assert_eq(spawned_exit_code(sp), 0, "exit code recorded");
+    # wait is idempotent once reaped — a caller polling after the fact must not
+    # block forever or get -1.
+    assert_eq(spawned_wait(sp), 0, "wait after reap returns the recorded code");
+    return 0;
+}
+
+fn test_spawn_exit_code_and_signal() {
+    test_group("sandbox_spawn_exit_code");
+    var sb = _spawn_running_sandbox(0);
+    var sp = sandbox_spawn(sb, "/bin/false", 0);
+    assert(sp != 0, "spawned /bin/false");
+    assert_eq(spawned_wait(sp), 1, "/bin/false exits 1");
+
+    # A signalled child reports 128+signal, so a caller can tell it apart from
+    # a payload that merely exited with that number.
+    var sb2 = _spawn_running_sandbox(0);
+    var sp2 = sandbox_spawn(sb2, "/bin/sleep 30", 0);
+    assert(sp2 != 0, "spawned sleep");
+    assert_eq(spawned_try_wait(sp2), 0, "still running");
+    assert_eq(spawned_kill(sp2, 9), 0, "SIGKILL delivered");
+    assert_eq(spawned_wait(sp2), 137, "reports 128+9, not a bare 9");
+    return 0;
+}
+
+fn test_spawn_detaches_and_logs() {
+    test_group("sandbox_spawn_logging");
+    var log = "/tmp/kavach_spawn_out.txt";
+    xunlink(log);
+    var sb = _spawn_running_sandbox(0);
+    var sp = sandbox_spawn(sb, "/bin/echo hello-from-spawn", log);
+    assert(sp != 0, "spawned");
+    spawned_wait(sp);
+    var buf = alloc(256);
+    var n = file_read_all(log, buf, 255);
+    if (n < 0) { n = 0; }
+    store8(buf + n, 0);
+    assert(n > 0, "stdout reached the log file");
+    # The point of the redirect: output goes to the log, not to the parent's
+    # terminal, and it survives the child.
+    assert(strstr(buf, "hello-from-spawn") >= 0, "log holds the child's stdout");
+    return 0;
+}
+
+fn test_spawn_log_appends() {
+    test_group("sandbox_spawn_log_appends");
+    # A restarted container extends its log rather than erasing why the previous
+    # attempt died.
+    var log = "/tmp/kavach_spawn_append.txt";
+    xunlink(log);
+    var sb = _spawn_running_sandbox(0);
+    spawned_wait(sandbox_spawn(sb, "/bin/echo first", log));
+    spawned_wait(sandbox_spawn(sb, "/bin/echo second", log));
+    var buf = alloc(512);
+    var n = file_read_all(log, buf, 511);
+    if (n < 0) { n = 0; }
+    store8(buf + n, 0);
+    assert(strstr(buf, "first") >= 0, "the first run survived");
+    assert(strstr(buf, "second") >= 0, "the second run was appended");
+    return 0;
+}
+
+fn test_spawn_refuses_unsafe_input() {
+    test_group("sandbox_spawn_refuses_unsafe");
+    var sb = _spawn_running_sandbox(0);
+    # A control char would split into extra argv tokens past the guard.
+    assert_eq(sandbox_spawn(sb, "/bin/echo hi\nrm -rf /", 0), 0, "control chars refused");
+    assert_eq(sandbox_spawn(sb, "", 0), 0, "empty command refused");
+
+    # Not RUNNING -> refuse.
+    var c = config_new();
+    config_backend(c, Backend.PROCESS);
+    var idle = sandbox_create(c);
+    assert_eq(sandbox_spawn(idle, "/bin/true", 0), 0, "refuses a non-running sandbox");
+    return 0;
+}
+
+fn test_spawn_applies_seccomp() {
+    test_group("sandbox_spawn_applies_seccomp");
+    # The default policy enables seccomp, so this is the ordinary path, not an
+    # exotic one — if the filter could not be installed before execve the spawn
+    # would fail here rather than silently run unfiltered.
+    var p = policy_basic();
+    SandboxPolicy_set_seccomp_enabled(p, 1);
+    var sb = _spawn_running_sandbox(p);
+    var sp = sandbox_spawn(sb, "/bin/true", 0);
+    assert(sp != 0, "spawns with seccomp enabled");
+    assert_eq(spawned_wait(sp), 0, "and the payload actually ran (execve survived the filter)");
+    return 0;
+}
+
+fn test_bpf_write_insn_bytes() {
+    test_group("bpf_write_insn_bytes");
+    # Assert the BYTES, not just that the call returned. The previous
+    # implementation used a typed `bpf_insn` local and compiled to a no-op:
+    # every field write was dropped, the filter came out 184 zero bytes, and
+    # PR_SET_SECCOMP rejected it with EINVAL — so seccomp was never applied by
+    # any caller, silently. Every check except this one passed.
+    var f = alloc(8);
+    var i = 0;
+    while (i < 8) { store8(f + i, 0); i = i + 1; }
+    security_bpf_write_insn(f, 0, 0x06, 0, 0, 0x7FFF0000);   # RET ALLOW
+    # struct sock_filter, little-endian: u16 code, u8 jt, u8 jf, u32 k.
+    assert_eq(load8(f + 0), 6, "code low byte");
+    assert_eq(load8(f + 1), 0, "code high byte");
+    assert_eq(load8(f + 2), 0, "jt");
+    assert_eq(load8(f + 3), 0, "jf");
+    assert_eq(load8(f + 4), 0, "k byte 0");
+    assert_eq(load8(f + 5), 0, "k byte 1");
+    assert_eq(load8(f + 6), 255, "k byte 2");
+    assert_eq(load8(f + 7), 127, "k byte 3 — 0x7FFF0000 little-endian");
+
+    # jt/jf are distinct single bytes at 2 and 3, and k is unaffected by them.
+    var g = alloc(8);
+    security_bpf_write_insn(g, 0, 0x15, 7, 3, 165);
+    assert_eq(load8(g + 0), 21, "JEQ opcode");
+    assert_eq(load8(g + 2), 7, "jt written");
+    assert_eq(load8(g + 3), 3, "jf written");
+    assert_eq(load8(g + 4), 165, "k = mount(165)");
+    return 0;
+}
+
+fn test_seccomp_filter_actually_loads() {
+    test_group("seccomp_filter_actually_loads");
+    # The end-to-end property the byte test protects: the kernel accepts the
+    # filter. Loaded in a CHILD so the test process stays unconfined.
+    var info = result_unwrap(security_create_exec_seccomp_filter());
+    var pid = sys_fork();
+    if (pid == 0) {
+        var r = security_load_seccomp(security_seccomp_filter_ptr(info),
+        security_seccomp_filter_len(info));
+        if (is_ok(r) == 0) { sys_exit(60); }
+        # The whole point of the exec-safe profile: execve survives it.
+        var argv = alloc(16);
+        store64(argv, "/bin/true");
+        store64(argv + 8, 0);
+        var envp = alloc(8);
+        store64(envp, 0);
+        sys_execve("/bin/true", argv, envp);
+        sys_exit(61);
+    }
+    var st[4];
+    store32(&st, 0);
+    sys_waitpid(pid, &st, 0);
+    var status = load32(&st);
+    assert_eq(status & 127, 0, "child was not killed by a signal");
+    var code = (status >> 8) & 255;
+    assert(code != 60, "the kernel ACCEPTED the filter (not EINVAL)");
+    assert(code != 61, "execve ran under the filter");
+    assert_eq(code, 0, "/bin/true completed under seccomp");
+    return 0;
+}
+
+fn test_exec_seccomp_filter_shape() {
+    test_group("exec_seccomp_filter_shape");
+    # The allowlist profile cannot be used pre-exec: execve(59) is not in it, so
+    # loading it before an exec kills the child on that exec. This is the
+    # property that forced a second filter to exist, so pin it.
+    var basic = security_create_basic_seccomp_filter();
+    assert(is_ok(basic) == 1, "basic filter builds");
+
+    var exec_res = security_create_exec_seccomp_filter();
+    assert(is_ok(exec_res) == 1, "exec-safe filter builds");
+    var info = result_unwrap(exec_res);
+    var len = security_seccomp_filter_len(info);
+    assert(len % 8 == 0, "filter is a whole number of BPF insns");
+    var n_deny = vec_len(_seccomp_deny_list());
+    assert_eq(len / 8, n_deny + 3, "LD + one JEQ per denied call + RET ALLOW + RET KILL");
+
+    # Every denied syscall must appear as a JEQ's k operand, and each JEQ must
+    # jump to the LAST instruction (the KILL). An off-by-one in that jump would
+    # silently send a denied syscall to ALLOW.
+    var ptr = security_seccomp_filter_ptr(info);
+    var kill_idx = n_deny + 2;
+    var i = 0;
+    var ok_jumps = 1;
+    while (i < n_deny) {
+        var off = (1 + i) * 8;
+        var k = load32(ptr + off + 4);
+        if (k != vec_get(_seccomp_deny_list(), i)) { ok_jumps = 0; }
+        var jt = load8(ptr + off + 2);
+        # from index 1+i, skipping jt lands on 1+i+1+jt; that must be kill_idx.
+        if ((1 + i) + 1 + jt != kill_idx) { ok_jumps = 0; }
+        i = i + 1;
+    }
+    assert_eq(ok_jumps, 1, "every denied syscall JEQs to the KILL instruction");
+
+    # mount and ptrace are the two that matter most for container escape.
+    var has_mount = 0;
+    var has_ptrace = 0;
+    var j = 0;
+    while (j < n_deny) {
+        if (vec_get(_seccomp_deny_list(), j) == 165) { has_mount = 1; }
+        if (vec_get(_seccomp_deny_list(), j) == 101) { has_ptrace = 1; }
+        j = j + 1;
+    }
+    assert_eq(has_mount, 1, "mount(165) is denied");
+    assert_eq(has_ptrace, 1, "ptrace(101) is denied");
+    return 0;
+}
+
+fn test_spawn_terminate_escalates() {
+    test_group("sandbox_spawn_terminate");
+    var sb = _spawn_running_sandbox(0);
+    var sp = sandbox_spawn(sb, "/bin/sleep 30", 0);
+    assert(sp != 0, "spawned");
+    # SIGTERM, brief grace, then SIGKILL. sleep ignores nothing, so it dies on
+    # the TERM and the escalation should not be needed — but the call must
+    # return promptly either way rather than hanging for the full 30s.
+    var code = spawned_terminate(sp, 500);
+    assert(code >= 0, "terminate returned a code");
+    assert_eq(spawned_alive(sp), 0, "child is reaped, not left a zombie");
+    return 0;
+}
+
+fn test_spawn_null_handles() {
+    test_group("sandbox_spawn_null_handles");
+    assert_eq(spawned_pid(0), 0 - 1, "pid of null");
+    assert_eq(spawned_alive(0), 0, "alive of null");
+    assert_eq(spawned_exit_code(0), 0 - 1, "exit code of null");
+    assert_eq(spawned_try_wait(0), 0 - 1, "try_wait of null");
+    assert_eq(spawned_wait(0), 0 - 1, "wait of null");
+    assert_eq(spawned_kill(0, 15), 0 - 1, "kill of null");
+    assert_eq(spawned_terminate(0, 10), 0 - 1, "terminate of null");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_backend_parse();
@@ -2071,6 +2327,17 @@ fn main() {
     test_file_write_secure_r();
     test_aho_corasick();
     test_persistent_guest();
+    test_spawn_lifecycle();
+    test_spawn_exit_code_and_signal();
+    test_spawn_detaches_and_logs();
+    test_spawn_log_appends();
+    test_spawn_refuses_unsafe_input();
+    test_spawn_applies_seccomp();
+    test_bpf_write_insn_bytes();
+    test_seccomp_filter_actually_loads();
+    test_exec_seccomp_filter_shape();
+    test_spawn_terminate_escalates();
+    test_spawn_null_handles();
     return assert_summary();
 }
 

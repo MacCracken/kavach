@@ -66,6 +66,7 @@ modules = [
     "src/backend_noop.cyr",
     "src/backend_process.cyr",
     "src/persistent.cyr",
+    "src/spawn.cyr",
     "src/backend_gvisor.cyr",
     "src/backend_oci.cyr",
     "src/backend_wasm.cyr",

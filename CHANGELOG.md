@@ -7,6 +7,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.9.0] — 2026-07-25
+
+### Security — seccomp filters were never actually applied
+`security_bpf_write_insn` built each BPF instruction through a typed
+`bpf_insn` struct local (`var insn: bpf_insn = buf + offset; insn.code = …`).
+Under this toolchain that compiled to a **no-op**: every field write was
+dropped. `security_create_basic_seccomp_filter` therefore returned 184
+**zero** bytes, and `security_load_seccomp` failed with `EINVAL` on every call
+it has ever received — so **no consumer of this library has ever had a seccomp
+filter installed**, while the API reported a policy that requested one.
+
+Nothing failed loudly. The function returned 0, the filter had the right
+length, the struct had the right shape, and the only observable symptom was a
+`Result` error at load time that no caller was checking closely. Found while
+building `sandbox_spawn`, when a child that should have exec'd kept dying at
+the confinement step.
+
+Fixed by writing the instruction bytes explicitly. The regression test asserts
+the **produced bytes** against the kernel's `struct sock_filter` layout, and a
+second test loads a filter in a forked child and confirms the kernel accepts it
+and that `execve` still runs — because "the call returned 0" is exactly the
+check that passed for the entire time this was broken.
+
+### Added — `sandbox_spawn`: policy-threaded detached spawn
+`sandbox_exec` runs to completion and captures output; `persistent_spawn` keeps
+a guest on pipes but takes no `Sandbox`, so it threads **no** policy — no
+cgroup, no namespaces, no landlock, no seccomp. Neither serves a daemon
+container. The named consumer is stiva's `run -d`, which has been blocked on
+this symbol existing.
+
+- `sandbox_spawn(sandbox, command, log_path)` → `SpawnedProcess*`
+- `spawned_pid` / `_alive` / `_exit_code` / `_try_wait` / `_wait` / `_kill`
+- `spawned_terminate(sp, grace_ms)` — SIGTERM, grace, then SIGKILL and reap;
+  the escalation a container `stop` needs, where getting it wrong means either
+  lost data or leaked processes.
+
+**The policy contract is all-or-nothing.** A detached spawn that quietly drops
+half the policy is worse than none, because the caller cannot tell. Every
+confinement step either applies or the child `_exit`s with a **distinct code**
+(120 stdio · 121 cgroup · 122 no_new_privs · 123 namespaces · 124 landlock ·
+125 seccomp) rather than falling through to `execve` unconfined — so a dead
+container says *which* primitive was unavailable.
+
+Child ordering, which is security-relevant: `setsid` (or a Ctrl-C in the
+launching shell kills the "detached" job) → stdio redirect → close inherited
+fds (the CVE-2024-21626 class) → cgroup join → `NO_NEW_PRIVS` → namespaces →
+landlock → **seccomp last**, since it would otherwise filter the confinement
+steps above it.
+
+### Added — `security_create_exec_seccomp_filter`
+A seccomp profile that can be installed **before** `execve`.
+`security_create_basic_seccomp_filter`'s 20-syscall allowlist does not include
+`execve`, so loading it on any spawn path kills the child on the very syscall
+that starts it. The new profile is a **deny-list (default allow)** covering the
+~20 syscalls that appear in container-escape chains — `mount`, `pivot_root`,
+`setns`, `unshare`, `ptrace`, `process_vm_readv/writev`, module loading,
+`kexec_load`, `bpf`, `perf_event_open`, `userfaultfd` and friends.
+
+That is explicitly weaker than a default-deny allowlist, and the comment says
+so: a usable default-deny profile needs `execve` plus the whole dynamic-loader
+surface — in practice the ~300-entry OCI default list, which is a policy
+artifact rather than something this function should invent.
+
+### Fixed — unprivileged network isolation was unobtainable
+`_spawn_ns_flags` pairs `NS_USER` with `NS_NETWORK` when not running as root.
+`unshare(CLONE_NEWNET)` alone is `EPERM` for an unprivileged process; a network
+namespace is only obtainable as part of a new **user** namespace, which is how
+rootless containers get one.
+
 ## [3.8.3] — 2026-07-22
 
 **samay + ai-hwaccel are now `optional` — consumers stop paying for a bridge kavach

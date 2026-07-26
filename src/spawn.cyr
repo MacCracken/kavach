@@ -1,0 +1,361 @@
+# spawn.cyr — policy-threaded DETACHED spawn (3.9.0).
+#
+# `sandbox_exec` runs a command to completion and captures its output;
+# `persistent_spawn` keeps a guest alive on pipes but takes no Sandbox, so it
+# threads NO policy — no cgroup, no namespaces, no landlock, no seccomp. Neither
+# shape serves a daemon container: the caller needs the process to outlive the
+# call, under the sandbox's policy, with its output going somewhere durable.
+#
+# That is what this module adds. The consumer is stiva's `run -d`, which has been
+# blocked on this symbol existing (its roadmap tracks the gate by symbol rather
+# than by kavach version, precisely because two releases went by with the
+# version moving and the symbol absent).
+#
+# ── The policy contract ──────────────────────────
+# A detached spawn that quietly drops half the policy is worse than no detached
+# spawn, because the caller cannot tell. So every isolation primitive the policy
+# asks for is either APPLIED or the spawn REFUSES. There is no "best effort"
+# path here. In particular a hardening step that fails in the child `_exit`s
+# rather than falling through to execve unconfined.
+#
+# ── Ordering in the child, and why ────────────────────────
+#   1. setsid          — leave the parent's session/controlling terminal, or a
+#                        Ctrl-C in the launching shell kills the "detached" job.
+#   2. stdio redirect  — stdin from /dev/null, stdout+stderr appended to the log.
+#   3. fd cleanup      — close(3..) so no inherited descriptor reaches the
+#                        payload (the CVE-2024-21626 class: a leaked host
+#                        directory fd is a filesystem escape).
+#   4. cgroup join     — write our own pid to cgroup.procs. Direct, unlike the
+#                        `sh -c` prelude cgroup_wrap_argv needs for the exec
+#                        path, because here we ARE the child.
+#   5. NO_NEW_PRIVS    — must precede seccomp; the kernel rejects a filter from
+#                        an unprivileged process without it.
+#   6. namespaces      — unshare before the payload exists.
+#   7. landlock        — path rules; also sets NO_NEW_PRIVS itself.
+#   8. execve.
+#
+#   9. seccomp         — applied LAST, or it would filter the confinement steps
+#                        above it. Uses the exec-safe DENY-list profile; the
+#                        20-syscall allowlist cannot be used pre-exec because it
+#                        does not permit execve. See
+#                        security_create_exec_seccomp_filter.
+
+# A detached child under sandbox policy.
+#   pid         — child pid
+#   alive       — 1 running, 0 reaped (exit_code then valid)
+#   exit_code   — -1 until reaped
+#   cgroup_path — cstr | 0; rmdir'd when the child is reaped
+#   log_path    — cstr | 0; where stdout+stderr went
+#derive(accessors)
+struct SpawnedProcess {
+    pid;
+    alive;
+    exit_code;
+    cgroup_path;
+    log_path;
+}
+var SPAWNED_PROCESS_SIZE = 40;
+
+# Highest fd we scan when clearing inherited descriptors. close_range(2) would
+# be tidier but is not in the frozen syscall surface this module may use.
+var SPAWN_MAX_FD = 1024;
+
+# O_WRONLY|O_CREAT|O_APPEND, mode 0644. Append rather than truncate: a restarted
+# container should extend its log, not silently erase the evidence of why the
+# previous attempt died.
+var SPAWN_LOG_FLAGS = 1089;
+var SPAWN_LOG_MODE = 420;
+
+# Child exit codes for a confinement step that could not be applied. The child
+# _exits rather than execing, so the payload never runs less confined than the
+# policy promised — and the specific code says which primitive was missing.
+enum SpawnExit {
+    SPAWN_EXIT_STDIO = 120;
+    SPAWN_EXIT_CGROUP = 121;
+    SPAWN_EXIT_NNP = 122;
+    SPAWN_EXIT_NS = 123;
+    SPAWN_EXIT_LANDLOCK = 124;
+    SPAWN_EXIT_SECCOMP = 125;
+}
+
+# Namespace flags implied by the policy.
+#
+# `network_enabled == 0` asks for a private network namespace. Note this reads a
+# field that `policy_new` zero-fills, so the DEFAULT policy requests network
+# isolation — that is the intended default for a sandbox, and the exec path's
+# failure to act on it is a gap there, not a licence to ignore it here.
+#
+# Unprivileged `unshare(CLONE_NEWNET)` is EPERM: an unprivileged process may
+# only create a network namespace as part of a NEW USER namespace, which is
+# exactly how rootless containers get one. So when we are not root we pair
+# NS_USER with it. Running as root, the user namespace is unnecessary and adds a
+# uid-mapping step nothing here needs, so it is omitted.
+#[must_use]
+fn _spawn_ns_flags(policy) {
+    if (policy == 0) { return 0; }
+    if (SandboxPolicy_network_enabled(policy) != 0) { return 0; }
+    if (sys_getuid() == 0) { return NS_NETWORK; }
+    return NS_USER | NS_NETWORK;
+}
+
+# Close every descriptor from `from` up to SPAWN_MAX_FD. Errors are expected
+# and ignored — most of the range is simply not open.
+fn _spawn_close_inherited(from) {
+    var fd = from;
+    while (fd < SPAWN_MAX_FD) {
+        sys_close(fd);
+        fd = fd + 1;
+    }
+    return 0;
+}
+
+# Put the CALLING process into `cgroup_path`. Returns 0 on success, -1 on
+# failure. Called in the child, so "the calling process" is the payload.
+fn _spawn_cgroup_join(cgroup_path) {
+    if (cgroup_path == 0) { return 0; }
+    var fpath = _cgroup_file(cgroup_path, "cgroup.procs");
+    var buf[32];
+    var len = fmt_int_buf(sys_getpid(), &buf);
+    if (file_write_all(fpath, &buf, len) < 0) { return 0 - 1; }
+    return 0;
+}
+
+# Redirect stdio for the detached child: stdin from /dev/null, stdout+stderr to
+# `log_path` (or /dev/null when none was given). Returns 0 / -1.
+fn _spawn_redirect_stdio(log_path) {
+    var devnull = sys_open("/dev/null", 0, 0);          # O_RDONLY
+    if (devnull < 0) { return 0 - 1; }
+    sys_dup2(devnull, 0);
+    sys_close(devnull);
+
+    var out = 0 - 1;
+    if (log_path != 0) {
+        out = sys_open(log_path, SPAWN_LOG_FLAGS, SPAWN_LOG_MODE);
+    }
+    if (out < 0) {
+        out = sys_open("/dev/null", 1, 0);              # O_WRONLY
+        if (out < 0) { return 0 - 1; }
+    }
+    sys_dup2(out, 1);
+    sys_dup2(out, 2);
+    if (out > 2) { sys_close(out); }
+    return 0;
+}
+
+# Spawn `command` detached under `sandbox`'s policy, with stdout+stderr appended
+# to `log_path` (0 → /dev/null). Returns SpawnedProcess*, or 0.
+#
+# Refuses when: the sandbox is not RUNNING, the command carries control
+# characters or trips the runtime guard, the policy asks for an isolation
+# primitive that cannot be applied (see _spawn_seccomp_supported), or the fork
+# fails. A refusal prints through kavach_err_print and leaves nothing running.
+fn sandbox_spawn(sandbox, command, log_path) {
+    if (Sandbox_state(sandbox) != SandboxState.RUNNING) {
+        kavach_err_print(KAVACH_ERR_EXEC_FAILED, "sandbox not running");
+        return 0;
+    }
+    # Same two pre-checks the exec path runs, for the same reason: a control
+    # character would split into extra argv tokens, and a guard-violating
+    # command must never reach fork.
+    if (is_safe_argument(command) == 0) {
+        kavach_err_print(KAVACH_ERR_EXEC_FAILED, "command contains illegal control chars");
+        return 0;
+    }
+    var guard_cfg = runtime_guard_config_default();
+    if (vec_len(check_command(command, guard_cfg)) > 0) {
+        kavach_err_print(KAVACH_ERR_EXEC_FAILED, "command blocked by runtime guard");
+        return 0;
+    }
+    var args = _split_command(command);
+    var argc = vec_len(args);
+    if (argc == 0) {
+        kavach_err_print(KAVACH_ERR_EXEC_FAILED, "empty command");
+        return 0;
+    }
+
+    var policy = 0;
+    var cfg = Sandbox_config(sandbox);
+    if (cfg != 0) { policy = SandboxConfig_policy(cfg); }
+
+    # Build the seccomp filter in the PARENT: alloc in the child after fork is
+    # fine here, but a filter that fails to build should refuse the spawn rather
+    # than _exit a child the caller already has a handle to.
+    var seccomp_info = 0;
+    if (policy != 0) {
+        if (SandboxPolicy_seccomp_enabled(policy) == 1) {
+            var sres = security_create_exec_seccomp_filter();
+            if (is_ok(sres) == 0) {
+                kavach_err_print(KAVACH_ERR_EXEC_FAILED, "cannot build seccomp filter");
+                return 0;
+            }
+            seccomp_info = result_unwrap(sres);
+        }
+    }
+
+    # Cgroup is created by the PARENT (the child may lack permission to mkdir
+    # under the cgroup root) and joined by the child.
+    var cgroup_path = 0;
+    if (policy != 0) {
+        if (cgroup_policy_has_limits(policy) == 1) {
+            cgroup_path = cgroup_setup(policy);
+        }
+    }
+
+    var argv = alloc((argc + 1) * 8);
+    var i = 0;
+    while (i < argc) {
+        store64(argv + i * 8, vec_get(args, i));
+        i = i + 1;
+    }
+    store64(argv + argc * 8, 0);
+    var envp = alloc(8);
+    store64(envp, 0);
+
+    var pid = sys_fork();
+    if (pid < 0) {
+        cgroup_teardown(cgroup_path);
+        kavach_err_print(KAVACH_ERR_EXEC_FAILED, "fork failed");
+        return 0;
+    }
+    if (pid == 0) {
+        # ── child ──
+        # Every failure below _exits. Falling through to execve after a failed
+        # hardening step would run the payload with less isolation than the
+        # policy promised, which is the one outcome this module must not have.
+        # Each confinement step has its OWN exit code, so a caller that sees a
+        # dead container can tell WHICH isolation primitive was unavailable
+        # rather than staring at one opaque number. 12x is chosen to sit below
+        # 126/127, which the shell already reserves for "not executable" and
+        # "not found".
+        sys_setsid();
+        if (_spawn_redirect_stdio(log_path) != 0) { sys_exit(SPAWN_EXIT_STDIO); }
+        _spawn_close_inherited(3);
+        if (_spawn_cgroup_join(cgroup_path) != 0) { sys_exit(SPAWN_EXIT_CGROUP); }
+
+        # NO_NEW_PRIVS before anything that depends on it.
+        if (syscall(SYS_PRCTL, 38, 1, 0, 0, 0) < 0) { sys_exit(SPAWN_EXIT_NNP); }
+
+        var nsf = _spawn_ns_flags(policy);
+        if (nsf != 0) {
+            if (is_ok(security_create_namespace(nsf)) == 0) { sys_exit(SPAWN_EXIT_NS); }
+        }
+        if (policy != 0) {
+            if (SandboxPolicy_landlock_rules_len(policy) > 0) {
+                if (is_ok(security_apply_landlock(0, 0)) == 0) { sys_exit(SPAWN_EXIT_LANDLOCK); }
+            }
+        }
+        # Seccomp LAST among the confinements: everything above it (unshare,
+        # landlock_restrict_self, prctl) would itself be filtered otherwise.
+        # The exec-safe profile permits execve by construction — see
+        # security_create_exec_seccomp_filter for why the basic allowlist cannot
+        # be used here.
+        if (seccomp_info != 0) {
+            if (is_ok(security_load_seccomp(security_seccomp_filter_ptr(seccomp_info),
+            security_seccomp_filter_len(seccomp_info))) == 0) {
+                sys_exit(SPAWN_EXIT_SECCOMP);
+            }
+        }
+        sys_execve(vec_get(args, 0), argv, envp);
+        sys_exit(127);
+    }
+
+    # ── parent ──
+    var sp = alloc(SPAWNED_PROCESS_SIZE);
+    SpawnedProcess_set_pid(sp, pid);
+    SpawnedProcess_set_alive(sp, 1);
+    SpawnedProcess_set_exit_code(sp, 0 - 1);
+    SpawnedProcess_set_cgroup_path(sp, cgroup_path);
+    SpawnedProcess_set_log_path(sp, log_path);
+    return sp;
+}
+
+# Child pid, or -1.
+#[must_use]
+fn spawned_pid(sp) {
+    if (sp == 0) { return 0 - 1; }
+    return SpawnedProcess_pid(sp);
+}
+
+# 1 while the child has not been reaped.
+#[must_use]
+fn spawned_alive(sp) {
+    if (sp == 0) { return 0; }
+    return SpawnedProcess_alive(sp);
+}
+
+# Exit code, or -1 until the child has been reaped.
+#[must_use]
+fn spawned_exit_code(sp) {
+    if (sp == 0) { return 0 - 1; }
+    return SpawnedProcess_exit_code(sp);
+}
+
+# Record a reaped status: decode the wait status, mark dead, drop the cgroup.
+fn _spawned_reap(sp, status) {
+    var code = 0;
+    # WIFEXITED: low 7 bits are the signal; 0 means a normal exit and the code
+    # is in bits 8-15. A signalled child reports 128+signal, the shell
+    # convention, so a caller can tell "exited 9" from "killed by SIGKILL".
+    var sig = status & 127;
+    if (sig == 0) { code = (status >> 8) & 255; }
+    else { code = 128 + sig; }
+    SpawnedProcess_set_exit_code(sp, code);
+    SpawnedProcess_set_alive(sp, 0);
+    cgroup_teardown(SpawnedProcess_cgroup_path(sp));
+    SpawnedProcess_set_cgroup_path(sp, 0);
+    return code;
+}
+
+# Non-blocking reap. 1 = exited (exit_code now valid), 0 = still running,
+# -1 = error / already reaped.
+fn spawned_try_wait(sp) {
+    if (sp == 0) { return 0 - 1; }
+    if (SpawnedProcess_alive(sp) == 0) { return 1; }
+    var stbuf[4];
+    store32(&stbuf, 0);
+    # WNOHANG = 1.
+    var r = sys_waitpid(SpawnedProcess_pid(sp), &stbuf, 1);
+    if (r < 0) { return 0 - 1; }
+    if (r == 0) { return 0; }
+    _spawned_reap(sp, load32(&stbuf));
+    return 1;
+}
+
+# Block until the child exits; returns its exit code, or -1 on error.
+fn spawned_wait(sp) {
+    if (sp == 0) { return 0 - 1; }
+    if (SpawnedProcess_alive(sp) == 0) { return SpawnedProcess_exit_code(sp); }
+    var stbuf[4];
+    store32(&stbuf, 0);
+    var r = sys_waitpid(SpawnedProcess_pid(sp), &stbuf, 0);
+    if (r < 0) { return 0 - 1; }
+    return _spawned_reap(sp, load32(&stbuf));
+}
+
+# Signal the child. Returns 0 on success, -1 on error or when already reaped.
+# Does NOT reap — call spawned_wait / spawned_try_wait after, or the child
+# becomes a zombie and its cgroup is never torn down.
+fn spawned_kill(sp, signal) {
+    if (sp == 0) { return 0 - 1; }
+    if (SpawnedProcess_alive(sp) == 0) { return 0 - 1; }
+    if (sys_kill(SpawnedProcess_pid(sp), signal) < 0) { return 0 - 1; }
+    return 0;
+}
+
+# SIGTERM, wait up to `grace_ms` for the child to go, then SIGKILL and reap.
+# Returns the exit code, or -1. This is the shape a container runtime's `stop`
+# wants, and getting the escalation wrong (no grace, or no final SIGKILL) is a
+# common way to either lose data or leak processes.
+fn spawned_terminate(sp, grace_ms) {
+    if (sp == 0) { return 0 - 1; }
+    if (SpawnedProcess_alive(sp) == 0) { return SpawnedProcess_exit_code(sp); }
+    spawned_kill(sp, 15);                               # SIGTERM
+    var waited = 0;
+    while (waited < grace_ms) {
+        if (spawned_try_wait(sp) == 1) { return SpawnedProcess_exit_code(sp); }
+        sleep_ms(20);
+        waited = waited + 20;
+    }
+    spawned_kill(sp, 9);                                # SIGKILL
+    return spawned_wait(sp);
+}

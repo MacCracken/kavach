@@ -175,12 +175,29 @@ struct bpf_insn {
 }
 
 # Write a BPF sock_filter instruction (8 bytes) to buf at offset.
+# Write one classic-BPF instruction at `buf + offset`.
+#
+# Layout is the kernel's `struct sock_filter`, little-endian:
+#   +0 u16 code   +2 u8 jt   +3 u8 jf   +4 u32 k
+#
+# Written with explicit byte stores rather than through a typed `bpf_insn`
+# local. The typed form — `var insn: bpf_insn = buf + offset; insn.code = …` —
+# compiled to a NO-OP under this toolchain: every field write was dropped and
+# the buffer stayed zero-filled. Nothing failed loudly; the filter simply came
+# out as 184 zero bytes, and PR_SET_SECCOMP rejected it with EINVAL, so
+# **seccomp confinement was never actually applied by any caller**. The
+# regression test below asserts the produced bytes, not just that the call
+# returned — the previous shape "worked" by every check except the only one
+# that mattered.
 fn security_bpf_write_insn(buf, offset, code, jt, jf, k): i64 {
-    var insn: bpf_insn = buf + offset;
-    insn.code = code;
-    insn.jt = jt;
-    insn.jf = jf;
-    insn.k = k;
+    store8(buf + offset, code & 255);
+    store8(buf + offset + 1, (code >> 8) & 255);
+    store8(buf + offset + 2, jt & 255);
+    store8(buf + offset + 3, jf & 255);
+    store8(buf + offset + 4, k & 255);
+    store8(buf + offset + 5, (k >> 8) & 255);
+    store8(buf + offset + 6, (k >> 16) & 255);
+    store8(buf + offset + 7, (k >> 24) & 255);
     return 0;
 }
 
@@ -229,6 +246,89 @@ fn security_load_seccomp(filter, filter_len): i64 {
 
     return Ok(0);
     #endif
+}
+
+# Syscalls denied by the exec-safe profile. These are the ones a container
+# payload has no business making and that lead directly to host compromise or
+# namespace escape. Ordered roughly by how often they appear in escape chains.
+var _SECCOMP_DENY = 0;
+
+fn _seccomp_deny_list() {
+    if (_SECCOMP_DENY != 0) { return _SECCOMP_DENY; }
+    var v = vec_new();
+    vec_push(v, 165);   # mount
+    vec_push(v, 166);   # umount2
+    vec_push(v, 155);   # pivot_root
+    vec_push(v, 272);   # unshare        — re-namespacing after confinement
+    vec_push(v, 308);   # setns          — entering another container's ns
+    vec_push(v, 101);   # ptrace         — reading/writing sibling processes
+    vec_push(v, 310);   # process_vm_readv
+    vec_push(v, 311);   # process_vm_writev
+    vec_push(v, 175);   # init_module
+    vec_push(v, 176);   # delete_module
+    vec_push(v, 313);   # finit_module
+    vec_push(v, 246);   # kexec_load
+    vec_push(v, 169);   # reboot
+    vec_push(v, 167);   # swapon
+    vec_push(v, 168);   # swapoff
+    vec_push(v, 321);   # bpf
+    vec_push(v, 298);   # perf_event_open
+    vec_push(v, 323);   # userfaultfd    — a classic exploit-timing primitive
+    vec_push(v, 139);   # sysfs
+    vec_push(v, 103);   # syslog
+    _SECCOMP_DENY = v;
+    return v;
+}
+
+# Create a seccomp filter that can be installed BEFORE execve.
+# Returns Result: Ok(info) where info is {ptr, len}.
+#
+# **This is a DENY-list (default ALLOW), unlike
+# security_create_basic_seccomp_filter's 20-syscall allowlist, and the
+# difference is deliberate rather than lazy.**
+#
+# The allowlist profile is designed for a process already running its payload:
+# it permits read/write/mmap/futex and friends, and does NOT permit execve. Load
+# it before an exec and the kernel kills the child on the very syscall that
+# starts it — so it is unusable on any spawn path, which is why the detached
+# spawn needs this variant.
+#
+# A default-deny profile usable pre-exec would need to allowlist execve plus the
+# whole dynamic-loader surface (openat, mmap, mprotect, access, newfstatat, …)
+# and then everything the payload itself uses — in practice the ~300-entry list
+# the OCI default profile carries. That list is a policy artifact, not something
+# this function should invent. Until it exists, blocking the ~20 syscalls that
+# actually appear in container-escape chains is the honest, applicable middle:
+# strictly better than no filter, and explicitly weaker than the allowlist.
+#
+# Layout: LD_W_ABS; one JEQ per denied nr jumping to KILL; RET ALLOW; RET KILL.
+fn security_create_exec_seccomp_filter(): i64 {
+    var deny = _seccomp_deny_list();
+    var n = vec_len(deny);
+    var insns = n + 3;
+    var filter_size = insns * 8;
+    var filter = alloc(filter_size);
+
+    # insn 0: load the syscall number from seccomp_data.nr (offset 0).
+    security_bpf_write_insn(filter, 0, BPF_LD_W_ABS, 0, 0, 0);
+
+    # insns 1..n: JEQ <nr> -> KILL. A BPF jump counts instructions to SKIP, so
+    # from index (1+i) the jump to index (n+2) is (n+2) - (1+i) - 1 = n - i.
+    var i = 0;
+    while (i < n) {
+        security_bpf_write_insn(filter, (1 + i) * 8, BPF_JMP_JEQ_K,
+        n - i, 0, vec_get(deny, i));
+        i = i + 1;
+    }
+    # insn n+1: fell through every JEQ — allow.
+    security_bpf_write_insn(filter, (n + 1) * 8, BPF_RET_K, 0, 0, SECCOMP_RET_ALLOW);
+    # insn n+2: KILL target.
+    security_bpf_write_insn(filter, (n + 2) * 8, BPF_RET_K, 0, 0, SECCOMP_RET_KILL_PROCESS);
+
+    var info = alloc(16);
+    store64(info, filter);
+    store64(info + 8, filter_size);
+    return Ok(info);
 }
 
 # Create a basic seccomp filter allowing safe syscalls.
