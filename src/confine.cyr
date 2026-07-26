@@ -100,8 +100,9 @@ fn _spawn_write_idmaps(uid, gid) {
 # CAP_SYS_CHROOT *and* a directory fd outside the new root — which is exactly why
 # the caller closes inherited descriptors first, and why the payload is left with
 # no capability to re-chroot. pivot_root is the stronger primitive and wants the
-# rootfs to be a mount point of its own; that is the follow-up, and it is a
-# behaviour change worth its own increment rather than a silent upgrade here.
+# rootfs to be a mount point of its own; recorded as the next increment in the
+# 3.9.1 CHANGELOG entry ("pivot_root is the stronger primitive and is the next
+# increment"), because it is a behaviour change rather than a silent upgrade.
 fn _spawn_enter_rootfs(rootfs) {
     if (rootfs == 0) { return 0; }
     # Detach propagation, or our mounts (and the chroot) leak to the host.
