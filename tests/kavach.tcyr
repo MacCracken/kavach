@@ -1938,10 +1938,21 @@ fn test_persistent_guest() {
 
 # ══ sandbox_spawn (3.9.0) ════════════════════════════════
 
+# A RUNNING sandbox for the spawn tests.
+#
+# With no policy supplied, network access is EXPLICITLY ENABLED so no namespace
+# is requested. That is not tidiness: `policy_new` zero-fills, so the default
+# `network_enabled = 0` reads as "isolate the network", which unprivileged needs
+# a USER namespace to obtain — and hosts with
+# `kernel.unprivileged_userns_clone=0`, hardened distros, and most CI containers
+# deny that. These tests are about spawn/wait/kill/log mechanics; making them
+# depend on the host's userns policy tests the runner, not kavach. The namespace
+# path has its own environment-aware test below.
 fn _spawn_running_sandbox(policy) {
     var c = config_new();
     config_backend(c, Backend.PROCESS);
     if (policy != 0) { config_policy(c, policy); }
+    else { SandboxPolicy_set_network_enabled(SandboxConfig_policy(c), 1); }
     var sb = sandbox_create(c);
     sandbox_transition(sb, SandboxState.RUNNING);
     return sb;
@@ -2044,6 +2055,7 @@ fn test_spawn_applies_seccomp() {
     # would fail here rather than silently run unfiltered.
     var p = policy_basic();
     SandboxPolicy_set_seccomp_enabled(p, 1);
+    SandboxPolicy_set_network_enabled(p, 1);   # isolate the variable under test
     var sb = _spawn_running_sandbox(p);
     var sp = sandbox_spawn(sb, "/bin/true", 0);
     assert(sp != 0, "spawns with seccomp enabled");
@@ -2188,6 +2200,50 @@ fn test_spawn_null_handles() {
 }
 
 # ══ rootfs entry (3.9.1) ═════════════════════════════════
+
+fn test_spawn_namespaces_environment_aware() {
+    test_group("spawn_namespaces");
+    # The default policy asks for network isolation (policy_new zero-fills
+    # network_enabled), which unprivileged requires a user namespace to satisfy.
+    var p = policy_basic();
+    SandboxPolicy_set_seccomp_enabled(p, 0);
+    var want = _spawn_ns_flags(p, 0);
+    assert((want & NS_NETWORK) != 0, "default policy requests network isolation");
+
+    if (spawn_namespaces_available(want) == 0) {
+        # Host denies them (CI containers, kernel.unprivileged_userns_clone=0).
+        # The contract is FAIL CLOSED — the payload must not run less isolated
+        # than the policy promised — so assert the refusal is clean and named,
+        # rather than skipping and pretending the path is covered.
+        var sb0 = _spawn_running_sandbox(p);
+        var sp0 = sandbox_spawn(sb0, "/bin/true", 0);
+        if (sp0 != 0) {
+            var code0 = spawned_wait(sp0);
+            assert_eq(code0, 123, "child exits SPAWN_EXIT_NS rather than running unisolated");
+            assert(streq(spawn_exit_name(code0), "") == 0, "and the code has a readable name");
+        }
+        return 0;
+    }
+    # Host allows them: the spawn must actually work with the namespaces on.
+    var sb = _spawn_running_sandbox(p);
+    var sp = sandbox_spawn(sb, "/bin/true", 0);
+    assert(sp != 0, "spawned with namespaces");
+    assert_eq(spawned_wait(sp), 0, "and the payload ran inside them");
+    return 0;
+}
+
+fn test_spawn_exit_name() {
+    test_group("spawn_exit_name");
+    # A bare "exited 123" is undiagnosable; every confinement code must name
+    # itself. This is the helper that turns a CI failure into a sentence.
+    assert(streq(spawn_exit_name(123), "") == 0, "NS code has a name");
+    assert(strstr(spawn_exit_name(123), "namespace") >= 0, "and it mentions namespaces");
+    assert(strstr(spawn_exit_name(125), "seccomp") >= 0, "seccomp code names seccomp");
+    assert(strstr(spawn_exit_name(119), "rootfs") >= 0, "rootfs code names rootfs");
+    assert_eq(spawn_exit_name(0), 0, "a normal exit is not a confinement failure");
+    assert_eq(spawn_exit_name(127), 0, "nor is execve-not-found");
+    return 0;
+}
 
 fn test_rootfs_config_field() {
     test_group("rootfs_config_field");
@@ -2374,6 +2430,8 @@ fn main() {
     test_exec_seccomp_filter_shape();
     test_spawn_terminate_escalates();
     test_spawn_null_handles();
+    test_spawn_namespaces_environment_aware();
+    test_spawn_exit_name();
     test_rootfs_config_field();
     test_ns_flags_for_rootfs();
     return assert_summary();

@@ -67,6 +67,25 @@ unprivileged runc with no `XDG_RUNTIME_DIR` defaults its state root to `/run/run
 `mkdir /run/runc: permission denied`. That went to stderr, which the capture sends to `/dev/null`,
 so the container produced nothing and reported success.
 
+### Added — confinement failures are diagnosable, and the tests no longer depend on the host
+`spawn_exit_name(code)` turns a child's confinement exit code into a sentence. "The container
+exited 123" tells a caller nothing; *"cannot create namespaces (unprivileged user namespaces may
+be disabled on this host)"* tells them exactly what their kernel is refusing.
+`spawn_namespaces_available(flags)` probes, in a forked child, whether the host will actually grant
+the namespaces a policy implies — `unshare(2)` mutates the caller, so there is no way to ask
+without doing it.
+
+Both exist because the spawn tests were **host-dependent and failed in CI while passing locally**.
+They used the default policy, whose zero-filled `network_enabled = 0` reads as "isolate the
+network" — which unprivileged Linux grants only inside a USER namespace, and CI runners commonly
+deny those. Nine tests died with child exit 123 and no explanation.
+
+The tests now request no namespace where the namespace is not what is under test (spawn/wait/kill/
+log mechanics), and a separate environment-aware test asserts the **fail-closed refusal** when the
+host denies them — rather than skipping and pretending the path is covered. Verified by stubbing
+`security_create_namespace` to fail: the old tests reproduce all nine CI failures exactly, the new
+ones pass.
+
 ### Fixed — a failed `execve` was swallowed into exit 0
 The blocking capture path reported success for a command that never ran, which is a large part of
 why the missing-rootfs bug stayed invisible. `confine_capture` records the child's real status and

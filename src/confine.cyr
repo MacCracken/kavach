@@ -196,6 +196,52 @@ fn confine_child(policy, rootfs, cgroup_path, uid, gid, seccomp_info) {
     return 0;
 }
 
+# Human-readable name for a confinement exit code, or 0 when `code` is not one.
+#
+# The child _exits with a distinct code per failed primitive, which is precise
+# but opaque at the call site: "the container exited 123" says nothing, and a
+# caller staring at that has no way to know the host simply cannot create user
+# namespaces. Callers should run a non-zero exit through this before reporting.
+#[must_use]
+fn spawn_exit_name(code) {
+    if (code == SPAWN_EXIT_STDIO) { return "cannot redirect stdio"; }
+    if (code == SPAWN_EXIT_CGROUP) { return "cannot join cgroup"; }
+    if (code == SPAWN_EXIT_NNP) { return "cannot set no_new_privs"; }
+    if (code == SPAWN_EXIT_NS) {
+        return "cannot create namespaces (unprivileged user namespaces may be disabled on this host)";
+    }
+    if (code == SPAWN_EXIT_LANDLOCK) { return "cannot apply landlock"; }
+    if (code == SPAWN_EXIT_SECCOMP) { return "cannot load seccomp filter"; }
+    if (code == SPAWN_EXIT_ROOTFS) { return "cannot enter rootfs"; }
+    return 0;
+}
+
+# 1 when this host can actually create the namespaces `flags` asks for.
+#
+# Probes in a FORKED CHILD, because unshare(2) mutates the caller — there is no
+# way to ask "would this work?" without doing it. Hosts with
+# `kernel.unprivileged_userns_clone=0`, some hardened distros, and many CI
+# containers deny unprivileged user namespaces outright, and a caller wanting to
+# degrade gracefully (or a test wanting to skip) needs to know that up front
+# rather than decoding a child exit code afterwards.
+#[must_use]
+fn spawn_namespaces_available(flags) {
+    if (flags == 0) { return 1; }
+    var pid = sys_fork();
+    if (pid < 0) { return 0; }
+    if (pid == 0) {
+        if (is_ok(security_create_namespace(flags)) == 0) { sys_exit(1); }
+        sys_exit(0);
+    }
+    var st[4];
+    store32(&st, 0);
+    sys_waitpid(pid, &st, 0);
+    var status = load32(&st);
+    if ((status & 127) != 0) { return 0; }
+    if (((status >> 8) & 255) != 0) { return 0; }
+    return 1;
+}
+
 # Fork, confine, exec, and capture stdout — the blocking counterpart of
 # sandbox_spawn, used when the sandbox names a rootfs.
 #
