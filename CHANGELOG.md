@@ -93,6 +93,21 @@ host denies them — rather than skipping and pretending the path is covered. Ve
 `security_create_namespace` to fail: the old tests reproduce all nine CI failures exactly, the new
 ones pass.
 
+`spawn_seccomp_available()` is the same probe for the seccomp step, added after an audit showed the
+identical trap one confinement step further along: `_spawn_running_sandbox` overrode only
+`network_enabled`, while `policy_basic()` also sets `seccomp_enabled = 1`, so every spawn child
+still loaded a filter. On a host that refuses seccomp that is 11 failures with an opaque exit 125.
+
+The suite is now verified against four simulated hosts — all capabilities, namespaces denied,
+uid_map denied, seccomp denied — by stubbing each primitive to fail and rerunning. All four green.
+
+### Fixed — harness include sets
+`tests/kavach.bcyr` (and `tests/kavach.tcyr`) include `backend_process.cyr`, which now calls into
+`confine.cyr` and `security.cyr`; neither was in their include list, so both failed to compile
+with undefined `confine_capture` / `security_create_exec_seccomp_filter`. A `.tcyr`/`.bcyr` file
+carries its own include set rather than inheriting `src/lib.cyr`'s, so any module a backend starts
+depending on has to be added to every harness that includes that backend.
+
 ### Fixed — a failed `execve` was swallowed into exit 0
 The blocking capture path reported success for a command that never ran, which is a large part of
 why the missing-rootfs bug stayed invisible. `confine_capture` records the child's real status and

@@ -1952,7 +1952,15 @@ fn _spawn_running_sandbox(policy) {
     var c = config_new();
     config_backend(c, Backend.PROCESS);
     if (policy != 0) { config_policy(c, policy); }
-    else { SandboxPolicy_set_network_enabled(SandboxConfig_policy(c), 1); }
+    else {
+        # BOTH knobs, not just the network. policy_basic() also sets
+        # seccomp_enabled = 1, so without this every spawn child loads a filter
+        # and a host that refuses seccomp fails these tests with an opaque
+        # SPAWN_EXIT_SECCOMP — the same trap the network namespace sprang, one
+        # confinement step later. Seccomp has its own dedicated tests below.
+        SandboxPolicy_set_network_enabled(SandboxConfig_policy(c), 1);
+        SandboxPolicy_set_seccomp_enabled(SandboxConfig_policy(c), 0);
+    }
     var sb = sandbox_create(c);
     sandbox_transition(sb, SandboxState.RUNNING);
     return sb;
@@ -2059,6 +2067,14 @@ fn test_spawn_applies_seccomp() {
     var sb = _spawn_running_sandbox(p);
     var sp = sandbox_spawn(sb, "/bin/true", 0);
     assert(sp != 0, "spawns with seccomp enabled");
+    if (spawn_seccomp_available() == 0) {
+        # Host refuses seccomp. The contract is fail-closed, so assert the
+        # refusal is clean and named rather than skipping.
+        var c0 = spawned_wait(sp);
+        assert_eq(c0, 125, "child exits SPAWN_EXIT_SECCOMP rather than running unfiltered");
+        assert(strstr(spawn_exit_name(c0), "seccomp") >= 0, "and the code names seccomp");
+        return 0;
+    }
     assert_eq(spawned_wait(sp), 0, "and the payload actually ran (execve survived the filter)");
     return 0;
 }
@@ -2098,6 +2114,12 @@ fn test_seccomp_filter_actually_loads() {
     test_group("seccomp_filter_actually_loads");
     # The end-to-end property the byte test protects: the kernel accepts the
     # filter. Loaded in a CHILD so the test process stays unconfined.
+    if (spawn_seccomp_available() == 0) {
+        # Nothing to assert about a filter this kernel will not load; the
+        # fail-closed path is covered by test_spawn_applies_seccomp.
+        assert_eq(1, 1, "host refuses seccomp — load path not exercisable here");
+        return 0;
+    }
     var info = result_unwrap(security_create_exec_seccomp_filter());
     var pid = sys_fork();
     if (pid == 0) {
