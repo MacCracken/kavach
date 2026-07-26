@@ -42,17 +42,183 @@ fn _oci_state_root() {
     return p;
 }
 
+# ── host capture with a real exit status (3.9.2) ──────────
+#
+# `exec_capture` returns a BYTE COUNT and sends the child's stderr to
+# /dev/null. Both halves of that are wrong for running an OCI runtime:
+#
+#   * The byte count is not an outcome. `backend_capture_finish` sets
+#     `exit_code = 0` for every non-negative `n`, so a container that exited 7,
+#     died on a signal, or never started at all was reported as a success. That
+#     is the same defect 3.9.1 fixed for the PROCESS backend via
+#     `confine_last_exit()` — it just never reached this backend, which is the
+#     one SELECTED whenever runc or crun is installed.
+#   * runc writes its own diagnostics to stderr. Discarding them is how
+#     "mkdir /run/runc: permission denied" turned into a silent empty success
+#     once before (see `_oci_state_root` above). That was worked around by
+#     passing `--root`; the general case still needs the message.
+#
+# stdout comes back over a PIPE (it is the container's output and must stream),
+# stderr into a TEMP FILE. The asymmetry is deliberate: draining two pipes from
+# one thread deadlocks the moment either fills — a child that writes 64 KiB to
+# stderr before its first stdout byte blocks forever against a parent reading
+# stdout. A regular file never blocks the writer, so this needs no concurrent
+# drain, no poll/epoll, and no arch-conditional event-struct layout.
+var _OCI_ERR_MAX = 8192;
+var _oci_last_exit = 0;
+
+# Exit status of the most recent `_oci_run`, decoded from waitpid: the exit code
+# when the child exited normally, `128 + signal` when it was killed — the same
+# convention `confine_capture` uses, so an exit code means the same thing on
+# both backends.
+#[must_use]
+fn oci_last_exit() { return _oci_last_exit; }
+
+# stderr scratch path for one run, under the same uid-scoped state root as
+# runc's own state (0700), so a multi-user host cannot cross-read it.
+#[must_use]
+fn _oci_scratch_path(mid, container_id) {
+    var base = _oci_state_root();
+    var blen = strlen(base);
+    var mlen = strlen(mid);
+    var clen = strlen(container_id);
+    var p = alloc(blen + mlen + clen + 1);
+    memcpy(p, base, blen);
+    memcpy(p + blen, mid, mlen);
+    memcpy(p + blen + mlen, container_id, clen);
+    store8(p + blen + mlen + clen, 0);
+    return p;
+}
+
+#[must_use]
+fn _oci_err_path(container_id) { return _oci_scratch_path("/err-", container_id); }
+
+# Where runc writes its OWN structured log, kept apart from the container's
+# stderr by the global `--log` flag.
+#
+# The separation is not cosmetic — it is required for correctness. The
+# externalization gate scans `stdout + stderr` for secrets, and runc's own
+# messages are not container output: `code_scan` flags a plain
+# `runc run failed: chdir /nonexistent: no such file or directory` as a HIGH
+# finding, which the gate turns into QUARANTINE, which `sandbox_exec` turns into
+# a hard failure. Mixing the two made every runtime error present as
+# "externalization blocked: quarantined" — the runtime's own diagnostic
+# suppressed by the scanner meant to police the payload.
+#[must_use]
+fn _oci_log_path(container_id) { return _oci_scratch_path("/log-", container_id); }
+
 fn _oci_run(runtime, bundle, container_id, out_buf, out_cap) {
     var args = vec_new();
     vec_push(args, runtime);
     vec_push(args, "--root");
     vec_push(args, _oci_state_root());
+    # Global flag, so it must precede the `run` subcommand. Sends runc's own
+    # structured log to its own file instead of onto the container's stderr —
+    # see _oci_log_path for why that separation is load-bearing.
+    vec_push(args, "--log");
+    vec_push(args, _oci_log_path(container_id));
     vec_push(args, "run");
     vec_push(args, "--bundle");
     vec_push(args, bundle);
     vec_push(args, container_id);
-    return exec_capture(args, out_buf, out_cap);
+
+    var argc = vec_len(args);
+    var argv = alloc((argc + 1) * 8);
+    var i = 0;
+    while (i < argc) {
+        store64(argv + i * 8, vec_get(args, i));
+        i = i + 1;
+    }
+    store64(argv + argc * 8, 0);
+    # Empty environment, as everywhere else in kavach — the caller's env is
+    # never leaked into a sandbox. `--root` above is what removes this path's
+    # dependency on XDG_RUNTIME_DIR.
+    var envp = alloc(8);
+    store64(envp, 0);
+
+    var err_path = _oci_err_path(container_id);
+    var pipefd[16];
+    if (sys_pipe(&pipefd) < 0) { _oci_last_exit = 1; return 0 - 1; }
+    var rfd = load32(&pipefd);
+    var wfd = load32(&pipefd + 4);
+
+    var pid = sys_fork();
+    if (pid < 0) {
+        sys_close(rfd);
+        sys_close(wfd);
+        _oci_last_exit = 1;
+        return 0 - 1;
+    }
+    if (pid == 0) {
+        sys_close(rfd);
+        sys_dup2(wfd, 1);
+        sys_close(wfd);
+        var efd = sys_open(err_path, SPAWN_LOG_FLAGS, 384);   # 0600
+        if (efd >= 0) {
+            sys_dup2(efd, 2);
+            sys_close(efd);
+        }
+        sys_execve(vec_get(args, 0), argv, envp);
+        # execve failed. 127 is the shell's "command not found" and reaches the
+        # caller instead of being swallowed into a success.
+        sys_exit(127);
+    }
+
+    sys_close(wfd);
+    var total = 0;
+    var rgo = 1;
+    while (rgo == 1) {
+        var n = sys_read(rfd, out_buf + total, out_cap - total);
+        if (n <= 0) { rgo = 0; }
+        else {
+            total = total + n;
+            if (total >= out_cap) { rgo = 0; }
+        }
+    }
+    # Closed BEFORE waitpid: a child that outruns `out_cap` would otherwise
+    # block on a full pipe forever and hang the wait. It gets EPIPE instead.
+    sys_close(rfd);
+
+    var stbuf[4];
+    store32(&stbuf, 0);
+    sys_waitpid(pid, &stbuf, 0);
+    var status = load32(&stbuf);
+    var sig = status & 127;
+    if (sig == 0) { _oci_last_exit = (status >> 8) & 255; }
+    else { _oci_last_exit = 128 + sig; }
+    return total;
 }
+
+# Read back (and remove) one of the run's scratch files. Returns a cstr — "" when
+# nothing was written or the file is unreadable, never 0.
+fn _oci_take_file(path) {
+    var buf = alloc(_OCI_ERR_MAX + 1);
+    store8(buf, 0);
+    var fd = sys_open(path, 0, 0);                       # O_RDONLY
+    if (fd < 0) { return buf; }
+    var total = 0;
+    var rgo = 1;
+    while (rgo == 1) {
+        var n = sys_read(fd, buf + total, _OCI_ERR_MAX - total);
+        if (n <= 0) { rgo = 0; }
+        else {
+            total = total + n;
+            if (total >= _OCI_ERR_MAX) { rgo = 0; }
+        }
+    }
+    sys_close(fd);
+    store8(buf + total, 0);
+    sys_unlink(path);
+    return buf;
+}
+
+# The container's stderr for this run.
+fn _oci_take_stderr(container_id) { return _oci_take_file(_oci_err_path(container_id)); }
+
+# runc's own diagnostics for this run. Non-empty means the RUNTIME failed, not
+# the payload — runc logs nothing here for a container that merely exits
+# non-zero.
+fn _oci_take_log(container_id) { return _oci_take_file(_oci_log_path(container_id)); }
 
 fn _oci_delete(runtime, container_id) {
     var args = vec_new();
@@ -90,11 +256,62 @@ fn oci_exec(sandbox, command) {
     var out_buf = alloc(out_cap);
     var n = _oci_run(runtime, bundle, container_id, out_buf, out_cap);
     var end_ns = mono_now_ns();
+    var errtext = _oci_take_stderr(container_id);
+    var runclog = _oci_take_log(container_id);
 
     _oci_delete(runtime, container_id);
     oci_cleanup_bundle(bundle);
 
-    return backend_capture_finish(out_buf, n, out_cap, "OCI runtime run failed", start_ns, end_ns);
+    # A non-empty runc log means the RUNTIME failed — a bad bundle, a refused
+    # mount, a missing binary — and the payload never ran. That is a kavach-level
+    # error, not container output, so it is reported as one and never reaches the
+    # externalization gate. It must not: `code_scan` flags runc's own
+    # `runc run failed: chdir /nonexistent: no such file or directory` as a HIGH
+    # finding, so routing it through the gate would replace every runtime
+    # diagnostic with "externalization blocked: quarantined" — the scanner meant
+    # to police the payload suppressing the message that explains the failure.
+    #
+    # This also resolves what would otherwise be an unfixable ambiguity: `runc
+    # run` exits with the CONTAINER's status on success but its own non-zero
+    # status on its own failure, so the exit code alone cannot say which
+    # happened. The log file can.
+    if (strlen(runclog) > 0) {
+        return backend_error_result(_oci_diag("OCI runtime run failed: ", runclog));
+    }
+
+    var r = backend_capture_finish(out_buf, n, out_cap, "OCI runtime run failed", start_ns, end_ns);
+    if (r == 0) { return r; }
+    # Surface the payload's REAL outcome. `backend_capture_finish` derives
+    # exit_code from the byte count alone, which is not an outcome — reporting 0
+    # for a container that never ran is exactly how the missing-rootfs bug looked
+    # healthy for so long. Only override on the success path: when n < 0 the
+    # capture itself failed and its own (1, fail_msg) pair is the truth.
+    if (n >= 0) {
+        ExecResult_set_exit_code(r, _oci_last_exit);
+        # The container's own stderr, which DOES belong to the payload and so
+        # DOES get scanned. Before 3.9.2 it went to /dev/null, meaning anything a
+        # container wrote to stderr bypassed the externalization gate entirely.
+        if (strlen(errtext) > 0) { ExecResult_set_stderr(r, errtext); }
+    }
+    return r;
+}
+
+# "<prefix><detail>" with the detail trimmed of trailing newlines, as a fresh
+# cstr — runc's log line ends in one and it reads badly inside an error string.
+#[must_use]
+fn _oci_diag(prefix, detail) {
+    var dlen = strlen(detail);
+    while (dlen > 0) {
+        var c = load8(detail + dlen - 1);
+        if (c != 10 && c != 13) { break; }
+        dlen = dlen - 1;
+    }
+    var plen = strlen(prefix);
+    var out = alloc(plen + dlen + 1);
+    memcpy(out, prefix, plen);
+    memcpy(out + plen, detail, dlen);
+    store8(out + plen + dlen, 0);
+    return out;
 }
 
 fn oci_health(sandbox) {

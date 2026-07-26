@@ -122,9 +122,32 @@ fn backend_at(i) {
 # three helpers carry that shared shape so the logic — and its hardening —
 # lives in exactly one place.
 
+# Whether the most recent backend result is a KAVACH DIAGNOSTIC rather than
+# captured payload output.
+#
+# It matters because `sandbox_exec` runs the externalization gate over the
+# result's stdout+stderr, and the gate's contract is "scan what the payload
+# is about to externalize". A backend error is not payload output — it is
+# kavach explaining why there was no payload. Scanning it lets kavach's own
+# secret scanner censor kavach's own error messages: `code_scan` rates a
+# runtime diagnostic such as
+#   runc run failed: ... exec: "/app/x": stat /app/x: no such file or directory
+# a HIGH finding, the gate turns HIGH into QUARANTINE, and the user is told
+# "externalization blocked: quarantined" instead of what actually went wrong.
+# That is a category error, and it silently swallows exactly the message
+# needed to diagnose the failure.
+#
+# Set by the two diagnostic constructors, cleared by the capture path, so the
+# flag always describes the result the caller is holding.
+var _backend_diag_only = 0;
+
+#[must_use]
+fn backend_result_is_diagnostic() { return _backend_diag_only; }
+
 # Simple failure result: exit 1, no stdout, caller-supplied stderr, zero
 # duration. Replaces the per-backend `_X_error` helpers.
 fn backend_error_result(msg) {
+    _backend_diag_only = 1;
     var r = exec_result_new();
     ExecResult_set_exit_code(r, 1);
     ExecResult_set_stdout(r, "");
@@ -137,6 +160,7 @@ fn backend_error_result(msg) {
 # Runtime-guard violation result: exit 126 with the first violation's
 # description. Call only when vec_len(violations) > 0.
 fn backend_guard_result(violations) {
+    _backend_diag_only = 1;
     var r = exec_result_new();
     ExecResult_set_exit_code(r, 126);
     var v0 = vec_get(violations, 0);
@@ -157,6 +181,8 @@ fn backend_guard_result(violations) {
 # alternative (reading past the buffer) is not. Centralizing here fixes the
 # off-by-one for all nine capture backends at once.
 fn backend_capture_finish(out_buf, n, out_cap, fail_msg, start_ns, end_ns) {
+    # This IS captured payload output, so the gate must see it.
+    _backend_diag_only = 0;
     var r = exec_result_new();
     if (n < 0) {
         ExecResult_set_exit_code(r, 1);

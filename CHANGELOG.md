@@ -7,6 +7,93 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.9.2] — 2026-07-26
+
+### Fixed — the OCI backend never reported the container's exit code, so every run looked like success
+`oci_exec` reported **`exit_code = 0` for every container that ran**, whatever the payload actually
+did. A container that exited 7, died on a signal, or never started at all was indistinguishable
+from one that succeeded.
+
+This is the **same defect 3.9.1 fixed for the PROCESS backend** — that release added
+`ExecResult_set_exit_code(rr, confine_last_exit())` to `process_exec` and its entry below records
+"a failed `execve` no longer reports exit 0". The fix reached one backend of two, and the one it
+missed is the backend that gets *selected* whenever `runc` or `crun` is installed, i.e. on most
+real hosts.
+
+Three links produced it, all in `src/backend_oci.cyr`:
+
+1. `_oci_run` called the stdlib's `exec_capture`, which returns a **byte count**. runc's wait status
+   was never retrieved and is not recoverable from that return value.
+2. `oci_exec` passed that byte count straight to `backend_capture_finish`.
+3. `backend_capture_finish` sets `exit_code = 0` on every `n >= 0` path.
+
+So the reported exit code was a property of *whether the capture read bytes*, not of the container.
+
+`_oci_run` now forks, execs, and decodes `waitpid` itself, recording the result in
+`oci_last_exit()` — `128 + signal` for a signalled child, matching `confine_capture`'s convention
+so an exit code means the same thing on both backends. `oci_exec` applies it on the success path
+only; when the capture itself failed, `backend_capture_finish`'s own `(1, fail_msg)` pair is still
+the truth.
+
+**stderr is now captured too**, which is the other half of the same defect. `exec_capture` `dup2`s
+`/dev/null` onto the child's fd 2, so runc's own diagnostics were discarded — `_oci_state_root`'s
+comment already records being bitten by exactly that ("mkdir /run/runc: permission denied" going to
+a discarded stderr, so "the whole container silently produced nothing and reported success"). That
+instance was worked around by passing `--root`; the general case needed the message.
+
+It also closes a quieter hole: because stderr went to `/dev/null`, **anything a container wrote to
+stderr bypassed the externalization gate entirely.** A secret echoed to stderr was never scanned.
+It is now.
+
+**stdout comes back over a pipe, stderr into a temp file, and the asymmetry is deliberate.**
+Draining two pipes from one thread deadlocks the moment either fills: a child writing 64 KiB to
+stderr before its first stdout byte blocks forever against a parent reading stdout. A regular file
+never blocks its writer, so this needs no concurrent drain, no `poll`/`epoll`, and no
+arch-conditional event-struct layout — `epoll_event` is packed differently on x86_64 and aarch64
+and the AGNOS wrappers take a different arity again. `test_oci_run_large_stderr_does_not_deadlock`
+pushes ~82 KiB of stderr ahead of stdout; it hangs rather than fails if this regresses, which is
+the honest signal.
+
+### Fixed — runc's own diagnostics no longer reach the externalization gate
+Two further defects surfaced while verifying the above, both instances of one mistake: **kavach was
+letting its own secret scanner censor its own error messages.**
+
+`code_scan` rates a runtime diagnostic such as
+`runc run failed: ... exec: "/app/x": stat /app/x: no such file or directory` a **HIGH** finding.
+The gate turns HIGH into QUARANTINE and `sandbox_exec` turns QUARANTINE into a hard failure, so
+every runtime error presented as `externalization blocked: quarantined` — the scanner meant to
+police the payload suppressing precisely the message needed to diagnose the failure.
+
+Two changes, because it arrived by two routes:
+
+- **`runc --log <file>`** now sends runc's structured log to its own file rather than onto the
+  container's stderr. A non-empty log means the RUNTIME failed and the payload never ran, which is
+  reported as a backend error carrying runc's message. This also resolves what would otherwise be
+  an unfixable ambiguity: `runc run` exits with the CONTAINER's status on success but its own
+  non-zero status on its own failure, so the exit code alone cannot say which happened — the log
+  file can. The container's stderr, which *does* belong to the payload, is still gated.
+- **`sandbox_exec` no longer gates a diagnostic result at all.** `backend_error_result` and
+  `backend_guard_result` now mark themselves via `backend_result_is_diagnostic()`, which
+  `backend_capture_finish` clears. The gate's contract is "scan what the payload is about to
+  externalize"; a diagnostic is kavach explaining why there was no payload. The result still flows
+  back with its non-zero exit code and its reason attached, which is what callers had before this
+  path started producing messages long enough to trip the scanner.
+
+Net effect for a consumer: `stiva run <image> /nope` used to print `exit_code=0`. It now reports
+exit 1 with `stat /nope: no such file or directory`.
+
+**Residual ambiguity, stated rather than papered over:** for a container that genuinely ran, a
+non-zero exit code is the payload's. runc's own failures are separated by the log file, not by the
+code — a runtime whose log stays empty while it fails would still be attributed to the payload.
+
+Consumer impact (stiva, whose `exec_container` reads `ExecResult_exit_code` verbatim): `stiva wait`
+always yielded 0, `state.json`'s `exit_status` was wrong and stayed wrong across restarts, and
+`on-failure` restart policies could never observe a failure. Found while verifying stiva's
+`stiva build`, where `stiva run <image> /definitely-not-here` reported exit 0.
+
+Filed as `docs/development/issues/2026-07-26-oci-backend-never-reports-the-container-exit-code.md`.
+**494 → 532 assertions.**
+
 ## [3.9.1] — 2026-07-25
 
 ### Fixed — a sandbox could not say WHICH filesystem to run in, so every payload ran on the host

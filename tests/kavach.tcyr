@@ -2308,6 +2308,175 @@ fn test_ns_flags_for_rootfs() {
     return 0;
 }
 
+# ══ OCI backend exit status (3.9.2) ══════════════════════
+#
+# Before 3.9.2 `_oci_run` returned only a byte count and `oci_exec` reported
+# exit_code 0 for EVERY container that ran — a payload that exited 7, died on a
+# signal, or never started at all was indistinguishable from success. These
+# tests drive `_oci_run` with a stand-in "runtime" so they need no runc, no
+# root, and no container: `_oci_run` takes the runtime path as a parameter, and
+# a stand-in simply ignores the `--root ... run --bundle ...` arguments.
+#
+# The assertions are on the DECODED status, not on the byte count, because the
+# byte count was exactly what the old code mistook for an outcome.
+
+# Write an executable stand-in runtime at `path`. `body` is shell.
+fn _t_write_stub(path, body) {
+    sys_unlink(path);
+    file_write_all(path, body, strlen(body));
+    sys_chmod(path, 493);                   # 0755
+    return path;
+}
+
+fn test_oci_run_reports_nonzero_exit() {
+    test_group("oci_run_reports_nonzero_exit");
+    var stub = _t_write_stub("/tmp/kavach-t-oci-exit7",
+    "#!/bin/sh\necho hello-stdout\necho boom-stderr >&2\nexit 7\n");
+    var buf = alloc(65536);
+    var n = _oci_run(stub, "/tmp/nonexistent-bundle", "kavach-t-exit7", buf, 65536);
+    assert(n > 0, "stdout was captured");
+    store8(buf + n, 0);
+    assert_eq(strstr(buf, "hello-stdout") >= 0, 1, "stdout content is the payload's");
+    # THE regression assertion: 7, not 0.
+    assert_eq(oci_last_exit(), 7, "the payload's real exit code");
+    # stderr is captured too — before 3.9.2 it went to /dev/null, which is how
+    # runc's own "permission denied" became a silent empty success.
+    var err = _oci_take_stderr("kavach-t-exit7");
+    assert_eq(strstr(err, "boom-stderr") >= 0, 1, "stderr content is preserved");
+    sys_unlink(stub);
+    return 0;
+}
+
+fn test_oci_run_reports_zero_only_on_success() {
+    test_group("oci_run_reports_zero_only_on_success");
+    var stub = _t_write_stub("/tmp/kavach-t-oci-ok", "#!/bin/sh\necho fine\nexit 0\n");
+    var buf = alloc(4096);
+    var n = _oci_run(stub, "/tmp/nonexistent-bundle", "kavach-t-ok", buf, 4096);
+    assert(n > 0, "stdout captured");
+    assert_eq(oci_last_exit(), 0, "a genuine success still reports 0");
+    var err = _oci_take_stderr("kavach-t-ok");
+    assert_eq(strlen(err), 0, "and no stderr");
+    sys_unlink(stub);
+    return 0;
+}
+
+fn test_oci_run_missing_runtime_binary() {
+    test_group("oci_run_missing_runtime_binary");
+    var buf = alloc(4096);
+    var n = _oci_run("/definitely/not/a/runtime", "/tmp/b", "kavach-t-missing", buf, 4096);
+    assert_eq(n, 0, "no output from a binary that never executed");
+    # execve failed in the child -> 127, the shell's command-not-found code.
+    assert_eq(oci_last_exit(), 127, "a failed execve is 127, not 0");
+    return 0;
+}
+
+fn test_oci_run_signalled_child() {
+    test_group("oci_run_signalled_child");
+    # SIGKILL itself, so the parent decodes a signalled status rather than an
+    # exit code. Must match confine_capture's 128 + sig convention, or an exit
+    # code would mean different things on the two backends.
+    var stub = _t_write_stub("/tmp/kavach-t-oci-sig", "#!/bin/sh\nkill -9 $$\n");
+    var buf = alloc(4096);
+    _oci_run(stub, "/tmp/b", "kavach-t-sig", buf, 4096);
+    assert_eq(oci_last_exit(), 137, "SIGKILL -> 128 + 9");
+    _oci_take_stderr("kavach-t-sig");
+    sys_unlink(stub);
+    return 0;
+}
+
+fn test_oci_run_large_stderr_does_not_deadlock() {
+    test_group("oci_run_large_stderr_does_not_deadlock");
+    # The reason stderr goes to a FILE and not a second pipe. A child writing
+    # well past a pipe buffer to stderr BEFORE its first stdout byte would block
+    # forever against a single-threaded parent draining stdout. This test hangs
+    # rather than fails if that regresses, which is the honest signal.
+    var stub = _t_write_stub("/tmp/kavach-t-oci-bigerr",
+    "#!/bin/sh\ni=0\nwhile [ $i -lt 2000 ]; do echo 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx' >&2; i=$((i+1)); done\necho done-stdout\nexit 3\n");
+    var buf = alloc(65536);
+    var n = _oci_run(stub, "/tmp/b", "kavach-t-bigerr", buf, 65536);
+    store8(buf + n, 0);
+    assert_eq(strstr(buf, "done-stdout") >= 0, 1, "stdout still arrives after ~82 KiB of stderr");
+    assert_eq(oci_last_exit(), 3, "and the exit code survives");
+    var err = _oci_take_stderr("kavach-t-bigerr");
+    assert(strlen(err) > 4096, "stderr was captured (truncated to the 8 KiB cap)");
+    sys_unlink(stub);
+    return 0;
+}
+
+fn test_oci_runtime_log_is_separate_from_container_stderr() {
+    test_group("oci_runtime_log_is_separate_from_container_stderr");
+    # A stand-in that writes to BOTH its own --log file and its stderr, so the
+    # two channels are provably distinct rather than merely assumed to be.
+    # $2 is the --log path (argv: --root <r> --log <l> run ...  =>  $1=--root
+    # $2=<r> $3=--log $4=<l>).
+    var stub = _t_write_stub("/tmp/kavach-t-oci-split",
+    "#!/bin/sh\necho payload-stderr >&2\necho runtime-log > \"$4\"\nexit 0\n");
+    var buf = alloc(4096);
+    _oci_run(stub, "/tmp/b", "kavach-t-split", buf, 4096);
+    var err = _oci_take_stderr("kavach-t-split");
+    var log = _oci_take_log("kavach-t-split");
+    assert_eq(strstr(err, "payload-stderr") >= 0, 1, "container stderr holds the payload's output");
+    assert_eq(strstr(err, "runtime-log") >= 0, 0, "and NOT the runtime's log");
+    assert_eq(strstr(log, "runtime-log") >= 0, 1, "the runtime log holds the runtime's output");
+    assert_eq(strstr(log, "payload-stderr") >= 0, 0, "and NOT the payload's");
+    sys_unlink(stub);
+    return 0;
+}
+
+fn test_backend_diagnostic_results_bypass_the_gate() {
+    test_group("backend_diagnostic_results_bypass_the_gate");
+    # WHY this flag exists, asserted rather than described: a runtime diagnostic
+    # really does trip the scanner. If this first assertion ever stops holding,
+    # the bypass is no longer load-bearing and should be reconsidered — but
+    # while it holds, gating diagnostics means kavach censoring its own errors.
+    var probe = scan_result_new();
+    var diag = "runc run failed: unable to start container process: error during container init: exec: \"/app/x\": stat /app/x: no such file or directory";
+    code_scan(diag, probe);
+    assert(vec_len(ScanResult_findings(probe)) > 0, "a runtime diagnostic DOES trip code_scan");
+    assert(ScanResult_worst_severity(probe) >= Severity.HIGH, "at HIGH or worse, i.e. quarantine-or-block");
+
+    # The flag tracks whichever constructor produced the result the caller holds.
+    var e = backend_error_result("boom");
+    assert(e != 0, "error result built");
+    assert_eq(backend_result_is_diagnostic(), 1, "backend_error_result marks a diagnostic");
+
+    var buf = alloc(64);
+    memcpy(buf, "payload", 7);
+    var c = backend_capture_finish(buf, 7, 64, "fail", 0, 1000000);
+    assert(c != 0, "capture result built");
+    assert_eq(backend_result_is_diagnostic(), 0, "backend_capture_finish clears it — captured output IS gated");
+
+    var viol = vec_new();
+    vec_push(viol, guard_violation_new("test", "blocked for testing"));
+    var g = backend_guard_result(viol);
+    assert(g != 0, "guard result built");
+    assert_eq(backend_result_is_diagnostic(), 1, "a guard violation is a diagnostic too");
+    return 0;
+}
+
+fn test_oci_diag_trims_trailing_newlines() {
+    test_group("oci_diag_trims_trailing_newlines");
+    assert_eq(streq(_oci_diag("x: ", "boom\n"), "x: boom"), 1, "one trailing LF");
+    assert_eq(streq(_oci_diag("x: ", "boom\r\n"), "x: boom"), 1, "CRLF");
+    assert_eq(streq(_oci_diag("x: ", "boom\n\n\n"), "x: boom"), 1, "several");
+    assert_eq(streq(_oci_diag("x: ", "boom"), "x: boom"), 1, "none");
+    assert_eq(streq(_oci_diag("x: ", ""), "x: "), 1, "empty detail");
+    assert_eq(streq(_oci_diag("x: ", "\n"), "x: "), 1, "newline-only detail");
+    return 0;
+}
+
+fn test_oci_err_path_is_uid_scoped() {
+    test_group("oci_err_path_is_uid_scoped");
+    var p = _oci_err_path("abc123");
+    assert_eq(strstr(p, "/tmp/kavach-runc-") >= 0, 1, "under the uid-scoped state root");
+    assert_eq(strstr(p, "abc123") >= 0, 1, "and names the container");
+    # Distinct containers must not share a scratch file, or two concurrent runs
+    # would read each other's diagnostics.
+    assert_eq(streq(p, _oci_err_path("def456")), 0, "distinct per container");
+    return 0;
+}
+
+
 fn main() {
     alloc_init();
     test_backend_parse();
@@ -2464,6 +2633,15 @@ fn main() {
     test_spawn_exit_name();
     test_rootfs_config_field();
     test_ns_flags_for_rootfs();
+    test_oci_run_reports_nonzero_exit();
+    test_oci_run_reports_zero_only_on_success();
+    test_oci_run_missing_runtime_binary();
+    test_oci_run_signalled_child();
+    test_oci_run_large_stderr_does_not_deadlock();
+    test_backend_diagnostic_results_bypass_the_gate();
+    test_oci_runtime_log_is_separate_from_container_stderr();
+    test_oci_diag_trims_trailing_newlines();
+    test_oci_err_path_is_uid_scoped();
     return assert_summary();
 }
 

@@ -69,6 +69,19 @@ fn sandbox_exec(sandbox, command) {
     }
 
     # 2. Externalization gate
+    #
+    # Skipped when the backend returned a DIAGNOSTIC rather than captured output
+    # (no runtime found, bad bundle, runtime-guard violation). The gate polices
+    # what the payload externalizes; a diagnostic is kavach explaining why there
+    # was no payload, and scanning it lets kavach censor its own error messages
+    # — see backend_result_is_diagnostic. The result still flows back to the
+    # caller carrying its non-zero exit code and its reason.
+    if (backend_result_is_diagnostic() == 1) {
+        _last_scan_result = 0;
+        _last_assessment = 0;
+        _audit_record_if(audit, "exec_complete", "diagnostic");
+        return result;
+    }
     var scan = gate_apply(result, policy);
     _last_scan_result = scan;
 
