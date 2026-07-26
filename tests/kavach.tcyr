@@ -2219,7 +2219,10 @@ fn test_spawn_namespaces_environment_aware() {
         var sp0 = sandbox_spawn(sb0, "/bin/true", 0);
         if (sp0 != 0) {
             var code0 = spawned_wait(sp0);
-            assert_eq(code0, 123, "child exits SPAWN_EXIT_NS rather than running unisolated");
+            # 123 = namespace creation, 118 = id mapping. Either is a clean
+            # fail-closed; what must NOT happen is the payload running.
+            assert(code0 == 123 || code0 == 118,
+            "child exits with a confinement code rather than running unisolated");
             assert(streq(spawn_exit_name(code0), "") == 0, "and the code has a readable name");
         }
         return 0;
@@ -2240,6 +2243,11 @@ fn test_spawn_exit_name() {
     assert(strstr(spawn_exit_name(123), "namespace") >= 0, "and it mentions namespaces");
     assert(strstr(spawn_exit_name(125), "seccomp") >= 0, "seccomp code names seccomp");
     assert(strstr(spawn_exit_name(119), "rootfs") >= 0, "rootfs code names rootfs");
+    # Namespace creation and id mapping must be DISTINGUISHABLE — they fail on
+    # different hosts and the fix for each is different.
+    assert(streq(spawn_exit_name(118), spawn_exit_name(123)) == 0,
+    "idmap failure is not reported as a namespace failure");
+    assert(strstr(spawn_exit_name(118), "uid_map") >= 0, "idmap code names uid_map");
     assert_eq(spawn_exit_name(0), 0, "a normal exit is not a confinement failure");
     assert_eq(spawn_exit_name(127), 0, "nor is execve-not-found");
     return 0;

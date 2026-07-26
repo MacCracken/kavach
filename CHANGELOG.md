@@ -73,7 +73,14 @@ exited 123" tells a caller nothing; *"cannot create namespaces (unprivileged use
 be disabled on this host)"* tells them exactly what their kernel is refusing.
 `spawn_namespaces_available(flags)` probes, in a forked child, whether the host will actually grant
 the namespaces a policy implies — `unshare(2)` mutates the caller, so there is no way to ask
-without doing it.
+without doing it. It exercises the id-mapping write too, not just the namespace creation: those are
+different privileges, and a runner already inside a restricted user namespace grants the first and
+refuses the second, so probing only the first certifies a spawn that still dies.
+
+Creating a namespace and mapping ids into it accordingly have **separate exit codes**
+(`SPAWN_EXIT_NS` 123 / `SPAWN_EXIT_IDMAP` 118). Sharing one made the two indistinguishable —
+which is the exact opacity the per-step codes exist to remove, and it cost a second CI round to
+find.
 
 Both exist because the spawn tests were **host-dependent and failed in CI while passing locally**.
 They used the default policy, whose zero-filled `network_enabled = 0` reads as "isolate the
