@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.9.3] — 2026-07-26
+
+### Fixed — the OCI scratch directory and files were open to a local symlink attack
+Found by adversarial review of the 3.9.2 changes above, which introduced the scratch files.
+
+`_oci_state_root` built a fully predictable path — `/tmp/kavach-runc-<uid>` — called `sys_mkdir`
+and **discarded the result** ("EEXIST is fine"), then trusted whatever was there. On a shared host
+another user can create that directory (or symlink it) before the victim's first OCI exec and
+thereafter own runc's entire `--root` state plus both new scratch files. `EEXIST` says nothing
+about what is actually at the path.
+
+It is now validated: a real **directory** (`lstat`, so a symlink reports `S_IFLNK` rather than its
+target's type — `stat` would happily accept a link to a valid 0700 dir), **owned by us**, with **no
+group or other permission bits**. Any failure returns 0 and every caller refuses rather than
+proceeding into someone else's directory; `oci_exec` reports why.
+
+Two more holes in the same area:
+- **The scratch files were opened `O_APPEND` and followed symlinks.** `SPAWN_LOG_FLAGS` is
+  `O_WRONLY|O_CREAT|O_APPEND`, so a leftover file made a run's stderr the *concatenation* of the
+  previous run's and this one's, and a planted symlink redirected the write. Now
+  `O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW`.
+- **`_oci_take_file` read with no `O_NOFOLLOW`**, so winning the race on that predictable path
+  turned the read into an arbitrary-file read whose contents became the container's reported
+  stderr. Now `O_RDONLY|O_NOFOLLOW`.
+
+**`O_EXCL` alone would have made things worse**, which is worth recording: it makes the child's
+open *fail* on a leftover, so stderr goes to the inherited fd 2 and the read-back returns purely
+the stale contents. The parent now unlinks both paths before forking — that also removes a planted
+symlink (unlink removes the link, not its target), and the state-root validation is what makes the
+unlink safe, since nobody else can be racing inside a 0700 directory we own. **532 → 540
+assertions.**
+
 ## [3.9.2] — 2026-07-26
 
 ### Fixed — the OCI backend never reported the container's exit code, so every run looked like success

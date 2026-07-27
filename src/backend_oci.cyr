@@ -38,8 +38,33 @@ fn _oci_state_root() {
     memcpy(p, prefix, plen);
     memcpy(p + plen, &b, n);
     store8(p + plen + n, 0);
-    sys_mkdir(p, 448);                      # 0700; EEXIST is fine
+    sys_mkdir(p, 448);                      # 0700
+    # VALIDATE, do not assume. The name is fully predictable — "kavach-runc-"
+    # plus the victim's uid — and it lives in a world-writable directory, so on
+    # a shared host another user can create it (or symlink it) FIRST and then
+    # own runc's entire state directory plus both scratch files. `sys_mkdir`
+    # returning EEXIST tells us nothing about what is there.
+    #
+    # Three properties, all required: it must be a real DIRECTORY (not a
+    # symlink — `lstat`, so a link reports S_IFLNK rather than its target), it
+    # must be owned by US, and it must not be group- or world-accessible. Any
+    # failure returns 0 and every caller treats that as "no usable state root"
+    # rather than proceeding into an attacker's directory.
+    if (_oci_dir_is_ours(p) == 0) { return 0; }
     return p;
+}
+
+# 1 when `path` is a directory we own with no group/other bits set.
+#[must_use]
+fn _oci_dir_is_ours(path) {
+    var sb[144];
+    if (sys_lstat(path, &sb) != 0) { return 0; }
+    var mode = load64(&sb + 24) & 65535;
+    if ((mode & 61440) != 16384) { return 0; }          # S_IFDIR, and NOT S_IFLNK
+    if ((mode & 63) != 0) { return 0; }                 # any group/other bit -> refuse
+    var uid = (load64(&sb + 24) >> 32) & 4294967295;
+    if (uid != sys_getuid()) { return 0; }
+    return 1;
 }
 
 # ── host capture with a real exit status (3.9.2) ──────────
@@ -79,6 +104,7 @@ fn oci_last_exit() { return _oci_last_exit; }
 #[must_use]
 fn _oci_scratch_path(mid, container_id) {
     var base = _oci_state_root();
+    if (base == 0) { return 0; }            # unusable state root — refuse, do not build a path
     var blen = strlen(base);
     var mlen = strlen(mid);
     var clen = strlen(container_id);
@@ -108,10 +134,12 @@ fn _oci_err_path(container_id) { return _oci_scratch_path("/err-", container_id)
 fn _oci_log_path(container_id) { return _oci_scratch_path("/log-", container_id); }
 
 fn _oci_run(runtime, bundle, container_id, out_buf, out_cap) {
+    var state_root = _oci_state_root();
+    if (state_root == 0) { _oci_last_exit = 1; return 0 - 1; }
     var args = vec_new();
     vec_push(args, runtime);
     vec_push(args, "--root");
-    vec_push(args, _oci_state_root());
+    vec_push(args, state_root);
     # Global flag, so it must precede the `run` subcommand. Sends runc's own
     # structured log to its own file instead of onto the container's stderr —
     # see _oci_log_path for why that separation is load-bearing.
@@ -137,6 +165,19 @@ fn _oci_run(runtime, bundle, container_id, out_buf, out_cap) {
     store64(envp, 0);
 
     var err_path = _oci_err_path(container_id);
+    if (err_path == 0) { _oci_last_exit = 1; return 0 - 1; }
+    # Clear both scratch paths in the PARENT, before the fork.
+    #
+    # O_EXCL alone is not enough and is actively worse on its own: it makes the
+    # child's open FAIL on a leftover file, so the child's stderr goes to the
+    # inherited fd 2 and `_oci_take_file` then returns purely the stale contents.
+    # Unlink-then-create-exclusive is the correct pair — it also removes a
+    # symlink an attacker planted (unlink removes the LINK, not its target), and
+    # the state-root validation above is what makes doing so safe: nobody else
+    # can be racing us inside a 0700 directory we own.
+    sys_unlink(err_path);
+    var log_path_pre = _oci_log_path(container_id);
+    if (log_path_pre != 0) { sys_unlink(log_path_pre); }
     var pipefd[16];
     if (sys_pipe(&pipefd) < 0) { _oci_last_exit = 1; return 0 - 1; }
     var rfd = load32(&pipefd);
@@ -153,7 +194,15 @@ fn _oci_run(runtime, bundle, container_id, out_buf, out_cap) {
         sys_close(rfd);
         sys_dup2(wfd, 1);
         sys_close(wfd);
-        var efd = sys_open(err_path, SPAWN_LOG_FLAGS, 384);   # 0600
+        # O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW, 0600 — NOT the SPAWN_LOG_FLAGS
+        # used before, which are O_APPEND and follow symlinks:
+        #   * O_APPEND meant a leftover file made this run's stderr the
+        #     CONCATENATION of a previous run's and this one's.
+        #   * following a symlink let another user on a shared host redirect
+        #     this write, and O_EXCL additionally refuses a pre-created file.
+        # A refused open costs this run's stderr, never a wrong or attacker-
+        # chosen one; the container still runs.
+        var efd = sys_open(err_path, 131265, 384);
         if (efd >= 0) {
             sys_dup2(efd, 2);
             sys_close(efd);
@@ -192,9 +241,13 @@ fn _oci_run(runtime, bundle, container_id, out_buf, out_cap) {
 # Read back (and remove) one of the run's scratch files. Returns a cstr — "" when
 # nothing was written or the file is unreadable, never 0.
 fn _oci_take_file(path) {
+    if (path == 0) { return ""; }
     var buf = alloc(_OCI_ERR_MAX + 1);
     store8(buf, 0);
-    var fd = sys_open(path, 0, 0);                       # O_RDONLY
+    # O_RDONLY|O_NOFOLLOW (131072) — without O_NOFOLLOW an attacker who wins the
+    # race on this predictable path turns the read into an arbitrary-file read
+    # whose contents become the container's reported stderr.
+    var fd = sys_open(path, 131072, 0);
     if (fd < 0) { return buf; }
     var total = 0;
     var rgo = 1;
@@ -221,10 +274,12 @@ fn _oci_take_stderr(container_id) { return _oci_take_file(_oci_err_path(containe
 fn _oci_take_log(container_id) { return _oci_take_file(_oci_log_path(container_id)); }
 
 fn _oci_delete(runtime, container_id) {
+    var del_root = _oci_state_root();
+    if (del_root == 0) { return 0; }
     var args = vec_new();
     vec_push(args, runtime);
     vec_push(args, "--root");
-    vec_push(args, _oci_state_root());
+    vec_push(args, del_root);
     vec_push(args, "delete");
     vec_push(args, "--force");
     vec_push(args, container_id);
@@ -238,6 +293,11 @@ fn oci_exec(sandbox, command) {
     var runtime = _oci_runtime_path();
     if (runtime == 0) {
         return backend_error_result("no OCI runtime (runc/crun) found in PATH");
+    }
+    # Refuse rather than run against a state directory we cannot vouch for.
+    if (_oci_state_root() == 0) {
+        return backend_error_result(
+        "OCI state directory under /tmp is not a private directory owned by this user; refusing to run");
     }
 
     var guard_cfg = runtime_guard_config_default();

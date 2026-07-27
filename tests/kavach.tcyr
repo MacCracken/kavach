@@ -2465,6 +2465,75 @@ fn test_oci_diag_trims_trailing_newlines() {
     return 0;
 }
 
+fn test_oci_state_root_rejects_a_hostile_dir() {
+    test_group("oci_state_root_rejects_a_hostile_dir");
+    # The name is fully predictable ("kavach-runc-" + uid) and lives in a
+    # world-writable directory, so another user can create it first and own
+    # runc's state plus both scratch files. sys_mkdir returning EEXIST says
+    # nothing about what is actually there.
+    var root = _oci_state_root();
+    assert(root != 0, "a directory we own and created is accepted");
+
+    # World-writable -> refused.
+    var open_dir = "/tmp/kavach-t-openperm";
+    _oci_t_rmdir(open_dir);
+    sys_mkdir(open_dir, 511);                          # 0777
+    assert_eq(_oci_dir_is_ours(open_dir), 0, "a world-writable dir is refused");
+    sys_chmod(open_dir, 448);                          # 0700
+    assert_eq(_oci_dir_is_ours(open_dir), 1, "the same dir at 0700 is accepted");
+    _oci_t_rmdir(open_dir);
+
+    # A symlink -> refused. lstat, not stat, is what makes this work: stat would
+    # report the TARGET's type and happily accept a link to a real 0700 dir.
+    var link = "/tmp/kavach-t-linkroot";
+    sys_unlink(link);
+    _oci_t_rmdir(link);
+    var target = "/tmp/kavach-t-linktarget";
+    _oci_t_rmdir(target);
+    sys_mkdir(target, 448);
+    if (sys_symlink(target, link) == 0) {
+        assert_eq(_oci_dir_is_ours(link), 0, "a symlink to a valid dir is still refused");
+        sys_unlink(link);
+    }
+    _oci_t_rmdir(target);
+
+    # A regular file -> refused.
+    var f = "/tmp/kavach-t-notadir";
+    sys_unlink(f);
+    file_write_all(f, "x", 1);
+    assert_eq(_oci_dir_is_ours(f), 0, "a regular file is refused");
+    sys_unlink(f);
+
+    assert_eq(_oci_dir_is_ours("/tmp/kavach-t-absent-entirely"), 0, "an absent path is refused");
+    return 0;
+}
+
+fn _oci_t_rmdir(p) {
+    sys_rmdir(p);
+    return 0;
+}
+
+fn test_oci_scratch_open_is_exclusive_and_truncating() {
+    test_group("oci_scratch_open_is_exclusive_and_truncating");
+    # The child opens err_path with O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW. It used
+    # to use SPAWN_LOG_FLAGS, which are O_APPEND and follow symlinks — so a
+    # leftover file made a run's stderr the CONCATENATION of the previous run's
+    # and this one's.
+    var stub = _t_write_stub("/tmp/kavach-t-oci-excl", "#!/bin/sh\necho second >&2\nexit 0\n");
+    var idp = "kavach-t-excl";
+    var path = _oci_err_path(idp);
+    assert(path != 0, "scratch path built");
+    if (path == 0) { return 0; }
+    # Pre-seed the file as a previous run would have left it.
+    file_write_all(path, "STALE-FROM-A-PREVIOUS-RUN\n", 26);
+    var buf = alloc(4096);
+    _oci_run(stub, "/tmp/b", idp, buf, 4096);
+    var err = _oci_take_stderr(idp);
+    assert_eq(strstr(err, "STALE-FROM-A-PREVIOUS-RUN") >= 0, 0, "a leftover file never leaks into this run");
+    sys_unlink(stub);
+    return 0;
+}
+
 fn test_oci_err_path_is_uid_scoped() {
     test_group("oci_err_path_is_uid_scoped");
     var p = _oci_err_path("abc123");
@@ -2641,6 +2710,8 @@ fn main() {
     test_backend_diagnostic_results_bypass_the_gate();
     test_oci_runtime_log_is_separate_from_container_stderr();
     test_oci_diag_trims_trailing_newlines();
+    test_oci_state_root_rejects_a_hostile_dir();
+    test_oci_scratch_open_is_exclusive_and_truncating();
     test_oci_err_path_is_uid_scoped();
     return assert_summary();
 }
