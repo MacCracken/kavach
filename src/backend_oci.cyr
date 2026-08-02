@@ -58,7 +58,7 @@ fn _oci_state_root() {
 #[must_use]
 fn _oci_dir_is_ours(path) {
     var sb[144];
-    if (sys_lstat(path, &sb) != 0) { return 0; }
+    if (kv_lstat(path, &sb) != 0) { return 0; }
     var mode = load64(&sb + 24) & 65535;
     if ((mode & 61440) != 16384) { return 0; }          # S_IFDIR, and NOT S_IFLNK
     if ((mode & 63) != 0) { return 0; }                 # any group/other bit -> refuse
@@ -190,7 +190,7 @@ fn _oci_run(runtime, bundle, container_id, out_buf, out_cap) {
     var rfd = load32(&pipefd);
     var wfd = load32(&pipefd + 4);
 
-    var pid = sys_fork();
+    var pid = kv_fork();
     if (pid < 0) {
         sys_close(rfd);
         sys_close(wfd);
@@ -199,7 +199,7 @@ fn _oci_run(runtime, bundle, container_id, out_buf, out_cap) {
     }
     if (pid == 0) {
         sys_close(rfd);
-        sys_dup2(wfd, 1);
+        kv_dup2(wfd, 1);
         sys_close(wfd);
         # O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW, 0600 — NOT the SPAWN_LOG_FLAGS
         # used before, which are O_APPEND and follow symlinks:
@@ -211,10 +211,10 @@ fn _oci_run(runtime, bundle, container_id, out_buf, out_cap) {
         # chosen one; the container still runs.
         var efd = sys_open(err_path, 131265, 384);
         if (efd >= 0) {
-            sys_dup2(efd, 2);
+            kv_dup2(efd, 2);
             sys_close(efd);
         }
-        sys_execve(vec_get(args, 0), argv, envp);
+        kv_execve(vec_get(args, 0), argv, envp);
         # execve failed. 127 is the shell's "command not found" and reaches the
         # caller instead of being swallowed into a success.
         sys_exit(127);

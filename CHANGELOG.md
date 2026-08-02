@@ -7,6 +7,127 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.11.0] — 2026-08-02
+
+### Added — `kv_getgid` / `kv_lstat` / `kv_fork` / `kv_dup2` / `kv_execve` / `kv_setsid`
+
+⛔ **3.10.0 DID NOT ACTUALLY UNBLOCK ITS OWN HEADLINE CONSUMER.** That release guarded the
+Linux-only confinement primitives to fail closed on agnos and reported the aethersafha compositor
+fixed. It was not: `cyrius build --agnos` still stopped with *"refusing to emit binary with 3
+reachable undefined function(s)"* — `sys_getgid`, `sys_execve`, `sys_lstat`.
+
+⛔ **The reason is the one thing 3.10.0 got structurally wrong, and it is worth stating plainly: an
+`#ifdef` early-return does not remove the rest of the function from the build.**
+`spawn_namespaces_available` opens with `#ifdef CYRIUS_TARGET_AGNOS return 0; #endif` and then
+referenced `sys_getgid` twenty lines further down. The guard is a *runtime* branch — every statement
+after it is still compiled, and every symbol it names must still resolve at link time. So the six
+guarded functions changed what happens when the code *runs* on agnos and changed nothing about
+whether it *builds* there. Only a shim, whose two arms are selected at compile time, keeps an
+undefined name out of the object. 3.10.0 already knew this — it is exactly why `kv_unlink` /
+`kv_rmdir` / `kv_waitpid` exist — and then guarded the remaining call sites the other way.
+
+**The six new shims, and what each answers on agnos:**
+
+- **`kv_getgid()` → -1, never 0.** agnos defines `sys_getuid` and has no `sys_getgid` at all: there
+  is no group model in the kernel, so there is no honest number. ⚠ It answers **-1 = unknown**
+  because every consumer here (the `uid_map`/`gid_map` writer, the OCI `gidMappings` field) treats
+  the value as a real credential, and **0 is the id of root**. A shim that quietly reports root on a
+  platform with no groups is the kind of lie that reads as a working sandbox.
+- **`kv_lstat(path, statbuf)` → -1.** ⛔ Deliberately **not** emulated with agnos's `sys_stat`, even
+  though one exists. The single call site (`_oci_dir_is_ours`) uses lstat precisely to refuse a path
+  whose last component is a symlink — an attacker aiming the OCI state root at a directory they
+  control is the case it exists to catch — and agnos's `sys_stat` **follows** links, so the
+  substitution would convert a security check into its own bypass while the caller still read
+  `0 = verified ours`. ⚠ It would also hand back the wrong struct: agnos's stat buffer carries no
+  `st_uid`, and the caller reads the owner from `+24 >> 32`.
+- **`kv_fork` / `kv_dup2` / `kv_execve` / `kv_setsid` → -1.** agnos has no fork/exec model: all four
+  syscalls are absent, and process creation is the **fused** `sys_spawn_path(path, len)` #43 — load
+  an ELF and run it, with no separately-addressable child in between at which stdio could be
+  redirected or an image replaced. ⚠ `kv_dup2` is **not** emulated with agnos's `sys_dup`: dup picks
+  the lowest free descriptor while dup2 forces a *specific* one, and every call here targets fd
+  0/1/2, so a `sys_dup`-based shim would report success while the child's output went somewhere the
+  parent never reads.
+
+⭐ **The refusal is the error path that was already written, not a new one.** Every fork site in this
+repo reads `var pid = kv_fork(); if (pid < 0) { ...cleanup...; return -1; }`, so -1 walks straight
+into the handling the Linux path uses when `fork` itself fails. No caller needs a target check, no
+sandbox reports success it did not deliver, and the `if (pid == 0)` child block becomes unreachable
+by construction rather than by guard.
+
+⚠ **`fork` / `dup2` / `setsid` were shimmed even though only `execve` was tripping the build.** The
+compiler errors on undefined symbols it can prove reachable and merely *warns* on the rest; those
+three sit in the same child blocks, are equally undefined, and would have errored the moment
+reachability analysis, an inliner, or one new caller shifted. Leaving three of a family of four
+un-shimmed leaves a build break armed for whoever touches this next — which is precisely how the
+2026-08-01 compositor stop happened.
+
+### Verified
+
+Host **and `--agnos`** builds green. Test suites **540 + 12 pass, 0 fail**. Downstream:
+**aethersafha `--agnos` now builds for the first time since 2026-07-25** (15,499,624 B, static
+x86-64 ELF64 — the shape `agnos/scripts/burn/stage-tools.sh` requires), with its own 20 suites green
+on the host.
+
+## [3.10.0] - 2026-08-02
+
+### Added — `kv_unlink` / `kv_rmdir` / `kv_waitpid`: portable shims for the syscalls whose SHAPE differs by target
+
+⛔ **kavach did not build `--agnos` at all, and that broke every consumer, not just the backends.**
+`cyrius build` auto-prepends every `[deps.*]` module into the compilation unit, so a project
+declaring `[deps.kavach]` and building `--agnos` failed even if it only ever touched `sandbox_*`.
+That is how it surfaced: it broke the aethersafha compositor, which never sandboxes anything.
+
+The syscall wrappers genuinely differ by target: Linux `sys_unlink(path)` / `sys_rmdir(path)` take
+one argument, agnos takes `(path, pathlen)`. 25 call sites across 8 files used the Linux form with
+no guard. Cyrius used to **warn** on an arity mismatch and compile anyway; **6.5.1 made it a hard
+error**, which turned latent wrongness into a build stop — the correct direction.
+
+⚠ **`kv_waitpid` is a MODEL adapter, not an arity adapter, and conflating the two would be silently
+wrong.** Linux writes a packed wait-STATUS word (low 7 bits signal, bits 8-15 exit code). agnos
+`sys_waitpid(pid)` takes one argument and returns the **exit code directly** — cyrius's own
+`syscalls_x86_64_agnos.cyr` says so where it defines the agnos `W*` decoders. Every caller in this
+repo decodes `(status >> 8) & 255`, so handing them a bare code would put it in the **signal**
+field: a child exiting 11 would read as *killed by SIGSEGV*, and a clean exit 0 as *killed by signal
+0*. The agnos arm synthesises the packed word.
+
+### Changed — the Linux-only confinement primitives now FAIL CLOSED on agnos instead of failing to compile
+
+Guarded: `_spawn_enter_rootfs`, `confine_child`, `spawn_namespaces_available`,
+`spawn_seccomp_available`, `confine_capture`, `_oci_run`.
+
+⛔ **Not one of them returns success on agnos, and that is the whole point.** agnos has no mount
+namespaces, no `chroot`, no `prctl`, no cgroups, no landlock, no seccomp — `SYS_CHDIR` and
+`SYS_PRCTL` are not even in its syscall enum. A guard that returned 0 would report *"the payload is
+confined"* on a platform where not one primitive ran: a sandbox that is silently not a sandbox,
+which is the worst failure mode this file could have. agnos sandboxing goes through
+`backend_sy_agnos`, not here.
+
+### Known — `--agnos` is CLOSER but still does not build, and the remainder needs a decision, not another sweep pass
+
+Three reachable undefined symbols remain: `sys_fork` (`src/persistent.cyr:69`, `src/spawn.cyr:139`),
+`sys_dup2` (`_spawn_redirect_stdio` and the fork children), and `json_v_parse_str` — which is **not
+kavach's**, it is a bayan symbol.
+
+⭐ **The regression has a date, and it reframes the work.** `src/confine.cyr` is new in **3.9.1
+(2026-07-25)**, and aethersafha's last working `--agnos` binary is dated 2026-07-25 11:24. agnos did
+not newly LOSE anything — `sys_fork` was always absent there. What 3.9.1 changed is that the fork
+path became **REACHABLE** from the compilation unit, and cyrius only refuses to emit on *reachable*
+undefined functions. So the remaining fix is guarding entry points, not porting a process model.
+
+⛔ **Do not reach for `--allow-undef`.** It emits a binary containing undefined functions, which is
+exactly the class of silent wrongness this ecosystem pays for in hardware burns.
+
+Full analysis, including the consumer-side pin failure that let this land unnoticed:
+`docs/development/issues/2026-08-01-linux-only-backends-break-every-agnos-consumer.md`.
+
+### Changed — cyrius pin 6.4.69 -> 6.5.5; sigil 3.12.2, ai-hwaccel 2.3.16
+
+### Verification
+
+Host build green; **554 tests pass** (540 + 12 + 2), unchanged from before these edits.
+⚠ The `--agnos` build is still red by design of what remains — see Known above.
+
+
 ## [3.9.3] — 2026-07-26
 
 ### Fixed — the OCI scratch directory and files were open to a local symlink attack

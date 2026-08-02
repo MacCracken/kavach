@@ -100,7 +100,7 @@ fn sandbox_spawn(sandbox, command, log_path) {
     # Read the ids in the PARENT: inside the new user namespace getuid() would
     # report the mapped id, not the one the map has to be written against.
     var spawn_uid = sys_getuid();
-    var spawn_gid = sys_getgid();
+    var spawn_gid = kv_getgid();
 
     # Build the seccomp filter in the PARENT: alloc in the child after fork is
     # fine here, but a filter that fails to build should refuse the spawn rather
@@ -136,7 +136,7 @@ fn sandbox_spawn(sandbox, command, log_path) {
     var envp = alloc(8);
     store64(envp, 0);
 
-    var pid = sys_fork();
+    var pid = kv_fork();
     if (pid < 0) {
         cgroup_teardown(cgroup_path);
         kavach_err_print(KAVACH_ERR_EXEC_FAILED, "fork failed");
@@ -152,10 +152,10 @@ fn sandbox_spawn(sandbox, command, log_path) {
         # rather than staring at one opaque number. 12x is chosen to sit below
         # 126/127, which the shell already reserves for "not executable" and
         # "not found".
-        sys_setsid();
+        kv_setsid();
         if (_spawn_redirect_stdio(log_path) != 0) { sys_exit(SPAWN_EXIT_STDIO); }
         confine_child(policy, rootfs, cgroup_path, spawn_uid, spawn_gid, seccomp_info);
-        sys_execve(vec_get(args, 0), argv, envp);
+        kv_execve(vec_get(args, 0), argv, envp);
         sys_exit(127);
     }
 

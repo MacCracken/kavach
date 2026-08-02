@@ -66,7 +66,7 @@ fn persistent_spawn(command) {
     var out_rfd = load32(&outpipe);
     var out_wfd = load32(&outpipe + 4);
 
-    var pid = sys_fork();
+    var pid = kv_fork();
     if (pid < 0) {
         sys_close(in_rfd); sys_close(in_wfd);
         sys_close(out_rfd); sys_close(out_wfd);
@@ -76,13 +76,13 @@ fn persistent_spawn(command) {
         # child: wire the pipe ends to stdin/stdout, /dev/null to stderr
         sys_close(in_wfd);
         sys_close(out_rfd);
-        sys_dup2(in_rfd, 0);
+        kv_dup2(in_rfd, 0);
         sys_close(in_rfd);
-        sys_dup2(out_wfd, 1);
+        kv_dup2(out_wfd, 1);
         sys_close(out_wfd);
         var devnull = sys_open("/dev/null", 1, 0);   # 1 = O_WRONLY (mirrors exec_capture)
-        if (devnull >= 0) { sys_dup2(devnull, 2); sys_close(devnull); }
-        sys_execve(vec_get(args, 0), argv, envp);
+        if (devnull >= 0) { kv_dup2(devnull, 2); sys_close(devnull); }
+        kv_execve(vec_get(args, 0), argv, envp);
         sys_exit(127);
     }
     # parent: keep the write-stdin + read-stdout ends

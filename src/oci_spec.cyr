@@ -246,7 +246,7 @@ fn oci_generate_spec(sandbox, command) {
         var m2 = ",\"size\":1}],\"gidMappings\":[{\"containerID\":0,\"hostID\":";
         memcpy(buf + pos, m2, strlen(m2)); pos = pos + strlen(m2);
         var gb[24];
-        var glen = fmt_int_buf(sys_getgid(), &gb);
+        var glen = fmt_int_buf(kv_getgid(), &gb);
         memcpy(buf + pos, &gb, glen); pos = pos + glen;
         var m3 = ",\"size\":1}]";
         memcpy(buf + pos, m3, strlen(m3)); pos = pos + strlen(m3);
