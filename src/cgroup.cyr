@@ -179,7 +179,7 @@ fn cgroup_setup(policy) {
 # empty.
 fn cgroup_teardown(cgroup_path) {
     if (cgroup_path == 0) { return 0; }
-    sys_rmdir(cgroup_path);
+    kv_rmdir(cgroup_path);
     return 0;
 }
 

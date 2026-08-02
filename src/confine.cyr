@@ -106,6 +106,17 @@ fn _spawn_write_idmaps(uid, gid) {
 # increment"), because it is a behaviour change rather than a silent upgrade.
 fn _spawn_enter_rootfs(rootfs) {
     if (rootfs == 0) { return 0; }
+    # ⛔ LINUX ONLY, AND IT MUST FAIL CLOSED ELSEWHERE. This is mount-namespace + chroot
+    # confinement: agnos has no mount namespaces, no `chroot`, and no `chdir` syscall — `sys_mount`
+    # is a 0-argument stub there and `SYS_CHDIR` is not in the enum at all, so this function did not
+    # even COMPILE for `--agnos`, taking every consumer of `[deps.kavach]` down with it.
+    # ⚠ The agnos arm returns -1, NOT 0. Returning 0 would report "the payload is confined to
+    # `rootfs`" on a platform where nothing of the sort happened — a sandbox that silently is not
+    # one. A caller that cannot confine must be told it cannot confine.
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0 - 1;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
     # Detach propagation, or our mounts (and the chroot) leak to the host.
     if (sys_mount(0, "/", 0, MS_REC_PRIVATE, 0) < 0) { return 0 - 1; }
     if (syscall(SYS_CHROOT_NR, rootfs) < 0) { return 0 - 1; }
@@ -113,6 +124,7 @@ fn _spawn_enter_rootfs(rootfs) {
     # escape route.
     if (syscall(SYS_CHDIR, "/") < 0) { return 0 - 1; }
     return 0;
+    #endif
 }
 
 # Close every descriptor from `from` up to SPAWN_MAX_FD. Errors are expected
@@ -170,6 +182,18 @@ fn _spawn_redirect_stdio(log_path) {
 # seccomp is last because it denies mount/chroot/unshare; rootfs entry precedes
 # landlock because landlock path rules resolve against the current root.
 fn confine_child(policy, rootfs, cgroup_path, uid, gid, seccomp_info) {
+    # ⛔ THE WHOLE SEQUENCE IS LINUX-SPECIFIC and none of it exists on agnos: no cgroups, no
+    # `prctl`, no namespaces, no landlock, no seccomp. `SYS_PRCTL` is not even in the agnos syscall
+    # enum, so this function failed to COMPILE for `--agnos` and took every consumer of
+    # `[deps.kavach]` with it — including consumers that never sandbox anything.
+    # ⚠ FAIL CLOSED, and loudly. Returning 0 here would tell a caller "the child is confined" on a
+    # platform where not one primitive ran — a sandbox that is silently not a sandbox, which is the
+    # worst failure mode this file has. agnos sandboxing goes through backend_sy_agnos, not here.
+    #ifdef CYRIUS_TARGET_AGNOS
+    sys_exit(SPAWN_EXIT_NNP);
+    return 0 - 1;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
     _spawn_close_inherited(3);
     if (_spawn_cgroup_join(cgroup_path) != 0) { sys_exit(SPAWN_EXIT_CGROUP); }
     if (syscall(SYS_PRCTL, 38, 1, 0, 0, 0) < 0) { sys_exit(SPAWN_EXIT_NNP); }
@@ -201,6 +225,7 @@ fn confine_child(policy, rootfs, cgroup_path, uid, gid, seccomp_info) {
         }
     }
     return 0;
+    #endif
 }
 
 # Human-readable name for a confinement exit code, or 0 when `code` is not one.
@@ -236,6 +261,12 @@ fn spawn_exit_name(code) {
 # rather than decoding a child exit code afterwards.
 #[must_use]
 fn spawn_namespaces_available(flags) {
+    # ⛔ LINUX ONLY. This PROBES namespace availability by forking a child; agnos has no fork,
+    # no namespaces, and no uid_map. ⚠ Answering 0 ("unavailable") is the honest and SAFE answer —
+    # a caller that believes namespaces exist would build a policy it cannot enforce.
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0;
+    #endif
     if (flags == 0) { return 1; }
     # Read the ids BEFORE the fork. Inside a fresh user namespace getuid()
     # reports the UNMAPPED id (nobody), and a uid_map written against that is
@@ -258,7 +289,7 @@ fn spawn_namespaces_available(flags) {
     }
     var st[4];
     store32(&st, 0);
-    sys_waitpid(pid, &st, 0);
+    kv_waitpid(pid, &st, 0);
     var status = load32(&st);
     if ((status & 127) != 0) { return 0; }
     if (((status >> 8) & 255) != 0) { return 0; }
@@ -273,6 +304,11 @@ fn spawn_namespaces_available(flags) {
 # irreversible for the calling process.
 #[must_use]
 fn spawn_seccomp_available() {
+    # ⛔ LINUX ONLY — forks a child to test-load a seccomp filter. agnos has neither.
+    # ⚠ 0 = "no seccomp here", which is true, and which keeps callers from promising a filter.
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0;
+    #endif
     var res = security_create_exec_seccomp_filter();
     if (is_ok(res) == 0) { return 0; }
     var info = result_unwrap(res);
@@ -287,7 +323,7 @@ fn spawn_seccomp_available() {
     }
     var st[4];
     store32(&st, 0);
-    sys_waitpid(pid, &st, 0);
+    kv_waitpid(pid, &st, 0);
     var status = load32(&st);
     if ((status & 127) != 0) { return 0; }
     if (((status >> 8) & 255) != 0) { return 0; }
@@ -303,6 +339,13 @@ fn spawn_seccomp_available() {
 #
 # Returns bytes captured, or -1.
 fn confine_capture(args, policy, rootfs, cgroup_path, seccomp_info, buf, buflen) {
+    # ⛔ LINUX ONLY — the fork/confine/execve/capture path. agnos has no fork by design and its
+    # sandboxing goes through backend_sy_agnos, not this file.
+    # ⚠ -1, never a fabricated success: a caller must not receive an empty capture buffer and
+    # conclude the payload ran and printed nothing.
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0 - 1;
+    #endif
     var argc = vec_len(args);
     if (argc < 1) { return 0 - 1; }
     var argv = alloc((argc + 1) * 8);
@@ -351,7 +394,7 @@ fn confine_capture(args, policy, rootfs, cgroup_path, seccomp_info, buf, buflen)
     sys_close(rfd);
     var stbuf[4];
     store32(&stbuf, 0);
-    sys_waitpid(pid, &stbuf, 0);
+    kv_waitpid(pid, &stbuf, 0);
     var status = load32(&stbuf);
     var sig = status & 127;
     var code = 0;

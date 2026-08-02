@@ -1,5 +1,61 @@
 # kavach — shared string helpers + security hardening primitives
 
+# ---- portable filesystem-removal shims -----------------------------------
+# ⛔ THE AGNOS AND LINUX SYSCALL WRAPPERS HAVE DIFFERENT ARITIES, and kavach called the Linux form
+# unguarded in eight files. On Linux `sys_unlink(path)` / `sys_rmdir(path)` take one argument; on
+# agnos they take `(path, pathlen)`. Cyrius used to WARN on an arity mismatch and compile anyway —
+# it is now a hard ERROR, which is correct, and which turned this latent wrongness into a build stop.
+#
+# ⚠ THE BLAST RADIUS WAS THE WHOLE CONSUMER, NOT THE BACKEND. `cyrius build` auto-prepends every
+# `[deps.*]` module into the compilation unit, so any project declaring `[deps.kavach]` and building
+# `--agnos` failed to compile even if it never touched the OCI or Firecracker backends. That is how
+# it surfaced: it broke the aethersafha compositor, which uses only `sandbox_*`.
+#
+# These shims are the ONE place the difference lives. Call sites use kv_unlink / kv_rmdir and stay
+# target-agnostic. See docs/development/issues/2026-08-01-linux-only-backends-break-every-agnos-consumer.md
+fn kv_unlink(path): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return sys_unlink(path, strlen(path));
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    return sys_unlink(path);
+    #endif
+}
+
+fn kv_rmdir(path): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return sys_rmdir(path, strlen(path));
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    return sys_rmdir(path);
+    #endif
+}
+
+# kv_waitpid(pid, status_out, opts) — portable reap. Returns the pid (>0) or -1.
+#
+# ⛔ THIS IS NOT AN ARITY DIFFERENCE, IT IS A MODEL DIFFERENCE, and treating it as the former would
+# be silently wrong. Linux `sys_waitpid(pid, status, opts)` writes a packed wait-STATUS word whose
+# low 7 bits are the terminating signal and whose bits 8-15 are the exit code. agnos
+# `sys_waitpid(pid)` takes one argument and returns the child's **exit code DIRECTLY** — cyrius's own
+# `syscalls_x86_64_agnos.cyr` says so where it defines the agnos `W*` decoders.
+#
+# ⚠ Every caller in this repo decodes `(status >> 8) & 255`. Handing them a bare exit code would put
+# the code in the SIGNAL field: a child exiting 11 would read as "killed by SIGSEGV", and a clean
+# exit 0 would read as "killed by signal 0". So the agnos arm SYNTHESISES the Linux-shaped word.
+fn kv_waitpid(pid, status_out, opts): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    var code = sys_waitpid(pid);
+    if (code < 0) { return 0 - 1; }
+    # agnos children always exit normally (there is no signal-kill model here), so the signal
+    # field is 0 and the exit code goes where every caller already looks for it.
+    if (status_out != 0) { store32(status_out, (code & 255) << 8); }
+    return pid;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    return sys_waitpid(pid, status_out, opts);
+    #endif
+}
+
 # ---- constant-time ops ---------------------------------------------------
 # Delegates to the stdlib ct_eq_bytes_lens, which XORs byte-by-byte into an
 # accumulator without early exit. Prevents timing side channels on

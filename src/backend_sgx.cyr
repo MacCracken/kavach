@@ -130,8 +130,8 @@ fn sgx_exec(sandbox, command) {
 
     # Cleanup: unlink manifest, rmdir workdir.
     var manifest = _sgx_manifest_file(workdir);
-    sys_unlink(manifest);
-    sys_rmdir(workdir);
+    kv_unlink(manifest);
+    kv_rmdir(workdir);
 
     return backend_capture_finish(out_buf, n, out_cap, "gramine-sgx run failed", start_ns, end_ns);
 }

@@ -112,8 +112,8 @@ fn firecracker_exec(sandbox, command) {
     var end_ns = mono_now_ns();
 
     # Cleanup workdir
-    sys_unlink(cfg_path);
-    sys_rmdir(workdir);
+    kv_unlink(cfg_path);
+    kv_rmdir(workdir);
 
     return backend_capture_finish(out_buf, n, out_cap, "firecracker run failed", start_ns, end_ns);
 }

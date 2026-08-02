@@ -283,7 +283,7 @@ fn oci_prepare_bundle(container_id, sandbox, command) {
     memcpy(rootfs, bundle, strlen(bundle));
     memcpy(rootfs + strlen(bundle), "/rootfs", 8);
     if (cfg_rootfs == 0) {
-        if (sys_mkdir(rootfs, 448) < 0) { sys_rmdir(bundle); return 0; }
+        if (sys_mkdir(rootfs, 448) < 0) { kv_rmdir(bundle); return 0; }
     }
 
     var cfg_path = alloc(strlen(bundle) + 16);
@@ -292,14 +292,14 @@ fn oci_prepare_bundle(container_id, sandbox, command) {
 
     var spec = oci_generate_spec(sandbox, command);
     if (spec == 0) {
-        sys_rmdir(rootfs);
-        sys_rmdir(bundle);
+        kv_rmdir(rootfs);
+        kv_rmdir(bundle);
         return 0;
     }
     var r = file_write_secure(cfg_path, spec, strlen(spec));
     if (r < 0) {
-        sys_rmdir(rootfs);
-        sys_rmdir(bundle);
+        kv_rmdir(rootfs);
+        kv_rmdir(bundle);
         return 0;
     }
     return bundle;
@@ -310,13 +310,13 @@ fn oci_cleanup_bundle(bundle) {
     var cfg_path = alloc(strlen(bundle) + 16);
     memcpy(cfg_path, bundle, strlen(bundle));
     memcpy(cfg_path + strlen(bundle), "/config.json", 13);
-    sys_unlink(cfg_path);
+    kv_unlink(cfg_path);
 
     var rootfs = alloc(strlen(bundle) + 8);
     memcpy(rootfs, bundle, strlen(bundle));
     memcpy(rootfs + strlen(bundle), "/rootfs", 8);
-    sys_rmdir(rootfs);
+    kv_rmdir(rootfs);
 
-    sys_rmdir(bundle);
+    kv_rmdir(bundle);
     return 0;
 }

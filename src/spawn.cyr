@@ -214,7 +214,7 @@ fn spawned_try_wait(sp) {
     var stbuf[4];
     store32(&stbuf, 0);
     # WNOHANG = 1.
-    var r = sys_waitpid(SpawnedProcess_pid(sp), &stbuf, 1);
+    var r = kv_waitpid(SpawnedProcess_pid(sp), &stbuf, 1);
     if (r < 0) { return 0 - 1; }
     if (r == 0) { return 0; }
     _spawned_reap(sp, load32(&stbuf));
@@ -227,7 +227,7 @@ fn spawned_wait(sp) {
     if (SpawnedProcess_alive(sp) == 0) { return SpawnedProcess_exit_code(sp); }
     var stbuf[4];
     store32(&stbuf, 0);
-    var r = sys_waitpid(SpawnedProcess_pid(sp), &stbuf, 0);
+    var r = kv_waitpid(SpawnedProcess_pid(sp), &stbuf, 0);
     if (r < 0) { return 0 - 1; }
     return _spawned_reap(sp, load32(&stbuf));
 }

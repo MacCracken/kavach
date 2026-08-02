@@ -129,14 +129,14 @@ fn quarantine_store(storage, artifact, artifact_len, scan_result, sandbox_id) {
     }
 
     var meta_path = _qpath(base, id, "meta");
-    if (meta_path == 0) { sys_unlink(art_path); return 0 - 1; }
+    if (meta_path == 0) { kv_unlink(art_path); return 0 - 1; }
     var meta = _meta_jsonl(id, sandbox_id,
     ScanResult_verdict(scan_result),
     QuarantineStatus.QUARANTINED);
     var mw = file_write_secure_r(meta_path, meta, strlen(meta));
     if (is_err_result(mw) == 1) {
         kavach_err_print(KAVACH_ERR_IO_ERROR, io_error_name(err_code_of(mw)));
-        sys_unlink(art_path);
+        kv_unlink(art_path);
         return 0 - 1;
     }
     return id;

@@ -134,6 +134,13 @@ fn _oci_err_path(container_id) { return _oci_scratch_path("/err-", container_id)
 fn _oci_log_path(container_id) { return _oci_scratch_path("/log-", container_id); }
 
 fn _oci_run(runtime, bundle, container_id, out_buf, out_cap) {
+    # ⛔ LINUX ONLY — forks a child that execs an OCI runtime (runc/crun). Neither the fork nor
+    # the runtime exists on agnos.
+    # ⚠ -1 rather than an empty-but-successful capture, so "the container produced no output"
+    # and "there is no container runtime here" stay distinguishable.
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0 - 1;
+    #endif
     var state_root = _oci_state_root();
     if (state_root == 0) { _oci_last_exit = 1; return 0 - 1; }
     var args = vec_new();
@@ -175,9 +182,9 @@ fn _oci_run(runtime, bundle, container_id, out_buf, out_cap) {
     # symlink an attacker planted (unlink removes the LINK, not its target), and
     # the state-root validation above is what makes doing so safe: nobody else
     # can be racing us inside a 0700 directory we own.
-    sys_unlink(err_path);
+    kv_unlink(err_path);
     var log_path_pre = _oci_log_path(container_id);
-    if (log_path_pre != 0) { sys_unlink(log_path_pre); }
+    if (log_path_pre != 0) { kv_unlink(log_path_pre); }
     var pipefd[16];
     if (sys_pipe(&pipefd) < 0) { _oci_last_exit = 1; return 0 - 1; }
     var rfd = load32(&pipefd);
@@ -230,7 +237,7 @@ fn _oci_run(runtime, bundle, container_id, out_buf, out_cap) {
 
     var stbuf[4];
     store32(&stbuf, 0);
-    sys_waitpid(pid, &stbuf, 0);
+    kv_waitpid(pid, &stbuf, 0);
     var status = load32(&stbuf);
     var sig = status & 127;
     if (sig == 0) { _oci_last_exit = (status >> 8) & 255; }
@@ -261,7 +268,7 @@ fn _oci_take_file(path) {
     }
     sys_close(fd);
     store8(buf + total, 0);
-    sys_unlink(path);
+    kv_unlink(path);
     return buf;
 }
 

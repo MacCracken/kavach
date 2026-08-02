@@ -124,7 +124,7 @@ fn persistent_terminate(g): i64 {
         sys_close(PersistentGuest_stdin_fd(g));
         sys_kill(PersistentGuest_pid(g), 9);   # 9 = SIGKILL (guaranteed reap)
         var stbuf[1];
-        sys_waitpid(PersistentGuest_pid(g), &stbuf, 0);
+        kv_waitpid(PersistentGuest_pid(g), &stbuf, 0);
         sys_close(PersistentGuest_stdout_fd(g));
         PersistentGuest_set_alive(g, 0);
     }
