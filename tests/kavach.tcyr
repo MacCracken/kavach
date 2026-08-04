@@ -2245,7 +2245,14 @@ fn test_spawn_namespaces_environment_aware() {
             # fail-closed; what must NOT happen is the payload running.
             assert(code0 == 123 || code0 == 118,
             "child exits with a confinement code rather than running unisolated");
-            assert(streq(spawn_exit_name(code0), "") == 0, "and the code has a readable name");
+            # `spawn_exit_name` returns 0 for a non-confinement code, so the
+            # null check comes FIRST — handing 0 to streq segfaults, which
+            # turns the assertion above into an exit-139 with no diagnostic.
+            assert(spawn_exit_name(code0) != 0, "the code is a confinement code");
+            if (spawn_exit_name(code0) != 0) {
+                assert(streq(spawn_exit_name(code0), "") == 0,
+                "and the code has a readable name");
+            }
         }
         return 0;
     }

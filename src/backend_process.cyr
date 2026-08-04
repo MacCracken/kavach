@@ -89,7 +89,12 @@ fn process_exec(sandbox, command) {
                 sec = result_unwrap(sres);
             }
         }
-        n = confine_capture(args, pol, rootfs, cgroup_path, sec, buf, PROCESS_MAX_OUTPUT);
+        # Namespaces only where they were already attempted: with a rootfs.
+        # The rootfs-less arm is the one 3.11.3 added, and it must not make
+        # unprivileged namespace creation a precondition for seccomp.
+        var want_ns = 0;
+        if (rootfs != 0) { want_ns = 1; }
+        n = confine_capture(args, pol, rootfs, cgroup_path, sec, buf, PROCESS_MAX_OUTPUT, want_ns);
         cgroup_teardown(cgroup_path);
         var end_rf = mono_now_ns();
         var rr = backend_capture_finish(buf, n, PROCESS_MAX_OUTPUT, "exec failed", start_ns, end_rf);

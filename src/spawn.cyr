@@ -154,7 +154,10 @@ fn sandbox_spawn(sandbox, command, log_path) {
         # "not found".
         kv_setsid();
         if (_spawn_redirect_stdio(log_path) != 0) { sys_exit(SPAWN_EXIT_STDIO); }
-        confine_child(policy, rootfs, cgroup_path, spawn_uid, spawn_gid, seccomp_info);
+        # 1: sandbox_spawn's namespace contract is unchanged by 3.11.3 — it
+        # fails closed when the host denies them, and a test asserts exactly
+        # that.
+        confine_child(policy, rootfs, cgroup_path, spawn_uid, spawn_gid, seccomp_info, 1);
         kv_execve(vec_get(args, 0), argv, envp);
         sys_exit(127);
     }

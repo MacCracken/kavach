@@ -8035,7 +8035,23 @@ fn _spawn_redirect_stdio(log_path) {
 #   -> seccomp
 # seccomp is last because it denies mount/chroot/unshare; rootfs entry precedes
 # landlock because landlock path rules resolve against the current root.
-fn confine_child(policy, rootfs, cgroup_path, uid, gid, seccomp_info) {
+# `want_ns` (3.11.3) — whether to create namespaces as the policy requests.
+#
+# **1 for every caller that predates 3.11.3, and their behaviour is unchanged.**
+# `sandbox_spawn` in particular has a fail-closed namespace contract with a test
+# to match: a policy asking for network isolation on a host that denies
+# unprivileged user namespaces must exit 123/118 rather than run the payload
+# less isolated than promised.
+#
+# 0 for exactly one caller: the rootfs-less capture that 3.11.3 added so
+# `seccomp_enabled` would stop being ignored. That path previously applied
+# **nothing at all**, so seccomp + landlock is a strict gain — but making
+# unprivileged namespace creation a *precondition* for it would turn payloads
+# that used to run into payloads that do not run, on any host restricting user
+# namespaces (Ubuntu 24.04 does). It claims no network isolation it did not get;
+# a caller wanting that guarantee uses a rootfs-bearing sandbox or
+# `sandbox_spawn`, both of which still fail closed.
+fn confine_child(policy, rootfs, cgroup_path, uid, gid, seccomp_info, want_ns) {
     # ⛔ THE WHOLE SEQUENCE IS LINUX-SPECIFIC and none of it exists on agnos: no cgroups, no
     # `prctl`, no namespaces, no landlock, no seccomp. `SYS_PRCTL` is not even in the agnos syscall
     # enum, so this function failed to COMPILE for `--agnos` and took every consumer of
@@ -8052,26 +8068,10 @@ fn confine_child(policy, rootfs, cgroup_path, uid, gid, seccomp_info) {
     if (_spawn_cgroup_join(cgroup_path) != 0) { sys_exit(SPAWN_EXIT_CGROUP); }
     if (syscall(SYS_PRCTL, 38, 1, 0, 0, 0) < 0) { sys_exit(SPAWN_EXIT_NNP); }
 
-    # **Namespaces are applied on the rootfs path, and only there** (3.11.3).
-    #
-    # `_spawn_ns_flags` answers what a policy *wants*, and that answer is
-    # unchanged. What changed is who reaches this code: until 3.11.3 only a
-    # rootfs-bearing sandbox did, and now a policy asking for seccomp or
-    # landlock takes the same seam without one.
-    #
-    # Unprivileged namespace creation must not become a precondition for
-    # process-level confinement. A new network namespace requires a new USER
-    # namespace when not root, and Ubuntu 24.04 restricts unprivileged user
-    # namespaces outright — so requesting one there fails the spawn with
-    # `SPAWN_EXIT_NS`, turning a payload that used to run unconfined into one
-    # that does not run at all. That is a regression for every existing
-    # consumer, in exchange for isolation the platform was never going to
-    # grant.
-    #
-    # The rootfs-less path therefore applies what needs no privilege — seccomp
-    # and landlock — and does **not** claim network isolation it did not get.
+    # `want_ns` is 0 only for the capture path added in 3.11.3 — see the note
+    # on `confine_child`'s signature.
     var nsf = 0;
-    if (rootfs != 0) { nsf = _spawn_ns_flags(policy, rootfs); }
+    if (want_ns != 0) { nsf = _spawn_ns_flags(policy, rootfs); }
     if (nsf != 0) {
         if (is_ok(security_create_namespace(nsf)) == 0) { sys_exit(SPAWN_EXIT_NS); }
         if ((nsf & NS_USER) != 0) {
@@ -8134,6 +8134,11 @@ fn spawn_exit_name(code) {
     if (code == SPAWN_EXIT_IDMAP) {
         return "cannot write uid_map/gid_map (already inside a restricted user namespace?)";
     }
+    # 0 is the contract, not an oversight: "this is not a confinement code",
+    # which `test_spawn_exit_name` asserts for a normal exit and for 127.
+    # Callers must not hand it straight to a string function — see the guard in
+    # `test_spawn_namespaces_environment_aware`, where an unexpected code would
+    # otherwise turn a failed assertion into a SIGSEGV.
     return 0;
 }
 
@@ -8224,7 +8229,7 @@ fn spawn_seccomp_available() {
 # own fork here rather than a flag passed down.
 #
 # Returns bytes captured, or -1.
-fn confine_capture(args, policy, rootfs, cgroup_path, seccomp_info, buf, buflen) {
+fn confine_capture(args, policy, rootfs, cgroup_path, seccomp_info, buf, buflen, want_ns) {
     # ⛔ LINUX ONLY — the fork/confine/execve/capture path. agnos has no fork by design and its
     # sandboxing goes through backend_sy_agnos, not this file.
     # ⚠ -1, never a fabricated success: a caller must not receive an empty capture buffer and
@@ -8260,7 +8265,7 @@ fn confine_capture(args, policy, rootfs, cgroup_path, seccomp_info, buf, buflen)
         kv_dup2(wfd, 1);
         kv_dup2(wfd, 2);
         sys_close(wfd);
-        confine_child(policy, rootfs, cgroup_path, uid, gid, seccomp_info);
+        confine_child(policy, rootfs, cgroup_path, uid, gid, seccomp_info, want_ns);
         kv_execve(vec_get(args, 0), argv, envp);
         # execve failed — 127 is the shell's "command not found", and it is
         # visible to the caller instead of being swallowed into a success.
@@ -8491,7 +8496,12 @@ fn process_exec(sandbox, command) {
                 sec = result_unwrap(sres);
             }
         }
-        n = confine_capture(args, pol, rootfs, cgroup_path, sec, buf, PROCESS_MAX_OUTPUT);
+        # Namespaces only where they were already attempted: with a rootfs.
+        # The rootfs-less arm is the one 3.11.3 added, and it must not make
+        # unprivileged namespace creation a precondition for seccomp.
+        var want_ns = 0;
+        if (rootfs != 0) { want_ns = 1; }
+        n = confine_capture(args, pol, rootfs, cgroup_path, sec, buf, PROCESS_MAX_OUTPUT, want_ns);
         cgroup_teardown(cgroup_path);
         var end_rf = mono_now_ns();
         var rr = backend_capture_finish(buf, n, PROCESS_MAX_OUTPUT, "exec failed", start_ns, end_rf);
@@ -8871,7 +8881,10 @@ fn sandbox_spawn(sandbox, command, log_path) {
         # "not found".
         kv_setsid();
         if (_spawn_redirect_stdio(log_path) != 0) { sys_exit(SPAWN_EXIT_STDIO); }
-        confine_child(policy, rootfs, cgroup_path, spawn_uid, spawn_gid, seccomp_info);
+        # 1: sandbox_spawn's namespace contract is unchanged by 3.11.3 — it
+        # fails closed when the host denies them, and a test asserts exactly
+        # that.
+        confine_child(policy, rootfs, cgroup_path, spawn_uid, spawn_gid, seccomp_info, 1);
         kv_execve(vec_get(args, 0), argv, envp);
         sys_exit(127);
     }
