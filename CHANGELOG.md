@@ -53,6 +53,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Namespaces are applied on the rootfs path, and only there.** Routing
+  confinement on the policy meant `confine_child` was suddenly reached without
+  a rootfs — and `config_new` defaults to `policy_basic()`, whose
+  `network_enabled = 0` makes `_spawn_ns_flags` request a network namespace,
+  which unprivileged requires a **user** namespace to obtain. Ubuntu 24.04
+  restricts unprivileged user namespaces, so on a stock CI runner the child
+  died at `SPAWN_EXIT_NS` and a payload that previously ran unconfined stopped
+  running at all. Caught by CI, not locally, because the developer host permits
+  them.
+
+  `_spawn_ns_flags` is unchanged — it answers what a policy *wants*, and its
+  contract test still holds. What changed is what `confine_child` *applies*: the
+  rootfs-less path takes seccomp and landlock, neither of which needs a
+  privilege, and does not claim network isolation the platform was never going
+  to grant. Namespaces stay with rootfs-bearing sandboxes, which is where they
+  have always been.
+
 - `security_apply_landlock` walked `count` entries of `rules` without bounding
   by the list, so a deny-all request (a non-zero count over an empty list) would
   have indexed past the end. The walk is now bounded by both; `count == 0` still
