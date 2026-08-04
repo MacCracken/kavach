@@ -191,8 +191,18 @@ fn security_apply_landlock(rules, count): i64 {
     }
     defer { syscall(SYS_CLOSE, ruleset_fd); }
 
+    # 3.11.3: bound the walk by the list as well as the count. A caller asking
+    # for a ruleset with **no** path-beneath rules — total filesystem denial,
+    # which `policy_landlock_deny_all` expresses as a non-zero count over an
+    # empty list — must create and enforce the ruleset without indexing past
+    # the end of it. `count == 0` above still means "no landlock at all", which
+    # is a different request and stays different.
+    var walk = count;
+    if (rules == 0) { walk = 0; }
+    else { if (vec_len(rules) < walk) { walk = vec_len(rules); } }
+
     var idx = 0;
-    while (idx < count) {
+    while (idx < walk) {
         var rule = vec_get(rules, idx);
         var access = security_fs_rule_access(rule);
 

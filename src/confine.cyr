@@ -215,7 +215,20 @@ fn confine_child(policy, rootfs, cgroup_path, uid, gid, seccomp_info) {
 
     if (policy != 0) {
         if (SandboxPolicy_landlock_rules_len(policy) > 0) {
-            if (is_ok(security_apply_landlock(0, 0)) == 0) { sys_exit(SPAWN_EXIT_LANDLOCK); }
+            # 3.11.3: the policy's ACTUAL rules, where this passed `(0, 0)` —
+            # a null list with a zero count, which `security_apply_landlock`
+            # answers `Ok(0)` to immediately. The count was checked, the rules
+            # were never sent, and no ruleset was ever installed.
+            #
+            # A `deny_all` policy carries a count with an empty list on purpose:
+            # a ruleset with no path-beneath rules permits nothing, so the count
+            # is passed rather than the list length.
+            var _ll = SandboxPolicy_landlock_rules(policy);
+            if (_ll == 0) { _ll = vec_new(); }
+            if (is_ok(security_apply_landlock(_ll,
+            SandboxPolicy_landlock_rules_len(policy))) == 0) {
+                sys_exit(SPAWN_EXIT_LANDLOCK);
+            }
         }
     }
     if (seccomp_info != 0) {

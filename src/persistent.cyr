@@ -39,7 +39,46 @@ var PERSISTENT_GUEST_SIZE = 32;
 # pre-exec safety checks, then fork + dup2 + execve (mirrors backend_process's
 # argv build + the exec_capture pipe pattern, with a second pipe for stdin).
 # -> PersistentGuest* (0 on an unsafe/blocked command, empty split, or fork/OOM).
+# Spawn a persistent guest **inside a policy's confinement**.
+#
+# `persistent_spawn` — which this wraps — applies nothing: it is not associated
+# with a `Sandbox`, takes no policy, and `kv_execve`s the payload with the
+# caller's full ambient authority. That was invisible at the call site, and it
+# is the only kavach API offering a stdin channel, so it is what a consumer
+# needing one reaches for. agnosai measured the consequence against 3.11.2: a
+# `cxvm` guest spawned this way opened `/etc/passwd`.
+#
+# **`persistent_spawn` keeps its signature and its behaviour** — callers who
+# genuinely want an unconfined child still have it, now by naming it rather
+# than by default. Its doc says so.
+#
+# Returns 0 if the command is refused, the fork fails, or the policy asks for
+# confinement that could not be applied.
+fn persistent_spawn_confined(command, policy) {
+    if (policy == 0) { return persistent_spawn(command); }
+    if (policy_wants_confinement(policy) == 0) { return persistent_spawn(command); }
+
+    var sec = 0;
+    if (SandboxPolicy_seccomp_enabled(policy) == 1) {
+        var sres = security_create_exec_seccomp_filter();
+        # Fail closed: a policy that asked for seccomp and did not get a filter
+        # must not fall through to an unconfined spawn.
+        if (is_ok(sres) == 0) { return 0; }
+        sec = result_unwrap(sres);
+    }
+    return _persistent_spawn_inner(command, policy, sec);
+}
+
+# Spawn a persistent guest with **no confinement**.
+#
+# Applies no seccomp, no landlock and no namespaces, whatever policy the caller
+# may hold elsewhere — it takes none. For a payload that is not trusted, use
+# `persistent_spawn_confined`.
 fn persistent_spawn(command) {
+    return _persistent_spawn_inner(command, 0, 0);
+}
+
+fn _persistent_spawn_inner(command, policy, seccomp_info) {
     if (is_safe_argument(command) == 0) { return 0; }
     var guard_cfg = runtime_guard_config_default();
     var violations = check_command(command, guard_cfg);
@@ -82,6 +121,28 @@ fn persistent_spawn(command) {
         sys_close(out_wfd);
         var devnull = sys_open("/dev/null", 1, 0);   # 1 = O_WRONLY (mirrors exec_capture)
         if (devnull >= 0) { kv_dup2(devnull, 2); sys_close(devnull); }
+        # The seam. Landlock and seccomp are installed HERE — after the pipes
+        # are wired and before `execve` — because landlock does not affect
+        # descriptors that were already open, which is what lets a confined
+        # guest still read its stdin, and because a filter installed after
+        # `execve` would be too late by definition.
+        if (policy != 0) {
+            if (SandboxPolicy_landlock_rules_len(policy) > 0) {
+                var _pl = SandboxPolicy_landlock_rules(policy);
+                if (_pl == 0) { _pl = vec_new(); }
+                if (is_ok(security_apply_landlock(_pl,
+                SandboxPolicy_landlock_rules_len(policy))) == 0) {
+                    sys_exit(SPAWN_EXIT_LANDLOCK);
+                }
+            }
+        }
+        if (seccomp_info != 0) {
+            if (syscall(SYS_PRCTL, 38, 1, 0, 0, 0) < 0) { sys_exit(SPAWN_EXIT_NNP); }
+            if (is_ok(security_load_seccomp(security_seccomp_filter_ptr(seccomp_info),
+            security_seccomp_filter_len(seccomp_info))) == 0) {
+                sys_exit(SPAWN_EXIT_SECCOMP);
+            }
+        }
         kv_execve(vec_get(args, 0), argv, envp);
         sys_exit(127);
     }

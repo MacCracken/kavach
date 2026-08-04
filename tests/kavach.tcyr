@@ -2758,6 +2758,143 @@ fn test_config_struct_growth_is_abi_safe() {
     return 0;
 }
 
+# --- 3.11.3: confinement without a rootfs ---------------------------------
+
+# Whether the payload could read a file outside any allowed path.
+#
+# `/bin/cat` of a scratch file the test writes itself: the externalization gate
+# has nothing to say about it, so what comes back reflects access control and
+# not output scanning. Pointing this at /etc/passwd instead is how the bug hid
+# — the read SUCCEEDS and the gate then quarantines the output, so the call
+# returns null and looks confined.
+fn _t_conf_probe_path() {
+    return "/tmp/kavach-confine-probe.txt";
+}
+
+fn _t_conf_write_probe() {
+    var body = "OUTSIDE-THE-SANDBOX\n";
+    file_write_all(_t_conf_probe_path(), body, strlen(body));
+    return 0;
+}
+
+# Run `/bin/cat <probe>` under `policy`, returning its captured output.
+#
+# **Returns the text, not a byte count.** The capture merges the payload's
+# stderr into the same buffer, so a denied read still produces output - `cat`'s
+# own "Permission denied". Counting bytes reads that as a successful read; only
+# the file's CONTENT distinguishes the two.
+fn _t_conf_read_bytes(policy) {
+    var c = config_new();
+    SandboxConfig_set_backend(c, Backend.PROCESS);
+    SandboxConfig_set_policy(c, policy);
+    var s = sandbox_create(c);
+    if (s == 0) { return 0 - 1; }
+    sandbox_transition(s, SandboxState.RUNNING);
+    var cmd = str_cat(str_from("/bin/cat "), str_from(_t_conf_probe_path()));
+    var r = sandbox_exec(s, str_cstr(cmd));
+    sandbox_destroy(s);
+    if (r == 0) { return str_from(""); }
+    return str_from(ExecResult_stdout(r));
+}
+
+fn test_policy_wants_confinement() {
+    test_group("policy_wants_confinement");
+    assert_eq(policy_wants_confinement(0), 0, "a null policy asks for nothing");
+    assert_eq(policy_wants_confinement(policy_minimal()), 0,
+    "a minimal policy asks for nothing");
+    assert_eq(policy_wants_confinement(policy_basic()), 1,
+    "seccomp_enabled means the confined path is required");
+    assert_eq(policy_wants_confinement(policy_strict()), 1, "and strict does too");
+
+    var p = policy_minimal();
+    policy_landlock_add(p, "/tmp", FS_READ_ONLY);
+    assert_eq(policy_wants_confinement(p), 1,
+    "a landlock rule alone requires it, with no seccomp");
+    return 0;
+}
+
+fn test_landlock_rules_are_expressible() {
+    test_group("landlock_rules_are_expressible");
+    # Before 3.11.3 `landlock_rules_len` was a counter with no list behind it,
+    # so no consumer could name a path and both presets shipped a count of 0.
+    var p = policy_minimal();
+    assert_eq(SandboxPolicy_landlock_rules_len(p), 0, "a fresh policy names no paths");
+    assert_eq(policy_landlock_rules(p), 0, "...and carries no list");
+
+    policy_landlock_add(p, "/opt/tool-data", FS_READ_ONLY);
+    assert_eq(SandboxPolicy_landlock_rules_len(p), 1, "adding a rule counts it");
+    assert_eq(vec_len(policy_landlock_rules(p)), 1, "...and stores it");
+
+    var r0 = vec_get(policy_landlock_rules(p), 0);
+    assert_eq(str_eq(str_from(security_fs_rule_path(r0)), str_from("/opt/tool-data")), 1,
+    "...with its path");
+    assert_eq(security_fs_rule_access(r0), FS_READ_ONLY, "...and its access mode");
+
+    policy_landlock_add(p, "/var/scratch", FS_READ_WRITE);
+    assert_eq(SandboxPolicy_landlock_rules_len(p), 2, "a second rule accumulates");
+    assert_eq(vec_len(policy_landlock_rules(p)), 2, "...in the same list");
+
+    # The count and the list must not drift — score_backend reads the count.
+    assert_eq(SandboxPolicy_landlock_rules_len(p), vec_len(policy_landlock_rules(p)),
+    "the counter matches the list it counts");
+
+    # deny_all is a count with no rules: a ruleset permitting nothing, which is
+    # NOT the same as naming no ruleset at all.
+    var d = policy_minimal();
+    policy_landlock_deny_all(d);
+    assert_eq(SandboxPolicy_landlock_rules_len(d), 1, "deny_all requests a ruleset");
+    assert_eq(vec_len(policy_landlock_rules(d)), 0, "...that allows no path");
+    return 0;
+}
+
+fn test_seccomp_applies_without_a_rootfs() {
+    test_group("seccomp_applies_without_a_rootfs");
+    # **The 3.11.3 regression.** Until then `process_exec` reached the confined
+    # capture only under `rootfs != 0`, so a policy with seccomp_enabled = 1
+    # ran through a plain fork/exec and the flag did nothing. agnosai measured
+    # a policy_strict() sandbox reading an arbitrary host file and reporting
+    # success.
+    _t_conf_write_probe();
+
+    # Unconfined by request: the file is readable, which is what makes the
+    # confined case below a real comparison rather than a broken command.
+    var open_out = _t_conf_read_bytes(policy_minimal());
+    assert_eq(str_contains_cstr(open_out, "OUTSIDE-THE-SANDBOX"), 1,
+    "an unconfined policy reads the probe file - the command itself works");
+
+    # A confining policy must now take the seam. It reaches confine_child,
+    # which installs seccomp; the read either succeeds under a permissive
+    # filter or is denied, but it must NOT be the plain host exec.
+    var confined_out = _t_conf_read_bytes(policy_basic());
+    assert_eq(confined_out != 0, 1, "a confining policy still returns a result");
+    return 0;
+}
+
+fn test_landlock_denies_a_path_outside_its_rules() {
+    test_group("landlock_denies_a_path_outside_its_rules");
+    # The end-to-end property the rule API exists for: a policy allowing only
+    # one subtree must not read outside it. This is the assertion agnosai's
+    # ADR-006 gate needs.
+    _t_conf_write_probe();
+
+    var p = policy_minimal();
+    # Allow a directory that does NOT contain the probe file.
+    policy_landlock_add(p, "/usr", FS_READ_ONLY);
+
+    var out = _t_conf_read_bytes(p);
+    # On a kernel without landlock, security_apply_landlock returns Ok(0) and
+    # nothing is enforced - so this asserts only when landlock is present.
+    if (security_landlock_abi_version() > 0) {
+        assert_eq(str_contains_cstr(out, "OUTSIDE-THE-SANDBOX"), 0,
+        "a payload confined to /usr cannot read /tmp - landlock rules are APPLIED");
+        # And the denial is visible rather than silent: cat says why.
+        assert_eq(str_len(out) > 0, 1,
+        "...with the payload's own error explaining the denial");
+    }
+    return 0;
+}
+
+
 fn main() {
     alloc_init();
     test_backend_parse();
@@ -2932,6 +3069,10 @@ fn main() {
     test_config_externalization_defaults_off();
     test_config_externalization_round_trips();
     test_config_struct_growth_is_abi_safe();
+    test_policy_wants_confinement();
+    test_landlock_rules_are_expressible();
+    test_seccomp_applies_without_a_rootfs();
+    test_landlock_denies_a_path_outside_its_rules();
     return assert_summary();
 }
 

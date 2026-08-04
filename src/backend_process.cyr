@@ -61,16 +61,32 @@ fn process_exec(sandbox, command) {
     # forks and execs on the host with no child-side seam, so a rootfs-bearing
     # sandbox takes kavach's own confined capture instead. Before 3.9.1 there was
     # no rootfs field at all and every container ran host binaries.
+    #
+    # **And a policy asking for seccomp or landlock needs that same seam, rootfs
+    # or not** (3.11.3). Until then this branch was gated on `rootfs != 0`
+    # alone, so `seccomp_enabled = 1` was stored, scored by `score_backend`, and
+    # never applied: a `policy_strict()` sandbox with no rootfs read arbitrary
+    # host files and reported success. Measured by agnosai against 3.11.2 —
+    # `/bin/cat` of a file outside any allowed path returned its 33 bytes.
+    # `_spawn_enter_rootfs(0)` already returns 0, and `_spawn_ns_flags` already
+    # takes `rootfs` into account, so the confined path needs no rootfs to work.
     var rootfs = 0;
     if (cfg != 0) { rootfs = SandboxConfig_rootfs(cfg); }
-    if (rootfs != 0) {
-        var pol = 0;
-        if (cfg != 0) { pol = SandboxConfig_policy(cfg); }
+    var pol0 = 0;
+    if (cfg != 0) { pol0 = SandboxConfig_policy(cfg); }
+    if (rootfs != 0 || policy_wants_confinement(pol0) == 1) {
+        var pol = pol0;
         var sec = 0;
         if (pol != 0) {
             if (SandboxPolicy_seccomp_enabled(pol) == 1) {
                 var sres = security_create_exec_seccomp_filter();
-                if (is_ok(sres) == 1) { sec = result_unwrap(sres); }
+                # **Fail closed.** A policy that asked for seccomp and did not
+                # get a filter must not fall through to an unconfined exec —
+                # that is the shape of the bug this whole branch fixes.
+                if (is_ok(sres) == 0) {
+                    return backend_error_result("seccomp requested but the filter could not be built");
+                }
+                sec = result_unwrap(sres);
             }
         }
         n = confine_capture(args, pol, rootfs, cgroup_path, sec, buf, PROCESS_MAX_OUTPUT);

@@ -7,6 +7,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.11.3] — 2026-08-04
+
+### Security
+
+- **Neither exec path applied seccomp or landlock without a rootfs.**
+  `process_exec` reached the confined capture only under `rootfs != 0`, so a
+  policy carrying `seccomp_enabled = 1` ran its payload through a plain
+  fork/exec with the caller's full ambient authority. The flag was stored,
+  scored by `score_backend`, and never applied — a `policy_strict()` sandbox
+  with no rootfs read an arbitrary host file and reported success.
+
+  Found and measured by agnosai while porting its cx tool sandbox, whose
+  [ADR-006](https://github.com/MacCracken/agnosai) makes kavach's seccomp +
+  landlock the *entire* security boundary for untrusted bytecode: a `.cyx`
+  calling `open("/etc/passwd")` succeeded through `persistent_spawn`.
+
+  Routing is now on the **policy** (`policy_wants_confinement`) rather than on
+  the rootfs. `_spawn_enter_rootfs(0)` already returned 0 and `_spawn_ns_flags`
+  already accounted for a null rootfs, so the confined path needed no rootfs to
+  work — only to be reached. A policy that asks for seccomp and cannot get a
+  filter now **fails closed** instead of falling through to an unconfined exec.
+
+- **Landlock rules could not be expressed, so landlock was applied by nothing.**
+  `SandboxPolicy.landlock_rules_len` was a bare counter with no list behind it,
+  and `confine_child` called `security_apply_landlock(0, 0)` — a null list with
+  a zero count, which returns `Ok(0)` immediately. Both shipped presets carried
+  a count of 0. The machinery underneath was complete and has handled all
+  thirteen ABI v1 rights since 3.11.1; only the path from a policy to it was
+  missing.
+
+  New: `policy_landlock_add(policy, path, access)` accumulating a real rule
+  list, `policy_landlock_deny_all(policy)` for a ruleset that permits nothing,
+  and `policy_landlock_rules(policy)` to read it back. `confine_child` passes
+  the policy's actual rules.
+
+- **`persistent_spawn` applied no confinement and took no policy.** It is the
+  only kavach API offering a stdin channel, so it is what a consumer needing one
+  reaches for — and it forked and `execve`d with nothing applied.
+  `persistent_spawn_confined(command, policy)` installs landlock and seccomp in
+  the child, after the pipes are wired and before `execve`: landlock does not
+  affect already-open descriptors, which is what lets a confined guest still
+  read its stdin. `persistent_spawn` keeps its signature and behaviour for
+  callers who genuinely want an unconfined child, and now says so.
+
+### Fixed
+
+- `security_apply_landlock` walked `count` entries of `rules` without bounding
+  by the list, so a deny-all request (a non-zero count over an empty list) would
+  have indexed past the end. The walk is now bounded by both; `count == 0` still
+  means "no landlock at all", which is a different request.
+
+### Added
+
+- `policy_wants_confinement(policy)` — whether a policy requires the child-side
+  seam. The routing predicate for `process_exec`, and the answer to "will this
+  sandbox actually confine anything".
+
 ## [3.11.2] — 2026-08-03
 
 ### Added — `SandboxConfig.externalization`: a sandbox can carry its own gate policy
