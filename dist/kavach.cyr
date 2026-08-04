@@ -8052,7 +8052,26 @@ fn confine_child(policy, rootfs, cgroup_path, uid, gid, seccomp_info) {
     if (_spawn_cgroup_join(cgroup_path) != 0) { sys_exit(SPAWN_EXIT_CGROUP); }
     if (syscall(SYS_PRCTL, 38, 1, 0, 0, 0) < 0) { sys_exit(SPAWN_EXIT_NNP); }
 
-    var nsf = _spawn_ns_flags(policy, rootfs);
+    # **Namespaces are applied on the rootfs path, and only there** (3.11.3).
+    #
+    # `_spawn_ns_flags` answers what a policy *wants*, and that answer is
+    # unchanged. What changed is who reaches this code: until 3.11.3 only a
+    # rootfs-bearing sandbox did, and now a policy asking for seccomp or
+    # landlock takes the same seam without one.
+    #
+    # Unprivileged namespace creation must not become a precondition for
+    # process-level confinement. A new network namespace requires a new USER
+    # namespace when not root, and Ubuntu 24.04 restricts unprivileged user
+    # namespaces outright — so requesting one there fails the spawn with
+    # `SPAWN_EXIT_NS`, turning a payload that used to run unconfined into one
+    # that does not run at all. That is a regression for every existing
+    # consumer, in exchange for isolation the platform was never going to
+    # grant.
+    #
+    # The rootfs-less path therefore applies what needs no privilege — seccomp
+    # and landlock — and does **not** claim network isolation it did not get.
+    var nsf = 0;
+    if (rootfs != 0) { nsf = _spawn_ns_flags(policy, rootfs); }
     if (nsf != 0) {
         if (is_ok(security_create_namespace(nsf)) == 0) { sys_exit(SPAWN_EXIT_NS); }
         if ((nsf & NS_USER) != 0) {
