@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.11.2] — 2026-08-03
+
+### Added — `SandboxConfig.externalization`: a sandbox can carry its own gate policy
+
+**Reported by agnosai**, porting `sandbox/kavach_bridge`. The Rust kavach lets a
+caller attach an `ExternalizationPolicy` to a config, and agnosai's Rust builds
+every config with `.externalization(ExternalizationPolicy::default())`
+unconditionally. The Cyrius `struct SandboxConfig` had nine fields and no such
+slot, so that line had **no counterpart to port** — and the consumer's
+`build_config_enables_externalization` test had nothing to assert against.
+
+`config_externalization(c, p)` now sets it, alongside the existing
+`config_rootfs` / `config_agent_id` / `config_network`.
+
+⚠ **The default is 0, not `ext_policy_default()`, and that is deliberate for a
+patch release.** Defaulting to an active policy would start scanning output for
+every existing consumer that never asked for it — a behaviour change dressed as
+a new capability. A fresh config behaves exactly as it did in 3.11.1.
+
+⭐ **Carrying the policy is all this does; nothing applies it for you.** The
+lifecycle does not run the gate, so a caller still passes the policy to
+`gate_apply` where it wants output scanned. What the field buys is that two
+sandboxes running under different trust levels stop looking identical to
+anything reading their configs — which is exactly agnosai's case, where
+`policy_for_trust` maps a crew's trust level to one of three policies.
+
+`SANDBOX_CONFIG_SIZE` grows **72 → 80**. ABI-safe on the same reasoning bote
+used when `dispatcher_new` grew 72 → 88 at 3.3.0: `config_new` is the only
+constructor, the size is not documented to callers, and every field is read at a
+fixed offset.
+
+### Verified
+
+**590 assertions pass, 0 fail** (was 575 at 3.11.1). Both halves
+mutation-verified, and the first mutation is the one worth stating: **growing
+the struct while forgetting to bump `SANDBOX_CONFIG_SIZE`** puts the new field
+outside the allocation, and `test_config_externalization_defaults_off` catches
+it reading garbage (`got 1, expected 0`) rather than letting it corrupt the next
+heap object silently. Defaulting the field ON is caught by the same assertion.
+`test_config_struct_growth_is_abi_safe` round-trips all nine pre-existing fields
+after the tenth was appended.
+
 ## [3.11.1] — 2026-08-03
 
 ### Security — Landlock handled only 3 of 13 filesystem rights, so a confined process could delete any file on the host

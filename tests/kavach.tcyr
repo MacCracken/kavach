@@ -2684,6 +2684,80 @@ fn test_landlock_denies_mutation_outside_allowed_path() {
     return 0;
 }
 
+# ================================================================
+# SandboxConfig.externalization (3.11.2)
+# ================================================================
+#
+# Reported by agnosai: the Rust kavach lets a caller attach an
+# ExternalizationPolicy to a config, and the Cyrius struct had no such field, so
+# `build_config`'s unconditional `.externalization(...)` had no counterpart.
+#
+# The struct grew 72 -> 80 bytes, so the ABI-safety half matters as much as the
+# feature: every pre-existing field must still round-trip.
+
+fn test_config_externalization_defaults_off() {
+    test_group("config_externalization_defaults_off");
+    var c = config_new();
+    # **0, not ext_policy_default().** Defaulting to an active policy would
+    # start scanning output for every consumer that never asked for it.
+    assert_eq(SandboxConfig_externalization(c), 0,
+    "a fresh config carries NO externalization policy — behaviour is unchanged for existing callers");
+    return 0;
+}
+
+fn test_config_externalization_round_trips() {
+    test_group("config_externalization_round_trips");
+    var c = config_new();
+    var p = ext_policy_default();
+    config_externalization(c, p);
+    assert_eq(SandboxConfig_externalization(c), p, "the policy is stored");
+    assert_eq(ExternalizationPolicy_block_threshold(SandboxConfig_externalization(c)),
+    Severity.CRITICAL, "...and reads back intact");
+
+    # A stricter policy is distinguishable from the default — the whole point is
+    # that two sandboxes under different trust levels no longer look identical.
+    var strict = alloc(EXT_POLICY_SIZE);
+    ExternalizationPolicy_set_enabled(strict, 1);
+    ExternalizationPolicy_set_max_artifact_size_bytes(strict, 1048576);
+    ExternalizationPolicy_set_block_threshold(strict, Severity.MEDIUM);
+    var c2 = config_new();
+    config_externalization(c2, strict);
+    assert_eq(ExternalizationPolicy_block_threshold(SandboxConfig_externalization(c2)),
+    Severity.MEDIUM, "a per-sandbox policy is carried distinctly");
+    assert_eq(ExternalizationPolicy_block_threshold(SandboxConfig_externalization(c)),
+    Severity.CRITICAL, "...without disturbing the other config");
+    return 0;
+}
+
+fn test_config_struct_growth_is_abi_safe() {
+    test_group("config_struct_growth_is_abi_safe");
+    # 72 -> 80. Every field is read at a fixed offset, so all nine originals
+    # must still round-trip after the tenth was appended.
+    var c = config_new();
+    config_backend(c, Backend.OCI);
+    config_policy(c, policy_strict());
+    config_timeout_ms(c, 12345);
+    config_inner_backend(c, Backend.WASM);
+    config_agent_id(c, "agent-abc");
+    config_hostname(c, "host1");
+    config_domainname(c, "dom1");
+    config_workdir(c, "/w");
+    config_rootfs(c, "/r");
+    config_externalization(c, ext_policy_default());
+
+    assert_eq(SandboxConfig_backend(c), Backend.OCI, "growth: backend intact");
+    assert_eq(SandboxConfig_timeout_ms(c), 12345, "growth: timeout_ms intact");
+    assert_eq(SandboxConfig_inner_backend(c), Backend.WASM, "growth: inner_backend intact");
+    assert_eq(SandboxPolicy_seccomp_enabled(SandboxConfig_policy(c)), 1, "growth: policy intact");
+    assert_eq(str_eq_cstr(str_from(SandboxConfig_agent_id(c)), "agent-abc"), 1, "growth: agent_id intact");
+    assert_eq(str_eq_cstr(str_from(SandboxConfig_hostname(c)), "host1"), 1, "growth: hostname intact");
+    assert_eq(str_eq_cstr(str_from(SandboxConfig_domainname(c)), "dom1"), 1, "growth: domainname intact");
+    assert_eq(str_eq_cstr(str_from(SandboxConfig_workdir(c)), "/w"), 1, "growth: workdir intact");
+    assert_eq(str_eq_cstr(str_from(SandboxConfig_rootfs(c)), "/r"), 1, "growth: rootfs intact");
+    assert_eq(SandboxConfig_externalization(c) != 0, 1, "growth: the new field holds");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_backend_parse();
@@ -2855,6 +2929,9 @@ fn main() {
     test_landlock_allowed_access_grants_within_the_path();
     test_landlock_abi_version_is_sane();
     test_landlock_denies_mutation_outside_allowed_path();
+    test_config_externalization_defaults_off();
+    test_config_externalization_round_trips();
+    test_config_struct_growth_is_abi_safe();
     return assert_summary();
 }
 
