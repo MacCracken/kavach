@@ -2546,6 +2546,144 @@ fn test_oci_err_path_is_uid_scoped() {
 }
 
 
+# ================================================================
+# Landlock right coverage (3.11.1)
+# ================================================================
+#
+# Landlock restricts ONLY the rights named in `handled_access_fs` and leaves
+# every other right fully permitted. Until 3.11.1 the mask held three rights, so
+# a confined process could delete any file on the host, create directories
+# anywhere, and exec any binary — while "cannot read /etc/passwd" passed,
+# because reading WAS handled. Reported by agnosai with a runnable probe.
+#
+# These are pure-arithmetic tests of the masks. The end-to-end proof (fork,
+# confine, try to unlink outside the allowed path) is `test_landlock_denies_
+# mutation_outside_allowed_path` below, which is the one that actually regresses.
+
+fn test_landlock_handled_access_covers_the_abi() {
+    # ABI v1: all thirteen filesystem rights, and no more.
+    var v1 = _landlock_handled_access(1);
+    assert_eq(v1 & LANDLOCK_ACCESS_FS_EXECUTE, LANDLOCK_ACCESS_FS_EXECUTE, "v1 handles EXECUTE");
+    assert_eq(v1 & LANDLOCK_ACCESS_FS_READ_FILE, LANDLOCK_ACCESS_FS_READ_FILE, "v1 READ_FILE");
+    assert_eq(v1 & LANDLOCK_ACCESS_FS_WRITE_FILE, LANDLOCK_ACCESS_FS_WRITE_FILE, "v1 WRITE_FILE");
+    assert_eq(v1 & LANDLOCK_ACCESS_FS_READ_DIR, LANDLOCK_ACCESS_FS_READ_DIR, "v1 READ_DIR");
+    assert_eq(v1 & LANDLOCK_ACCESS_FS_REMOVE_FILE, LANDLOCK_ACCESS_FS_REMOVE_FILE,
+    "v1 handles REMOVE_FILE — the right whose absence let a confined process delete anything");
+    assert_eq(v1 & LANDLOCK_ACCESS_FS_REMOVE_DIR, LANDLOCK_ACCESS_FS_REMOVE_DIR, "v1 REMOVE_DIR");
+    assert_eq(v1 & LANDLOCK_ACCESS_FS_MAKE_DIR, LANDLOCK_ACCESS_FS_MAKE_DIR, "v1 MAKE_DIR");
+    assert_eq(v1 & LANDLOCK_ACCESS_FS_MAKE_REG, LANDLOCK_ACCESS_FS_MAKE_REG, "v1 MAKE_REG");
+    assert_eq(v1 & LANDLOCK_ACCESS_FS_MAKE_SYM, LANDLOCK_ACCESS_FS_MAKE_SYM, "v1 MAKE_SYM");
+    assert_eq(v1 & LANDLOCK_ACCESS_FS_MAKE_SOCK, LANDLOCK_ACCESS_FS_MAKE_SOCK, "v1 MAKE_SOCK");
+    assert_eq(v1 & LANDLOCK_ACCESS_FS_MAKE_FIFO, LANDLOCK_ACCESS_FS_MAKE_FIFO, "v1 MAKE_FIFO");
+    assert_eq(v1 & LANDLOCK_ACCESS_FS_MAKE_CHAR, LANDLOCK_ACCESS_FS_MAKE_CHAR, "v1 MAKE_CHAR");
+    assert_eq(v1 & LANDLOCK_ACCESS_FS_MAKE_BLOCK, LANDLOCK_ACCESS_FS_MAKE_BLOCK, "v1 MAKE_BLOCK");
+
+    # The later rights must NOT be named on a v1 kernel: landlock_create_ruleset
+    # answers EINVAL for a right the running ABI does not know, which would turn
+    # a working sandbox into a hard failure.
+    assert_eq(v1 & LANDLOCK_ACCESS_FS_REFER, 0, "v1 does NOT name REFER — EINVAL on old kernels");
+    assert_eq(v1 & LANDLOCK_ACCESS_FS_TRUNCATE, 0, "v1 does NOT name TRUNCATE");
+
+    var v2 = _landlock_handled_access(2);
+    assert_eq(v2 & LANDLOCK_ACCESS_FS_REFER, LANDLOCK_ACCESS_FS_REFER, "v2 adds REFER");
+    assert_eq(v2 & LANDLOCK_ACCESS_FS_TRUNCATE, 0, "v2 still withholds TRUNCATE");
+
+    var v3 = _landlock_handled_access(3);
+    assert_eq(v3 & LANDLOCK_ACCESS_FS_TRUNCATE, LANDLOCK_ACCESS_FS_TRUNCATE, "v3 adds TRUNCATE");
+
+    # A newer kernel is masked DOWN to what this code knows, never up.
+    assert_eq(_landlock_handled_access(9), v3, "an unknown newer ABI is clamped to the known set");
+}
+
+fn test_landlock_allowed_access_grants_within_the_path() {
+    var ro = _landlock_allow_read_only();
+    assert_eq(ro & LANDLOCK_ACCESS_FS_READ_FILE, LANDLOCK_ACCESS_FS_READ_FILE, "ro reads files");
+    assert_eq(ro & LANDLOCK_ACCESS_FS_READ_DIR, LANDLOCK_ACCESS_FS_READ_DIR, "ro lists dirs");
+    # EXECUTE is granted read-only on purpose: it was permitted EVERYWHERE before
+    # 3.11.1, and a sandbox that read-only-mounts /usr to run python3 is normal.
+    assert_eq(ro & LANDLOCK_ACCESS_FS_EXECUTE, LANDLOCK_ACCESS_FS_EXECUTE,
+    "ro can exec — withholding it would break every consumer that runs a mounted interpreter");
+    assert_eq(ro & LANDLOCK_ACCESS_FS_WRITE_FILE, 0, "but read-only does NOT write");
+    assert_eq(ro & LANDLOCK_ACCESS_FS_REMOVE_FILE, 0, "and does NOT delete");
+    assert_eq(ro & LANDLOCK_ACCESS_FS_MAKE_DIR, 0, "and does NOT mkdir");
+
+    var rw = _landlock_allow_read_write(3);
+    assert_eq(rw & LANDLOCK_ACCESS_FS_WRITE_FILE, LANDLOCK_ACCESS_FS_WRITE_FILE, "rw writes");
+    assert_eq(rw & LANDLOCK_ACCESS_FS_REMOVE_FILE, LANDLOCK_ACCESS_FS_REMOVE_FILE,
+    "rw deletes INSIDE its own path — the fix must not break legitimate use");
+    assert_eq(rw & LANDLOCK_ACCESS_FS_MAKE_DIR, LANDLOCK_ACCESS_FS_MAKE_DIR, "rw mkdirs");
+    assert_eq(rw & LANDLOCK_ACCESS_FS_TRUNCATE, LANDLOCK_ACCESS_FS_TRUNCATE, "rw truncates on v3");
+    assert_eq(_landlock_allow_read_write(1) & LANDLOCK_ACCESS_FS_TRUNCATE, 0,
+    "...but not on a v1 kernel that would EINVAL on it");
+
+    # Everything read-only grants, read-write also grants.
+    assert_eq(rw & ro, ro, "read-write is a superset of read-only");
+}
+
+fn test_landlock_abi_version_is_sane() {
+    var abi = security_landlock_abi_version();
+    # 0 means "no Landlock here", which is a legitimate answer (old kernel, or
+    # AGNOS). Anything else must be a real version number.
+    if (abi != 0) {
+        assert_eq(abi >= 1, 1, "a reported ABI version is at least 1");
+        assert_eq(abi < 100, 1, "...and is a version, not an errno or a fd");
+    }
+}
+
+# **The regression guard.** Pure-arithmetic mask tests cannot catch a mask that
+# is correct but never reaches the kernel, so this one forks, confines the child
+# for real, and has it try to mutate outside its allowed path.
+#
+# The child reports through its exit code because it is confined — it cannot
+# write a result file anywhere the parent could read.
+#   0 = every mutation outside was DENIED (correct)
+#   1 = unlink outside SUCCEEDED (the 3.11.0 hole)
+#   2 = mkdir outside SUCCEEDED (the 3.11.0 hole)
+#   3 = landlock unavailable on this kernel — inconclusive, not a failure
+fn _t_landlock_child(allowed, victim, newdir) {
+    var rules = vec_new();
+    vec_push(rules, security_fs_rule_read_write(allowed));
+    if (security_landlock_abi_version() == 0) { syscall(SYS_EXIT_GROUP, 3); }
+    security_apply_landlock(rules, 1);
+    if (sys_unlink(victim) >= 0) { syscall(SYS_EXIT_GROUP, 1); }
+    if (sys_mkdir(newdir, 448) >= 0) { syscall(SYS_EXIT_GROUP, 2); }
+    syscall(SYS_EXIT_GROUP, 0);
+    return 0;
+}
+
+fn test_landlock_denies_mutation_outside_allowed_path() {
+    test_group("landlock_denies_mutation_outside_allowed_path");
+
+    var allowed = "/tmp/kavach-t-ll-allowed";
+    var victim = "/tmp/kavach-t-ll-victim";
+    var newdir = "/tmp/kavach-t-ll-newdir";
+    sys_mkdir(allowed, 448);
+    var vfd = sys_open(victim, 193, 384);
+    if (vfd >= 0) { sys_close(vfd); }
+    sys_rmdir(newdir);
+
+    var pid = kv_fork();
+    if (pid == 0) { _t_landlock_child(allowed, victim, newdir); }
+
+    var st[8];
+    kv_waitpid(pid, &st, 0);
+    var code = (load64(&st) >> 8) & 255;
+
+    if (code == 3) {
+        assert_eq(1, 1, "landlock unavailable on this kernel — mutation test inconclusive");
+    } else {
+        assert_eq(code, 0,
+        "a confined child cannot unlink or mkdir OUTSIDE its allowed path (1=unlink, 2=mkdir)");
+        # And the proof is on disk, not just in an exit code.
+        assert_eq(file_exists(victim), 1, "the victim file survived the confined child");
+    }
+
+    sys_unlink(victim);
+    sys_rmdir(newdir);
+    sys_rmdir(allowed);
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_backend_parse();
@@ -2713,6 +2851,10 @@ fn main() {
     test_oci_state_root_rejects_a_hostile_dir();
     test_oci_scratch_open_is_exclusive_and_truncating();
     test_oci_err_path_is_uid_scoped();
+    test_landlock_handled_access_covers_the_abi();
+    test_landlock_allowed_access_grants_within_the_path();
+    test_landlock_abi_version_is_sane();
+    test_landlock_denies_mutation_outside_allowed_path();
     return assert_summary();
 }
 

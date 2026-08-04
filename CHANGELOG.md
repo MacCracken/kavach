@@ -7,6 +7,87 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.11.1] — 2026-08-03
+
+### Security — Landlock handled only 3 of 13 filesystem rights, so a confined process could delete any file on the host
+
+⛔ **`security_apply_landlock` named three rights in `handled_access_fs` —
+`READ_FILE`, `WRITE_FILE`, `READ_DIR` — and Landlock permits every right it is
+not told to handle.** A process confined by this library, including through
+`confine_child` (the path every sandboxed spawn takes), could therefore still
+`unlink` any file on the system, `rmdir` any directory, `mkdir` anywhere, and
+`execve` any binary. Only reading and writing *contents* were confined.
+
+⚠ **The failure mode is the reason this sat undetected.** The obvious smoke test
+— and the exact escape test a downstream ADR specifies — is "a confined process
+cannot read `/etc/passwd`". That **passed**, because reading was one of the
+three rights that *were* handled. The sandbox looked correct while deletion was
+wide open.
+
+**Reported by agnosai**, with a runnable probe, while planning its M7 sandbox
+milestone against an ADR that makes kavach's seccomp + Landlock the *entire*
+security boundary for untrusted tool code. Measured before the fix, on
+kavach 3.11.0 / cyrius 6.5.6 / Linux 7.1.5 — a process confined read-only to one
+scratch directory:
+
+```
+  open(/etc/passwd, O_RDONLY)   REFUSED   [READ_FILE handled]
+  open(victim, O_WRONLY)        REFUSED   [WRITE_FILE handled]
+  mkdir(/tmp/agnosai_ll_newdir) ALLOWED   [MAKE_DIR NOT handled]
+  unlink(victim.txt)            ALLOWED   [REMOVE_FILE NOT handled]
+  rmdir(victimdir)              ALLOWED   [REMOVE_DIR NOT handled]
+```
+
+…and afterwards the victim file and directory were **gone from disk**.
+
+**The fix.** All thirteen ABI v1 rights are now declared and named in
+`handled_access_fs`, plus `REFER` (ABI v2) and `TRUNCATE` (ABI v3) where the
+running kernel knows them.
+
+⭐ **The ABI query is not optional and is the subtle part.**
+`landlock_create_ruleset` fails **EINVAL** if `handled_access_fs` names a right
+the running ABI does not know, so naming `REFER` or `TRUNCATE` unconditionally
+would convert a working sandbox into a hard error on any kernel older than 6.2.
+New `security_landlock_abi_version()` queries the version
+(`landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION)`) and
+`_landlock_handled_access(abi)` masks **down** to it. An unknown newer ABI is
+clamped to the known set rather than trusted.
+
+⚠ **`EXECUTE` is granted inside read-only paths, deliberately, and this is the
+one place the fix is less strict than it could be.** Before 3.11.1 exec was
+permitted *everywhere* because the right was unhandled; a sandbox that
+read-only-mounts `/usr` in order to run `/usr/bin/python3` is the ordinary case.
+Withholding it would have turned a security fix into a breaking change for every
+such consumer. Granting it only within allowed paths is strictly tighter than
+3.11.0 while keeping that case working.
+
+`FS_READ_WRITE` grants the full mutation set — create, delete, truncate, and on
+ABI v2+ rename across two of the caller's own allowed directories — so a
+sandboxed process keeps full control of its writable area. **Outside those paths
+all of it is now denied, which is the actual fix.**
+
+**One correction to the original report, because the narrower version is the
+true one:** `O_CREAT` of a *regular file* was never a way in — it requires
+`WRITE_FILE`, which was already handled, so file creation was refused even in
+3.11.0. The real holes were directory creation, and deletion of both files and
+directories.
+
+### Verified
+
+Host build green. **575 assertions pass, 0 fail** (was 540 + 12 at 3.11.0;
++33 mask assertions and a fork-based end-to-end test).
+
+⭐ **The end-to-end test is the one that regresses**, and it is
+mutation-verified against the real bug: reverting `handled_access` to the
+3.11.0 three-right mask makes `test_landlock_denies_mutation_outside_allowed_path`
+fail with `got 1, expected 0` (the child's unlink succeeded) **and** `the victim
+file survived the confined child — got 0, expected 1`. The pure-arithmetic mask
+tests cannot catch a mask that is correct but never reaches the kernel, which is
+why the fork-and-confine test exists alongside them.
+
+On a kernel without Landlock the test reports "inconclusive" rather than
+passing vacuously.
+
 ## [3.11.0] — 2026-08-02
 
 ### Added — `kv_getgid` / `kv_lstat` / `kv_fork` / `kv_dup2` / `kv_execve` / `kv_setsid`

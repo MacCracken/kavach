@@ -1,0 +1,31 @@
+fn main(): i64 {
+    alloc_init();
+    var dir = "/tmp/claude-1000/-home-macro-Repos-agnosai/ae283479-a98e-41da-a593-ad4c84f9cc30/scratchpad/lltest";
+    var rules = vec_new();
+    vec_push(rules, security_fs_rule_read_only(dir));
+    security_apply_landlock(rules, 1);
+    println("-- confined: read-only on one scratch dir --");
+
+    var fd = sys_open("/etc/passwd", 0, 0);
+    if (fd < 0) { println("  open(/etc/passwd, O_RDONLY)   REFUSED   [READ_FILE handled]"); }
+    else { println("  open(/etc/passwd, O_RDONLY)   ALLOWED"); syscall(3, fd); }
+
+    var wfd = sys_open("/tmp/agnosai_ll_victim.txt", 1, 0);
+    if (wfd < 0) { println("  open(victim, O_WRONLY)        REFUSED   [WRITE_FILE handled]"); }
+    else { println("  open(victim, O_WRONLY)        ALLOWED"); syscall(3, wfd); }
+
+    if (sys_mkdir("/tmp/agnosai_ll_newdir", 448) >= 0) {
+        println("  mkdir(/tmp/agnosai_ll_newdir) ALLOWED   [MAKE_DIR NOT handled]");
+    } else { println("  mkdir(/tmp/agnosai_ll_newdir) refused"); }
+
+    var u = sys_unlink("/tmp/agnosai_ll_victim.txt");
+    if (u >= 0) { println("  unlink(victim.txt)            ALLOWED   [REMOVE_FILE NOT handled]"); }
+    else { println("  unlink(victim.txt)            refused"); }
+
+    var rd = sys_rmdir("/tmp/agnosai_ll_victimdir");
+    if (rd >= 0) { println("  rmdir(victimdir)              ALLOWED   [REMOVE_DIR NOT handled]"); }
+    else { println("  rmdir(victimdir)              refused"); }
+    return 0;
+}
+var rc = main();
+syscall(SYS_EXIT_GROUP, rc);
