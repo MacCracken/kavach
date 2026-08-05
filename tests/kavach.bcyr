@@ -204,6 +204,58 @@ fn bench_health_check_noop() {
     return 0;
 }
 
+# ---- the exec path, which nothing measured until 3.11.7 -------------------
+#
+# **Every benchmark above this line is in-process.** `sandbox_full_lifecycle`
+# uses `Backend.NOOP` and execs nothing, so scoring, policy, scanning and the
+# audit chain were covered while `confine_capture` — fork, exec, the drain loop
+# and the deadline — was not. That is the code 3.11.3 through 3.11.6 rewrote,
+# and none of those releases recorded a `bench-history.csv` row either, so a
+# regression in it could not have been seen from either direction.
+#
+# `_bench_exec` runs a real payload through the PROCESS backend. Iteration
+# counts are low because each one forks: these are latency figures, not
+# throughput.
+fn _bench_exec(cmd, pol) {
+    var cfg = config_new();
+    SandboxConfig_set_backend(cfg, Backend.PROCESS);
+    if (pol != 0) { SandboxConfig_set_policy(cfg, pol); }
+    config_timeout_ms(cfg, 30000);
+    var s = sandbox_create(cfg);
+    if (s == 0) { return 0; }
+    sandbox_transition(s, SandboxState.RUNNING);
+    sandbox_exec(s, cmd);
+    sandbox_destroy(s);
+    return 0;
+}
+
+# The short-payload case, and the one most exposed to `CONFINE_POLL_MS`: the
+# parent's first non-blocking read almost certainly finds nothing yet, so the
+# loop takes an idle iteration and sleeps before the output is there to read.
+fn bench_process_exec_echo() {
+    return _bench_exec("/bin/echo hi", policy_minimal());
+}
+
+# Output past the 64 KiB pipe buffer — what the round-robin drain exists for.
+# A payload that fills a pipe the parent is not draining deadlocks, so this is
+# both a latency figure and a standing check that it does not.
+#
+# **No shell, no metacharacters, no quotes.** `_split_command` splits on
+# whitespace only, so `sh -c "a | b"` becomes the tokens `"a`, `|`, `b` and
+# either the guard refuses it or the shell dies on the fragment — the first
+# version of this benchmark did exactly that and reported 20 µs, faster than
+# `echo`, which is what a benchmark that runs nothing looks like. `seq` needs
+# none of it: measured at **228,894 bytes** of stdout through this API.
+fn bench_process_exec_large_output() {
+    return _bench_exec("/usr/bin/seq 1 40000", policy_minimal());
+}
+
+# The confined path — namespaces off, but landlock/seccomp routing engaged, so
+# `confine_child` runs rather than the plain fork/exec.
+fn bench_process_exec_confined() {
+    return _bench_exec("/bin/echo hi", policy_strict());
+}
+
 fn bench_sandbox_full_lifecycle() {
     var cfg = config_new();
     config_backend(cfg, Backend.NOOP);
@@ -356,6 +408,19 @@ fn main() {
     var b14 = bench_new("sandbox_full_lifecycle");
     bench_run(b14, &bench_sandbox_full_lifecycle, 1000);
     vec_push(benches, b14);
+
+    # The exec path (3.11.7). Low iteration counts — each forks.
+    var b23 = bench_new("process_exec_echo");
+    bench_run(b23, &bench_process_exec_echo, 50);
+    vec_push(benches, b23);
+
+    var b24 = bench_new("process_exec_large_output");
+    bench_run(b24, &bench_process_exec_large_output, 20);
+    vec_push(benches, b24);
+
+    var b25 = bench_new("process_exec_confined");
+    bench_run(b25, &bench_process_exec_confined, 50);
+    vec_push(benches, b25);
 
     # Disk-bound (reference only)
     var b15 = bench_new("audit_chain_record_to_tmpfs");

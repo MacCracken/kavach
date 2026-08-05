@@ -8493,6 +8493,7 @@ timeout_ms, do_confine) {
     var odone = 0;
     var edone = 0;
     var killed = 0;
+    var idle = 0;
     while (odone == 0 || edone == 0) {
         var moved = 0;
         if (odone == 0) {
@@ -8522,11 +8523,27 @@ timeout_ms, do_confine) {
                 odone = 1;
                 edone = 1;
             } else {
-                # An idle iteration with no deadline still sleeps rather than
-                # spinning — a non-blocking read that finds nothing returns at
-                # once, and retrying it burns a core for as long as the payload
-                # runs.
-                kv_sleep_ms(CONFINE_POLL_MS);
+                # An idle iteration still sleeps rather than spinning — a
+                # non-blocking read that finds nothing returns at once, and
+                # retrying it burns a core for as long as the payload runs.
+                #
+                # **But it backs off into that, rather than starting there
+                # (3.11.7).** A flat `CONFINE_POLL_MS` charges every exec the
+                # full interval before its first byte is even readable, and a
+                # short payload is *entirely* that wait. Measured on
+                # `/bin/echo hi` through the PROCESS backend: **11.96 ms at a
+                # flat 5 ms against 4.78 ms at a flat 1 ms** — 2.5x, none of it
+                # work. The regression arrived with this loop in 3.11.5 and
+                # shipped through 3.11.6 because no benchmark execs anything;
+                # `process_exec_echo` exists now so it cannot happen again.
+                #
+                # The ramp keeps both properties: a fast payload is noticed in
+                # about a millisecond, and a slow one still converges to
+                # `CONFINE_POLL_MS`, so the CPU argument above is unchanged for
+                # exactly the case it was made about.
+                idle = idle + 1;
+                if (idle < CONFINE_POLL_RAMP) { kv_sleep_ms(1); }
+                else { kv_sleep_ms(CONFINE_POLL_MS); }
             }
         }
     }
@@ -8557,6 +8574,14 @@ var _confine_last_exit = 0;
 
 # How often the drain loop looks again while a payload is running.
 var CONFINE_POLL_MS = 5;
+
+# Idle iterations spent at 1 ms before falling back to `CONFINE_POLL_MS`.
+#
+# 8 ms of fine-grained polling covers process startup, which is where a short
+# payload's whole latency lives; past that the payload is genuinely working and
+# 5 ms granularity costs it nothing. Set this to 0 to restore the flat interval
+# 3.11.5 and 3.11.6 shipped.
+var CONFINE_POLL_RAMP = 8;
 
 # Ceiling on captured stderr. A payload cannot make the parent allocate without
 # bound by writing diagnostics.

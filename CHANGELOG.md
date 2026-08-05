@@ -123,6 +123,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   because an open-looking issue that is actually closed costs the next reader
   the same time twice.
 
+### Performance
+
+- **Every process exec paid ~7 ms of dead sleep, and nothing could have seen
+  it.** `confine_capture`'s drain loop (3.11.5) slept a flat `CONFINE_POLL_MS`
+  = 5 ms on every idle iteration — including the ones before the payload has
+  written its first byte, which for a short payload is the *whole* run. It now
+  spends its first `CONFINE_POLL_RAMP` = 8 idle iterations at 1 ms before
+  falling back to 5 ms, so a fast payload is noticed in about a millisecond and
+  a slow one still converges to the old interval. The CPU argument the sleep was
+  added for is unchanged for exactly the case it was made about.
+
+  | benchmark | 3.11.6 (flat 5 ms) | 3.11.7 (ramp) | |
+  |---|---|---|---|
+  | `process_exec_echo` | 11.96 ms | **4.88 ms** | −59% |
+  | `process_exec_confined` | 12.41 ms | **5.06 ms** | −59% |
+  | `process_exec_large_output` | 140.88 ms | **115.88 ms** | −18% |
+
+  Attribution is direct, not inferred: the same binary with only
+  `CONFINE_POLL_MS` changed from 5 to 1 measures 4.78 ms on `process_exec_echo`,
+  so the interval was the cost and the ramp recovers it. Set
+  `CONFINE_POLL_RAMP = 0` to restore the flat interval.
+
+- **Three benchmarks added, because the entire exec path had none.**
+  `process_exec_echo`, `process_exec_large_output` (228,894 bytes of stdout,
+  past the 64 KiB pipe buffer, which is what the round-robin drain exists for)
+  and `process_exec_confined`. Before them, every benchmark in the suite was
+  in-process — `sandbox_full_lifecycle` uses `Backend.NOOP` and execs nothing —
+  so `confine_capture`, the drain loop, the deadline, `process_exec` and
+  `oci_exec` were unmeasured. **That is why the regression above shipped through
+  four releases**: 3.11.3 to 3.11.6 rewrote that code and none of them recorded
+  a benchmark row, and a row would not have caught it anyway.
+
+  `large_output` was wrong on its first attempt and reported 20 µs — faster than
+  `echo`, because `_split_command` splits on whitespace only, so
+  `sh -c "a | b"` became the tokens `"a`, `|`, `b` and nothing ran. A benchmark
+  that runs nothing looks like a fast benchmark. It uses `seq` now, verified at
+  228,894 bytes through this API.
+
 ### Note on the benchmark history
 
 `benches/bench-history.csv` has **no row for 3.11.6, and none for 3.8.0 through
