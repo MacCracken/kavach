@@ -3094,6 +3094,56 @@ not stored and ignored");
     return 0;
 }
 
+# --- 3.11.6: namespaces on the persistent path ----------------------------
+
+fn test_persistent_namespaces_are_opt_in_and_fail_closed() {
+    test_group("persistent_namespaces");
+    # **The persistent path applied landlock and seccomp and nothing else.** It
+    # takes a SandboxPolicy, which carries `network_enabled`, and acted on none
+    # of it — and `config_require_namespaces` (3.11.5) is a SandboxConfig field
+    # that never reaches here. agnosai's cx tool sandbox uses this path, because
+    # it is the only kavach API with a stdin channel, so a `.cyx` guest could
+    # open a socket.
+    var p = policy_basic();
+
+    # Default: unchanged, no namespaces demanded.
+    var g0 = persistent_spawn_confined("/usr/bin/id -u", p);
+    if (g0 != 0) {
+        sys_close(PersistentGuest_stdin_fd(g0));
+        var b0 = alloc(256);
+        var n0 = persistent_read(g0, b0, 255);
+        var s0[8];
+        store64(&s0, 0);
+        kv_waitpid(PersistentGuest_pid(g0), &s0, 0);
+        assert_eq((load64(&s0) >> 8) & 255, 0, "the default path still runs the guest");
+    }
+
+    # Opt in: the guest either runs INSIDE a user namespace - where it is
+    # mapped to uid 0 - or is refused cleanly. Running as the real uid would
+    # mean the request was stored and dropped, which is the bug.
+    var g = persistent_spawn_confined_ns("/usr/bin/id -u", p, 1);
+    if (g == 0) { return 0; }
+    sys_close(PersistentGuest_stdin_fd(g));
+    var buf = alloc(256);
+    var n = persistent_read(g, buf, 255);
+    if (n < 0) { n = 0; }
+    store8(buf + n, 0);
+    var st[8];
+    store64(&st, 0);
+    kv_waitpid(PersistentGuest_pid(g), &st, 0);
+    var code = (load64(&st) >> 8) & 255;
+
+    if (code == 123 || code == 118) { return 0; }
+    assert_eq(code, 0, "an opt-in namespace request either runs or fails closed");
+    # Exactly "0", not `contains "0"` — the real uid 1000 contains a zero.
+    var isroot = 0;
+    if (n > 0 && load8(buf) == 48 && n <= 2) { isroot = 1; }
+    assert_eq(isroot, 1,
+    "...and inside a user namespace the guest is uid 0 - the policy's namespaces \
+were APPLIED, not carried and ignored");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_backend_parse();
@@ -3278,6 +3328,7 @@ fn main() {
     test_stderr_is_its_own_stream();
     test_stdout_and_stderr_both_large_do_not_deadlock();
     test_require_namespaces_is_opt_in();
+    test_persistent_namespaces_are_opt_in_and_fail_closed();
     return assert_summary();
 }
 

@@ -55,8 +55,31 @@ var PERSISTENT_GUEST_SIZE = 32;
 # Returns 0 if the command is refused, the fork fails, or the policy asks for
 # confinement that could not be applied.
 fn persistent_spawn_confined(command, policy) {
+    return persistent_spawn_confined_ns(command, policy, 0);
+}
+
+# Spawn a persistent guest with the policy's confinement **and its namespaces**.
+#
+# `require_ns` is the same opt-in, fail-closed shape `config_require_namespaces`
+# gave `process_exec` in 3.11.5 — expressed as a parameter here because the
+# persistent path takes no `SandboxConfig` to carry a flag on.
+#
+# **Why it is opt-in.** A network namespace needs a new *user* namespace when
+# unprivileged, and Ubuntu 24.04 restricts those outright; making it
+# unconditional would turn guests that ran into guests that do not run at all.
+# **Why it fails closed.** A caller asking for network isolation and silently
+# not getting it is the failure mode this whole line of releases exists to
+# remove — the guest exits `SPAWN_EXIT_NS` (123) or `SPAWN_EXIT_IDMAP` (118)
+# rather than running with a network its policy said it would not have.
+#
+# The namespaces come from the policy, so `network_enabled = 0` — the default —
+# is what asks for network isolation. Until 3.11.6 that field reached this path
+# and nothing acted on it.
+fn persistent_spawn_confined_ns(command, policy, require_ns) {
     if (policy == 0) { return persistent_spawn(command); }
-    if (policy_wants_confinement(policy) == 0) { return persistent_spawn(command); }
+    if (policy_wants_confinement(policy) == 0 && require_ns == 0) {
+        return persistent_spawn(command);
+    }
 
     var sec = 0;
     if (SandboxPolicy_seccomp_enabled(policy) == 1) {
@@ -66,7 +89,9 @@ fn persistent_spawn_confined(command, policy) {
         if (is_ok(sres) == 0) { return 0; }
         sec = result_unwrap(sres);
     }
-    return _persistent_spawn_inner(command, policy, sec);
+    # Read in the PARENT: inside a new user namespace `getuid` reports the
+    # mapped id, not the one the map must be written against.
+    return _persistent_spawn_inner(command, policy, sec, require_ns, sys_getuid(), kv_getgid());
 }
 
 # Spawn a persistent guest with **no confinement**.
@@ -75,10 +100,10 @@ fn persistent_spawn_confined(command, policy) {
 # may hold elsewhere — it takes none. For a payload that is not trusted, use
 # `persistent_spawn_confined`.
 fn persistent_spawn(command) {
-    return _persistent_spawn_inner(command, 0, 0);
+    return _persistent_spawn_inner(command, 0, 0, 0, 0, 0);
 }
 
-fn _persistent_spawn_inner(command, policy, seccomp_info) {
+fn _persistent_spawn_inner(command, policy, seccomp_info, want_ns, uid, gid) {
     if (is_safe_argument(command) == 0) { return 0; }
     var guard_cfg = runtime_guard_config_default();
     var violations = check_command(command, guard_cfg);
@@ -121,11 +146,24 @@ fn _persistent_spawn_inner(command, policy, seccomp_info) {
         sys_close(out_wfd);
         var devnull = sys_open("/dev/null", 1, 0);   # 1 = O_WRONLY (mirrors exec_capture)
         if (devnull >= 0) { kv_dup2(devnull, 2); sys_close(devnull); }
-        # The seam. Landlock and seccomp are installed HERE — after the pipes
-        # are wired and before `execve` — because landlock does not affect
-        # descriptors that were already open, which is what lets a confined
-        # guest still read its stdin, and because a filter installed after
-        # `execve` would be too late by definition.
+        # The seam. Namespaces, then landlock, then seccomp — installed HERE,
+        # after the pipes are wired and before `execve`. The pipes come first
+        # because none of these three affect descriptors that were already open,
+        # which is what lets a confined guest still read its stdin; and all three
+        # come before `execve` because a filter installed after it is too late by
+        # definition.
+        if (want_ns != 0 && policy != 0) {
+            if (syscall(SYS_PRCTL, 38, 1, 0, 0, 0) < 0) { sys_exit(SPAWN_EXIT_NNP); }
+            var nsf = _spawn_ns_flags(policy, 0);
+            if (nsf != 0) {
+                if (is_ok(security_create_namespace(nsf)) == 0) { sys_exit(SPAWN_EXIT_NS); }
+                if ((nsf & NS_USER) != 0) {
+                    # Its own code: creating the namespace and mapping ids into
+                    # it are different privileges that fail on different hosts.
+                    if (_spawn_write_idmaps(uid, gid) != 0) { sys_exit(SPAWN_EXIT_IDMAP); }
+                }
+            }
+        }
         if (policy != 0) {
             if (SandboxPolicy_landlock_rules_len(policy) > 0) {
                 var _pl = SandboxPolicy_landlock_rules(policy);

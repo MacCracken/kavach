@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.11.6] — 2026-08-04
+
+### Added
+
+- **`persistent_spawn_confined_ns(command, policy, require_ns)` — namespaces on
+  the persistent path.** It applied landlock and seccomp and **nothing else**:
+  it takes a `SandboxPolicy`, which carries `network_enabled`, and acted on none
+  of it. `config_require_namespaces` (3.11.5) is a `SandboxConfig` field and
+  never reached here.
+
+  That mattered because the persistent path is the only kavach API with a stdin
+  channel, so it is what a consumer needing one must use — agnosai's cx tool
+  sandbox among them, where a `.cyx` guest could open a socket despite a policy
+  saying otherwise.
+
+  Opt-in and fail-closed, the same shape 3.11.5 gave `process_exec`: the guest
+  runs inside the policy's namespaces or exits `SPAWN_EXIT_NS` (123) /
+  `SPAWN_EXIT_IDMAP` (118), never with a network its policy denied.
+  `persistent_spawn_confined` keeps its signature and behaviour.
+
+  Namespaces are created **after** the pipes are wired and **before** landlock,
+  seccomp and `execve` — the pipes first because none of the three affect
+  already-open descriptors, which is what lets a confined guest still read its
+  stdin.
+
 ## [3.11.5] — 2026-08-04
 
 ### Added
