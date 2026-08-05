@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.11.5] — 2026-08-04
+
+### Added
+
+- **`config_require_namespaces(config, on)` — opt-in, fail-closed namespace
+  isolation without a rootfs.** 3.11.3 routed confinement on the policy, which
+  made `confine_child` reachable with no rootfs; namespaces were then tied to
+  the rootfs path because applying them unconditionally broke payloads on hosts
+  that restrict unprivileged user namespaces (Ubuntu 24.04 does). That left a
+  rootfs-less sandbox with **no network isolation**, silently.
+
+  It is now sayable. With the flag set, the rootfs-less path requests the
+  policy's namespaces and **fails closed** if the host refuses — the payload
+  exits `SPAWN_EXIT_NS` (123) or `SPAWN_EXIT_IDMAP` (118) rather than running
+  with a network the policy said it would not have. Off by default, so no
+  existing caller changes behaviour.
+
+- **`confine_last_stderr()` / `confine_last_stderr_len()`.**
+
+### Fixed
+
+- **The payload's stderr is its own stream.** Both child fds went to one pipe
+  and `backend_capture_finish` then hardcoded `ExecResult.stderr` to `""` — so
+  a caller was told the payload wrote nothing to stderr, which is a different
+  and false claim from "kavach did not keep it". A diagnostic like
+  `ls: cannot access ...` vanished entirely.
+
+  Two pipes now, both non-blocking and **drained round-robin**: draining one to
+  EOF and then the other deadlocks the moment the undrained pipe fills (64 KiB),
+  because the payload blocks writing to it and so never closes the first. The
+  regression test is shaped for exactly that — a small stdout and a stderr past
+  the buffer — since flooding stdout instead proves nothing, the capture having
+  its own cap.
+
+### Changed
+
+- `SandboxConfig` gains `require_ns` (size 80 → 88, appended, no existing field
+  offset moves).
+- `process_exec` sets `ExecResult.stderr` from the capture on both paths.
+
 ## [3.11.4] — 2026-08-04
 
 ### Security

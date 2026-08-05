@@ -418,13 +418,26 @@ timeout_ms, do_confine) {
     sys_pipe(&pipefd);
     var rfd = load32(&pipefd);
     var wfd = load32(&pipefd + 4);
+    # 3.11.5: a SECOND pipe, so the payload's stderr is its own stream. Until
+    # then both fds went to one pipe and `backend_capture_finish` then set
+    # `ExecResult.stderr` to "" — a field that always read empty, which is a
+    # different and false claim from "the payload wrote nothing".
+    var epipe[16];
+    sys_pipe(&epipe);
+    var erfd = load32(&epipe);
+    var ewfd = load32(&epipe + 4);
     var pid = kv_fork();
-    if (pid < 0) { sys_close(rfd); sys_close(wfd); return 0 - 1; }
+    if (pid < 0) {
+        sys_close(rfd); sys_close(wfd); sys_close(erfd); sys_close(ewfd);
+        return 0 - 1;
+    }
     if (pid == 0) {
         sys_close(rfd);
+        sys_close(erfd);
         kv_dup2(wfd, 1);
-        kv_dup2(wfd, 2);
+        kv_dup2(ewfd, 2);
         sys_close(wfd);
+        sys_close(ewfd);
         if (do_confine != 0) {
             confine_child(policy, rootfs, cgroup_path, uid, gid, seccomp_info, want_ns);
         }
@@ -434,42 +447,65 @@ timeout_ms, do_confine) {
         sys_exit(127);
     }
     sys_close(wfd);
+    sys_close(ewfd);
 
-    # Non-blocking, so the deadline can be checked between reads. A blocking
-    # read has nowhere to notice that time has passed.
+    # **Both ends non-blocking and drained round-robin** (3.11.5). Draining one
+    # to EOF and then the other deadlocks the moment the undrained pipe fills
+    # (64 KiB): the payload blocks writing to it, so it never closes the first,
+    # so the parent's read never finishes. The deadline needs the same
+    # non-blocking reads, so the two requirements share one loop.
+    syscall(SYS_FCNTL, rfd, 4, 2048);       # F_SETFL, O_NONBLOCK
+    syscall(SYS_FCNTL, erfd, 4, 2048);
+
     var deadline = 0;
-    if (timeout_ms > 0) {
-        deadline = mono_now_ns() / 1000000 + timeout_ms;
-        syscall(SYS_FCNTL, rfd, 4, 2048);   # F_SETFL, O_NONBLOCK
-    }
+    if (timeout_ms > 0) { deadline = mono_now_ns() / 1000000 + timeout_ms; }
 
     var total = 0;
-    var rgo = 1;
+    var etotal = 0;
+    var odone = 0;
+    var edone = 0;
     var killed = 0;
-    while (rgo == 1) {
-        var n = sys_read(rfd, buf + total, buflen - total);
-        if (n == 0) { rgo = 0; }
-        if (n > 0) {
-            total = total + n;
-            if (total >= buflen) { rgo = 0; }
+    while (odone == 0 || edone == 0) {
+        var moved = 0;
+        if (odone == 0) {
+            var n = sys_read(rfd, buf + total, buflen - 1 - total);
+            if (n == 0) { odone = 1; }
+            if (n > 0) {
+                total = total + n;
+                moved = 1;
+                if (total >= buflen - 1) { odone = 1; }
+            }
         }
-        if (n < 0) {
-            # EAGAIN when a deadline is set; a real error otherwise.
-            if (deadline == 0) { rgo = 0; }
-            else {
-                if (mono_now_ns() / 1000000 >= deadline) {
-                    # Kill FIRST: the payload's pipe end must close, or the
-                    # loop would wait on an EOF that is never coming.
-                    sys_kill(pid, 9);
-                    killed = 1;
-                    rgo = 0;
-                } else {
-                    kv_sleep_ms(CONFINE_POLL_MS);
-                }
+        if (edone == 0) {
+            var m = sys_read(erfd, &_confine_err_buf + etotal, CONFINE_ERR_MAX - 1 - etotal);
+            if (m == 0) { edone = 1; }
+            if (m > 0) {
+                etotal = etotal + m;
+                moved = 1;
+                if (etotal >= CONFINE_ERR_MAX - 1) { edone = 1; }
+            }
+        }
+        if (moved == 0) {
+            if (deadline > 0 && mono_now_ns() / 1000000 >= deadline) {
+                # Kill FIRST: the payload's pipe ends must close, or the loop
+                # would wait on an EOF that is never coming.
+                sys_kill(pid, 9);
+                killed = 1;
+                odone = 1;
+                edone = 1;
+            } else {
+                # An idle iteration with no deadline still sleeps rather than
+                # spinning — a non-blocking read that finds nothing returns at
+                # once, and retrying it burns a core for as long as the payload
+                # runs.
+                kv_sleep_ms(CONFINE_POLL_MS);
             }
         }
     }
     sys_close(rfd);
+    sys_close(erfd);
+    store8(&_confine_err_buf + etotal, 0);
+    _confine_err_len = etotal;
     _confine_last_timed_out = killed;
 
     var stbuf[4];
@@ -492,6 +528,24 @@ var _confine_last_exit = 0;
 
 # How often the drain loop looks again while a payload is running.
 var CONFINE_POLL_MS = 5;
+
+# Ceiling on captured stderr. A payload cannot make the parent allocate without
+# bound by writing diagnostics.
+var CONFINE_ERR_MAX = 65536;
+var _confine_err_buf[65536];
+var _confine_err_len = 0;
+
+# The payload's stderr from the most recent `confine_capture`, NUL-terminated.
+#
+# Its own stream since 3.11.5. Before that both fds went to one pipe and
+# `ExecResult.stderr` was hardcoded to "" — so a caller that checked it was told
+# the payload wrote nothing, which is a different claim from "we did not keep
+# it".
+#[must_use]
+fn confine_last_stderr() { return &_confine_err_buf; }
+
+#[must_use]
+fn confine_last_stderr_len() { return _confine_err_len; }
 
 # Whether the most recent `confine_capture` killed its payload on the deadline.
 var _confine_last_timed_out = 0;

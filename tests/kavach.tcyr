@@ -2980,6 +2980,120 @@ fn test_process_backend_reports_the_real_exit_code() {
     return 0;
 }
 
+# --- 3.11.5: stderr and opt-in namespaces ---------------------------------
+
+fn test_stderr_is_its_own_stream() {
+    test_group("stderr_is_its_own_stream");
+    # **`ExecResult.stderr` was always ""** — both fds went to one pipe and
+    # `backend_capture_finish` hardcoded the field empty, so a caller was told
+    # the payload wrote nothing to stderr rather than that kavach did not keep
+    # it. Two pipes now, drained round-robin.
+    var r = _t_tmo_run("/bin/sh -c", 30000, policy_minimal());
+    # The runtime guard blocks `sh`, so drive a binary that writes to stderr
+    # without one: `ls` on a missing path.
+    var e = _t_tmo_run("/bin/ls /nonexistent-kavach-probe", 30000, policy_minimal());
+    if (e == 0) { return 0; }
+
+    var err = str_from(ExecResult_stderr(e));
+    var got = 0;
+    if (str_len(err) > 0) { got = 1; }
+    assert_eq(got, 1, "a payload's stderr is captured, not discarded");
+    assert_eq(str_contains_cstr(err, "nonexistent-kavach-probe"), 1,
+    "...and it is the payload's own message");
+    assert_eq(str_contains_cstr(str_from(ExecResult_stdout(e)), "nonexistent-kavach-probe"), 0,
+    "...on its own stream, not merged into stdout");
+
+    var nonzero = 0;
+    if (ExecResult_exit_code(e) != 0) { nonzero = 1; }
+    assert_eq(nonzero, 1, "...alongside the real exit code");
+    return 0;
+}
+
+fn test_stdout_and_stderr_both_large_do_not_deadlock() {
+    test_group("both_streams_large");
+    # **Small stdout, huge stderr** — that is the shape that deadlocks a
+    # drain-stdout-to-EOF-first loop: the parent waits for a stdout EOF that
+    # never comes, because the payload is blocked writing to a stderr pipe
+    # nobody is reading. Flooding stdout instead proves nothing, since the
+    # capture stops at its own buffer cap and moves on.
+    #
+    # The runtime guard blocks a bare `sh`, so the payload is a script run by
+    # its own absolute path.
+    var body = "#!/bin/sh\necho stdout-marker\nawk 'BEGIN{for(i=0;i<6000;i++) print \"stderr-padding-line\"}' >&2\necho stdout-done\n";
+    file_write_all("/tmp/kavach-both-streams.sh", body, strlen(body));
+    sys_chmod("/tmp/kavach-both-streams.sh", 493);
+
+    var r = _t_tmo_run("/tmp/kavach-both-streams.sh", 30000, policy_minimal());
+    if (r == 0) { return 0; }
+
+    var out = str_from(ExecResult_stdout(r));
+    var err = str_from(ExecResult_stderr(r));
+    # **A silent skip here would hide the deadlock this test exists for**, so
+    # the flood is asserted rather than assumed. If the environment cannot run
+    # the payload at all, both streams are empty and there is nothing to check.
+    if (str_len(out) == 0 && str_len(err) == 0) { return 0; }
+    var flooded = 0;
+    if (str_len(err) > 65000) { flooded = 1; }
+    assert_eq(flooded, 1,
+    "the probe really did fill the stderr pipe past 64 KiB - without that the \
+drain order cannot deadlock and this test proves nothing");
+
+    assert_eq(str_contains_cstr(out, "stdout-marker"), 1,
+    "stdout is captured while stderr floods");
+    assert_eq(str_contains_cstr(out, "stdout-done"), 1,
+    "...including what the payload wrote AFTER the flood - it was never blocked");
+    assert_eq(str_contains_cstr(err, "stderr-padding-line"), 1, "...and stderr with it");
+    assert_eq(ExecResult_timed_out(r), 0,
+    "...without the drain deadlocking into its own deadline");
+    return 0;
+}
+
+fn test_require_namespaces_is_opt_in() {
+    test_group("require_namespaces_opt_in");
+    var c = config_new();
+    assert_eq(SandboxConfig_require_ns(c), 0,
+    "a fresh config does NOT require namespaces - applying them unconditionally \
+breaks payloads on hosts that restrict unprivileged user namespaces");
+
+    config_require_namespaces(c, 1);
+    assert_eq(SandboxConfig_require_ns(c), 1, "...and a caller can ask for them");
+
+    # Opting in must be a real request, not a stored flag: with it set and no
+    # rootfs, the payload either runs inside namespaces or fails closed.
+    SandboxConfig_set_backend(c, Backend.PROCESS);
+    SandboxConfig_set_policy(c, policy_basic());
+    config_timeout_ms(c, 30000);
+    var s = sandbox_create(c);
+    if (s == 0) { return 0; }
+    sandbox_transition(s, SandboxState.RUNNING);
+    var r = sandbox_exec(s, "/usr/bin/id -u");
+    sandbox_destroy(s);
+    if (r == 0) { return 0; }
+
+    var code = ExecResult_exit_code(r);
+    var out = str_from(ExecResult_stdout(r));
+    # **`/bin/true` cannot tell the two outcomes apart** — it exits 0 whether or
+    # not namespaces were created, so asserting on its code passes with the flag
+    # ignored. `id -u` can: inside a new USER namespace the caller is mapped to
+    # root and reports 0, outside it reports the real uid.
+    #
+    # So the acceptable outcomes are exactly two: it ran and saw uid 0, or it
+    # was refused cleanly. Running as the real uid means the request was
+    # silently dropped.
+    if (code == 123 || code == 118) { return 0; }
+    assert_eq(code, 0, "an opt-in namespace request either runs or fails closed");
+    # **Not `contains "0"`** — the real uid 1000 contains a zero, so that
+    # substring passed with the flag ignored. Exactly "0", plus its newline.
+    var isroot = 0;
+    if (str_len(out) <= 2 && str_len(out) > 0) {
+        if (load8(str_data(out)) == 48) { isroot = 1; }
+    }
+    assert_eq(isroot, 1,
+    "...and inside a user namespace the payload is uid 0 - the request was honoured, \
+not stored and ignored");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_backend_parse();
@@ -3161,6 +3275,9 @@ fn main() {
     test_timeout_ms_is_enforced();
     test_timeout_does_not_truncate_fast_payloads();
     test_process_backend_reports_the_real_exit_code();
+    test_stderr_is_its_own_stream();
+    test_stdout_and_stderr_both_large_do_not_deadlock();
+    test_require_namespaces_is_opt_in();
     return assert_summary();
 }
 

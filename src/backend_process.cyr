@@ -93,11 +93,17 @@ fn process_exec(sandbox, command) {
                 sec = result_unwrap(sres);
             }
         }
-        # Namespaces only where they were already attempted: with a rootfs.
-        # The rootfs-less arm is the one 3.11.3 added, and it must not make
-        # unprivileged namespace creation a precondition for seccomp.
+        # Namespaces where they were already attempted (with a rootfs), or
+        # where the caller explicitly asked for them (3.11.5). The rootfs-less
+        # arm is the one 3.11.3 added, and it must not make unprivileged
+        # namespace creation a precondition for seccomp by default — but a
+        # caller who needs network isolation can now say so and get a
+        # fail-closed refusal instead of silence.
         var want_ns = 0;
         if (rootfs != 0) { want_ns = 1; }
+        if (cfg != 0) {
+            if (SandboxConfig_require_ns(cfg) == 1) { want_ns = 1; }
+        }
         n = confine_capture(args, pol, rootfs, cgroup_path, sec, buf, PROCESS_MAX_OUTPUT, want_ns,
         tmo, 1);
         cgroup_teardown(cgroup_path);
@@ -108,6 +114,8 @@ fn process_exec(sandbox, command) {
         if (rr != 0) {
             ExecResult_set_exit_code(rr, confine_last_exit());
             ExecResult_set_timed_out(rr, confine_last_timed_out());
+            # 3.11.5: the payload's own stderr, where this field was "".
+            ExecResult_set_stderr(rr, confine_last_stderr());
         }
         return rr;
     }
@@ -126,6 +134,7 @@ fn process_exec(sandbox, command) {
     if (pr != 0) {
         ExecResult_set_exit_code(pr, confine_last_exit());
         ExecResult_set_timed_out(pr, confine_last_timed_out());
+        ExecResult_set_stderr(pr, confine_last_stderr());
     }
     return pr;
 }

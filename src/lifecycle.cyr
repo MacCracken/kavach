@@ -98,9 +98,11 @@ struct SandboxConfig {
     workdir;
     rootfs;
     externalization;
+    require_ns;
 }
 
-var SANDBOX_CONFIG_SIZE = 80;
+# 88 (3.11.5): `require_ns` appended, so no existing field offset moves.
+var SANDBOX_CONFIG_SIZE = 88;
 
 # Defaults match Rust's SandboxConfig::default():
 #   backend=Process, policy=basic(), timeout_ms=30000, inner_backend=-1 (none)
@@ -120,6 +122,24 @@ fn config_new() {
 fn config_backend(c, b)        { SandboxConfig_set_backend(c, b); return c; }
 fn config_policy(c, p)         { SandboxConfig_set_policy(c, p); return c; }
 fn config_timeout_ms(c, ms)    { SandboxConfig_set_timeout_ms(c, ms); return c; }
+
+# Require the namespaces the policy asks for, even without a rootfs.
+#
+# **Off by default, and that default is a deliberate trade** (3.11.5). Namespace
+# isolation on a rootfs-less sandbox needs a new *user* namespace when
+# unprivileged, and Ubuntu 24.04 restricts those outright — so applying it
+# unconditionally turns payloads that used to run into payloads that do not run
+# at all, on a stock CI host. 3.11.3 briefly did exactly that.
+#
+# With this set, the rootfs-less path requests the policy's namespaces and
+# **fails closed** if the host refuses: the payload exits `SPAWN_EXIT_NS` (123)
+# or `SPAWN_EXIT_IDMAP` (118) rather than running with the network the policy
+# said it would not have. That is the right answer for a caller who needs the
+# guarantee, and the wrong default for one who does not know they are asking.
+#
+# Off, a rootfs-less sandbox gets seccomp and landlock and **no network
+# isolation** — which is what it silently got before 3.11.5, now sayable.
+fn config_require_namespaces(c, on) { SandboxConfig_set_require_ns(c, on); return c; }
 fn config_inner_backend(c, b)  { SandboxConfig_set_inner_backend(c, b); return c; }
 fn config_agent_id(c, s)       { SandboxConfig_set_agent_id(c, s); return c; }
 fn config_hostname(c, s)       { SandboxConfig_set_hostname(c, s); return c; }
