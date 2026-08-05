@@ -57,6 +57,10 @@ fn process_exec(sandbox, command) {
 
     var buf = alloc(PROCESS_MAX_OUTPUT);
     var n = 0;
+    # The deadline the config carries — accepted since forever, enforced since
+    # 3.11.4.
+    var tmo = 0;
+    if (cfg != 0) { tmo = SandboxConfig_timeout_ms(cfg); }
     # A sandbox naming a rootfs must run INSIDE it. The stdlib's exec_capture
     # forks and execs on the host with no child-side seam, so a rootfs-bearing
     # sandbox takes kavach's own confined capture instead. Before 3.9.1 there was
@@ -94,20 +98,36 @@ fn process_exec(sandbox, command) {
         # unprivileged namespace creation a precondition for seccomp.
         var want_ns = 0;
         if (rootfs != 0) { want_ns = 1; }
-        n = confine_capture(args, pol, rootfs, cgroup_path, sec, buf, PROCESS_MAX_OUTPUT, want_ns);
+        n = confine_capture(args, pol, rootfs, cgroup_path, sec, buf, PROCESS_MAX_OUTPUT, want_ns,
+        tmo, 1);
         cgroup_teardown(cgroup_path);
         var end_rf = mono_now_ns();
         var rr = backend_capture_finish(buf, n, PROCESS_MAX_OUTPUT, "exec failed", start_ns, end_rf);
         # Surface the payload's real exit code. Reporting 0 for a command that
         # never ran is how the missing-rootfs bug looked healthy for so long.
-        if (rr != 0) { ExecResult_set_exit_code(rr, confine_last_exit()); }
+        if (rr != 0) {
+            ExecResult_set_exit_code(rr, confine_last_exit());
+            ExecResult_set_timed_out(rr, confine_last_timed_out());
+        }
         return rr;
     }
-    n = exec_capture(args, buf, PROCESS_MAX_OUTPUT);
+
+    # **The unconfined path takes the same capture** (3.11.4), with
+    # `do_confine = 0`. It used the stdlib's `exec_capture`, which discards the
+    # child's wait status and has no seam for a deadline — so every command that
+    # ran reported `exit_code = 0` (measured: `/bin/false`, real exit 1, and
+    # `/bin/ls` on a missing path, real exit 2, both came back 0) and no
+    # `timeout_ms` was ever enforced. One capture, so neither can drift again.
+    n = confine_capture(args, 0, 0, cgroup_path, 0, buf, PROCESS_MAX_OUTPUT, 0, tmo, 0);
     cgroup_teardown(cgroup_path);
     var end_ns = mono_now_ns();
 
-    return backend_capture_finish(buf, n, PROCESS_MAX_OUTPUT, "exec failed", start_ns, end_ns);
+    var pr = backend_capture_finish(buf, n, PROCESS_MAX_OUTPUT, "exec failed", start_ns, end_ns);
+    if (pr != 0) {
+        ExecResult_set_exit_code(pr, confine_last_exit());
+        ExecResult_set_timed_out(pr, confine_last_timed_out());
+    }
+    return pr;
 }
 
 fn process_health(sandbox) { return 1; }

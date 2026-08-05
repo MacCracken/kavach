@@ -2910,6 +2910,76 @@ fn test_landlock_denies_a_path_outside_its_rules() {
 }
 
 
+# --- 3.11.4: the deadline and the exit code -------------------------------
+
+fn _t_tmo_run(cmd, ms, pol) {
+    var c = config_new();
+    SandboxConfig_set_backend(c, Backend.PROCESS);
+    if (pol != 0) { SandboxConfig_set_policy(c, pol); }
+    config_timeout_ms(c, ms);
+    var s = sandbox_create(c);
+    if (s == 0) { return 0; }
+    sandbox_transition(s, SandboxState.RUNNING);
+    var r = sandbox_exec(s, cmd);
+    sandbox_destroy(s);
+    return r;
+}
+
+fn test_timeout_ms_is_enforced() {
+    test_group("timeout_ms_is_enforced");
+    # **Measured against 3.11.2**: a 1000 ms deadline ran `/bin/sleep 8` for
+    # 8001 ms and reported timed_out = 0. The field was accepted, stored,
+    # scored, and read by `wasm_exec` alone.
+    var t0 = mono_now_ns() / 1000000;
+    var r = _t_tmo_run("/bin/sleep 8", 1000, policy_minimal());
+    var dt = mono_now_ns() / 1000000 - t0;
+    if (r == 0) { return 0; }
+
+    assert_eq(ExecResult_timed_out(r), 1, "a payload past its deadline is killed");
+    var prompt = 0;
+    if (dt < 5000) { prompt = 1; }
+    assert_eq(prompt, 1, "...promptly, not after the payload finishes on its own");
+    return 0;
+}
+
+fn test_timeout_does_not_truncate_fast_payloads() {
+    test_group("timeout_does_not_truncate");
+    var r = _t_tmo_run("/bin/echo within-budget", 30000, policy_minimal());
+    if (r == 0) { return 0; }
+    assert_eq(ExecResult_timed_out(r), 0, "a payload inside its deadline is not a timeout");
+    assert_eq(str_contains_cstr(str_from(ExecResult_stdout(r)), "within-budget"), 1,
+    "...and its output is not truncated by the poll loop");
+    assert_eq(ExecResult_exit_code(r), 0, "...and its exit code is its own");
+    return 0;
+}
+
+fn test_process_backend_reports_the_real_exit_code() {
+    test_group("process_reports_real_exit_code");
+    # **Measured against 3.11.2**: `backend_capture_finish` hardcoded
+    # exit_code = 0, and `exec_capture` discarded the wait status, so
+    # /bin/false (real exit 1) and /bin/ls on a missing path (real exit 2)
+    # both came back 0. An unconfined policy took that path.
+    var f = _t_tmo_run("/bin/false", 30000, policy_minimal());
+    if (f == 0) { return 0; }
+    var nonzero = 0;
+    if (ExecResult_exit_code(f) != 0) { nonzero = 1; }
+    assert_eq(nonzero, 1, "/bin/false reports a NON-ZERO exit through an unconfined policy");
+
+    var t = _t_tmo_run("/bin/true", 30000, policy_minimal());
+    if (t != 0) {
+        assert_eq(ExecResult_exit_code(t), 0, "...and /bin/true still reports 0");
+    }
+
+    # And the confining path, which has reported it since 3.11.3.
+    var cf = _t_tmo_run("/bin/false", 30000, policy_basic());
+    if (cf != 0) {
+        var cnz = 0;
+        if (ExecResult_exit_code(cf) != 0) { cnz = 1; }
+        assert_eq(cnz, 1, "a CONFINING policy reports it too - one capture, no drift");
+    }
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_backend_parse();
@@ -3088,6 +3158,9 @@ fn main() {
     test_landlock_rules_are_expressible();
     test_seccomp_applies_without_a_rootfs();
     test_landlock_denies_a_path_outside_its_rules();
+    test_timeout_ms_is_enforced();
+    test_timeout_does_not_truncate_fast_payloads();
+    test_process_backend_reports_the_real_exit_code();
     return assert_summary();
 }
 

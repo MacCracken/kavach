@@ -375,7 +375,21 @@ fn spawn_seccomp_available() {
 # own fork here rather than a flag passed down.
 #
 # Returns bytes captured, or -1.
-fn confine_capture(args, policy, rootfs, cgroup_path, seccomp_info, buf, buflen, want_ns) {
+# `timeout_ms` (3.11.4) — wall-clock budget, 0 for none. On expiry the payload
+# is SIGKILLed and reaped, and `confine_last_timed_out()` reports it.
+#
+# **`SandboxConfig.timeout_ms` was accepted and ignored by every backend except
+# WASM.** A config with a 1000 ms deadline ran `/bin/sleep 8` for 8001 ms and
+# reported `timed_out = 0` — the bound was not enforced and the flag said it
+# had been. `process_exec` now passes the config's deadline here.
+#
+# `do_confine` (3.11.4) — whether to run `confine_child` at all. 0 gives a plain
+# fork/exec capture, which is what the non-confining path used to get from the
+# stdlib's `exec_capture`. Routing it through here instead is what gives that
+# path a real exit code and a deadline; `exec_capture` discards the wait status
+# and has no seam for either.
+fn confine_capture(args, policy, rootfs, cgroup_path, seccomp_info, buf, buflen, want_ns,
+timeout_ms, do_confine) {
     # ⛔ LINUX ONLY — the fork/confine/execve/capture path. agnos has no fork by design and its
     # sandboxing goes through backend_sy_agnos, not this file.
     # ⚠ -1, never a fabricated success: a caller must not receive an empty capture buffer and
@@ -411,24 +425,53 @@ fn confine_capture(args, policy, rootfs, cgroup_path, seccomp_info, buf, buflen,
         kv_dup2(wfd, 1);
         kv_dup2(wfd, 2);
         sys_close(wfd);
-        confine_child(policy, rootfs, cgroup_path, uid, gid, seccomp_info, want_ns);
+        if (do_confine != 0) {
+            confine_child(policy, rootfs, cgroup_path, uid, gid, seccomp_info, want_ns);
+        }
         kv_execve(vec_get(args, 0), argv, envp);
         # execve failed — 127 is the shell's "command not found", and it is
         # visible to the caller instead of being swallowed into a success.
         sys_exit(127);
     }
     sys_close(wfd);
+
+    # Non-blocking, so the deadline can be checked between reads. A blocking
+    # read has nowhere to notice that time has passed.
+    var deadline = 0;
+    if (timeout_ms > 0) {
+        deadline = mono_now_ns() / 1000000 + timeout_ms;
+        syscall(SYS_FCNTL, rfd, 4, 2048);   # F_SETFL, O_NONBLOCK
+    }
+
     var total = 0;
     var rgo = 1;
+    var killed = 0;
     while (rgo == 1) {
         var n = sys_read(rfd, buf + total, buflen - total);
-        if (n <= 0) { rgo = 0; }
-        else {
+        if (n == 0) { rgo = 0; }
+        if (n > 0) {
             total = total + n;
             if (total >= buflen) { rgo = 0; }
         }
+        if (n < 0) {
+            # EAGAIN when a deadline is set; a real error otherwise.
+            if (deadline == 0) { rgo = 0; }
+            else {
+                if (mono_now_ns() / 1000000 >= deadline) {
+                    # Kill FIRST: the payload's pipe end must close, or the
+                    # loop would wait on an EOF that is never coming.
+                    sys_kill(pid, 9);
+                    killed = 1;
+                    rgo = 0;
+                } else {
+                    kv_sleep_ms(CONFINE_POLL_MS);
+                }
+            }
+        }
     }
     sys_close(rfd);
+    _confine_last_timed_out = killed;
+
     var stbuf[4];
     store32(&stbuf, 0);
     kv_waitpid(pid, &stbuf, 0);
@@ -446,6 +489,15 @@ fn confine_capture(args, policy, rootfs, cgroup_path, seccomp_info, buf, buflen,
 # payload that never ran — which is exactly how the missing-rootfs bug stayed
 # invisible.
 var _confine_last_exit = 0;
+
+# How often the drain loop looks again while a payload is running.
+var CONFINE_POLL_MS = 5;
+
+# Whether the most recent `confine_capture` killed its payload on the deadline.
+var _confine_last_timed_out = 0;
+
+#[must_use]
+fn confine_last_timed_out() { return _confine_last_timed_out; }
 
 #[must_use]
 fn confine_last_exit() { return _confine_last_exit; }

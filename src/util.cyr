@@ -474,3 +474,23 @@ fn _split_command(cmdline) {
     }
     return args;
 }
+
+# Sleep `ms` milliseconds.
+#
+# 3.11.4: the drain loop in `confine_capture` polls a non-blocking pipe, and
+# without a sleep between reads it burns a full core for as long as the payload
+# runs. agnosai measured exactly that shape in its own capture — 100% CPU for
+# the duration of a `sleep 2` — before adding the idle sleep.
+fn kv_sleep_ms(ms): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    # 35 = nanosleep on x86_64 Linux. Spelled numerically because the stdlib
+    # exposes no constant for it and kavach must not depend on one appearing.
+    var ts[16];
+    store64(&ts, ms / 1000);
+    store64(&ts + 8, (ms % 1000) * 1000000);
+    return syscall(35, &ts, 0);
+    #endif
+}

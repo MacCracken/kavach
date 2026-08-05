@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.11.4] — 2026-08-04
+
+### Security
+
+- **`SandboxConfig.timeout_ms` is enforced on the process backend.** It was
+  accepted, stored, scored, and read by `wasm_exec` alone — 14 of 15 registered
+  backends dropped it. Measured on 3.11.2: a config with `timeout_ms = 1000`
+  running `/bin/sleep 8` took **8001 ms** and reported `timed_out = 0`. A
+  sandboxed payload that never exits hung its caller forever, and the flag said
+  otherwise.
+
+  `confine_capture` takes a deadline: the capture pipe goes non-blocking, the
+  drain loop checks the clock between reads and sleeps 5 ms when idle, and on
+  expiry the payload is SIGKILLed — kill first, so its pipe end closes and the
+  loop is not left waiting on an EOF that is never coming — then reaped.
+  `confine_last_timed_out()` reports it and `process_exec` sets
+  `ExecResult.timed_out` from it.
+
+  The idle sleep is not a nicety: polling a non-blocking pipe without one burns
+  a full core for as long as the payload runs.
+
+### Fixed
+
+- **The process backend reports the payload's real exit code on every path.**
+  The unconfined path used the stdlib's `exec_capture`, which waits on the child
+  and discards the status, and `backend_capture_finish` hardcodes 0 — so
+  `/bin/false` (real exit 1) and `/bin/ls` on a missing path (real exit 2) both
+  came back **0**, and a failing payload was indistinguishable from a successful
+  one. 3.11.3 fixed it only for policies that request confinement.
+
+  Both paths now go through `confine_capture`, which already decoded the status
+  correctly; the unconfined one passes `do_confine = 0` for a plain
+  fork/exec/capture. One capture, so the two cannot drift apart again — and the
+  deadline above applies to both for the same reason.
+
+### Added
+
+- `confine_last_timed_out()` — whether the most recent `confine_capture` killed
+  its payload on the deadline.
+- `kv_sleep_ms(ms)` — the drain loop's idle wait.
+
+### Changed
+
+- `confine_capture` takes `timeout_ms` and `do_confine`. Both are new trailing
+  parameters; `process_exec` is the only in-tree caller.
+
 ## [3.11.3] — 2026-08-04
 
 ### Security
@@ -63,12 +109,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   running at all. Caught by CI, not locally, because the developer host permits
   them.
 
-  `_spawn_ns_flags` is unchanged — it answers what a policy *wants*, and its
-  contract test still holds. What changed is what `confine_child` *applies*: the
-  rootfs-less path takes seccomp and landlock, neither of which needs a
-  privilege, and does not claim network isolation the platform was never going
-  to grant. Namespaces stay with rootfs-bearing sandboxes, which is where they
-  have always been.
+  `confine_child` and `confine_capture` take a **`want_ns`** parameter. It is 1
+  for every caller that predates 3.11.3, so their behaviour is untouched — in
+  particular `sandbox_spawn`, which has a fail-closed namespace contract with a
+  test asserting a payload exits 123/118 rather than running less isolated than
+  its policy promised. It is 0 for exactly one caller: the rootfs-less capture
+  3.11.3 added. That path previously applied **nothing**, so seccomp + landlock
+  is a strict gain, and it claims no network isolation it did not get — a caller
+  wanting that guarantee uses a rootfs-bearing sandbox or `sandbox_spawn`.
+
+  A first attempt gated namespaces inside `confine_child` for every caller. That
+  silently broke `sandbox_spawn`'s fail-closed contract, and the resulting
+  assertion failure surfaced as a **SIGSEGV** rather than a message, because
+  `spawn_exit_name` returns 0 for a non-confinement code and the test handed
+  that straight to `streq`. The test now null-checks first, so an unexpected
+  code fails with a sentence instead of a signal.
 
 - `security_apply_landlock` walked `count` entries of `rules` without bounding
   by the list, so a deny-all request (a non-zero count over an empty list) would
