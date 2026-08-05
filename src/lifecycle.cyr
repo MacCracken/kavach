@@ -55,6 +55,17 @@ fn valid_transition(from, to) {
 
 # ---- ExecResult -----------------------------------------------------------
 
+# `stdout_len` / `stderr_len` (3.11.7): the artifact's TRUE byte length, or -1
+# when the caller did not supply one and `strlen` is the right answer.
+#
+# They exist because the externalization gate measured every artifact with
+# `strlen`, which is not a length — it is a distance to the first NUL. A payload
+# whose stdout contained an embedded NUL was scanned only up to it, so a
+# credential sitting after one was **released as PASS**. Appended after
+# `timed_out` so no existing field offset moves.
+#
+# NB: keep field comments OUT of this struct body — `#derive(accessors)` reads
+# each line as a field.
 #derive(accessors)
 struct ExecResult {
     exit_code;
@@ -62,9 +73,11 @@ struct ExecResult {
     stderr;
     duration_ms;
     timed_out;
+    stdout_len;
+    stderr_len;
 }
 
-var EXEC_RESULT_SIZE = 40;
+var EXEC_RESULT_SIZE = 56;
 
 fn exec_result_new() {
     var r = alloc(EXEC_RESULT_SIZE);
@@ -72,7 +85,49 @@ fn exec_result_new() {
     while (i < EXEC_RESULT_SIZE) { store64(r + i, 0); i = i + 8; }
     ExecResult_set_stdout(r, "");
     ExecResult_set_stderr(r, "");
+    # -1, not 0, so "unset" and "genuinely empty" stay distinguishable — a 0
+    # sentinel would make every default-constructed result claim its stdout is
+    # zero bytes and silence the gate entirely.
+    ExecResult_set_stdout_len(r, 0 - 1);
+    ExecResult_set_stderr_len(r, 0 - 1);
     return r;
+}
+
+# Set stdout together with its true length — the length-carrying setter.
+#
+# Use this whenever the artifact may contain a NUL. The bare
+# `ExecResult_set_stdout` leaves the stored length untouched, which is correct
+# for a cstring and **stale** if a length was set earlier for a different
+# buffer, so do not mix the two on one result.
+fn exec_result_set_stdout_n(r, p, n) {
+    ExecResult_set_stdout(r, p);
+    ExecResult_set_stdout_len(r, n);
+    return r;
+}
+
+fn exec_result_set_stderr_n(r, p, n) {
+    ExecResult_set_stderr(r, p);
+    ExecResult_set_stderr_len(r, n);
+    return r;
+}
+
+# The artifact's length: the supplied one when there is one, else `strlen`.
+#
+# Every reader of an `ExecResult` artifact goes through these two rather than
+# calling `strlen` directly, so a caller that supplied a length gets it honoured
+# everywhere and one that did not keeps the pre-3.11.7 behaviour exactly.
+#[must_use]
+fn exec_result_stdout_len(r) {
+    var n = ExecResult_stdout_len(r);
+    if (n >= 0) { return n; }
+    return strlen(ExecResult_stdout(r));
+}
+
+#[must_use]
+fn exec_result_stderr_len(r) {
+    var n = ExecResult_stderr_len(r);
+    if (n >= 0) { return n; }
+    return strlen(ExecResult_stderr(r));
 }
 
 # ---- SandboxConfig --------------------------------------------------------

@@ -1,10 +1,18 @@
-# Neither exec path applies seccomp or landlock without a rootfs
+# Neither exec path applies seccomp or landlock without a rootfs — RESOLVED
 
 **Filed by**: agnosai (Rust → Cyrius port, M7 — the cx tool-sandbox bites)
 **Date**: 2026-08-04
 **Version**: kavach 3.11.2
 **Severity**: Critical — a policy with `seccomp_enabled = 1` runs its payload
 with no confinement at all, and reports success.
+
+**Status:** ✅ **RESOLVED in kavach 3.11.3** (namespaces completed in 3.11.5/3.11.6).
+Confinement is routed on the POLICY, not the rootfs — `backend_process.cyr:81`
+takes the confined seam when `rootfs != 0 || policy_wants_confinement(pol) == 1`
+— and the persistent path gained `persistent_spawn_confined` / `_ns`. Verified
+against live code 2026-08-05 during the 3.11.7 cut; covered by
+`policy_wants_confinement`, `landlock_denies_a_path_outside_its_rules`,
+`landlock_denies_mutation_outside_allowed_path` and `persistent_namespaces`.
 
 ## Summary
 

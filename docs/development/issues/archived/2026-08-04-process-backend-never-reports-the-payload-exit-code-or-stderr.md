@@ -1,4 +1,4 @@
-# Process backend never reports the payload's exit code or stderr
+# Process backend never reports the payload's exit code or stderr — RESOLVED
 
 **Filed by**: agnosai (Rust → Cyrius port, M7 — `kavach_bridge`'s exec half)
 **Date**: 2026-08-04
@@ -10,6 +10,12 @@ succeeded, and its diagnostics are discarded.
 is the same defect on the OCI backend. This one is on `Backend.PROCESS`, which
 is what `config_new` selects by default and therefore what most consumers hit
 first.
+
+**Status:** ✅ **RESOLVED in kavach 3.11.4** (stderr stream split in 3.11.5).
+`backend_process.cyr:115-137` stores `confine_last_exit()` and
+`confine_last_stderr()` on both the confined and unconfined paths. Verified
+against live code 2026-08-05 during the 3.11.7 cut; covered by
+`process_reports_real_exit_code` and `stderr_is_its_own_stream`.
 
 ## What happens
 

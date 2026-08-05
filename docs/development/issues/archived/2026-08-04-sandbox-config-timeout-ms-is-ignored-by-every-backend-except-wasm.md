@@ -1,10 +1,17 @@
-# `SandboxConfig.timeout_ms` is ignored by every backend except WASM
+# `SandboxConfig.timeout_ms` is ignored by every backend except WASM — RESOLVED
 
 **Filed by**: agnosai (Rust → Cyrius port, M7 — `kavach_bridge`'s exec half)
 **Date**: 2026-08-04
 **Version**: kavach 3.11.2
 **Severity**: High — a sandboxed payload that never exits hangs its caller
 forever, and `ExecResult.timed_out` reports `0` while it does.
+
+**Status:** ✅ **RESOLVED in kavach 3.11.4**. `backend_process.cyr:63` reads
+`SandboxConfig_timeout_ms(cfg)` and threads it into `confine_capture`, which
+enforces it in the drain loop. Verified against live code 2026-08-05 during the
+3.11.7 cut; covered by `timeout_ms_is_enforced` (a 1000 ms deadline on
+`/bin/sleep 8` must report `timed_out` and return in under 5 s) and
+`timeout_does_not_truncate` for the negative case.
 
 ## What happens
 

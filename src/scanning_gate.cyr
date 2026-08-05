@@ -20,12 +20,47 @@ fn determine_verdict(worst, policy) {
 # Combine stdout + "\n" + stderr into a fresh heap cstr. Newline separator
 # prevents false positives at the stdout/stderr boundary.
 fn _concat_with_nl(a, b) {
-    var alen = strlen(a);
-    var blen = strlen(b);
+    return _concat_scan_buf(a, strlen(a), b, strlen(b));
+}
+
+# The buffer the three scanners actually see: `alen` bytes of `a`, a newline,
+# `blen` bytes of `b`, NUL-terminated — with every **interior** NUL rewritten to
+# a newline.
+#
+# **The rewrite is what makes `strlen` correct rather than what works around
+# it.** The scanners take a cstring and measure it themselves; before 3.11.7
+# they were handed a buffer whose first NUL might be nowhere near its end, so
+# `secrets_scan` stopped there and a credential after it was never looked at —
+# measured, an identical 23 bytes returning PASS with a NUL and BLOCK with a
+# space. Guaranteeing the buffer contains no interior NUL makes every scanner
+# see the whole artifact with no change to any of them.
+#
+# **A newline, not a space or a NUL-strip.** `_concat_with_nl` already separates
+# stdout from stderr with one for exactly this reason — it is a boundary the
+# scanners are known to handle and no secret, code or data pattern contains it,
+# so substituting it neither hides a match nor invents one. Dropping the bytes
+# instead would splice two unrelated spans together and could fabricate a
+# pattern that was never in the artifact.
+#
+# The artifact itself is untouched: this is a scanning copy. What the caller
+# releases is still its own bytes, NULs and all.
+fn _concat_scan_buf(a, alen, b, blen) {
     var buf = alloc(alen + blen + 2);
-    memcpy(buf, a, alen);
+    var i = 0;
+    while (i < alen) {
+        var c = load8(a + i);
+        if (c == 0) { c = 10; }
+        store8(buf + i, c);
+        i = i + 1;
+    }
     store8(buf + alen, 10);
-    memcpy(buf + alen + 1, b, blen);
+    var j = 0;
+    while (j < blen) {
+        var d = load8(b + j);
+        if (d == 0) { d = 10; }
+        store8(buf + alen + 1 + j, d);
+        j = j + 1;
+    }
     store8(buf + alen + 1 + blen, 0);
     return buf;
 }
@@ -46,7 +81,13 @@ fn gate_apply(result, policy) {
 
     var stdout = ExecResult_stdout(result);
     var stderr = ExecResult_stderr(result);
-    var total = strlen(stdout) + strlen(stderr);
+    # The artifact's TRUE lengths (3.11.7). `strlen` is a distance to the first
+    # NUL, not a length, and using it here understated the size cap as well as
+    # the scan — an artifact with an embedded NUL under-reported its own size to
+    # the limit it was being checked against.
+    var olen = exec_result_stdout_len(result);
+    var elen = exec_result_stderr_len(result);
+    var total = olen + elen;
     if (total > ExternalizationPolicy_max_artifact_size_bytes(policy)) {
         scan_result_push(sr, finding_new("gate", Severity.CRITICAL,
         "size_limit", "output size exceeds limit", 0));
@@ -54,7 +95,7 @@ fn gate_apply(result, policy) {
         return sr;
     }
 
-    var combined = _concat_with_nl(stdout, stderr);
+    var combined = _concat_scan_buf(stdout, olen, stderr, elen);
     secrets_scan(combined, sr);
     code_scan(combined, sr);
     data_scan(combined, sr);
@@ -68,10 +109,21 @@ fn gate_apply(result, policy) {
     # the policy opts in (ExternalizationPolicy.redact_secrets == 1).
     if (verdict == ScanVerdict.WARN) {
         if (ExternalizationPolicy_redact_secrets(policy) == 1) {
-            var red_out = secrets_redact(stdout);
-            if (red_out != 0) { ExecResult_set_stdout(result, red_out); }
-            var red_err = secrets_redact(stderr);
-            if (red_err != 0) { ExecResult_set_stderr(result, red_err); }
+            # Redacted over the TRUE lengths, and the produced lengths stored
+            # back. Redaction copies non-matching spans verbatim, so its output
+            # carries any NUL the input had — leaving the stored length behind
+            # would describe the new buffer with the old buffer's size, and
+            # re-deriving it with `strlen` would truncate the artifact at the
+            # first NUL on the way out. Both are how a partial redaction gets
+            # released as a whole one.
+            var ol[8];
+            store64(&ol, 0);
+            var red_out = secrets_redact_n(stdout, olen, &ol);
+            if (red_out != 0) { exec_result_set_stdout_n(result, red_out, load64(&ol)); }
+            var el[8];
+            store64(&el, 0);
+            var red_err = secrets_redact_n(stderr, elen, &el);
+            if (red_err != 0) { exec_result_set_stderr_n(result, red_err, load64(&el)); }
         }
     }
     return sr;

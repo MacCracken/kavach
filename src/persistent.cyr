@@ -104,6 +104,22 @@ fn persistent_spawn(command) {
 }
 
 fn _persistent_spawn_inner(command, policy, seccomp_info, want_ns, uid, gid) {
+    # ⛔ LINUX ONLY — forks a child and installs `prctl`/namespaces/landlock/
+    # seccomp on it. agnos has no fork by design and its sandboxing goes through
+    # backend_sy_agnos.
+    # ⚠ 0, the same "could not spawn" the guards below return: a caller must not
+    # receive a guest handle for a child that does not exist.
+    #
+    # The body is **excluded** from the agnos build rather than merely
+    # unreachable on it. `SYS_PRCTL` is not in the agnos syscall enum, and an
+    # undefined symbol is a hard error whether or not the line can execute —
+    # which, because `cyrius build` auto-prepends every `[deps.*]` module, fails
+    # any `--agnos` consumer that declares `[deps.kavach]` at all. The namespace
+    # work in 3.11.6 is what introduced the reference.
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
     if (is_safe_argument(command) == 0) { return 0; }
     var guard_cfg = runtime_guard_config_default();
     var violations = check_command(command, guard_cfg);
@@ -194,6 +210,7 @@ fn _persistent_spawn_inner(command, policy, seccomp_info, want_ns, uid, gid) {
     PersistentGuest_set_stdout_fd(g, out_rfd);
     PersistentGuest_set_alive(g, 1);
     return g;
+    #endif
 }
 
 # Write `len` bytes to the guest's stdin. -> bytes written, or -1 if the guest is

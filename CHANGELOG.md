@@ -7,6 +7,132 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.11.7] — 2026-08-05
+
+### Security
+
+- **The externalization gate measured artifacts with `strlen`, so a secret after
+  an embedded NUL was released as PASS.** `strlen` is not a length — it is a
+  distance to the first NUL — and every measurement in the scan path used it:
+  the size cap at `gate_apply`, `_concat_with_nl`'s two `memcpy` bounds, and
+  each scanner's own `n`. An artifact whose stdout contained a NUL was therefore
+  scanned only up to it.
+
+  Measured, on identical 23-byte payloads differing in one separator byte:
+
+  | stdout | verdict |
+  |---|---|
+  | `"ok" NUL "AKIAIOSFODNN7EXAMPLE"` | **PASS** — a live credential released |
+  | `"ok" SP  "AKIAIOSFODNN7EXAMPLE"` | BLOCK |
+
+  The reverse also bit, for the same reason: a caller passing a **borrowed
+  slice** — a Cyrius `Str` from `str_new`/`str_substr`, which shares its
+  source's buffer and adds no terminator — had `strlen` run off the end into
+  whatever followed in the arena. Ten clean bytes BLOCKed on a credential that
+  was not part of the artifact at all. So the verdict could depend on unrelated
+  allocator contents.
+
+  Three changes, and **none of the three scanners was touched**:
+
+  - **`ExecResult` carries `stdout_len` / `stderr_len`**, with
+    `exec_result_set_stdout_n` / `_set_stderr_n` to supply them and
+    `exec_result_stdout_len` / `_stderr_len` to read them. `-1` means unset and
+    falls back to `strlen`, so **every existing caller behaves exactly as
+    before**. The sentinel is `-1` rather than `0` because `0` cannot be told
+    from a genuinely empty artifact — with a `0` default the gate would have
+    concluded every result was empty and scanned nothing.
+  - **The scan buffer is guaranteed NUL-free.** `_concat_scan_buf` copies both
+    streams over their true lengths and rewrites every *interior* NUL to a
+    newline. That makes `strlen` **correct** for the scanners rather than
+    working around it — they see the whole artifact and needed no change. A
+    newline specifically because `_concat_with_nl` already separates stdout from
+    stderr with one: it is a boundary the scanners handle and no secrets, code
+    or data pattern contains it, so the substitution neither hides a match nor
+    invents one. Dropping the bytes instead would splice unrelated spans
+    together and could fabricate a pattern that was never in the artifact.
+  - **Redaction covers the whole artifact.** `secrets_redact_n(text, n, out_len)`
+    redacts over a length and reports the length it produced. Both halves
+    matter: its output copies non-matching spans verbatim, so it carries any NUL
+    the input had, and re-measuring that output with `strlen` would truncate the
+    very artifact the caller is about to release. `secrets_redact` keeps its
+    signature for cstring callers.
+
+  **The artifact itself is never rewritten** — the NUL-free buffer is a scanning
+  copy. What a caller releases is still its own bytes.
+
+  **Measured, because the rewrite replaces two `memcpy`s with byte loops** and
+  that is a fair thing to worry about on the gate's hot path. It is not a
+  regression — the scan dominates the copy by orders of magnitude:
+
+  | benchmark | byte loop (3.11.7) | `memcpy` baseline |
+  |---|---|---|
+  | `gate_clean_output` | **311.0 µs** | 314.4 µs |
+  | `secrets_scan_clean_text` | **15.08 µs** | 15.23 µs |
+  | `secrets_redact` | **7.56 µs** | 7.61 µs |
+
+  Same binary, same box, baseline produced by reverting only the two loops. The
+  differences are inside run-to-run noise in both directions.
+
+  Filed by agnosai as
+  `2026-08-05-gate-apply-measures-with-strlen-so-it-cannot-scan-a-length-carrying-string.md`.
+  Four regression tests, each mutation-verified — reverting the NUL rewrite, the
+  size-cap length, the `-1` sentinel, or the redaction length fails 1, 1, 11 and
+  2 assertions respectively. **The size-cap test was vacuous on its first
+  attempt** (its artifact carried a secret, so it blocked either way) and is now
+  built on clean content with a PASS sanity check ahead of it.
+
+### Fixed
+
+- **`--agnos` still failed to build, at two sites the 3.11.x line added itself.**
+  `2026-08-01-linux-only-backends-break-every-agnos-consumer.md` named five
+  `sys_unlink`/`sys_rmdir` arity mismatches, and the `kv_*` shims closed those —
+  but the issue's actual claim, *every `--agnos` consumer fails to compile*,
+  remained true. `cyrius build --agnos src/main.cyr` was verified failing on
+  3.11.6.
+
+  Two references to Linux-only syscall constants sat in function bodies that
+  were never excluded from the agnos build:
+
+  - `confine.cyr` — `SYS_FCNTL`, from the non-blocking round-robin drain added
+    in **3.11.5**.
+  - `persistent.cyr` — `SYS_PRCTL`, from the namespace work added in **3.11.6**.
+
+  Both functions already returned early on agnos, but **a preprocessor arm is
+  not a compiler arm**: an `#ifdef` early return does not stop the lines below
+  it from being compiled, and an undefined symbol is a hard error whether or not
+  it can execute. Because `cyrius build` auto-prepends every `[deps.*]` module,
+  that failed *any* `--agnos` consumer declaring `[deps.kavach]`, including one
+  that never touches either backend. Both bodies are now wrapped in
+  `#ifndef CYRIUS_TARGET_AGNOS`, matching the pattern the rest of `confine.cyr`,
+  `security.cyr` and `util.cyr` already use.
+
+  Verified by the issue's own repro: `--agnos` builds, and the native build is
+  unchanged.
+
+  **Not part of this fix, recorded so it is not mistaken for one:**
+  `util.cyr:329` issues a raw `syscall(91, fd, mode, 0)` for `fchmod`. It
+  compiles everywhere because 91 is a literal, but 91 is the *Linux* number —
+  on agnos it names something else. That is a latent correctness bug on agnos,
+  not a build failure, and it is left alone here rather than folded into a
+  release about compilation.
+
+- **`2026-07-26-oci-backend-never-reports-the-container-exit-code.md` was fixed
+  in 3.9.2 and never archived.** No code change here — verified against live
+  code during this cut (`src/backend_oci.cyr:357` stores `_oci_last_exit`) and
+  the file is moved to `archived/` with a status line saying so. Recorded
+  because an open-looking issue that is actually closed costs the next reader
+  the same time twice.
+
+### Note on the benchmark history
+
+`benches/bench-history.csv` has **no row for 3.11.6, and none for 3.8.0 through
+3.11.6** — the labels jump 3.7.1 → 3.11.7. CLAUDE.md requires a row per release,
+so the prior-release comparison it asks for could not be made here. The 3.11.7
+row is recorded (22 benchmarks); the gate figures above are a direct
+before/after on this change instead, which is the comparison that was actually
+available. Backfilling the gap is not attempted — those releases are already
+cut and re-running them now would label today's machine with their versions.
+
 ## [3.11.6] — 2026-08-04
 
 ### Added

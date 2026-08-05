@@ -1,8 +1,18 @@
-# The Firecracker and OCI backends call the LINUX syscall wrappers unguarded — every `--agnos` consumer fails to compile
+# The Firecracker and OCI backends call the LINUX syscall wrappers unguarded — every `--agnos` consumer fails to compile — RESOLVED
 
 **Discovered:** 2026-08-01, building aethersafha `--agnos` during the desktop-arc GPU work
 **Severity:** High — it is a hard compile error, and it blocks the whole consumer, not just the backend
 **Affects:** kavach 3.9.3 (`src/backend_firecracker.cyr`, `src/backend_oci.cyr`)
+
+**Status:** ✅ **RESOLVED in kavach 3.11.7** (2026-08-05). The five
+`sys_unlink`/`sys_rmdir` sites named below were closed earlier by the `kv_*`
+shims, but **the symptom this issue is named for outlived them**: `cyrius build
+--agnos src/main.cyr` was verified still failing on 3.11.6, at two sites the
+3.11.x line added itself — `SYS_FCNTL` in `confine.cyr` (from 3.11.5's drain
+loop) and `SYS_PRCTL` in `persistent.cyr` (from 3.11.6's namespace work). Both
+function bodies are now wrapped in `#ifndef CYRIUS_TARGET_AGNOS`; an `#ifdef`
+early return does not stop the lines below it compiling. Verified by this
+issue's own repro. See the 3.11.7 section of `CHANGELOG.md`.
 
 ## Summary
 

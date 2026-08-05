@@ -602,6 +602,101 @@ fn test_gate_stderr() {
     return 0;
 }
 
+# ---- 3.11.7: the gate measures a length, not a distance to the first NUL ----
+
+# Build "ok" NUL "AKIAIOSFODNN7EXAMPLE" — 23 bytes with the secret AFTER a NUL.
+fn _t_nul_artifact(sep) {
+    var b = alloc(32);
+    memcpy(b, "ok", 2);
+    store8(b + 2, sep);
+    memcpy(b + 3, "AKIAIOSFODNN7EXAMPLE", 20);
+    store8(b + 23, 0);
+    return b;
+}
+
+fn test_gate_scans_past_an_embedded_nul() {
+    test_group("gate_embedded_nul");
+    # The control FIRST: the same 23 bytes with a space where the NUL goes must
+    # block, or the assertion below is measuring nothing.
+    var ctl = exec_result_new();
+    exec_result_set_stdout_n(ctl, _t_nul_artifact(32), 23);
+    assert_eq(ScanResult_verdict(gate_apply(ctl, ext_policy_default())),
+    ScanVerdict.BLOCK, "control: space-separated key blocks");
+
+    # And with a NUL. Before 3.11.7 the gate measured `strlen` = 2 and released
+    # a live credential as PASS.
+    var er = exec_result_new();
+    exec_result_set_stdout_n(er, _t_nul_artifact(0), 23);
+    assert_eq(ScanResult_verdict(gate_apply(er, ext_policy_default())),
+    ScanVerdict.BLOCK, "a credential AFTER an embedded NUL is still scanned");
+    return 0;
+}
+
+fn test_gate_length_is_not_strlen_for_the_size_cap() {
+    test_group("gate_nul_size_cap");
+    # **CLEAN content on purpose.** An artifact carrying a secret blocks whether
+    # or not the cap works, so it cannot tell the two apart — the first version
+    # of this test used one and survived reverting the fix. With nothing to find,
+    # BLOCK can only come from the size limit.
+    var b = alloc(32);
+    memcpy(b, "ok", 2);
+    store8(b + 2, 0);
+    memcpy(b + 3, "aaaaaaaaaaaaaaaaaaaa", 20);
+    store8(b + 23, 0);
+
+    # Sanity: uncapped, this artifact is PASS. Otherwise the assertion below
+    # would be satisfied by content, which is what went wrong the first time.
+    var clean = exec_result_new();
+    exec_result_set_stdout_n(clean, b, 23);
+    assert_eq(ScanResult_verdict(gate_apply(clean, ext_policy_default())),
+    ScanVerdict.PASS, "the artifact itself is clean");
+
+    # 23 real bytes against a 10-byte cap. `strlen` sees 2 and lets it through.
+    var er = exec_result_new();
+    exec_result_set_stdout_n(er, b, 23);
+    var pol = ext_policy_default();
+    ExternalizationPolicy_set_max_artifact_size_bytes(pol, 10);
+    assert_eq(ScanResult_verdict(gate_apply(er, pol)), ScanVerdict.BLOCK,
+    "the size cap sees 23 bytes, not strlen's 2");
+    return 0;
+}
+
+fn test_exec_result_length_defaults_to_strlen() {
+    test_group("gate_len_default");
+    # A caller that supplies no length keeps the pre-3.11.7 behaviour exactly:
+    # -1 means unset, and every reader falls back to strlen.
+    var er = exec_result_new();
+    assert_eq(ExecResult_stdout_len(er), 0 - 1, "unset is -1, not 0");
+    ExecResult_set_stdout(er, "hello world");
+    assert_eq(exec_result_stdout_len(er), 11, "unset resolves through strlen");
+    # ...and a genuinely empty artifact is distinguishable from an unset one.
+    exec_result_set_stdout_n(er, "", 0);
+    assert_eq(exec_result_stdout_len(er), 0, "an explicit 0 length is honoured");
+    return 0;
+}
+
+fn test_redact_covers_the_whole_artifact() {
+    test_group("redact_past_nul");
+    # Redaction must not stop at the NUL either, and must report the length it
+    # produced — its output carries the NUL, so strlen would truncate it.
+    var ol[8];
+    store64(&ol, 0);
+    var out = secrets_redact_n(_t_nul_artifact(0), 23, &ol);
+    assert_neq(out, 0, "redaction produced a buffer");
+    assert_neq(load64(&ol), 0, "...and reported its length");
+    # The key is gone and the marker is present somewhere past the NUL.
+    var found = 0;
+    var i = 0;
+    var n = load64(&ol);
+    while (i + 4 <= n) {
+        if (load8(out + i) == 82 && load8(out + i + 1) == 69
+        && load8(out + i + 2) == 68 && load8(out + i + 3) == 65) { found = 1; }
+        i = i + 1;
+    }
+    assert_eq(found, 1, "the secret after the NUL was redacted, not skipped");
+    return 0;
+}
+
 fn test_credential_register_resolve() {
     test_group("credential_register");
     var p = credential_proxy_new();
@@ -3194,6 +3289,10 @@ fn main() {
     test_gate_size_limit();
     test_gate_disabled();
     test_gate_stderr();
+    test_gate_scans_past_an_embedded_nul();
+    test_gate_length_is_not_strlen_for_the_size_cap();
+    test_exec_result_length_defaults_to_strlen();
+    test_redact_covers_the_whole_artifact();
     test_verdict_determination();
     test_runtime_blocked_command();
     test_runtime_allowed_command();

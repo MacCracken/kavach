@@ -1,9 +1,16 @@
-# OCI backend never reports the container's exit code — every run looks like success
+# OCI backend never reports the container's exit code — every run looks like success — RESOLVED
 
 **Discovered:** 2026-07-26, while verifying stiva's `stiva build` end to end
 **Severity:** High (silent wrong value on the default backend of any host with runc installed)
 **Affects:** kavach 3.9.1 (`src/backend.cyr` `oci_exec`); the PROCESS backend was fixed in 3.9.1,
 the OCI backend was not
+
+**Status:** ✅ **RESOLVED in kavach 3.9.2**. `_oci_run` captures the runtime's
+wait status into `_oci_last_exit` and `oci_exec` stores it via
+`ExecResult_set_exit_code(r, _oci_last_exit)` (`src/backend_oci.cyr:357`), with
+the container's own stderr captured to a temp file rather than `/dev/null`.
+Verified against live code 2026-08-05 during the 3.11.7 cut; the file had
+simply never been archived. See the 3.9.2 section of `CHANGELOG.md`.
 
 ## Summary
 
