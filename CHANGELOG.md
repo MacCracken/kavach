@@ -82,14 +82,50 @@ for a deadline"; `wasm_exec` was still calling it.
   box with wasmtime and on one without.
 - fmt / lint clean on every file this release touched.
 
+### Changed — toolchain and dependencies
+
+- **`[deps.sigil]` 3.12.2 → 3.12.6.** It was four patch releases behind.
+- `[deps.ai-hwaccel]` 2.3.16 and `[deps.samay]` 1.0.1 were already current — checked, not
+  assumed.
+- **Pin 6.5.16 → 6.5.17.** ⚠ **This is what makes this release's CI green.** Under 6.5.16
+  `cyrius distlib` exited 1 on this bundle: its self-check compiled the generated bundle
+  *without* the stdlib leaves it had just written to `dist/kavach.deps`, and
+  `src/util.cyr`'s bounds-checked `sl[i]` reads lower to `_slice_idx_get_W` helpers that
+  the undefined-**fn** downgrade cannot reach. The bundle was correct throughout — it
+  compiled cleanly against its own sidecar — and the failure was **not** caused by any
+  source change here. Filed as
+  `cyrius/docs/development/issues/2026-08-10-distlib-self-check-fails-on-slice-subscript.md`
+  and fixed in 6.5.17.
+
+  ⚠ The consumer-side workaround would have been to drop the bounds-checked slice in
+  `is_safe_text` / `is_safe_argument` — the two functions that validate untrusted input,
+  where trap-on-out-of-range is the entire point. That was not taken.
+
+  Verified at the new pin: `distlib` exits 0, `dist/kavach.cyr` regenerates
+  **byte-identical**, a clean-room consumer builds from the bundle plus its sidecar, and
+  `tests/kavach.tcyr` is 665 assertions / 0 failures.
+
 ### Known residual
 
-- ⚠ **`lib/sakshi.cyr` resolves to 2.4.8, not the 6.5.16 snapshot's 2.4.10.** `cyrius deps`
-  copies each git dep's own vendored `lib/`, and `sigil` 3.12.2 and `ai-hwaccel` 2.3.16
-  both carry 2.4.8 (samay 1.0.1 carries 2.4.6) — so a `cyrius lib sync --full` is undone by
-  the next build's implicit resolve. Nothing kavach uses depends on 2.4.9/2.4.10, so this
-  is staleness rather than breakage, but it cannot be fixed from inside this repo: the
-  three dependencies need their own sakshi refreshed first.
+- ⚠ **`lib/sakshi.cyr` resolves to 2.4.8, not the 6.5.17 snapshot's 2.4.10.** `cyrius deps`
+  overlays each git dep's own `[deps.sakshi]` resolution on top of the snapshot, and
+  **sigil 3.12.2 declares `tag = "2.4.8"`** — so a `cyrius lib sync --full` is undone by
+  the next build's implicit resolve. The only signal is an unnamed "1 bundled lib(s)
+  differ" shadow warning, and `deps --verify` cannot catch it because the lock is written
+  *from disk* and records the downgraded file's hash. Nothing kavach calls needs 2.4.9+,
+  so this is staleness, not breakage.
+
+  ⚠ **agnosai's fix for this does not transfer, and trying it breaks consumers.** agnosai
+  and majra add a defensive `[deps.sakshi]` to their own manifests, which wins the
+  overlay. Doing that here was tried and reverted: declaring sakshi as a git dep makes
+  `distlib` reclassify it out of the **stdlib leaves**, so `dist/kavach.deps` loses its
+  `sakshi` line and a clean-room consumer then fails with five undefined `sakshi_*`
+  functions. The defensive pin is safe for a *binary* and unsafe for a library that
+  publishes a bundle.
+
+  ⚠ **Bumping `[deps.sigil]` to 3.12.6 does not clear it**: sigil 3.12.6 still declares
+  `[deps.sakshi] tag = "2.4.8"` itself. The fix is one line in sigil, and it would clear
+  this for every sigil consumer at once — it is not kavach's to make.
 
 ## [3.11.7] — 2026-08-05
 
