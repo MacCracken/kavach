@@ -89,10 +89,43 @@ fn which_exists(name) {
     return 0;
 }
 
+# Look for wasmtime on PATH. Returns path cstr, or 0 if none.
+fn _wasm_binary_path() {
+    if (path_exists("/usr/local/bin/wasmtime") == 1) { return "/usr/local/bin/wasmtime"; }
+    if (path_exists("/usr/bin/wasmtime") == 1) { return "/usr/bin/wasmtime"; }
+    # Fall back to a cargo-installed wasmtime under $HOME/.cargo/bin. getenv
+    # ships in the stdlib now (reads /proc/self/environ + allocates) — call it
+    # here at config time only, never post-fork (it is not async-signal-safe).
+    var home = getenv("HOME");
+    if (home != 0) {
+        var suffix = "/.cargo/bin/wasmtime";
+        var hlen = strlen(home);
+        var slen = strlen(suffix);
+        var path = alloc_checked(checked_sum4(hlen, slen, 1, 0));
+        if (path != 0) {
+            memcpy(path, home, hlen);
+            memcpy(path + hlen, suffix, slen);
+            store8(path + hlen + slen, 0);
+            if (path_exists(path) == 1) { return path; }
+        }
+    }
+    return 0;
+}
+
 fn backend_is_available(b) {
     if (b == Backend.NOOP) { return 1; }
     if (b == Backend.PROCESS) { return 1; }
-    if (b == Backend.WASM) { return 0; }
+    # 3.11.8: PROBE, like every sibling below. This was a hardcoded 0 while
+    # `wasm_health` right next to it did the correct check — and because
+    # `sandbox_create` refuses a backend that reports unavailable, the WASM path
+    # was unreachable through the public API **even with wasmtime installed**.
+    # A consumer could register the backend, configure it and never reach
+    # `wasm_exec`. `_wasm_binary_path` moved here from `backend_wasm.cyr` so
+    # this file can call it; Cyrius resolves single-pass, callees first.
+    if (b == Backend.WASM) {
+        if (_wasm_binary_path() == 0) { return 0; }
+        return 1;
+    }
     if (b == Backend.GVISOR) { return which_exists("runsc"); }
     if (b == Backend.FIRECRACKER) { return which_exists("firecracker"); }
     if (b == Backend.OCI) {

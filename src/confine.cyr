@@ -388,8 +388,8 @@ fn spawn_seccomp_available() {
 # stdlib's `exec_capture`. Routing it through here instead is what gives that
 # path a real exit code and a deadline; `exec_capture` discards the wait status
 # and has no seam for either.
-fn confine_capture(args, policy, rootfs, cgroup_path, seccomp_info, buf, buflen, want_ns,
-timeout_ms, do_confine) {
+fn confine_capture_input(args, policy, rootfs, cgroup_path, seccomp_info, buf, buflen,
+want_ns, timeout_ms, do_confine, input, input_len) {
     # ⛔ LINUX ONLY — the fork/confine/execve/capture path. agnos has no fork by design and its
     # sandboxing goes through backend_sy_agnos, not this file.
     # ⚠ -1, never a fabricated success: a caller must not receive an empty capture buffer and
@@ -436,14 +436,39 @@ timeout_ms, do_confine) {
     sys_pipe(&epipe);
     var erfd = load32(&epipe);
     var ewfd = load32(&epipe + 4);
+    # 3.11.8: a THIRD pipe, for the payload's stdin — created ONLY when there is
+    # something to send. Until then the child inherited the parent's fd 0, so a
+    # backend could run a program but could not pass it arguments on stdin,
+    # which is the whole contract of every WASM/CLI tool protocol. agnosai filed
+    # it while porting `.agpkg`: "a WASM tool that cannot receive parameters is
+    # not a port of this file".
+    #
+    # ⚠ `input == 0` keeps the INHERIT behaviour rather than handing the child an
+    # empty stdin. Every pre-3.11.8 caller reaches here through `confine_capture`
+    # with `input = 0`, and switching them to an immediate EOF would change what
+    # an interactive payload sees.
+    var in_rfd = 0 - 1;
+    var in_wfd = 0 - 1;
+    if (input != 0) {
+        var inpipe[16];
+        sys_pipe(&inpipe);
+        in_rfd = load32(&inpipe);
+        in_wfd = load32(&inpipe + 4);
+    }
     var pid = kv_fork();
     if (pid < 0) {
         sys_close(rfd); sys_close(wfd); sys_close(erfd); sys_close(ewfd);
+        if (in_rfd >= 0) { sys_close(in_rfd); sys_close(in_wfd); }
         return 0 - 1;
     }
     if (pid == 0) {
         sys_close(rfd);
         sys_close(erfd);
+        if (in_rfd >= 0) {
+            sys_close(in_wfd);
+            kv_dup2(in_rfd, 0);
+            sys_close(in_rfd);
+        }
         kv_dup2(wfd, 1);
         kv_dup2(ewfd, 2);
         sys_close(wfd);
@@ -458,6 +483,23 @@ timeout_ms, do_confine) {
     }
     sys_close(wfd);
     sys_close(ewfd);
+
+    # Send the payload's stdin and close it, so a guest that reads to EOF makes
+    # progress. ⚠ BEFORE the drain loop, and the close is what matters: a guest
+    # blocked on a read that never ends would hit the deadline instead of
+    # answering, and the failure would look like a timeout rather than a
+    # protocol mistake.
+    #
+    # ⚠ A short write is not retried. Pipe capacity is 64 KiB by default and the
+    # child is not reading yet, so an input larger than that would block here
+    # while the child is still in `execve` — which is a deadlock, not a slow
+    # write. Callers with a large payload should pass it by file instead; stated
+    # rather than papered over with a partial write nobody checks.
+    if (in_rfd >= 0) {
+        sys_close(in_rfd);
+        if (input_len > 0) { sys_write(in_wfd, input, input_len); }
+        sys_close(in_wfd);
+    }
 
     # **Both ends non-blocking and drained round-robin** (3.11.5). Draining one
     # to EOF and then the other deadlocks the moment the undrained pipe fills
@@ -546,6 +588,14 @@ timeout_ms, do_confine) {
     _confine_last_exit = code;
     return total;
     #endif
+}
+
+# The pre-3.11.8 shape: capture with the child inheriting the parent's stdin.
+# Every existing caller lands here, so none of them changed behaviour.
+fn confine_capture(args, policy, rootfs, cgroup_path, seccomp_info, buf, buflen, want_ns,
+timeout_ms, do_confine) {
+    return confine_capture_input(args, policy, rootfs, cgroup_path, seccomp_info, buf,
+    buflen, want_ns, timeout_ms, do_confine, 0, 0);
 }
 
 # Exit code of the most recent confine_capture. The capture returns a byte

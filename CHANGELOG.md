@@ -7,6 +7,90 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.11.8] — 2026-08-09 — the WASM backend was unreachable, deaf and blind
+
+From a consumer report filed by agnosai while porting `rust-old/src/sandbox/wasm.rs` +
+`tools/wasm_tool.rs` onto this backend —
+`docs/development/issues/2026-08-09-wasm-backend-unreachable-no-stdin-no-exit-code.md`.
+
+**The through-line: the process backend fixed this whole class of bug for itself in
+3.11.4/3.11.5, and the WASM backend was left behind on the old `exec_capture` call.**
+Its doc comment already said `exec_capture` "discards the wait status and has no seam
+for a deadline"; `wasm_exec` was still calling it.
+
+### Fixed
+
+- **`backend_is_available(Backend.WASM)` was a hardcoded `0`** (`src/backend.cyr`), while
+  `wasm_health` right beside it did the correct probe and every sibling backend probed
+  properly. `sandbox_create` refuses a backend that reports unavailable, so **the entire
+  WASM path was dead through the public API even with `wasmtime` installed** — a consumer
+  could register the backend, configure it, and never reach `wasm_exec`. It now probes
+  with `_wasm_binary_path`, which moved from `backend_wasm.cyr` into `backend.cyr` so the
+  single-pass include order allows the call.
+
+- **The guest's exit code was discarded.** `backend_capture_finish` stamps `0` on any
+  successful capture and `wasm_exec` never overrode it, so **a module that TRAPPED
+  reported success** with whatever partial stdout it managed. A consumer branching on
+  `exit_code != 0` — the entire failure taxonomy of a tool protocol — saw every failure as
+  a success. `wasm_exec` now routes through `confine_capture_input` and reports
+  `confine_last_exit()`, exactly as the process backend has since 3.11.4.
+
+- **The guest's stderr was hard-redirected to `/dev/null`**, so `ExecResult.stderr` always
+  read `""` — a different and false claim from "the guest wrote nothing". Now
+  `confine_last_stderr()`.
+
+- **`SandboxConfig.timeout_ms` and `policy` were ignored on this path.** `exec_capture` has
+  no seam for either; the confined capture enforces both.
+
+### Added
+
+- **`confine_capture_input(...)` — a stdin channel.** A third pipe, created only when
+  there is input to send. Before this the child inherited the parent's fd 0, so a backend
+  could run a program but **could not pass it arguments**, which is the whole contract of
+  every WASM/CLI tool protocol. As agnosai put it: *a WASM tool that cannot receive
+  parameters is not a port of this file.*
+
+  ⚠ `input == 0` keeps the **inherit** behaviour rather than handing the child an empty
+  stdin — every pre-3.11.8 caller reaches here through `confine_capture` with `0`, and an
+  immediate EOF would change what an interactive payload sees.
+
+  ⚠ The pipe is **closed after the write**. Without that a guest reading to EOF blocks and
+  hits the deadline, so a protocol mistake would present as a timeout. Pinned by a test.
+
+  ⚠ A short write is **not** retried. Pipe capacity is 64 KiB and the child is not reading
+  yet, so a larger payload would block before `execve` — a deadlock, not a slow write.
+  Callers with a large payload should pass it by file; stated rather than papered over
+  with a partial write nobody checks.
+
+- **`SandboxConfig.stdin` / `.stdin_len`, with `config_stdin(c, ptr, len)`.** The struct
+  goes 88 → 104 bytes, appended so **no existing field offset moves** — the discipline
+  `require_ns` followed at 88, and asserted by a test that re-reads three older fields.
+  The buffer is not copied and must outlive the `sandbox_exec` that consumes it.
+
+### Changed
+
+- **Toolchain pin 6.5.10 → 6.5.16**, with `lib/` re-synced.
+
+### Verified
+
+- `tests/kavach.tcyr` — **665 assertions, 0 failures** (638 → 665).
+- The new assertions are behavioural, not structural: `/bin/cat` proves stdin actually
+  reaches the guest and comes back byte for byte; `/bin/false` proves exit 1 is reported
+  where `exec_capture` reported 0; `/bin/sh -c 'echo oops 1>&2; exit 3'` proves stderr and
+  an explicit code both survive; and the availability test asserts
+  `backend_is_available == wasm_health` rather than a fixed value, so it is honest on a
+  box with wasmtime and on one without.
+- fmt / lint clean on every file this release touched.
+
+### Known residual
+
+- ⚠ **`lib/sakshi.cyr` resolves to 2.4.8, not the 6.5.16 snapshot's 2.4.10.** `cyrius deps`
+  copies each git dep's own vendored `lib/`, and `sigil` 3.12.2 and `ai-hwaccel` 2.3.16
+  both carry 2.4.8 (samay 1.0.1 carries 2.4.6) — so a `cyrius lib sync --full` is undone by
+  the next build's implicit resolve. Nothing kavach uses depends on 2.4.9/2.4.10, so this
+  is staleness rather than breakage, but it cannot be fixed from inside this repo: the
+  three dependencies need their own sakshi refreshed first.
+
 ## [3.11.7] — 2026-08-05
 
 ### Security

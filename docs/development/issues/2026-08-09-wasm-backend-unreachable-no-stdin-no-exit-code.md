@@ -1,6 +1,10 @@
 # WASM backend: hardcoded unavailable, no stdin channel, no guest exit code
 
-**Status:** 🔴 OPEN — filed by a consumer, not fixed here.
+**Status:** ✅ **FIXED in 3.11.8** — all three findings. §1 probes with `_wasm_binary_path`
+(moved into `backend.cyr`); §2 is `confine_capture_input` plus `SandboxConfig.stdin`; §3
+comes free from routing `wasm_exec` through the confined capture, which also restores the
+guest's stderr and the `timeout_ms`/`policy` this path was ignoring. The smaller
+`_wasm_binary_path`-vs-"not found in PATH" wording note is not addressed.
 **Filed:** 2026-08-09, against kavach 3.11.7 as vendored in cyrius 6.5.16.
 **Consumer:** agnosai's M11, porting `rust-old/src/sandbox/wasm.rs` +
 `tools/wasm_tool.rs` + `tools/wasm_loader.rs` (955 lines) off wasmtime's embedded

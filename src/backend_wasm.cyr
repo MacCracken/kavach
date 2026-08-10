@@ -9,29 +9,6 @@
 # Deferred: WAT inline modules, custom linker hooks. Both require embedding
 # a real WASM runtime — v3.0 or whenever mabda/yukti exposes one.
 
-# Look for wasmtime on PATH. Returns path cstr, or 0 if none.
-fn _wasm_binary_path() {
-    if (path_exists("/usr/local/bin/wasmtime") == 1) { return "/usr/local/bin/wasmtime"; }
-    if (path_exists("/usr/bin/wasmtime") == 1) { return "/usr/bin/wasmtime"; }
-    # Fall back to a cargo-installed wasmtime under $HOME/.cargo/bin. getenv
-    # ships in the stdlib now (reads /proc/self/environ + allocates) — call it
-    # here at config time only, never post-fork (it is not async-signal-safe).
-    var home = getenv("HOME");
-    if (home != 0) {
-        var suffix = "/.cargo/bin/wasmtime";
-        var hlen = strlen(home);
-        var slen = strlen(suffix);
-        var path = alloc_checked(checked_sum4(hlen, slen, 1, 0));
-        if (path != 0) {
-            memcpy(path, home, hlen);
-            memcpy(path + hlen, suffix, slen);
-            store8(path + hlen + slen, 0);
-            if (path_exists(path) == 1) { return path; }
-        }
-    }
-    return 0;
-}
-
 # Fuel calibration from timeout_ms. Matches Rust:
 #   fuel ≈ timeout_ms * 1_000_000 (≈ 1B instr/sec assumption)
 fn _wasm_fuel_from_timeout(timeout_ms) {
@@ -146,10 +123,40 @@ fn wasm_exec(sandbox, command) {
 
     var out_cap = 1048576;
     var out_buf = alloc(out_cap);
-    var n = exec_capture(args, out_buf, out_cap);
+
+    # 3.11.8: `confine_capture_input`, not the stdlib's `exec_capture`.
+    #
+    # ⚠ Three things were wrong with `exec_capture` here, and the process
+    # backend had already fixed all three for itself in 3.11.4/3.11.5 — this
+    # backend was simply left behind on the old call:
+    #
+    #   * **the guest's exit code was discarded.** `backend_capture_finish`
+    #     stamps 0 on any successful capture, and nothing overrode it, so a
+    #     module that TRAPPED reported success with whatever partial stdout it
+    #     managed. A consumer branching on `exit_code != 0` — which is the whole
+    #     failure taxonomy of a tool protocol — saw every failure as a success.
+    #   * **stderr was hard-redirected to /dev/null**, so `ExecResult.stderr`
+    #     always read "", which is a different and false claim from "the guest
+    #     wrote nothing".
+    #   * **there was no stdin**, so a guest could be run but not given
+    #     parameters. That is what agnosai filed: a WASM tool that cannot
+    #     receive its input is not a tool.
+    #
+    # `do_confine = 0`: wasmtime's own WASI sandbox is the boundary for the
+    # guest — no preopens means no filesystem, and `--fuel`/`--max-memory-size`
+    # bound it — and confining the wasmtime PROCESS itself with landlock would
+    # also block it from reading the module. Stated so the 0 reads as a decision.
+    var n = confine_capture_input(args, policy, 0, 0, 0, out_buf, out_cap, 0,
+    timeout, 0, SandboxConfig_stdin(cfg), SandboxConfig_stdin_len(cfg));
     var end_ns = mono_now_ns();
 
-    return backend_capture_finish(out_buf, n, out_cap, "wasmtime run failed", start_ns, end_ns);
+    var r = backend_capture_finish(out_buf, n, out_cap, "wasmtime run failed", start_ns, end_ns);
+    if (r != 0) {
+        ExecResult_set_exit_code(r, confine_last_exit());
+        ExecResult_set_timed_out(r, confine_last_timed_out());
+        ExecResult_set_stderr(r, confine_last_stderr());
+    }
+    return r;
 }
 
 fn wasm_health(sandbox) {

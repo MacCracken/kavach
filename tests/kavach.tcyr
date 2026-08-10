@@ -1500,6 +1500,118 @@ fn test_oci_bundle_cleanup() {
     return 0;
 }
 
+# 3.11.8: the WASM backend is REACHABLE. `backend_is_available` used to return a
+# hardcoded 0 for it while `wasm_health` right beside it did the correct probe —
+# and `sandbox_create` refuses an unavailable backend, so the whole path was
+# dead through the public API even with wasmtime installed.
+fn test_wasm_availability_is_probed() {
+    test_group("wasm_availability");
+    kavach_init();
+
+    # ⚠ The two must AGREE. They disagreeing is precisely the bug: one said
+    # "never available" and the other probed. Asserting equality rather than a
+    # fixed value keeps the test honest on a box that has wasmtime and on one
+    # that does not.
+    assert_eq(backend_is_available(Backend.WASM), wasm_health(0),
+    "availability and health agree — they used to contradict each other");
+
+    # And it tracks the binary, rather than being a constant either way.
+    var have = 0;
+    if (_wasm_binary_path() != 0) { have = 1; }
+    assert_eq(backend_is_available(Backend.WASM), have,
+    "availability follows whether a wasmtime binary was found");
+
+    # A sandbox can actually be created when the runtime is present. On a box
+    # without wasmtime this asserts the refusal instead, which is the arm that
+    # is reachable here — and it is a real assertion, not a skip.
+    var cfg = config_new();
+    config_backend(cfg, Backend.WASM);
+    var sb = sandbox_create(cfg);
+    if (have == 1) {
+        assert(sb != 0, "with wasmtime present, a WASM sandbox is creatable");
+    } else {
+        assert_eq(sb, 0, "without wasmtime, creation is refused rather than half-working");
+    }
+    return 0;
+}
+
+# 3.11.8: `SandboxConfig` carries the payload's stdin. Before this there was no
+# way to give a guest its input at all, which is what made the backend unusable
+# as a tool host — agnosai filed it while porting `.agpkg`.
+fn test_config_stdin() {
+    test_group("config_stdin");
+    var cfg = config_new();
+    assert_eq(SandboxConfig_stdin(cfg), 0, "a fresh config inherits this process's stdin");
+    assert_eq(SandboxConfig_stdin_len(cfg), 0, "with no length");
+
+    var payload = "{\"parameters\":{\"name\":\"world\"}}";
+    config_stdin(cfg, payload, strlen(payload));
+    assert_eq(SandboxConfig_stdin(cfg), payload, "and it round-trips the pointer");
+    assert_eq(SandboxConfig_stdin_len(cfg), strlen(payload), "and the length");
+
+    # ⚠ Appending the two fields must not move any existing offset — the same
+    # discipline `require_ns` followed when the struct went to 88.
+    assert_eq(SandboxConfig_backend(cfg), Backend.PROCESS, "backend still reads");
+    assert_eq(SandboxConfig_timeout_ms(cfg), 30000, "timeout still reads");
+    assert_eq(SandboxConfig_inner_backend(cfg), 0 - 1, "inner_backend still reads");
+    assert_eq(SANDBOX_CONFIG_SIZE, 104, "and the struct is 104 bytes");
+    return 0;
+}
+
+# 3.11.8: the payload really receives its stdin, and the parent really sees the
+# guest's exit code and stderr. `/bin/cat` is the smallest proof of the first;
+# `/bin/false` and `/bin/sh -c` of the rest.
+fn test_confine_capture_input() {
+    test_group("confine_capture_input");
+    var buf = alloc(4096);
+
+    # stdin reaches the child and is echoed back.
+    var args = vec_new();
+    vec_push(args, "/bin/cat");
+    var msg = "hello from stdin";
+    var n = confine_capture_input(args, 0, 0, 0, 0, buf, 4096, 0, 5000, 0,
+    msg, strlen(msg));
+    assert_eq(n, strlen(msg), "cat echoes exactly what was written to its stdin");
+    assert_eq(memeq(buf, msg, strlen(msg)), 1, "byte for byte");
+    assert_eq(confine_last_exit(), 0, "and exits 0");
+
+    # ⚠ The stdin pipe is CLOSED after the write. Without that, `cat` blocks on a
+    # read that never ends and this returns a TIMEOUT — the failure would look
+    # like a slow guest rather than a protocol mistake.
+    assert_eq(confine_last_timed_out(), 0, "and does not time out, because stdin was closed");
+
+    # An empty input still closes stdin, so the child sees EOF immediately.
+    var n2 = confine_capture_input(args, 0, 0, 0, 0, buf, 4096, 0, 5000, 0, "", 0);
+    assert_eq(n2, 0, "an empty stdin yields no output");
+    assert_eq(confine_last_exit(), 0, "and still exits cleanly");
+    assert_eq(confine_last_timed_out(), 0, "rather than hanging on a never-closed pipe");
+
+    # ⚠ The REAL exit code, which `exec_capture` discarded. This is the whole of
+    # finding 3: a guest that fails must not report success.
+    var fargs = vec_new();
+    vec_push(fargs, "/bin/false");
+    confine_capture_input(fargs, 0, 0, 0, 0, buf, 4096, 0, 5000, 0, "", 0);
+    assert_eq(confine_last_exit(), 1, "/bin/false reports exit 1, not 0");
+
+    # And the guest's own stderr, which used to be hard-redirected to /dev/null.
+    var eargs = vec_new();
+    vec_push(eargs, "/bin/sh");
+    vec_push(eargs, "-c");
+    vec_push(eargs, "echo oops 1>&2; exit 3");
+    confine_capture_input(eargs, 0, 0, 0, 0, buf, 4096, 0, 5000, 0, "", 0);
+    assert_eq(confine_last_exit(), 3, "an explicit exit code survives");
+    assert_eq(strlen(confine_last_stderr()) > 0, 1, "and stderr is captured, not discarded");
+
+    # `input = 0` keeps the pre-3.11.8 INHERIT behaviour, so no existing caller
+    # changed. `confine_capture` is that path.
+    var cargs = vec_new();
+    vec_push(cargs, "/bin/true");
+    assert(confine_capture(cargs, 0, 0, 0, 0, buf, 4096, 0, 5000, 0) >= 0,
+    "the inherit-stdin wrapper still works");
+    assert_eq(confine_last_exit(), 0, "with a real exit code");
+    return 0;
+}
+
 fn test_wasm_registered() {
     test_group("wasm_registered");
     kavach_init();
@@ -3340,6 +3452,9 @@ fn main() {
     test_oci_spec_shared_by_gvisor_and_oci();
     test_oci_bundle_cleanup();
     test_wasm_registered();
+    test_wasm_availability_is_probed();
+    test_config_stdin();
+    test_confine_capture_input();
     test_wasm_fuel_calculation();
     test_wasm_trim();
     test_wasm_exec_without_wasmtime();

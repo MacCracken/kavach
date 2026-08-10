@@ -154,10 +154,13 @@ struct SandboxConfig {
     rootfs;
     externalization;
     require_ns;
+    stdin;
+    stdin_len;
 }
 
-# 88 (3.11.5): `require_ns` appended, so no existing field offset moves.
-var SANDBOX_CONFIG_SIZE = 88;
+# 104 (3.11.8): `stdin` + `stdin_len` appended, so no existing field offset
+# moves — the same discipline `require_ns` followed at 88.
+var SANDBOX_CONFIG_SIZE = 104;
 
 # Defaults match Rust's SandboxConfig::default():
 #   backend=Process, policy=basic(), timeout_ms=30000, inner_backend=-1 (none)
@@ -177,6 +180,19 @@ fn config_new() {
 fn config_backend(c, b)        { SandboxConfig_set_backend(c, b); return c; }
 fn config_policy(c, p)         { SandboxConfig_set_policy(c, p); return c; }
 fn config_timeout_ms(c, ms)    { SandboxConfig_set_timeout_ms(c, ms); return c; }
+
+# Bytes to hand the payload on stdin (3.11.8). `ptr = 0` means "inherit this
+# process's stdin", which is what every backend did before this existed.
+#
+# ⚠ The buffer is NOT copied — it must outlive the `sandbox_exec` that consumes
+# it. And it is capped by pipe capacity: see `confine_capture_input`, which does
+# not retry a short write because a payload larger than the pipe would block
+# before the child is reading.
+fn config_stdin(c, ptr, len)   {
+    SandboxConfig_set_stdin(c, ptr);
+    SandboxConfig_set_stdin_len(c, len);
+    return c;
+}
 
 # Require the namespaces the policy asks for, even without a rootfs.
 #
