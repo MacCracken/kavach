@@ -5,7 +5,7 @@ description = "Sandbox execution framework — 10 backends, strength scoring (0-
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/kavach"
 language = "cyrius"
-cyrius = "6.5.17"
+cyrius = "6.5.18"
 
 [build]
 entry = "src/main.cyr"
@@ -159,7 +159,7 @@ stdlib = [
 [deps.sigil]
 git = "https://github.com/MacCracken/sigil.git"
 path = "../sigil"
-tag = "3.12.6"
+tag = "3.12.7"
 modules = ["dist/sigil.cyr"]
 
 # ── Feature gating for the samay bridge ──────────────────────────

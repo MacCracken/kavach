@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Toolchain pin 6.5.17 → 6.5.18; `[deps.sigil]` 3.12.6 → 3.12.7.**
+  `[deps.ai-hwaccel]` 2.3.16 and `[deps.samay]` 1.0.1 were already latest —
+  checked, not assumed.
+
+  ⚠ **This clears 3.11.8's "known residual".** That release recorded
+  `lib/sakshi.cyr` resolving to 2.4.8 instead of the snapshot's 2.4.10, traced to
+  sigil declaring `[deps.sakshi] tag = "2.4.8"` in its own manifest and `cyrius
+  deps` overlaying that on top of the toolchain snapshot. sigil 3.12.7 drops the
+  git dep entirely — sakshi is now folded into the stdlib — so the overlay is
+  gone and **`lib/sakshi.cyr` holds at 2.4.10 through a build, with no shadow
+  warning.** Nothing was changed on this side; the fix was upstream, where the
+  residual said it belonged.
+
+  Verified: `distlib` exits 0, `dist/kavach.cyr` regenerates **byte-identical**,
+  and `tests/kavach.tcyr` is 665 assertions / 0 failures.
+
 ## [3.11.8] — 2026-08-09 — the WASM backend was unreachable, deaf and blind
 
 From a consumer report filed by agnosai while porting `rust-old/src/sandbox/wasm.rs` +
