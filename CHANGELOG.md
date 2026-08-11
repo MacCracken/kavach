@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.11.9] — 2026-08-10 — toolchain + deps; 3.11.8's sakshi residual is cleared
+
+Maintenance only: **no `src/` file changed** and `dist/kavach.cyr` regenerates
+**byte-identical**.
+
 ### Changed
 
 - **Toolchain pin 6.5.17 → 6.5.18; `[deps.sigil]` 3.12.6 → 3.12.7.**
