@@ -7,6 +7,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.11.10] — 2026-08-11 — the WASM backend's wasmtime flags were never valid
+
+### Fixed — `wasmtime run` rejected our argv outright, and no test could see it
+
+`_wasm_append_limits` emitted `--max-memory-size <bytes>` and `--fuel <N>` as
+top-level `wasmtime run` flags. wasmtime answers:
+
+```
+error: unexpected argument '--max-memory-size' found
+```
+
+and runs nothing. Both options live in wasmtime's `-W` group and are spelled
+`-W max-memory-size=N` and `-W fuel=N`. `--dir` was and remains correct.
+
+⚠ **This is not a wasmtime-47 regression — the spelling was never right.** The
+`-W` option group has existed since wasmtime 14 (2023). Verified against the
+installed **wasmtime 47.0.3**: the old argv errors, the new argv runs a module
+and exits 0.
+
+⚠ **Nothing in this repo had ever run a real module.** `test_wasm_exec_without_wasmtime`
+and `test_wasm_exec_missing_file` both fail *before* argv is assembled, so a wrong
+flag was structurally invisible. The backend was also unreachable through the
+public API until 3.11.8, so it had never been exercised end to end by a consumer
+either.
+
+### Added — `test_wasm_exec_real_module`, the test that would have caught it
+
+Runs a real module through `wasm_exec` and asserts the guest exited 0, plus that
+wasmtime did not emit `unexpected argument`. Verified to **fail** on the old
+spellings.
+
+The module is 36 bytes, hand-assembled in the test rather than checked in: magic
++ version, a `() -> ()` type, one function, an exported `_start`, and a body of a
+single END opcode. Building it from `.wat` would need `wat2wasm`, and pulling in
+a Rust wasm target to test a shell-out would be a heavier dependency than the
+thing under test.
+
+⚠ **The test sets a memory limit AND a timeout, and that is load-bearing.**
+`policy_new()` zeroes the struct and `_wasm_append_limits` emits each flag only
+when its value is > 0 — so under a default config the argv is a bare
+`wasmtime run -- <path>`, which is valid under every spelling. The first version
+of this test did exactly that and passed with the broken flags restored. A
+memory limit makes `-W max-memory-size=` reachable; a timeout makes `-W fuel=`
+reachable through `_wasm_fuel_from_timeout`.
+
+### Changed — lint is clean across `src/` and `tests/`, was 8 warnings
+
+All pre-existing and all in `tests/kavach.tcyr`: six over-long lines, two
+double-blank-line runs. Three of the six were long string fixtures — an OCI stub
+script, a runc diagnostic, and a both-streams shell script — now assembled with
+`str_builder`, with **byte-equality asserted for each** before the edit was
+written.
+
+⚠ **Cyrius has no adjacent-literal concatenation** (`"abc" "def"` is
+`expected ';', got string`), and a `\`-continued literal is unsafe because
+`cyrius fmt` reindents inside multi-line strings and the spaces land *in* the
+string. `str_builder` is the only safe split for a fixture whose exact bytes
+matter — and for a shell script, they do.
+
+**Gate:** 2 suites, **669 + 12 assertions, 0 failures**, on wasmtime 47.0.3.
+`cyrius lint` clean across `src/` and `tests/`; `fmt` clean; `vet` 44 deps /
+0 untrusted; `deny` 0 violations; `dist/kavach.cyr` regenerated at 3.11.10,
+idempotent, self-check current, and the fix verified present in the bundle.
+
 ## [3.11.9] — 2026-08-10 — toolchain + deps; 3.11.8's sakshi residual is cleared
 
 Maintenance only: **no `src/` file changed** and `dist/kavach.cyr` regenerates

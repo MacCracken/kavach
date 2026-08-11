@@ -32,30 +32,50 @@ fn _wasm_append_preopens(args, sandbox) {
 }
 
 # Append resource-limit flags from policy.
+# Build one `-W key=value` argument, NUL-terminated.
+#
+# ⚠ Both limits must be a SINGLE argv element of the form `-Wkey=value` or the
+# pair `-W` `key=value` — wasmtime's option groups do not accept
+# `-W key value`. This helper emits the pair form.
+fn _wasm_push_w_opt(args, key, value) {
+    var buf[64];
+    var klen = strlen(key);
+    memcpy(&buf, key, klen);
+    store8(&buf + klen, 61);
+    var vlen = fmt_int_buf(value, &buf + klen + 1);
+    var total = klen + 1 + vlen;
+    var out = alloc(total + 1);
+    memcpy(out, &buf, total);
+    store8(out + total, 0);
+    vec_push(args, "-W");
+    vec_push(args, out);
+    return 0;
+}
+
+# CPU and memory bounds for the guest.
+#
+# ⚠ **These moved into wasmtime's `-W` option group and the old spellings are
+# now HARD ERRORS.** Until 3.11.10 this emitted `--max-memory-size <bytes>` and
+# `--fuel <N>` as top-level `run` flags; wasmtime 47 answers
+# `error: unexpected argument '--max-memory-size' found` and runs nothing.
+#
+# ⚠ **It was never validated.** Nothing in this repo had ever run a real module
+# through `wasm_exec` — `test_wasm_exec_without_wasmtime` and
+# `test_wasm_exec_missing_file` both fail before argv is assembled, so a wrong
+# flag was invisible. `test_wasm_exec_real_module` now runs one end to end and
+# is the guard; it fails on the old spellings.
+#
+# The `-W` group has existed since wasmtime 14, so the pair form is not a
+# 47-specific accommodation — it is the spelling that has been correct all along.
 fn _wasm_append_limits(args, policy, timeout_ms) {
-    # Memory limit: --max-memory-size <bytes>
     var mem = SandboxPolicy_memory_limit_mb(policy);
     if (mem > 0) {
-        var mem_buf[32];
-        var mem_bytes = mem * 1048576;
-        var mem_len = fmt_int_buf(mem_bytes, &mem_buf);
-        var mem_str = alloc(mem_len + 1);
-        memcpy(mem_str, &mem_buf, mem_len);
-        store8(mem_str + mem_len, 0);
-        vec_push(args, "--max-memory-size");
-        vec_push(args, mem_str);
+        _wasm_push_w_opt(args, "max-memory-size", mem * 1048576);
     }
 
-    # Fuel metering: --fuel <N>
     var fuel = _wasm_fuel_from_timeout(timeout_ms);
     if (fuel > 0) {
-        var f_buf[32];
-        var f_len = fmt_int_buf(fuel, &f_buf);
-        var f_str = alloc(f_len + 1);
-        memcpy(f_str, &f_buf, f_len);
-        store8(f_str + f_len, 0);
-        vec_push(args, "--fuel");
-        vec_push(args, f_str);
+        _wasm_push_w_opt(args, "fuel", fuel);
     }
     return 0;
 }

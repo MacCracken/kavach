@@ -140,7 +140,8 @@ fn test_err_names() {
     test_group("error_names");
     assert_eq(streq(kavach_err_name(KAVACH_ERR_OK), "ok"), 1, "OK → ok");
     assert_eq(streq(kavach_err_name(KAVACH_ERR_TIMEOUT), "sandbox timeout"), 1, "TIMEOUT → sandbox timeout");
-    assert_eq(streq(kavach_err_name(KAVACH_ERR_POLICY_VIOLATION), "policy violation"), 1, "POLICY → policy violation");
+    assert_eq(streq(kavach_err_name(KAVACH_ERR_POLICY_VIOLATION),
+    "policy violation"), 1, "POLICY → policy violation");
     return 0;
 }
 
@@ -1652,6 +1653,105 @@ fn test_wasm_exec_without_wasmtime() {
     return 0;
 }
 
+# Run a REAL module end to end — the test that was missing, and the reason the
+# argv could be wrong for as long as it was.
+#
+# ⚠ `test_wasm_exec_without_wasmtime` and `test_wasm_exec_missing_file` both
+# fail BEFORE argv is assembled, so neither could ever see a bad flag. Until
+# 3.11.10 this backend emitted `--max-memory-size <bytes>` and `--fuel <N>` as
+# top-level `wasmtime run` flags; wasmtime answers
+# `error: unexpected argument '--max-memory-size' found` and runs nothing. Every
+# test still passed.
+#
+# The module is 36 bytes, hand-assembled here rather than checked in: magic +
+# version, a `() -> ()` type, one function, an exported `_start`, and a body that
+# is a single END opcode. No toolchain needed — building it from a .wat would
+# require `wat2wasm`, and depending on a Rust wasm target to test a shell-out
+# would be a heavier dependency than the thing under test.
+fn _write_nop_wasm(path) {
+    var b[64];
+    var n = 0;
+    # magic \0asm, version 1
+    store8(&b + n, 0); n = n + 1;
+    store8(&b + n, 97); n = n + 1;
+    store8(&b + n, 115); n = n + 1;
+    store8(&b + n, 109); n = n + 1;
+    store8(&b + n, 1); n = n + 1;
+    store8(&b + n, 0); n = n + 1;
+    store8(&b + n, 0); n = n + 1;
+    store8(&b + n, 0); n = n + 1;
+    # type section: 1 type, () -> ()
+    store8(&b + n, 1); n = n + 1;
+    store8(&b + n, 4); n = n + 1;
+    store8(&b + n, 1); n = n + 1;
+    store8(&b + n, 96); n = n + 1;
+    store8(&b + n, 0); n = n + 1;
+    store8(&b + n, 0); n = n + 1;
+    # function section: 1 func of type 0
+    store8(&b + n, 3); n = n + 1;
+    store8(&b + n, 2); n = n + 1;
+    store8(&b + n, 1); n = n + 1;
+    store8(&b + n, 0); n = n + 1;
+    # export section: "_start" -> func 0
+    store8(&b + n, 7); n = n + 1;
+    store8(&b + n, 10); n = n + 1;
+    store8(&b + n, 1); n = n + 1;
+    store8(&b + n, 6); n = n + 1;
+    store8(&b + n, 95); n = n + 1;
+    store8(&b + n, 115); n = n + 1;
+    store8(&b + n, 116); n = n + 1;
+    store8(&b + n, 97); n = n + 1;
+    store8(&b + n, 114); n = n + 1;
+    store8(&b + n, 116); n = n + 1;
+    store8(&b + n, 0); n = n + 1;
+    store8(&b + n, 0); n = n + 1;
+    # code section: 1 body, size 2, 0 locals, END
+    store8(&b + n, 10); n = n + 1;
+    store8(&b + n, 4); n = n + 1;
+    store8(&b + n, 1); n = n + 1;
+    store8(&b + n, 2); n = n + 1;
+    store8(&b + n, 0); n = n + 1;
+    store8(&b + n, 11); n = n + 1;
+    file_write_all(path, &b, n);
+    return n;
+}
+
+fn test_wasm_exec_real_module() {
+    test_group("wasm_real_module");
+    kavach_init();
+    if (_wasm_binary_path() == 0) { return 0; }
+
+    var path = "/tmp/kavach-test-nop.wasm";
+    assert_eq(_write_nop_wasm(path), 36, "the 36-byte nop module is written");
+
+    # ⚠ **BOTH limits must be set or this test proves nothing.** `policy_new()`
+    # zeroes the struct, and `_wasm_append_limits` emits each flag only when its
+    # value is > 0 — so with a default config the argv is bare `wasmtime run --
+    # <path>`, which is valid under every spelling. The first version of this
+    # test did exactly that and passed with the broken flags restored.
+    #
+    # A memory limit makes `-W max-memory-size=` reachable; a timeout makes
+    # `-W fuel=` reachable via `_wasm_fuel_from_timeout`.
+    var pol = policy_new();
+    SandboxPolicy_set_memory_limit_mb(pol, 64);
+    var cfg = config_new();
+    config_backend(cfg, Backend.WASM);
+    config_policy(cfg, pol);
+    config_timeout_ms(cfg, 5000);
+    var sb = alloc(SANDBOX_SIZE);
+    Sandbox_set_config(sb, cfg);
+
+    var r = wasm_exec(sb, path);
+    assert(r != 0, "wasm_exec returns a result");
+    # ⚠ THE assertion. On the pre-3.11.10 argv wasmtime rejects the flags and
+    # exits non-zero without running the guest, so this is 1 rather than 0.
+    assert_eq(ExecResult_exit_code(r), 0,
+    "the guest RAN and exited 0 — a non-zero here means wasmtime rejected the argv");
+    assert_eq(cstr_contains(ExecResult_stderr(r), "unexpected argument"), 0,
+    "and wasmtime did not complain about an unknown flag");
+    return 0;
+}
+
 fn test_wasm_exec_missing_file() {
     test_group("wasm_missing_file");
     kavach_init();
@@ -2143,7 +2243,7 @@ fn test_persistent_guest() {
     return 0;
 }
 
-# ══ sandbox_spawn (3.9.0) ════════════════════════════════
+# ══ sandbox_spawn (3.9.0) ══
 
 # A RUNNING sandbox for the spawn tests.
 #
@@ -2428,7 +2528,7 @@ fn test_spawn_null_handles() {
     return 0;
 }
 
-# ══ rootfs entry (3.9.1) ═════════════════════════════════
+# ══ rootfs entry (3.9.1) ══
 
 fn test_spawn_namespaces_environment_aware() {
     test_group("spawn_namespaces");
@@ -2604,8 +2704,13 @@ fn test_oci_run_large_stderr_does_not_deadlock() {
     # well past a pipe buffer to stderr BEFORE its first stdout byte would block
     # forever against a single-threaded parent draining stdout. This test hangs
     # rather than fails if that regresses, which is the honest signal.
-    var stub = _t_write_stub("/tmp/kavach-t-oci-bigerr",
-    "#!/bin/sh\ni=0\nwhile [ $i -lt 2000 ]; do echo 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx' >&2; i=$((i+1)); done\necho done-stdout\nexit 3\n");
+    var _bigerr_body_sb = str_builder_new();
+    str_builder_add_cstr(_bigerr_body_sb, "#!/bin/sh\ni=0\n");
+    str_builder_add_cstr(_bigerr_body_sb, "while [ $i -lt 2000 ]; do ");
+    str_builder_add_cstr(_bigerr_body_sb, "echo 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx' >&2; i=$((i+1)); done\n");
+    str_builder_add_cstr(_bigerr_body_sb, "echo done-stdout\nexit 3\n");
+    var bigerr_body = str_data(str_builder_build(_bigerr_body_sb));
+    var stub = _t_write_stub("/tmp/kavach-t-oci-bigerr", bigerr_body);
     var buf = alloc(65536);
     var n = _oci_run(stub, "/tmp/b", "kavach-t-bigerr", buf, 65536);
     store8(buf + n, 0);
@@ -2644,7 +2749,11 @@ fn test_backend_diagnostic_results_bypass_the_gate() {
     # the bypass is no longer load-bearing and should be reconsidered — but
     # while it holds, gating diagnostics means kavach censoring its own errors.
     var probe = scan_result_new();
-    var diag = "runc run failed: unable to start container process: error during container init: exec: \"/app/x\": stat /app/x: no such file or directory";
+    var _diag_sb = str_builder_new();
+    str_builder_add_cstr(_diag_sb, "runc run failed: unable to start container process: ");
+    str_builder_add_cstr(_diag_sb, "error during container init: exec: \"/app/x\": ");
+    str_builder_add_cstr(_diag_sb, "stat /app/x: no such file or directory");
+    var diag = str_data(str_builder_build(_diag_sb));
     code_scan(diag, probe);
     assert(vec_len(ScanResult_findings(probe)) > 0, "a runtime diagnostic DOES trip code_scan");
     assert(ScanResult_worst_severity(probe) >= Severity.HIGH, "at HIGH or worse, i.e. quarantine-or-block");
@@ -2758,7 +2867,6 @@ fn test_oci_err_path_is_uid_scoped() {
     assert_eq(streq(p, _oci_err_path("def456")), 0, "distinct per container");
     return 0;
 }
-
 
 # ================================================================
 # Landlock right coverage (3.11.1)
@@ -3116,7 +3224,6 @@ fn test_landlock_denies_a_path_outside_its_rules() {
     return 0;
 }
 
-
 # --- 3.11.4: the deadline and the exit code -------------------------------
 
 fn _t_tmo_run(cmd, ms, pol) {
@@ -3226,7 +3333,11 @@ fn test_stdout_and_stderr_both_large_do_not_deadlock() {
     #
     # The runtime guard blocks a bare `sh`, so the payload is a script run by
     # its own absolute path.
-    var body = "#!/bin/sh\necho stdout-marker\nawk 'BEGIN{for(i=0;i<6000;i++) print \"stderr-padding-line\"}' >&2\necho stdout-done\n";
+    var _body_sb = str_builder_new();
+    str_builder_add_cstr(_body_sb, "#!/bin/sh\necho stdout-marker\n");
+    str_builder_add_cstr(_body_sb, "awk 'BEGIN{for(i=0;i<6000;i++) print \"stderr-padding-line\"}' >&2\n");
+    str_builder_add_cstr(_body_sb, "echo stdout-done\n");
+    var body = str_data(str_builder_build(_body_sb));
     file_write_all("/tmp/kavach-both-streams.sh", body, strlen(body));
     sys_chmod("/tmp/kavach-both-streams.sh", 493);
 
@@ -3458,6 +3569,7 @@ fn main() {
     test_wasm_fuel_calculation();
     test_wasm_trim();
     test_wasm_exec_without_wasmtime();
+    test_wasm_exec_real_module();
     test_wasm_exec_missing_file();
     test_all_ten_backends_registered();
     test_sy_agnos_tier_strength();
