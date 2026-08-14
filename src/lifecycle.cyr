@@ -156,11 +156,12 @@ struct SandboxConfig {
     require_ns;
     stdin;
     stdin_len;
+    fuel;
 }
 
-# 104 (3.11.8): `stdin` + `stdin_len` appended, so no existing field offset
-# moves — the same discipline `require_ns` followed at 88.
-var SANDBOX_CONFIG_SIZE = 104;
+# 112 (3.11.11): `fuel` appended, so no existing field offset moves — the same
+# discipline `stdin`/`stdin_len` followed at 104 and `require_ns` at 88.
+var SANDBOX_CONFIG_SIZE = 112;
 
 # Defaults match Rust's SandboxConfig::default():
 #   backend=Process, policy=basic(), timeout_ms=30000, inner_backend=-1 (none)
@@ -193,6 +194,20 @@ fn config_stdin(c, ptr, len)   {
     SandboxConfig_set_stdin_len(c, len);
     return c;
 }
+
+# An explicit WASM instruction budget, in wasmtime `--fuel` units.
+#
+# ⚠ **0 means "derive from `timeout_ms`", which is what every caller got before
+# this existed** — `_wasm_fuel_from_timeout` returns `timeout_ms * 1_000_000`,
+# so the default 30 s timeout implies 3e10. That is a *wall-clock* bound
+# expressed as a *CPU* bound, and the two are not interchangeable: a caller
+# wanting Rust's `Store::set_fuel(1_000_000_000)` had no way to ask for it
+# without also shortening its timeout to one second.
+#
+# Reported by agnosai 2026-08-13, whose `WasmSandbox` advertises the oracle's
+# 1e9 through `agnosai_wasm_sandbox_fuel` while the guest actually ran with 30x
+# that. Setting this makes the advertised limit the enforced one.
+fn config_fuel(c, fuel)        { SandboxConfig_set_fuel(c, fuel); return c; }
 
 # Require the namespaces the policy asks for, even without a rootfs.
 #

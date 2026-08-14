@@ -11,8 +11,19 @@
 
 # Fuel calibration from timeout_ms. Matches Rust:
 #   fuel ≈ timeout_ms * 1_000_000 (≈ 1B instr/sec assumption)
+#
+# ⚠ This is the FALLBACK, used only when `config_fuel` was not set. It derives a
+# CPU budget from a wall-clock one, which is a guess — see `config_fuel`.
 fn _wasm_fuel_from_timeout(timeout_ms) {
     return timeout_ms * 1000000;
+}
+
+# The effective fuel: an explicitly configured budget, or the timeout-derived
+# fallback when none was set.
+fn _wasm_effective_fuel(cfg, timeout_ms) {
+    var explicit = SandboxConfig_fuel(cfg);
+    if (explicit > 0) { return explicit; }
+    return _wasm_fuel_from_timeout(timeout_ms);
 }
 
 # Append "--dir <path>" pair for each landlock rule. Writes into argv vec.
@@ -67,13 +78,12 @@ fn _wasm_push_w_opt(args, key, value) {
 #
 # The `-W` group has existed since wasmtime 14, so the pair form is not a
 # 47-specific accommodation — it is the spelling that has been correct all along.
-fn _wasm_append_limits(args, policy, timeout_ms) {
+fn _wasm_append_limits(args, policy, fuel) {
     var mem = SandboxPolicy_memory_limit_mb(policy);
     if (mem > 0) {
         _wasm_push_w_opt(args, "max-memory-size", mem * 1048576);
     }
 
-    var fuel = _wasm_fuel_from_timeout(timeout_ms);
     if (fuel > 0) {
         _wasm_push_w_opt(args, "fuel", fuel);
     }
@@ -135,7 +145,7 @@ fn wasm_exec(sandbox, command) {
     var args = vec_new();
     vec_push(args, wasmtime);
     vec_push(args, "run");
-    _wasm_append_limits(args, policy, timeout);
+    _wasm_append_limits(args, policy, _wasm_effective_fuel(cfg, timeout));
     _wasm_append_preopens(args, sandbox);
     # `--` separator guards against .wasm paths starting with '-'.
     vec_push(args, "--");

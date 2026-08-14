@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.11.11] — 2026-08-13 — an explicit WASM fuel budget
+
+### Added
+
+- **`config_fuel(c, fuel)`** — a WASM instruction budget in wasmtime `--fuel`
+  units, set directly instead of inferred.
+
+  ⚠ **Until now the only fuel was `timeout_ms * 1_000_000`**, so a caller
+  wanting Rust's `Store::set_fuel(1_000_000_000)` had no way to ask for it
+  without also shortening its timeout to one second. That derivation turns a
+  **wall-clock** bound into a **CPU** bound, and the two are not
+  interchangeable: at the default 30 s timeout the guest ran with **3e10 fuel,
+  30x** what an embedding wasmtime host would set.
+
+  Reported by agnosai 2026-08-13, whose `WasmSandbox` advertises the oracle's
+  1e9 through `agnosai_wasm_sandbox_fuel` while the guest actually ran with
+  thirty times that — an accessor reporting a limit that never reached the
+  runtime.
+
+  **`0` keeps the old behaviour** and is the default, so nothing that does not
+  call `config_fuel` changes: `_wasm_effective_fuel` falls back to the
+  timeout-derived value.
+
+### Changed
+
+- `SandboxConfig` grows **104 -> 112 bytes**. `fuel` is **appended**, so no
+  existing field offset moves — the same discipline `require_ns` followed at 88
+  and `stdin`/`stdin_len` at 104. The read-backs in `test_config_stdin` are what
+  say the append was clean.
+- Toolchain pinned to **cyrius 6.5.20** (was 6.5.18).
+
+### Added — tests
+
+- `test_wasm_exec_explicit_fuel`, **676 assertions** (was 674). A budget of `1`
+  is the discriminator: it exhausts, so the guest does not exit 0, where the
+  5 s timeout would otherwise derive 5e9 and run it fine. Mutation-verified —
+  ignoring the field fails both the end-to-end run and the fallback assertion.
+
 ## [3.11.10] — 2026-08-11 — the WASM backend's wasmtime flags were never valid
 
 ### Fixed — `wasmtime run` rejected our argv outright, and no test could see it

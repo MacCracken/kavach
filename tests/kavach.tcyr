@@ -1550,12 +1550,16 @@ fn test_config_stdin() {
     assert_eq(SandboxConfig_stdin(cfg), payload, "and it round-trips the pointer");
     assert_eq(SandboxConfig_stdin_len(cfg), strlen(payload), "and the length");
 
-    # ⚠ Appending the two fields must not move any existing offset — the same
-    # discipline `require_ns` followed when the struct went to 88.
+    # ⚠ Appending a field must not move any existing offset — the same discipline
+    # `require_ns` followed at 88 and `stdin`/`stdin_len` at 104. `fuel` took it
+    # to 112 in 3.11.11; these read-backs are what say the append was clean.
     assert_eq(SandboxConfig_backend(cfg), Backend.PROCESS, "backend still reads");
     assert_eq(SandboxConfig_timeout_ms(cfg), 30000, "timeout still reads");
     assert_eq(SandboxConfig_inner_backend(cfg), 0 - 1, "inner_backend still reads");
-    assert_eq(SANDBOX_CONFIG_SIZE, 104, "and the struct is 104 bytes");
+    assert_eq(SandboxConfig_stdin(cfg), payload,
+    "stdin still reads its own value, at its old offset");
+    assert_eq(SandboxConfig_fuel(cfg), 0, "and fuel defaults to 0 — derive from timeout");
+    assert_eq(SANDBOX_CONFIG_SIZE, 112, "and the struct is 112 bytes");
     return 0;
 }
 
@@ -1749,6 +1753,59 @@ fn test_wasm_exec_real_module() {
     "the guest RAN and exited 0 — a non-zero here means wasmtime rejected the argv");
     assert_eq(cstr_contains(ExecResult_stderr(r), "unexpected argument"), 0,
     "and wasmtime did not complain about an unknown flag");
+    return 0;
+}
+
+# ⚠ **An explicit fuel budget must REACH wasmtime, and 0 must still fall back.**
+#
+# `_wasm_fuel_from_timeout` turns a WALL-CLOCK bound into a CPU one — 3e10 at the
+# default 30 s timeout — so a caller wanting Rust's
+# `Store::set_fuel(1_000_000_000)` had no way to ask for it without also
+# shortening its timeout to a second. Reported by agnosai, whose `WasmSandbox`
+# advertised the oracle's 1e9 while the guest ran with 30x that.
+#
+# A budget of 1 is the discriminator: it is enough to instantiate nothing, so
+# wasmtime exhausts it and the guest does NOT exit 0. With the field ignored the
+# 5 s timeout would derive 5e9 and the module would run fine.
+fn test_wasm_exec_explicit_fuel() {
+    test_group("wasm_explicit_fuel");
+    kavach_init();
+    if (_wasm_binary_path() == 0) { return 0; }
+
+    var path = "/tmp/kavach-test-fuel.wasm";
+    assert_eq(_write_nop_wasm(path), 36, "the 36-byte nop module is written");
+
+    var pol = policy_new();
+    SandboxPolicy_set_memory_limit_mb(pol, 64);
+
+    # A generous budget: the guest runs.
+    var ok_cfg = config_new();
+    config_backend(ok_cfg, Backend.WASM);
+    config_policy(ok_cfg, pol);
+    config_timeout_ms(ok_cfg, 5000);
+    config_fuel(ok_cfg, 1000000000);
+    var ok_sb = alloc(SANDBOX_SIZE);
+    Sandbox_set_config(ok_sb, ok_cfg);
+    assert_eq(ExecResult_exit_code(wasm_exec(ok_sb, path)), 0,
+    "a 1e9 budget runs the guest to completion");
+
+    # A budget of 1: wasmtime refuses.
+    var tight = config_new();
+    config_backend(tight, Backend.WASM);
+    config_policy(tight, pol);
+    config_timeout_ms(tight, 5000);
+    config_fuel(tight, 1);
+    var tight_sb = alloc(SANDBOX_SIZE);
+    Sandbox_set_config(tight_sb, tight);
+    assert_neq(ExecResult_exit_code(wasm_exec(tight_sb, path)), 0,
+    "a budget of 1 EXHAUSTS — a 0 here means config_fuel never reached wasmtime");
+
+    # 0 keeps the historical behaviour: derive from the timeout.
+    assert_eq(_wasm_effective_fuel(ok_cfg, 5000), 1000000000,
+    "an explicit budget wins over the timeout-derived one");
+    var bare = config_new();
+    assert_eq(_wasm_effective_fuel(bare, 5000), 5000000000,
+    "and 0 falls back to timeout_ms * 1e6, which is what every caller had before");
     return 0;
 }
 
@@ -3570,6 +3627,7 @@ fn main() {
     test_wasm_trim();
     test_wasm_exec_without_wasmtime();
     test_wasm_exec_real_module();
+    test_wasm_exec_explicit_fuel();
     test_wasm_exec_missing_file();
     test_all_ten_backends_registered();
     test_sy_agnos_tier_strength();
