@@ -163,7 +163,7 @@ fn security_apply_landlock(rules, count): i64 {
     # the sandbox's FS rules were enforced. Transitional — until AGNOS ships its own
     # FS-confinement mechanism (the native capability-layer Landlock-equivalent),
     # at which point this branch calls that instead of returning unsupported.
-    return err_not_supported("LANDLOCK");
+    return kavach_err_not_supported("LANDLOCK");
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
 
@@ -187,7 +187,7 @@ fn security_apply_landlock(rules, count): i64 {
         var errno = 0 - ruleset_fd;
         if (errno == ENOSYS) { return Ok(0); }
         if (errno == EOPNOTSUPP) { return Ok(0); }
-        return err_syscall_failed(errno, "landlock_create_ruleset failed");
+        return kavach_err_syscall_failed(errno, "landlock_create_ruleset failed");
     }
     defer { syscall(SYS_CLOSE, ruleset_fd); }
 
@@ -219,7 +219,7 @@ fn security_apply_landlock(rules, count): i64 {
             # O_PATH = 0x200000, O_CLOEXEC = 0x80000
             var path_fd = sys_open(path, 0x280000, 0);
             if (path_fd < 0) {
-                return err_syscall_failed(0 - path_fd, "landlock open path failed");
+                return kavach_err_syscall_failed(0 - path_fd, "landlock open path failed");
             }
 
             # LandlockPathBeneathAttr: { allowed_access: u64, parent_fd: i32 }
@@ -233,7 +233,7 @@ fn security_apply_landlock(rules, count): i64 {
             syscall(SYS_CLOSE, path_fd);
 
             if (ret < 0) {
-                return err_syscall_failed(0 - ret, "landlock_add_rule failed");
+                return kavach_err_syscall_failed(0 - ret, "landlock_add_rule failed");
             }
         }
         idx = idx + 1;
@@ -242,12 +242,12 @@ fn security_apply_landlock(rules, count): i64 {
     # Set no_new_privs (required by Landlock)
     var ret = syscall(SYS_PRCTL, 38, 1, 0, 0, 0);
     if (ret < 0) {
-        return err_syscall_failed(0 - ret, "PR_SET_NO_NEW_PRIVS failed");
+        return kavach_err_syscall_failed(0 - ret, "PR_SET_NO_NEW_PRIVS failed");
     }
 
     ret = syscall(SYS_LANDLOCK_RESTRICT_SELF, ruleset_fd, 0);
     if (ret < 0) {
-        return err_syscall_failed(0 - ret, "landlock_restrict_self failed");
+        return kavach_err_syscall_failed(0 - ret, "landlock_restrict_self failed");
     }
 
     return Ok(0);
@@ -314,14 +314,14 @@ fn security_bpf_write_insn(buf, offset, code, jt, jf, k): i64 {
 # Returns Result.
 fn security_load_seccomp(filter, filter_len): i64 {
     if (filter_len == 0) {
-        return err_invalid_argument("empty seccomp filter");
+        return kavach_err_invalid_argument("empty seccomp filter");
     }
     if (filter_len % 8 != 0) {
-        return err_invalid_argument("filter size not multiple of 8");
+        return kavach_err_invalid_argument("filter size not multiple of 8");
     }
     var num_insns = filter_len / 8;
     if (num_insns > BPF_MAXINSNS) {
-        return err_invalid_argument("seccomp filter too large");
+        return kavach_err_invalid_argument("seccomp filter too large");
     }
 
     #ifdef CYRIUS_TARGET_AGNOS
@@ -331,14 +331,14 @@ fn security_load_seccomp(filter, filter_len): i64 {
     # silent Ok(0) that would falsely imply the syscall surface was filtered. The
     # filter is still validated above. Transitional — until AGNOS provides native
     # syscall-surface filtering, at which point this branch calls that instead.
-    return err_not_supported("SECCOMP");
+    return kavach_err_not_supported("SECCOMP");
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
 
     # Set no_new_privs
     var ret = syscall(SYS_PRCTL, PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
     if (ret < 0) {
-        return err_syscall_failed(0 - ret, "PR_SET_NO_NEW_PRIVS failed");
+        return kavach_err_syscall_failed(0 - ret, "PR_SET_NO_NEW_PRIVS failed");
     }
 
     # sock_fprog: { u16 len, pad[6], u64 filter_ptr }
@@ -349,7 +349,7 @@ fn security_load_seccomp(filter, filter_len): i64 {
 
     ret = syscall(SYS_PRCTL, PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog, 0, 0);
     if (ret < 0) {
-        return err_syscall_failed(0 - ret, "PR_SET_SECCOMP failed");
+        return kavach_err_syscall_failed(0 - ret, "PR_SET_SECCOMP failed");
     }
 
     return Ok(0);
@@ -521,7 +521,7 @@ fn security_create_namespace(flags): i64 {
     # (same pattern as Landlock/seccomp) rather than a silent Ok(0) that would falsely
     # imply isolation was applied. Transitional — until AGNOS provides native
     # isolation primitives, at which point this branch calls those instead.
-    return err_not_supported("NAMESPACES");
+    return kavach_err_not_supported("NAMESPACES");
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
     var sflags = 0;
@@ -533,9 +533,9 @@ fn security_create_namespace(flags): i64 {
     var ret = syscall(SYS_UNSHARE, sflags);
     if (ret < 0) {
         var errno = 0 - ret;
-        if (errno == EPERM) { return err_permission_denied("security_create_namespace"); }
-        if (errno == EINVAL) { return err_invalid_argument("security_create_namespace: invalid flags"); }
-        return err_syscall_failed(errno, "unshare failed");
+        if (errno == EPERM) { return kavach_err_permission_denied("security_create_namespace"); }
+        if (errno == EINVAL) { return kavach_err_invalid_argument("security_create_namespace: invalid flags"); }
+        return kavach_err_syscall_failed(errno, "unshare failed");
     }
 
     return Ok(0);

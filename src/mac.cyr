@@ -54,7 +54,7 @@ enum AppArmorState {
 fn mac_read_file(path): i64 {
     var fd = sys_open(path, O_RDONLY, 0);
     if (fd < 0) {
-        return err_io(0 - fd, path);
+        return kavach_err_io(0 - fd, path);
     }
     defer { sys_close(fd); }
     # Read up to 4096 bytes (plenty for sysfs/procfs files)
@@ -62,7 +62,7 @@ fn mac_read_file(path): i64 {
     memset(buf, 0, 4097);
     var n = sys_read(fd, buf, 4096);
     if (n < 0) {
-        return err_io(0 - n, path);
+        return kavach_err_io(0 - n, path);
     }
     # Null-terminate
     store8(buf + n, 0);
@@ -80,17 +80,17 @@ fn mac_write_file(path, data, data_len): i64 {
     var fd = sys_open(path, O_WRONLY, 0);
     if (fd < 0) {
         var errno = 0 - fd;
-        if (errno == EPERM) { return err_permission_denied(path); }
-        if (errno == EACCES) { return err_permission_denied(path); }
-        return err_io(errno, path);
+        if (errno == EPERM) { return kavach_err_permission_denied(path); }
+        if (errno == EACCES) { return kavach_err_permission_denied(path); }
+        return kavach_err_io(errno, path);
     }
     defer { sys_close(fd); }
     var n = sys_write(fd, data, data_len);
     if (n < 0) {
         var werrno = 0 - n;
-        if (werrno == EPERM) { return err_permission_denied(path); }
-        if (werrno == EACCES) { return err_permission_denied(path); }
-        return err_io(werrno, path);
+        if (werrno == EPERM) { return kavach_err_permission_denied(path); }
+        if (werrno == EACCES) { return kavach_err_permission_denied(path); }
+        return kavach_err_io(werrno, path);
     }
     return Ok(0);
 }
@@ -179,11 +179,11 @@ fn mac_set_selinux_mode(mode): i64 {
     var enforce_path = "/sys/fs/selinux/enforce";
 
     if (mac_file_exists(enforce_path) == 0) {
-        return err_not_supported("selinux");
+        return kavach_err_not_supported("selinux");
     }
 
     if (mode == SELINUX_DISABLED) {
-        return err_invalid_argument("cannot disable SELinux at runtime; use kernel boot parameter");
+        return kavach_err_invalid_argument("cannot disable SELinux at runtime; use kernel boot parameter");
     }
 
     if (mode == SELINUX_ENFORCING) {
@@ -193,7 +193,7 @@ fn mac_set_selinux_mode(mode): i64 {
         return mac_write_file(enforce_path, "0", 1);
     }
 
-    return err_invalid_argument("invalid SELinux mode");
+    return kavach_err_invalid_argument("invalid SELinux mode");
 }
 
 # ================================================================
@@ -206,7 +206,7 @@ fn mac_get_selinux_context(): i64 {
     var path = "/proc/self/attr/current";
 
     if (mac_file_exists(path) == 0) {
-        return err_not_supported("selinux");
+        return kavach_err_not_supported("selinux");
     }
 
     var res = mac_read_file(path);
@@ -228,7 +228,7 @@ fn mac_get_selinux_context(): i64 {
 
 fn mac_set_selinux_context(context, on_exec): i64 {
     if (strlen(context) == 0) {
-        return err_invalid_argument("SELinux context cannot be empty");
+        return kavach_err_invalid_argument("SELinux context cannot be empty");
     }
 
     # Validate format: must have at least 3 colons (user:role:type:level)
@@ -242,7 +242,7 @@ fn mac_set_selinux_context(context, on_exec): i64 {
         vi = vi + 1;
     }
     if (colon_count < 3) {
-        return err_invalid_argument(
+        return kavach_err_invalid_argument(
         "invalid SELinux context format (expected user:role:type:level)");
     }
 
@@ -252,7 +252,7 @@ fn mac_set_selinux_context(context, on_exec): i64 {
     }
 
     if (mac_file_exists(path) == 0) {
-        return err_not_supported("selinux");
+        return kavach_err_not_supported("selinux");
     }
 
     return mac_write_file(path, context, ctx_len);
@@ -269,7 +269,7 @@ fn mac_get_apparmor_mode(): i64 {
     var path = "/proc/self/attr/current";
 
     if (mac_file_exists(path) == 0) {
-        return err_not_supported("apparmor");
+        return kavach_err_not_supported("apparmor");
     }
 
     var res = mac_read_file(path);
@@ -308,7 +308,7 @@ fn mac_apparmor_change_profile(profile_name): i64 {
     var name_len = strlen(profile_name);
 
     if (name_len == 0) {
-        return err_invalid_argument("AppArmor profile name cannot be empty");
+        return kavach_err_invalid_argument("AppArmor profile name cannot be empty");
     }
 
     # Validate: no slashes or nulls in profile name
@@ -316,17 +316,17 @@ fn mac_apparmor_change_profile(profile_name): i64 {
     while (ci < name_len) {
         var ch = load8(profile_name + ci);
         if (ch == 47) {
-            return err_invalid_argument("invalid AppArmor profile name: contains /");
+            return kavach_err_invalid_argument("invalid AppArmor profile name: contains /");
         }
         if (ch == 0) {
-            return err_invalid_argument("invalid AppArmor profile name: contains null");
+            return kavach_err_invalid_argument("invalid AppArmor profile name: contains null");
         }
         ci = ci + 1;
     }
 
     var attr_path = "/proc/self/attr/current";
     if (mac_file_exists(attr_path) == 0) {
-        return err_not_supported("apparmor");
+        return kavach_err_not_supported("apparmor");
     }
 
     # Build "changeprofile <name>" command
@@ -424,20 +424,20 @@ fn mac_default_profile(agent_type): i64 {
 fn mac_profile_validate(profile, mac_system): i64 {
     var agent_type = mac_profile_agent_type(profile);
     if (agent_type == 0) {
-        return err_invalid_argument("agent type cannot be empty");
+        return kavach_err_invalid_argument("agent type cannot be empty");
     }
     if (strlen(agent_type) == 0) {
-        return err_invalid_argument("agent type cannot be empty");
+        return kavach_err_invalid_argument("agent type cannot be empty");
     }
 
     if (mac_system == MAC_SELINUX) {
         var ctx = mac_profile_selinux_ctx(profile);
         if (ctx == 0) {
-            return err_invalid_argument("SELinux context required but not set");
+            return kavach_err_invalid_argument("SELinux context required but not set");
         }
         var ctx_len = strlen(ctx);
         if (ctx_len == 0) {
-            return err_invalid_argument("SELinux context required but not set");
+            return kavach_err_invalid_argument("SELinux context required but not set");
         }
         # Count colons — must have at least 3 (user:role:type:level)
         var colon_count = 0;
@@ -447,24 +447,24 @@ fn mac_profile_validate(profile, mac_system): i64 {
             vi = vi + 1;
         }
         if (colon_count < 3) {
-            return err_invalid_argument("invalid SELinux context format");
+            return kavach_err_invalid_argument("invalid SELinux context format");
         }
     }
 
     if (mac_system == MAC_APPARMOR) {
         var aa_name = mac_profile_apparmor_name(profile);
         if (aa_name == 0) {
-            return err_invalid_argument("AppArmor profile name required but not set");
+            return kavach_err_invalid_argument("AppArmor profile name required but not set");
         }
         var aa_len = strlen(aa_name);
         if (aa_len == 0) {
-            return err_invalid_argument("AppArmor profile name required but not set");
+            return kavach_err_invalid_argument("AppArmor profile name required but not set");
         }
         # No slashes or nulls allowed
         var ai = 0;
         while (ai < aa_len) {
             if (load8(aa_name + ai) == 47) {
-                return err_invalid_argument("invalid AppArmor profile name");
+                return kavach_err_invalid_argument("invalid AppArmor profile name");
             }
             ai = ai + 1;
         }
@@ -506,7 +506,7 @@ fn mac_apply_agent_profile(agent_type, profiles, profile_count): i64 {
     }
 
     if (found == 0) {
-        return err_invalid_argument("no MAC profile found for agent type");
+        return kavach_err_invalid_argument("no MAC profile found for agent type");
     }
 
     # Validate the profile
@@ -524,5 +524,5 @@ fn mac_apply_agent_profile(agent_type, profiles, profile_count): i64 {
         return mac_apparmor_change_profile(aa_name);
     }
 
-    return err_unknown("cannot apply MAC profile: unknown MAC system");
+    return kavach_err_unknown("cannot apply MAC profile: unknown MAC system");
 }

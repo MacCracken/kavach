@@ -63,7 +63,7 @@ fn agnosys_cstr_starts_with(str, prefix): i64 {
 fn agnosys_run_capture(args, buf, buflen, errmsg): i64 {
     var n = exec_capture(args, buf, buflen);
     if (n < 0) {
-        return err_unknown(errmsg);
+        return kavach_err_unknown(errmsg);
     }
     return Ok(n);
 }
@@ -74,7 +74,7 @@ fn agnosys_run_capture(args, buf, buflen, errmsg): i64 {
 fn agnosys_run_checked(args, errmsg): i64 {
     var rc = exec_vec(args);
     if (rc != 0) {
-        return err_unknown(errmsg);
+        return kavach_err_unknown(errmsg);
     }
     return Ok(0);
 }

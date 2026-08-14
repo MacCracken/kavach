@@ -112,23 +112,23 @@ fn syserr_message(e): i64 {
 # Error constructors — packed (fast, no alloc)
 # ================================================================
 
-fn err_syscall_failed_nr(errno): i64 {
+fn kavach_err_syscall_failed_nr(errno): i64 {
     return Err(syserr_pack(KAVACH_ERR_SYSCALL_FAILED, errno));
 }
 
-fn err_permission_denied_nr(errno): i64 {
+fn kavach_err_permission_denied_nr(errno): i64 {
     return Err(syserr_pack(KAVACH_ERR_PERMISSION_DENIED, errno));
 }
 
-fn err_would_block(): i64 {
+fn kavach_err_would_block(): i64 {
     return Err(syserr_pack(KAVACH_ERR_WOULD_BLOCK, EAGAIN));
 }
 
-fn err_invalid_argument_nr(): i64 {
+fn kavach_err_invalid_argument_nr(): i64 {
     return Err(syserr_pack(KAVACH_ERR_INVALID_ARGUMENT, EINVAL));
 }
 
-fn err_not_supported_nr(): i64 {
+fn kavach_err_not_supported_nr(): i64 {
     return Err(syserr_pack(KAVACH_ERR_NOT_SUPPORTED, ENOSYS));
 }
 
@@ -136,31 +136,31 @@ fn err_not_supported_nr(): i64 {
 # Error constructors — with message (heap, cold path)
 # ================================================================
 
-fn err_syscall_failed(errno, message): i64 {
+fn kavach_err_syscall_failed(errno, message): i64 {
     return Err(syserr_new(KAVACH_ERR_SYSCALL_FAILED, errno, message));
 }
 
-fn err_invalid_argument(message): i64 {
+fn kavach_err_invalid_argument(message): i64 {
     return Err(syserr_new(KAVACH_ERR_INVALID_ARGUMENT, EINVAL, message));
 }
 
-fn err_permission_denied(operation): i64 {
+fn kavach_err_permission_denied(operation): i64 {
     return Err(syserr_new(KAVACH_ERR_PERMISSION_DENIED, EPERM, operation));
 }
 
-fn err_module_not_loaded(module): i64 {
+fn kavach_err_module_not_loaded(module): i64 {
     return Err(syserr_new(KAVACH_ERR_MODULE_NOT_LOADED, ENODEV, module));
 }
 
-fn err_not_supported(feature): i64 {
+fn kavach_err_not_supported(feature): i64 {
     return Err(syserr_new(KAVACH_ERR_NOT_SUPPORTED, ENOSYS, feature));
 }
 
-fn err_unknown(message): i64 {
+fn kavach_err_unknown(message): i64 {
     return Err(syserr_new(KAVACH_ERR_UNKNOWN, 0, message));
 }
 
-fn err_io(errno, message): i64 {
+fn kavach_err_io(errno, message): i64 {
     return Err(syserr_new(KAVACH_ERR_IO, errno, message));
 }
 
@@ -168,18 +168,18 @@ fn err_io(errno, message): i64 {
 # Errno-based error creation — packed (zero alloc, hot path)
 # ================================================================
 
-fn err_from_errno(errno): i64 {
-    if (errno == EPERM) { return err_permission_denied_nr(EPERM); }
-    if (errno == EACCES) { return err_permission_denied_nr(EACCES); }
-    if (errno == EAGAIN) { return err_would_block(); }
-    if (errno == EINVAL) { return err_invalid_argument_nr(); }
-    if (errno == ENOSYS) { return err_not_supported_nr(); }
-    return err_syscall_failed_nr(errno);
+fn kavach_err_from_errno(errno): i64 {
+    if (errno == EPERM) { return kavach_err_permission_denied_nr(EPERM); }
+    if (errno == EACCES) { return kavach_err_permission_denied_nr(EACCES); }
+    if (errno == EAGAIN) { return kavach_err_would_block(); }
+    if (errno == EINVAL) { return kavach_err_invalid_argument_nr(); }
+    if (errno == ENOSYS) { return kavach_err_not_supported_nr(); }
+    return kavach_err_syscall_failed_nr(errno);
 }
 
-fn err_from_syscall_ret(ret): i64 {
+fn kavach_err_from_syscall_ret(ret): i64 {
     var errno = 0 - ret;
-    return err_from_errno(errno);
+    return kavach_err_from_errno(errno);
 }
 
 # ================================================================
@@ -269,6 +269,6 @@ fn is_syscall_err(ret): i64 {
 
 # Wrap a raw syscall return: Ok(ret) if >= 0, Err(from_errno) if < 0
 fn wrap_syscall(ret): i64 {
-    if (ret < 0) { return err_from_syscall_ret(ret); }
+    if (ret < 0) { return kavach_err_from_syscall_ret(ret); }
     return Ok(ret);
 }

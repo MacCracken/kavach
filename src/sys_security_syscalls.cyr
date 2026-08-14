@@ -14,7 +14,7 @@
 # Therefore EVERY consumer of these constants — kernel_audit.cyr
 # (audit_open/send_raw/recv_raw/agnos_log) and security.cyr (unshare) — MUST
 # reference them ONLY inside a `#ifndef CYRIUS_TARGET_AGNOS` branch; the agnos
-# branch returns err_not_supported (the security.cyr precedent). Confinement on
+# branch returns kavach_err_not_supported (the security.cyr precedent). Confinement on
 # agnos is the capability layer's job, not these Linux syscalls.
 enum SecuritySyscall {
     SYS_UNSHARE = 272;          # Linux x86_64 unshare   (out of agnos 0-62 range)

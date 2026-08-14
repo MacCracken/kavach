@@ -12,6 +12,18 @@ classification, credential proxy, HMAC-SHA256 audit chain — all in pure Cyrius
 
 ## Status
 
+**v3.11.13 — error-constructor namespacing + toolchain/dependency refresh.**
+Cyrius pin `6.5.20` → `6.5.21` and sigil `3.12.7` → `3.12.9`, both to the
+latest ecosystem. ⚠ **One breaking rename**: the 14 bare `err_*` error
+constructors are now `kavach_err_*`. kavach and sigil both inherit
+`sys_error.cyr` from agnosys and had been minting the same fourteen names into
+one auto-prepended namespace, resolved silently by source order; sigil
+namespaced its own to `sigil_err_*` at 3.12.8. Behaviour is unchanged — the two
+copies were byte-identical — but nothing kept them that way. Migration is a
+mechanical prefix; see [CHANGELOG](CHANGELOG.md) for the table. `duplicate fn`
+warnings on a fresh checkout: **34 → 20**. Build + the **684-assertion** suite
+green under cc `6.5.21`; 25 benches recorded, all within variance of v3.11.12.
+
 **v3.7.1 — toolchain + dependency refresh.** Cyrius pin `6.3.40` → `6.4.62`
 and sigil `3.9.8` → `3.11.1`, both to the latest ecosystem. No source or API
 change; the `dist/kavach.cyr` consumable surface is byte-identical apart from
@@ -148,13 +160,13 @@ for what's intentionally deferred.
 ## Build
 
 ```sh
-# Requires Cyrius 6.4.62 (pinned in cyrius.cyml; the first-party tree is
-# on the cc 6.4 line — the old 5.10.x sigil-NI asm-offset bisect is
+# Requires Cyrius 6.5.21 (pinned in cyrius.cyml; the first-party tree is
+# on the cc 6.5 line — the old 5.10.x sigil-NI asm-offset bisect is
 # retired). The pin matches the installed cycc; if cycc later drifts ahead,
 # skip local fmt writes to avoid minor-version drift.
 
-# 1. Resolve deps — populates lib/ (gitignored) with the cc 6.4.62
-#    stdlib snapshot + sigil 3.11.1 at the pinned tag (the agnosys
+# 1. Resolve deps — populates lib/ (gitignored) with the cc 6.5.21
+#    stdlib snapshot + sigil 3.12.9 at the pinned tag (the agnosys
 #    dependency was dropped at 3.5.0; see cyrius.cyml).
 cyrius deps
 
@@ -162,19 +174,22 @@ cyrius deps
 cyrius build src/main.cyr build/kavach
 ./build/kavach
 
-# Run the test suite (422 tests).
+# Run the test suite (684 assertions).
 cyrius test tests/kavach.tcyr
 
-# Run the bench harness (22 benches).
+# Run the bench harness (25 benches).
 cyrius bench tests/kavach.bcyr
 
-# Audit (fmt + lint + vet + deny + test + bench + doc).
-cyrius audit
+# Cleanliness gates. Run these individually — `cyrius audit` is the
+# TOOLCHAIN's own self-host audit, not a project gate.
+cyrius fmt <file>          # writes to stdout; diff against the file
+cyrius lint src/main.cyr
+cyrius vet src/main.cyr
 ```
 
 Dependencies (declared in [`cyrius.cyml`](cyrius.cyml)):
 - **Cyrius stdlib** — `alloc, args, assert, async, bayan, bench, chrono, ct, dynlib, fdlopen, fmt, fnptr, freelist, fs, hashmap, hashmap_fast, io, keccak, mmap, net, process, random, result, sandhi, slice, str, string, syscalls, tagged, thread, thread_local, tls, vec` (resolved by `cyrius deps` into `lib/`, which is gitignored). The 6.2 line folded the standalone `json`/`base64` modules into `bayan` and retired `bigint` (sigil bundles its own `u256`/`u384`).
-- **[sigil](https://github.com/MacCracken/sigil) 3.11.1** — SHA-256, HMAC-SHA256 (constant-time compare now via the stdlib `ct` module — sigil retired its own `ct_eq` in the 3.x line). Latest tag; the 5.10.x SIGILL bisect that capped it at 2.9.0 no longer applies under cc 6.4.62. The agnosys dependency was dropped at 3.5.0 — kavach internalized the Linux security backends it used (Landlock/seccomp, MAC, Linux-audit) as `src/` modules; see [`cyrius.cyml`](cyrius.cyml).
+- **[sigil](https://github.com/MacCracken/sigil) 3.12.9** — SHA-256, HMAC-SHA256 (constant-time compare now via the stdlib `ct` module — sigil retired its own `ct_eq` in the 3.x line). Latest tag; the 5.10.x SIGILL bisect that capped it at 2.9.0 no longer applies under cc 6.5.21. sigil 3.12.8 namespaced its error constructors `err_*` → `sigil_err_*`; kavach's own moved to `kavach_err_*` at v3.11.13. The agnosys dependency was dropped at 3.5.0 — kavach internalized the Linux security backends it used (Landlock/seccomp, MAC, Linux-audit) as `src/` modules; see [`cyrius.cyml`](cyrius.cyml).
 
 ## Consume kavach as a library (v3.6.0+)
 
@@ -240,10 +255,21 @@ freshness. See
 **Known integration caveats** (kavach is a heavy security engine — see
 ADR-006 §Consequences):
 
-- **Benign symbol overlaps.** kavach and sigil each internalized an
+- **Symbol overlaps with sigil.** kavach and sigil each internalized an
   `sys_error`/`sys_util` (the agnosys→agnodrm split), so a consumer sees
-  `duplicate fn 'err_*' / 'agnosys_*' / 'syserr_*'` (`last definition
-  wins`) warnings — the same ones kavach's own build emits. Non-fatal.
+  `duplicate fn` (`last definition wins`) warnings — the same ones kavach's
+  own build emits. The `err_*` third of that overlap is **resolved as of
+  v3.11.13**: sigil renamed its copies `sigil_err_*` at 3.12.8 and kavach
+  renamed its own `kavach_err_*`, so the two families no longer share a name.
+  ⚠ Those fourteen were benign *in effect* — the two copies are still
+  byte-identical forks of the same agnosys file, which is why the collision
+  went unnoticed for the whole 3.x line — but nothing made them **stay**
+  identical, and a divergence would have changed a consumer's error
+  classification with no build error at all.
+  Still overlapping, and still resolved by source order: `syserr_*` (7) and
+  the `agnosys_*` helpers (7), plus `path_exists` (vs ai-hwaccel) and
+  `attestation_result_new` (vs sigil). Those are compatible in practice today
+  but are not *structurally* safe; they are tracked for the same treatment.
 - **Namespaced error kinds (no `ERR_UNKNOWN` collision).** kavach's
   `SysErrorKind` members are prefixed `KAVACH_ERR_*` — e.g.
   `KAVACH_ERR_UNKNOWN = 7`, `KAVACH_ERR_SYSCALL_FAILED = 1` — precisely so
@@ -251,8 +277,14 @@ ADR-006 §Consequences):
   notably sakshi (sigil's tracing dep), whose `ERR_UNKNOWN = 1` would
   otherwise clash under last-def-wins. A consumer can distinguish every
   kavach error kind, and the generic `ERR_*` names stay free for sakshi and
-  friends. (The constructor/accessor API — `err_unknown()`, `syserr_kind()`,
-  … — is unchanged; only the enum constant names carry the prefix.)
+  friends. **As of v3.11.13 the error *constructors* carry the same prefix** —
+  `kavach_err_unknown()`, `kavach_err_invalid_argument()`,
+  `kavach_err_not_supported()`, … — because sigil 3.12.8 namespaced its own
+  identically-named copies to `sigil_err_*` (both trees descend from the same
+  agnosys `sys_error.cyr`). Consumers on ≤3.11.12 that called a bare `err_*`
+  must add the prefix; see the CHANGELOG 3.11.13 migration table. The
+  `syserr_*` accessors (`syserr_kind()`, `syserr_errno()`, `syserr_message()`)
+  are unchanged.
 - **~13 MB static scan tables** ride along; build with `CYRIUS_DCE=1` to
   drop the unreachable surface.
 

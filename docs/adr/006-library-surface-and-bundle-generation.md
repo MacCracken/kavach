@@ -107,14 +107,28 @@ zero-config, but distlib (correctly, per its design) emits only the direct
 leaves, and the CI freshness gate enforces distlib's output — so the
 declare-in-consumer contract is the ecosystem-consistent answer.
 
-### 4. Symbol-overlap posture (three clashes: one benign, two resolved)
+### 4. Symbol-overlap posture (three clashes: three resolved, one partly)
 
-**Benign — duplicate functions.** kavach and sigil each internalized an
-`sys_error.cyr` / `sys_util.cyr` in the agnosys→agnodrm decomposition.
-Consuming kavach re-emits the `duplicate fn 'err_*' / 'agnosys_*' /
-'syserr_*'` (`last definition wins`) warnings that kavach's **own**
-program build already emits — non-fatal, and "last definition wins" keeps
-kavach's copies authoritative in a kavach-rooted include graph.
+**Duplicate functions — the `err_*` third is resolved as of v3.11.13.**
+kavach and sigil each internalized an `sys_error.cyr` / `sys_util.cyr` in the
+agnosys→agnodrm decomposition, so consuming kavach re-emits the `duplicate fn`
+(`last definition wins`) warnings kavach's **own** program build already emits.
+
+⚠ **This section previously called that "benign", and for the `err_*` third
+that was the wrong call.** The two copies were byte-identical forks — same
+kind values, same packing, same `syserr_print` arms — so nothing misbehaved,
+which is precisely why fourteen silent collisions survived the whole 3.x line.
+But last-def-wins gave *no* mechanism to keep them identical: either side could
+have diverged and changed a consumer's error classification with no build
+error. sigil namespaced its copies `sigil_err_*` at 3.12.8 and kavach namespaced
+its own `kavach_err_*` at v3.11.13; that third no longer overlaps. See
+CHANGELOG 3.11.13.
+
+**Still overlapping**, and still resolved only by source order: `syserr_*`
+and the `agnosys_*` helpers (vs sigil), plus `path_exists` (vs ai-hwaccel)
+and `attestation_result_new` (vs sigil) — 20 warnings on a kavach build, down
+from 34. Compatible in practice today, but not *structurally* safe, and
+tracked for the same `<crate>_` treatment.
 
 **Resolved — former `ERR_UNKNOWN` value collision (consumer-only).**
 sakshi (pulled transitively via sigil for tracing) mints a generic
@@ -149,6 +163,18 @@ unique across the first-party tree, so the same `<CRATE>_ERR_*` convention
 generalizes tree-wide without the prefixes themselves colliding — sakshi /
 sigil adopting it is optional future hygiene, not required for kavach's
 consumers.
+
+> **Superseded in part — v3.11.13.** The sentence above ("callers reach error
+> kinds only through the constructor/accessor functions … whose names are
+> unchanged") was accurate for the release that made the *enum* change, but no
+> longer describes the surface. sigil 3.12.8 namespaced its own error
+> constructors `err_*` → `sigil_err_*`; sigil and kavach both inherit that file
+> from agnosys, so kavach's bare `err_*` had been colliding with sigil's under
+> last-def-wins the whole time. kavach namespaced its own to `kavach_err_*` at
+> v3.11.13. The `<CRATE>_ERR_*` convention this ADR called "optional future
+> hygiene" for other crates turned out to be the thing that resolved it — sigil
+> adopted it independently. The `syserr_*` accessors named here are still
+> unchanged. See CHANGELOG 3.11.13.
 
 **Resolved — the `KavachError` enum, proactively (this release).** The
 separate `KavachError` enum in `src/error.cyr` minted the same class of bare

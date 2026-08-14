@@ -7,6 +7,182 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.11.13] — 2026-08-14 — kavach and sigil were sharing 14 error-constructor names
+
+### Breaking
+
+- **The bare `err_*` error constructors are now `kavach_err_*`.** kavach and
+  sigil both inherit `sys_error.cyr` from agnosys, so both minted the *same
+  fourteen* bare constructor names. cyrius auto-prepends every `[deps.*]`
+  module into the compilation unit, so the two sets landed in one namespace and
+  the compiler resolved them under **last-def-wins** — emitting a
+  `duplicate fn` warning per name and picking whichever copy came later in
+  source order.
+
+  ⚠ **No behaviour changed, and that is the point.** The two copies were
+  checked against each other rather than assumed to differ: kind values
+  (1–8), `syserr_pack`/`syserr_new` layout, the `0x100000` packed-vs-heap
+  threshold, and every `syserr_print` arm are **byte-identical** — down to a
+  shared off-by-one that writes `"kernel module not loaded: "` as 25 bytes for
+  a 26-byte string. Both are still near-verbatim forks of the same agnosys
+  file, which is exactly why fourteen silent last-def-wins collisions survived
+  the entire 3.x line unnoticed.
+
+  The hazard is **structural, not present-tense**. Nothing in the build stops
+  either side from diverging: a consumer's error classification would change
+  with no error, no test failure, and no signal beyond one `duplicate fn`
+  warning buried among 34. And the files *have* started to drift — sigil's
+  enum members are `SIGIL_ERR_*` plus `SYSE_UNKNOWN`/`SYSE_IO`, kavach's are
+  `KAVACH_ERR_*`. The values still coincide, so behaviour still coincides;
+  the first edit on either side that moves one would not. This is the same
+  shape as the `ERR_UNKNOWN` collision
+  [ADR-006](docs/adr/006-library-surface-and-bundle-generation.md) closed for
+  the *enum* half at v3.6.0 — fixed there by verifying the latent hazard
+  rather than waiting for a consumer to hit it, and closed here on the same
+  reasoning.
+
+  sigil closed its side at **3.12.8** (`err_*` → `sigil_err_*`). kavach closes
+  its own here. Migration is a mechanical prefix — the arities, argument order,
+  and return values are unchanged:
+
+  | v3.11.12 and earlier | v3.11.13 |
+  |---|---|
+  | `err_syscall_failed(errno, msg)` | `kavach_err_syscall_failed(errno, msg)` |
+  | `err_syscall_failed_nr(errno)` | `kavach_err_syscall_failed_nr(errno)` |
+  | `err_invalid_argument(msg)` | `kavach_err_invalid_argument(msg)` |
+  | `err_invalid_argument_nr()` | `kavach_err_invalid_argument_nr()` |
+  | `err_permission_denied(op)` | `kavach_err_permission_denied(op)` |
+  | `err_permission_denied_nr(errno)` | `kavach_err_permission_denied_nr(errno)` |
+  | `err_not_supported(feature)` | `kavach_err_not_supported(feature)` |
+  | `err_not_supported_nr()` | `kavach_err_not_supported_nr()` |
+  | `err_module_not_loaded(module)` | `kavach_err_module_not_loaded(module)` |
+  | `err_would_block()` | `kavach_err_would_block()` |
+  | `err_unknown(msg)` | `kavach_err_unknown(msg)` |
+  | `err_io(errno, msg)` | `kavach_err_io(errno, msg)` |
+  | `err_from_errno(errno)` | `kavach_err_from_errno(errno)` |
+  | `err_from_syscall_ret(ret)` | `kavach_err_from_syscall_ret(ret)` |
+
+  **Unchanged, deliberately:** the `syserr_*` accessors (`syserr_kind`,
+  `syserr_errno`, `syserr_message`), the `KAVACH_ERR_*` enum members (already
+  namespaced at v3.6.0), and the stdlib-owned `err_code_of` / `err_code`, which
+  kavach does not define and must not shadow.
+
+  The prefix is the **crate name**, per the convention ADR-006 set for
+  `KAVACH_ERR_*` — repo names are globally unique across the first-party tree,
+  so `<crate>_err_*` generalizes without the prefixes themselves colliding.
+  sigil arrived at the same convention independently.
+
+### Changed
+
+- **Cyrius toolchain pin `6.5.20` → `6.5.21`.** Clean
+  `deps → build → lint → vet → test → bench` on the new pin. No stdlib symbol
+  migration was required; the `[deps]` stdlib list is unchanged, and the five
+  opt-in modules whose absence SIGILLs at runtime (`ct`, `keccak`, `thread`,
+  `thread_local`, `async`) are all still declared and vendored.
+- **sigil `3.12.7` → `3.12.9`** — latest. 3.12.8 carries the `sigil_err_*`
+  namespacing this release pairs with; 3.12.9 delocalises the RSA sign and
+  bignum workspaces off `cbank()` lanes (−9.53 MiB of `.bss`). kavach uses
+  sigil for HMAC-SHA256 of the audit chain (`src/audit.cyr`) and constant-time
+  comparison (`src/util.cyr`) — neither touches the asymmetric stack, so the
+  3.12.9 work is a pure inheritance.
+- **ai-hwaccel stays `2.3.16` and samay stays `1.0.1`** — both already latest.
+- **`lib/` re-vendored from scratch** (`rm -f lib/*.cyr cyrius.lock`,
+  `cyrius deps`): 76 deps locked across 69 modules, `cyrius deps --verify`
+  green. This is the curated `[deps]` set CI reproduces on a fresh checkout,
+  not a `cyrius lib sync` full snapshot.
+- `duplicate fn` warnings on a fresh checkout: **34 → 20**, measured rather
+  than counted by hand — v3.11.12's tree was rebuilt against a staged sigil
+  3.12.7 to get the 34, and the 14 that went are exactly the `err_*` set.
+  (Note `cyrius build` re-runs `cyrius deps` first, so reproducing the old
+  state needs the sigil bundle staged behind `[deps.sigil].path`, not swapped
+  into `lib/`.) The remaining 20 (`syserr_*` and the seven
+  `agnosys_*` helpers vs sigil, `path_exists` vs ai-hwaccel,
+  `attestation_result_new` vs sigil, and `SpawnedProcess_pid`/`_set_pid`
+  internal to `src/`) are pre-existing and untouched here.
+
+### Docs
+
+- `CLAUDE.md` corrected: the pin bullet and the DO-NOT rule still read `6.4.62`
+  / "the tree is on cc 6.4 now" and the identity bullet still read `v3.7.1`.
+  Added symbol collision with sigil as a third named pin-move hazard alongside
+  the opt-in-stdlib and stdlib-consolidation ones.
+- `README.md` — three fixes. The §Status block led with **v3.7.1**, six
+  releases stale, advertising cc `6.4.62` / sigil `3.11.1` / 422 assertions /
+  22 benches as current; §Build handed the reader those same versions as
+  prerequisites. The "constructor/accessor API … is unchanged" note is now
+  correct for the constructor half, and the "Benign symbol overlaps" caveat no
+  longer lists `err_*` (nor calls the survivors benign). §Build also stopped
+  recommending `cyrius audit` as a project gate — that is the **toolchain's own
+  self-host audit**; `fmt`/`lint`/`vet` are now named individually.
+- `docs/guides/getting-started.md` — missed by the v3.8–v3.11 releases
+  entirely; its build prerequisites still instructed cc `6.4.62` / sigil
+  `3.11.1`.
+- `docs/adr/006-library-surface-and-bundle-generation.md` — two edits. A
+  superseding note on the v3.6.0 enum decision (a note, not a rewrite — the
+  record stands), and §4 "Symbol-overlap posture", which classified the
+  `err_*` clash as **"Benign"** and told consumers the warnings were expected
+  and safe. That is the exact claim this release refutes, and README §Known
+  integration caveats points readers *at* it.
+- `docs/doc-health.md` — header plus every per-doc row for a doc this change
+  set touched; the rows still certified `README.md`, `CLAUDE.md`,
+  `overview.md`, `roadmap.md`, `getting-started.md`, and `cyrius.cyml` as
+  "Fresh" against v3.7.1 facts.
+- `cyrius.cyml` — the `[deps.sigil]` comment block said "Pinned at 3.11.1 —
+  latest" and "validated … under cc 6.4.62"; both corrected, and the collision
+  history recorded at the pin so a future bump does not reintroduce a bare
+  `err_*`.
+
+### Performance
+
+**Neutral — this release changes no semantics.** The rename is a pure
+identifier substitution and the pin/dep moves do not touch the measured paths.
+Verified rather than assumed: v3.11.12 was re-measured on the same machine from
+a detached worktree at `a9d4bd4`, and every benchmark lands inside run-to-run
+variance.
+
+| benchmark | 3.11.12 (re-measured) | 3.11.13 (recorded row) | 3.11.13 steady state |
+|---|---|---|---|
+| `http_path_extract` | 107 ns | 119 ns | 114 ns (3 further runs) |
+| `http_allowlist_hit` | 76 ns | 80 ns | 76–77 ns |
+| `http_allowlist_miss` | 80 ns | 84 ns | 81 ns |
+| `backend_parse` | 153 ns | 161 ns | — |
+| `gate_clean_output` | 326.2 µs | 335.8 µs | — (min 306.8 µs, max 491.6 µs) |
+| `code_scan_large_ac` | 481.9 µs | 505.4 µs | — (min 465.2 µs, max 653.6 µs) |
+
+The recorded row is a single cold run and sits at the high end; three further
+runs put the three `http_*` figures back on top of the 3.11.12 numbers. The
+CSV keeps the cold run rather than a hand-picked best, so the row is
+reproducible from `./scripts/bench-history.sh 3.11.13`.
+
+⚠ **`benches/bench-history.csv` has no rows for 3.11.8 through 3.11.12** —
+five releases cut without the baseline CLAUDE.md requires. The 3.11.13 row is
+therefore recorded against **3.11.7** as its nearest predecessor, and the
+deltas below are *cumulative over six releases*, not attributable to this one:
+
+- Wins: `process_exec_confined` 5,059 µs → 2,768 µs (**−45.3%**),
+  `process_exec_echo` 4,878 µs → 2,731 µs (**−44.0%**), `policy_strict_create`
+  93 ns → 65 ns (**−30.1%**), `config_builder_full` 178 ns → 134 ns
+  (**−24.7%**), `health_check_noop` 4,879 ns → 3,742 ns (**−23.3%**),
+  `cgroup_wrap_argv` 475 ns → 398 ns (**−16.2%**), `sandbox_full_lifecycle`
+  7,505 ns → 6,372 ns (**−15.1%**), `secrets_redact` 7,575 ns → 6,473 ns
+  (**−14.5%**).
+- Drift: `http_allowlist_hit` 63 ns → 77 ns, `http_path_extract` 103 ns →
+  114 ns, `http_allowlist_miss` 74 ns → 81 ns. The worktree measurement puts
+  all three at their current values *already at 3.11.12*, so they accrued
+  somewhere in 3.11.8–3.11.12 and are a follow-up, not a regression here.
+
+25 benchmarks recorded for 3.11.13. Tests: **684 passed / 0 failed**, plus 12
+(samay integration) and 2 — unchanged from 3.11.12, as a pure rename should be.
+
+### Known issues
+
+- **`warning: undefined function 'json_v_parse_str'` comes from samay 1.0.1**,
+  not kavach. bayan 1.3.0 (cyrius 6.5.0) renamed it `bayan_json_v_parse_str`;
+  ai-hwaccel took that migration at 2.3.16, samay has not. samay is optional
+  behind the default-on `scheduler` feature and kavach never calls the symbol
+  — `dist/kavach.cyr` contains zero samay references — so the warning is inert
+  here. Fix belongs upstream in samay.
+
 ## [3.11.12] — 2026-08-13 — the WASM backend defaulted to an UNBOUNDED guest
 
 ### Fixed

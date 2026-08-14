@@ -5,7 +5,7 @@ description = "Sandbox execution framework — 10 backends, strength scoring (0-
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/kavach"
 language = "cyrius"
-cyrius = "6.5.20"
+cyrius = "6.5.21"
 
 [build]
 entry = "src/main.cyr"
@@ -139,7 +139,7 @@ stdlib = [
 # at the pinned tag — used by src/audit.cyr for HMAC-SHA256 of the
 # audit chain and src/util.cyr for ct_eq constant-time comparisons.
 #
-# Pinned at 3.11.1 — latest. Since sigil 3.6 the four opt-in stdlib
+# Pinned at 3.12.9 — latest. Since sigil 3.6 the four opt-in stdlib
 # modules (ct, keccak, thread, thread_local) are NOT in the cyrius
 # auto-prepend union and the bundle does not carry them — each must be
 # declared in [deps] above so `cyrius deps` vendors it into lib/ (cyrius
@@ -154,12 +154,19 @@ stdlib = [
 # The pre-6.1 `bigint` stdlib module is RETIRED — sigil 3.x bundles its
 # own u256/u384 inline and kavach has no direct big-integer use, so the
 # old `bigint` [deps] entry was dropped at 3.4.2.
-# Validated by a clean build/test/bench run at this pin under cc 6.4.62.
+# Validated by a clean build/test/bench run at this pin under cc 6.5.21.
 # Bump in lockstep with the cyrius pin and re-validate.
+#
+# sigil 3.12.8 NAMESPACED ITS ERROR CONSTRUCTORS (`err_*` → `sigil_err_*`).
+# kavach's src/sys_error.cyr carried the same bare `err_*` names — both trees
+# descend from the same agnosys sys_error.cyr — so every build logged 14
+# `duplicate fn` warnings and silently resolved them by source order. kavach
+# namespaced its own side to `kavach_err_*` at 3.11.13; the two families no
+# longer overlap. Do not reintroduce a bare `err_*` here.
 [deps.sigil]
 git = "https://github.com/MacCracken/sigil.git"
 path = "../sigil"
-tag = "3.12.7"
+tag = "3.12.9"
 modules = ["dist/sigil.cyr"]
 
 # ── Feature gating for the samay bridge ──────────────────────────
