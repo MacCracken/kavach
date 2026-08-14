@@ -1672,6 +1672,22 @@ fn test_wasm_exec_without_wasmtime() {
 # is a single END opcode. No toolchain needed — building it from a .wat would
 # require `wat2wasm`, and depending on a Rust wasm target to test a shell-out
 # would be a heavier dependency than the thing under test.
+# A module declaring a 128 MiB memory — 42 bytes.
+#
+# The discriminator for the default ceiling: it instantiates fine with no
+# `-W max-memory-size` and is REFUSED under 64 MiB. Verified against wasmtime 47
+# directly before being wired here.
+fn _write_mem128_wasm(path) {
+    var b[42];
+    store8(&b + 0, 0); store8(&b + 1, 97); store8(&b + 2, 115); store8(&b + 3, 109); store8(&b + 4, 1); store8(&b + 5, 0); store8(&b + 6, 0); store8(&b + 7, 0);
+    store8(&b + 8, 1); store8(&b + 9, 4); store8(&b + 10, 1); store8(&b + 11, 96); store8(&b + 12, 0); store8(&b + 13, 0); store8(&b + 14, 3); store8(&b + 15, 2);
+    store8(&b + 16, 1); store8(&b + 17, 0); store8(&b + 18, 5); store8(&b + 19, 4); store8(&b + 20, 1); store8(&b + 21, 0); store8(&b + 22, 128); store8(&b + 23, 16);
+    store8(&b + 24, 7); store8(&b + 25, 10); store8(&b + 26, 1); store8(&b + 27, 6); store8(&b + 28, 95); store8(&b + 29, 115); store8(&b + 30, 116); store8(&b + 31, 97);
+    store8(&b + 32, 114); store8(&b + 33, 116); store8(&b + 34, 0); store8(&b + 35, 0); store8(&b + 36, 10); store8(&b + 37, 4); store8(&b + 38, 1); store8(&b + 39, 2);
+    store8(&b + 40, 0); store8(&b + 41, 11);
+    return file_write_all(path, &b, 42);
+}
+
 fn _write_nop_wasm(path) {
     var b[64];
     var n = 0;
@@ -1806,6 +1822,55 @@ fn test_wasm_exec_explicit_fuel() {
     var bare = config_new();
     assert_eq(_wasm_effective_fuel(bare, 5000), 5000000000,
     "and 0 falls back to timeout_ms * 1e6, which is what every caller had before");
+    return 0;
+}
+
+# ⚠ **A default policy must NOT mean an unbounded guest.**
+#
+# `config_new()` installs `policy_basic()`, which leaves `memory_limit_mb` at 0,
+# and `_wasm_append_limits` used to emit `-W max-memory-size` only when that was
+# > 0 — so every caller on the default ran with no ceiling. A wasm32 guest can
+# claim 4 GiB. Now the backend falls back to `WASM_DEFAULT_MEMORY_LIMIT_MB`,
+# which is the 64 MiB Rust's own `WasmSandbox` defaults to.
+fn test_wasm_default_memory_ceiling() {
+    test_group("wasm_default_memory");
+    assert_eq(_wasm_effective_memory_mb(policy_basic()), WASM_DEFAULT_MEMORY_LIMIT_MB,
+    "a policy naming no limit falls back to the default ceiling");
+    var explicit = policy_new();
+    SandboxPolicy_set_memory_limit_mb(explicit, 7);
+    assert_eq(_wasm_effective_memory_mb(explicit), 7,
+    "and an explicit limit still wins");
+    assert_eq(_wasm_effective_memory_mb(policy_strict()), 512,
+    "policy_strict keeps its own 512");
+
+    kavach_init();
+    if (_wasm_binary_path() == 0) { return 0; }
+
+    # End to end: a module declaring 128 MiB must be REFUSED under the default,
+    # where before it instantiated freely.
+    var path = "/tmp/kavach-test-mem128.wasm";
+    assert_eq(_write_mem128_wasm(path), 42, "the 128 MiB module is written");
+    var cfg = config_new();
+    config_backend(cfg, Backend.WASM);
+    config_timeout_ms(cfg, 5000);
+    var sb = alloc(SANDBOX_SIZE);
+    Sandbox_set_config(sb, cfg);
+    var r = wasm_exec(sb, path);
+    assert(r != 0, "wasm_exec returns a result");
+    assert_neq(ExecResult_exit_code(r), 0,
+    "a 128 MiB guest is REFUSED on the DEFAULT policy — a 0 here means unbounded");
+
+    # And a guest inside the ceiling still runs, so this is a ceiling and not a
+    # blanket refusal.
+    var nop = "/tmp/kavach-test-mem-nop.wasm";
+    assert_eq(_write_nop_wasm(nop), 36, "the nop module is written");
+    var cfg2 = config_new();
+    config_backend(cfg2, Backend.WASM);
+    config_timeout_ms(cfg2, 5000);
+    var sb2 = alloc(SANDBOX_SIZE);
+    Sandbox_set_config(sb2, cfg2);
+    assert_eq(ExecResult_exit_code(wasm_exec(sb2, nop)), 0,
+    "and a module within the ceiling still runs");
     return 0;
 }
 
@@ -3628,6 +3693,7 @@ fn main() {
     test_wasm_exec_without_wasmtime();
     test_wasm_exec_real_module();
     test_wasm_exec_explicit_fuel();
+    test_wasm_default_memory_ceiling();
     test_wasm_exec_missing_file();
     test_all_ten_backends_registered();
     test_sy_agnos_tier_strength();

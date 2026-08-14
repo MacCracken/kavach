@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.11.12] — 2026-08-13 — the WASM backend defaulted to an UNBOUNDED guest
+
+### Fixed
+
+- **A default policy meant no memory ceiling at all.** `config_new()` installs
+  `policy_basic()`, which sets seccomp and leaves `memory_limit_mb` at **0**, and
+  `_wasm_append_limits` emitted `-W max-memory-size` only when that was `> 0`.
+  So every caller on the default ran its guest with **no bound whatsoever** —
+  and a wasm32 guest can claim up to **4 GiB**.
+
+  ⚠ **Verified against wasmtime 47 rather than argued**: a hand-built module
+  declaring a **128 MiB** memory instantiates fine bare and is refused under a
+  64 MiB ceiling. The backend now always emits a ceiling, falling back to
+  `WASM_DEFAULT_MEMORY_LIMIT_MB` when the policy names none.
+
+  **64 MiB is not invented** — it is what Rust's own `WasmSandbox` defaults to
+  (`DEFAULT_MAX_MEMORY_BYTES`), so kavach now matches the embedding host it is
+  standing in for. An explicit `SandboxPolicy_set_memory_limit_mb` still wins,
+  and `policy_strict()` keeps its 512.
+
+  ⚠ **This is a behaviour change for any caller that relied on the absence of a
+  ceiling.** A sandbox defaulting to unbounded is the wrong default; a caller
+  wanting a larger guest now has to say so.
+
+  Reported by agnosai, whose ADR 019 had carried the memory half of this as an
+  open residual after the fuel half was closed in 3.11.11.
+
+### Added
+
+- `WASM_DEFAULT_MEMORY_LIMIT_MB` and `_wasm_effective_memory_mb(policy)`.
+- `test_wasm_default_memory_ceiling` — **684 assertions** (was 676). It asserts
+  the fallback, that an explicit limit still wins, that `policy_strict` keeps
+  512, and end to end that a 128 MiB guest is refused on the default policy
+  while a small one still runs. Mutation-verified: restoring the `mem > 0` guard
+  fails the end-to-end arm.
+
 ## [3.11.11] — 2026-08-13 — an explicit WASM fuel budget
 
 ### Added

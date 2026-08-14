@@ -9,6 +9,30 @@
 # Deferred: WAT inline modules, custom linker hooks. Both require embedding
 # a real WASM runtime — v3.0 or whenever mabda/yukti exposes one.
 
+# The guest memory ceiling applied when the policy names none, in MiB.
+#
+# ⚠ **A sandbox must not default to UNBOUNDED.** `policy_basic()` — what
+# `config_new()` installs — sets seccomp and leaves `memory_limit_mb` at 0, and
+# `_wasm_append_limits` used to emit `-W max-memory-size` only when that was
+# > 0. So every caller on the default policy ran its guest with no ceiling at
+# all: verified against wasmtime 47 with a module declaring **128 MiB**, which
+# instantiates fine bare and is refused under a 64 MiB ceiling. wasm32 caps a
+# guest at 4 GiB, so "no ceiling" means a hostile module can claim that much.
+#
+# 64 MiB is the value Rust's own `WasmSandbox` defaults to
+# (`DEFAULT_MAX_MEMORY_BYTES`, agnosai's oracle at
+# `rust-old/src/sandbox/wasm.rs:19`), so this matches the embedding host rather
+# than inventing a number. A caller wanting more sets
+# `SandboxPolicy_set_memory_limit_mb`; `policy_strict()` already sets 512.
+var WASM_DEFAULT_MEMORY_LIMIT_MB = 64;
+
+# The ceiling actually applied: the policy's, or the default when it names none.
+fn _wasm_effective_memory_mb(policy) {
+    var mem = SandboxPolicy_memory_limit_mb(policy);
+    if (mem > 0) { return mem; }
+    return WASM_DEFAULT_MEMORY_LIMIT_MB;
+}
+
 # Fuel calibration from timeout_ms. Matches Rust:
 #   fuel ≈ timeout_ms * 1_000_000 (≈ 1B instr/sec assumption)
 #
@@ -79,10 +103,10 @@ fn _wasm_push_w_opt(args, key, value) {
 # The `-W` group has existed since wasmtime 14, so the pair form is not a
 # 47-specific accommodation — it is the spelling that has been correct all along.
 fn _wasm_append_limits(args, policy, fuel) {
-    var mem = SandboxPolicy_memory_limit_mb(policy);
-    if (mem > 0) {
-        _wasm_push_w_opt(args, "max-memory-size", mem * 1048576);
-    }
+    # Always emitted — see `WASM_DEFAULT_MEMORY_LIMIT_MB` for why a missing
+    # policy limit must not mean "unbounded".
+    _wasm_push_w_opt(args, "max-memory-size",
+    _wasm_effective_memory_mb(policy) * 1048576);
 
     if (fuel > 0) {
         _wasm_push_w_opt(args, "fuel", fuel);
