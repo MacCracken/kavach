@@ -94,13 +94,6 @@ stdlib = [
     "args",
     "assert",
     "async",
-    # bayan = the 6.1.x consolidated data module (subsumes the pre-6.1
-    # standalone `json` + `base64` stdlib modules, which no longer ship
-    # as separate files). kavach does not parse JSON or decode base64
-    # directly — its oci_json_escape is hand-rolled (src/oci_spec.cyr) —
-    # but `bayan` is kept declared so `cyrius deps` resolves the union
-    # that the vendored sandhi/sigil bundles forward-reference under the
-    # single-pass loader. Replaced the retired `json` entry at 3.4.2.
     "bayan",
     "bench",
     "chrono",
