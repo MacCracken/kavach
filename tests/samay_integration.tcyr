@@ -4,7 +4,17 @@
 # samay dist (lib/samay.cyr + its ai-hwaccel dep), constructs real samay
 # scheduler types, and maps them through src/samay_bridge.cyr onto a kavach
 # SandboxPolicy. stdlib + declared deps (samay, ai-hwaccel) auto-prepend from
-# cyrius.cyml — do not include lib/ here (same as kavach's own tests).
+# cyrius.cyml — do not include lib/ here (same as kavach's own tests), with the
+# ONE documented exception below.
+#
+# ⛔ chrono IS THAT EXCEPTION, and it is not a style choice. Under cc 6.5.27 a
+# `[deps].stdlib` entry first reached TRANSITIVELY (async → async_macos → chrono)
+# is marked seen before its top-level `include` is pushed, so chrono is copied to
+# lib/ with no prepend and every `clock_now_ns` / `clock_now_ms` / `dt_now` call
+# site in the auto-prepended deps goes undefined — a hard build stop. This file
+# includes neither src/util.cyr nor src/lifecycle.cyr, so it cannot inherit the
+# include those carry. See src/util.cyr for the full mechanism.
+include "lib/chrono.cyr"
 
 include "src/policy.cyr"
 include "src/samay_bridge.cyr"
@@ -49,7 +59,7 @@ fn test_bridge_cpu_floor() {
 fn test_bridge_from_task() {
     test_group("samay_bridge_task");
     var task = scheduled_task_new(str_from("t"), str_from("d"), str_from("a"), 6,
-        resource_req_new(f64_from(4), 8192, REQ_NONE, 0, 1, 0));
+    resource_req_new(f64_from(4), 8192, REQ_NONE, 0, 1, 0));
     var p = sandbox_policy_from_samay_task(task);
     assert_eq(SandboxPolicy_cpu_limit_tenths(p), 40, "4.0 cores -> 40 tenths");
     assert_eq(SandboxPolicy_memory_limit_mb(p), 8192, "8192 MB from task");

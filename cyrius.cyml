@@ -5,7 +5,7 @@ description = "Sandbox execution framework — 10 backends, strength scoring (0-
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/kavach"
 language = "cyrius"
-cyrius = "6.5.21"
+cyrius = "6.5.27"
 
 [build]
 entry = "src/main.cyr"
@@ -15,7 +15,7 @@ output = "build/kavach"
 # kavach is consumable at the source level as a single-file bundle,
 # `dist/kavach.cyr` (committed). `modules` lists the domain `src/*.cyr`
 # files, in dependency order, that `cyrius distlib` concatenates to
-# (re)build that bundle (and its `dist/kavach.deps` stdlib sidecar).
+# (re)build that bundle (and its `dist/kavach.deps` `stdlib` sidecar).
 # This is the standard first-party dist flow — same as sigil, patra,
 # and bhumi: `[lib].modules` here is the generator's single source of
 # truth; `src/lib.cyr` mirrors this order as the human-facing header.
@@ -83,11 +83,15 @@ modules = [
 ]
 
 # ── Dependencies ─────────────────────────────────────────────────
-# Cyrius-stdlib modules vendored into lib/ by `cyrius deps`. kavach
+# Cyrius-`stdlib` modules vendored into lib/ by `cyrius deps`. kavach
 # includes them transitively via the modules under src/; the list
 # here mirrors the union of imports across src/, tests/, fuzz/, and
 # benches/ so `cyrius deps` resolves the full set. lib/ is gitignored
 # (see .gitignore) — `cyrius deps` is the source of truth.
+#
+# ⛔ 2 SILENT HAZARDS — read "MANIFEST HAZARDS" below the array before
+#    editing ANY comment above it. (1) `[deps]` must start inside the
+#    first 4095 bytes. (2) Declaring a module here != it gets included.
 [deps]
 stdlib = [
     "alloc",
@@ -128,6 +132,49 @@ stdlib = [
     "vec",
 ]
 
+# ── MANIFEST HAZARDS (read before editing anything above) ────────
+#
+# ⛔ (1) `[deps]` MUST START WITHIN THE FIRST 4095 BYTES OF THIS FILE.
+# `cyrius build` does not call the dep resolver directly: `_auto_deps`
+# (cyrius `cbt/deps.cyr:1983`) does `alloc(4096)` + `file_read_all(manifest,
+# buf, 4095)` and scans ONLY that prefix for `[deps]` / `[deps.`. Past 4095
+# the marker is invisible, `_auto_deps` returns 0, `cmd_deps()` never runs,
+# and NOTHING is prepended — no warning, no error, no mention of the manifest.
+# A populated lib/ does not save you: `cyrius deps` still vendors the files by
+# hand (it reads 32767 bytes), so the modules sit on disk while the build dies
+# on undefined stdlib symbols in src/. That is exactly what happened while
+# writing this block: an explanatory comment ABOVE `[deps]` pushed the marker
+# from byte 3676 to 5288 and the tree stopped building with
+# `undefined variable 'IoNotFound'` — pointing at src/util.cyr, 4 KB from the
+# actual cause. Hence the split: the cheap marker above, this text below.
+# ⚠ Headroom is ~400 bytes. `.github/workflows/ci.yml` gates it ("Manifest
+# [deps] within the 4095-byte auto_deps window") — keep that gate.
+#
+# ⛔ (2) DECLARING A MODULE BELOW DOES NOT GUARANTEE ITS `include` (cc 6.5.26+).
+# `cyrius deps` copies each declared module into lib/ AND pushes one
+# `include "lib/<mod>.cyr"` for `compile()` to prepend — but the resolver's
+# de-dup guard runs BEFORE that push (cyrius `cbt/deps.cyr:521` vs `:582`). A
+# module first reached TRANSITIVELY, as some other module's `include`, is
+# marked seen, so its own top-level entry silently resolves to a no-op: the
+# file lands in lib/, `cyrius deps` reports success, cyrius.lock records it —
+# and no `include` is emitted. Every symbol in it is then an undefined
+# function, and nothing in the output names the module.
+#
+# That is live for `chrono`: cc 6.5.26 added `lib/async_macos.cyr` (which
+# includes `lib/chrono.cyr`) under `lib/async.cyr`, and `async` precedes
+# `chrono` in the alphabetical list above. So `src/util.cyr`,
+# `tests/kavach.fcyr` and `tests/samay_integration.tcyr` each carry an explicit
+# `include "lib/chrono.cyr"` — DO NOT DELETE THEM, and do not "fix" this by
+# reordering the array instead: reordering encodes an assumption about
+# upstream's include chains and un-fixes itself the next time a module grows
+# an include. Filed upstream at cyrius
+# docs/development/issues/2026-08-17-stdlib-transitive-pull-drops-top-level-include.md
+# (bisected: clean 6.5.21-6.5.25, broken 6.5.26+). See CHANGELOG 3.11.14.
+#
+# ⚠ On a pin move, treat a NEW `undefined function` on a `stdlib` symbol as
+# hazard (2), and a build where NOTHING resolves as hazard (1) — neither
+# symptom points at this file.
+
 # External first-party deps. Resolved into lib/sigil.cyr by `cyrius deps`
 # at the pinned tag — used by src/audit.cyr for HMAC-SHA256 of the
 # audit chain and src/util.cyr for ct_eq constant-time comparisons.
@@ -144,10 +191,10 @@ stdlib = [
 # exercises the TLS path, so without thread_local storage the binary
 # links clean but SIGILLs at first crypto use (latent through sigil
 # ≤3.7.12, surfaced by the 3.7.14 bump — see bote 2.7.6 / libro 2.7.4).
-# The pre-6.1 `bigint` stdlib module is RETIRED — sigil 3.x bundles its
+# The pre-6.1 `bigint` `stdlib` module is RETIRED — sigil 3.x bundles its
 # own u256/u384 inline and kavach has no direct big-integer use, so the
 # old `bigint` [deps] entry was dropped at 3.4.2.
-# Validated by a clean build/test/bench run at this pin under cc 6.5.21.
+# Validated by a clean build/test/bench run at this pin under cc 6.5.27.
 # Bump in lockstep with the cyrius pin and re-validate.
 #
 # sigil 3.12.8 NAMESPACED ITS ERROR CONSTRUCTORS (`err_*` → `sigil_err_*`).

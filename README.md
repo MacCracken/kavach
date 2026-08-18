@@ -12,6 +12,26 @@ classification, credential proxy, HMAC-SHA256 audit chain — all in pure Cyrius
 
 ## Status
 
+**v3.11.14 — a declared stdlib module that arrives transitively is never
+included.** Cyrius pin `6.5.21` → `6.5.27`; sigil `3.12.9`, samay `1.0.1` and
+ai-hwaccel `2.3.16` re-verified as already latest, so no dep moved. ⛔ **The pin
+move stopped the whole tree building**, and the manifest was not at fault: since
+cc `6.5.26` a `[deps].stdlib` entry that the resolver first reaches
+*transitively* is marked seen before its top-level `include` is pushed, so
+`chrono` was copied into `lib/`, recorded in the lockfile — and never included.
+Every `clock_epoch_secs` / `clock_now_ns` / `sleep_ms` call became an undefined
+function, with no diagnostic naming `chrono`. Bisected to `6.5.26` (the release
+that added `lib/async_macos.cyr`, which includes chrono, under `lib/async.cyr`)
+and [filed upstream](CHANGELOG.md) with a self-verifying repro. Fixed with an
+explicit `include "lib/chrono.cyr"` rather than by reordering `[deps].stdlib` —
+order-independence is the point. ⭐ The same line protects **consumers**: it
+moves `chrono` to the top of `dist/kavach.deps`, ahead of `async`, so the
+identical bug cannot fire downstream. Also: the demo banner had printed
+`kavach v3.2.0` for nine releases and now tracks `VERSION`. Build + the
+**684-assertion** suite green under cc `6.5.27`, lint 0, fmt 0 drift; 25 benches
+recorded — CPU-bound set **−4 % to −10 %**, two fork/exec benches up (see
+[CHANGELOG](CHANGELOG.md) for why one of those is tail-driven noise).
+
 **v3.11.13 — error-constructor namespacing + toolchain/dependency refresh.**
 Cyrius pin `6.5.20` → `6.5.21` and sigil `3.12.7` → `3.12.9`, both to the
 latest ecosystem. ⚠ **One breaking rename**: the 14 bare `err_*` error
@@ -160,12 +180,12 @@ for what's intentionally deferred.
 ## Build
 
 ```sh
-# Requires Cyrius 6.5.21 (pinned in cyrius.cyml; the first-party tree is
+# Requires Cyrius 6.5.27 (pinned in cyrius.cyml; the first-party tree is
 # on the cc 6.5 line — the old 5.10.x sigil-NI asm-offset bisect is
 # retired). The pin matches the installed cycc; if cycc later drifts ahead,
 # skip local fmt writes to avoid minor-version drift.
 
-# 1. Resolve deps — populates lib/ (gitignored) with the cc 6.5.21
+# 1. Resolve deps — populates lib/ (gitignored) with the cc 6.5.27
 #    stdlib snapshot + sigil 3.12.9 at the pinned tag (the agnosys
 #    dependency was dropped at 3.5.0; see cyrius.cyml).
 cyrius deps
@@ -188,8 +208,8 @@ cyrius vet src/main.cyr
 ```
 
 Dependencies (declared in [`cyrius.cyml`](cyrius.cyml)):
-- **Cyrius stdlib** — `alloc, args, assert, async, bayan, bench, chrono, ct, dynlib, fdlopen, fmt, fnptr, freelist, fs, hashmap, hashmap_fast, io, keccak, mmap, net, process, random, result, sandhi, slice, str, string, syscalls, tagged, thread, thread_local, tls, vec` (resolved by `cyrius deps` into `lib/`, which is gitignored). The 6.2 line folded the standalone `json`/`base64` modules into `bayan` and retired `bigint` (sigil bundles its own `u256`/`u384`).
-- **[sigil](https://github.com/MacCracken/sigil) 3.12.9** — SHA-256, HMAC-SHA256 (constant-time compare now via the stdlib `ct` module — sigil retired its own `ct_eq` in the 3.x line). Latest tag; the 5.10.x SIGILL bisect that capped it at 2.9.0 no longer applies under cc 6.5.21. sigil 3.12.8 namespaced its error constructors `err_*` → `sigil_err_*`; kavach's own moved to `kavach_err_*` at v3.11.13. The agnosys dependency was dropped at 3.5.0 — kavach internalized the Linux security backends it used (Landlock/seccomp, MAC, Linux-audit) as `src/` modules; see [`cyrius.cyml`](cyrius.cyml).
+- **Cyrius stdlib** — `alloc, args, assert, async, bayan, bench, chrono, ct, dynlib, fdlopen, fmt, fnptr, freelist, fs, hashmap, hashmap_fast, io, keccak, mmap, net, process, random, result, sandhi, slice, str, string, syscalls, tagged, thread, thread_local, tls, vec` (resolved by `cyrius deps` into `lib/`, which is gitignored). The 6.2 line folded the standalone `json`/`base64` modules into `bayan` and retired `bigint` (sigil bundles its own `u256`/`u384`). ⚠ **`chrono` is additionally hand-included** at the top of `src/util.cyr` (and in `tests/kavach.fcyr` + `tests/samay_integration.tcyr`): since cc 6.5.26 the resolver drops the `include` for any declared module it first reaches transitively, and chrono now arrives via `async` → `async_macos`. Declaring it is not sufficient — don't remove those lines. See v3.11.14 in the [CHANGELOG](CHANGELOG.md).
+- **[sigil](https://github.com/MacCracken/sigil) 3.12.9** — SHA-256, HMAC-SHA256 (constant-time compare now via the stdlib `ct` module — sigil retired its own `ct_eq` in the 3.x line). Latest tag; the 5.10.x SIGILL bisect that capped it at 2.9.0 no longer applies under cc 6.5.27. sigil 3.12.8 namespaced its error constructors `err_*` → `sigil_err_*`; kavach's own moved to `kavach_err_*` at v3.11.13. The agnosys dependency was dropped at 3.5.0 — kavach internalized the Linux security backends it used (Landlock/seccomp, MAC, Linux-audit) as `src/` modules; see [`cyrius.cyml`](cyrius.cyml).
 
 ## Consume kavach as a library (v3.6.0+)
 

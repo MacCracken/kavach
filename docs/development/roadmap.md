@@ -2,7 +2,7 @@
 
 > **Principle**: Security correctness first, then backend breadth, then performance. Every sandbox gets a number.
 
-This roadmap is **future-facing only** — shipped work lives in [CHANGELOG.md](../../CHANGELOG.md). Current release: v3.11.13 (error-constructor namespacing + toolchain/dependency refresh). Toolchain pin: cc `6.5.21`; sigil `3.12.9` (agnosys dropped at v3.5.0 — its security backends are internalized).
+This roadmap is **future-facing only** — shipped work lives in [CHANGELOG.md](../../CHANGELOG.md). Current release: v3.11.14 (toolchain refresh + the dropped-`chrono`-include fix). Toolchain pin: cc `6.5.27`; sigil `3.12.9`, samay `1.0.1`, ai-hwaccel `2.3.16` (agnosys dropped at v3.5.0 — its security backends are internalized).
 
 ---
 

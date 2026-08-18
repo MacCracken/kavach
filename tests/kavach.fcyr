@@ -1,4 +1,13 @@
 # kavach fuzz harness
+#
+# ⛔ EXPLICIT chrono INCLUDE — the harness includes no `src/` module, so it cannot
+# inherit the one in `src/util.cyr`. Under cc 6.5.27 a `[deps].stdlib` entry that
+# is first reached TRANSITIVELY (here: async → async_macos → chrono) is marked
+# seen before the top-level `include` is pushed, so chrono lands in lib/ with no
+# prepend and the auto-prepended deps' `clock_now_ns`/`clock_now_ms` call sites go
+# undefined — a hard build stop even under DCE. See src/util.cyr for the full
+# mechanism.
+include "lib/chrono.cyr"
 
 fn fuzz_main(data, len) {
     if (len == 0) { return 0; }

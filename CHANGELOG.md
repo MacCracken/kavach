@@ -7,6 +7,170 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.11.14] — 2026-08-17 — a declared stdlib module that arrives transitively is never included
+
+### Changed
+
+- **Cyrius toolchain pin `6.5.21` → `6.5.27`.** Validated with the full
+  `deps → build → lint → vet → test → bench` chain on the new toolchain:
+  **684 assertions green** (unchanged from v3.11.13), plus the 12-assertion
+  `samay_integration` suite, lint **0**, `vet` 44 deps / 0 untrusted / 0
+  missing, `deny` 0 violations, fuzz clean, `fmt` **0 drift**.
+
+- **Dependency pins re-verified against upstream, all already latest** — sigil
+  `3.12.9`, samay `1.0.1`, ai-hwaccel `2.3.16`. No dep moved this release; the
+  toolchain did.
+
+- **`lib/` re-vendored from an empty tree.** The working copy had drifted to
+  **104 modules** against **70 declared** — 34 files (`mabda`, `niyama`,
+  `ganita`, `patra`, `regex`, `unicode/`, …) left over from a whole-snapshot
+  sync rather than `cyrius deps`. `rm -rf lib && cyrius deps` restores the
+  declared set as the source of truth; `cyrius.lock` goes 110 → 70 entries.
+
+- **`duplicate fn` warnings hold at 20** — the post-v3.11.13 baseline, with no
+  new collisions from the pin move. Still the documented `syserr_*` (9),
+  `agnosys_*` (7), `path_exists`, `attestation_result_new`, and the
+  intra-kavach `SpawnedProcess_pid` / `_set_pid` pair.
+
+### Fixed
+
+- **⛔ `chrono` was declared, vendored, and silently never included — the whole
+  tree stopped building.** Under cc **6.5.26+**, `[deps].stdlib`'s `chrono`
+  entry resolves to a **no-op**, so every `clock_epoch_secs` (audit,
+  quarantine, oci_spec, observability, attestation, scanning_threat,
+  scanning_runtime), `clock_now_ns` (lifecycle) and `sleep_ms` (spawn) call
+  became an undefined function and `cycc` refused to emit a binary.
+
+  ⚠ **The manifest was correct, and that is what made it expensive.**
+  `lib/chrono.cyr` is copied into `lib/`, `cyrius deps` reports success, and
+  `cyrius.lock` records it — but no `include` is ever prepended, and no
+  diagnostic names `chrono`. The error names a *symbol*, several steps later.
+
+  The cause is an **ordering** bug in the resolver, upstream, not in kavach.
+  `_dep_copy_stdlib_recursive` (cyrius `cbt/deps.cyr:521`) tests its seen-set
+  on its **first** line and returns before the `is_top == 1` push at
+  `cbt/deps.cyr:582`. A module first reached **transitively** (`is_top=0`) is
+  marked seen, so its own later top-level declaration can never be upgraded.
+  cc 6.5.26 added `lib/async_macos.cyr`, which carries
+  `include "lib/chrono.cyr"`, and `lib/async.cyr` includes *that* — so from
+  6.5.26 on, chrono arrives through `async`, and any manifest listing `async`
+  before `chrono` loses chrono's prepend. Ours did, alphabetically.
+
+  **Bisected** with a three-line program and one manifest: clean on
+  6.5.21–6.5.25, broken on 6.5.26 and 6.5.27, flipping on nothing but the
+  order of two entries in one array. Filed upstream with a self-verifying
+  repro — cyrius
+  `docs/development/issues/2026-08-17-stdlib-transitive-pull-drops-top-level-include.md`.
+
+  **Fixed here with an explicit `include "lib/chrono.cyr"`** in
+  [`src/util.cyr`](src/util.cyr) — kavach's first `[lib].modules` entry — plus
+  one each in [`tests/kavach.fcyr`](tests/kavach.fcyr) and
+  [`tests/samay_integration.tcyr`](tests/samay_integration.tcyr), which include
+  no `src/` module and so cannot inherit it.
+
+  ⚠ **Deliberately NOT fixed by reordering `[deps].stdlib`.** Moving `chrono`
+  above `async` also works and is a smaller diff, but it encodes an assumption
+  about *upstream's* include chains into our manifest and silently un-fixes
+  itself the next time a stdlib module grows an `include`. The explicit include
+  is order-independent. Cyrius include resolution is include-once, so it is a
+  no-op wherever the auto-prepend works — including on 6.5.21–6.5.25.
+
+- **⭐ Consumers are covered by the same one-line fix.** `cyrius distlib`
+  preserves `include "lib/..."` lines into the bundle and emits
+  `dist/kavach.deps` in bundle order, so `chrono` moved to the **top** of the
+  sidecar, ahead of `async`. The sidecar is consumed by `_dep_pull_leaves`,
+  which calls the *same* buggy resolver at `is_top=1` — so without this, every
+  downstream consumer (SY, stiva, kiran, AgnosAI, hoosh, bote, aethersafta,
+  mehman's M1 host) would have hit the identical undefined-`clock_*` failure on
+  a machine where nobody changed anything. Two independent protections, one
+  line.
+
+- **⛔ A second silent resolver cliff, found by documenting the first one: `[deps]`
+  must start within the first 4095 bytes of `cyrius.cyml`.** Writing the
+  explanation above the `[deps]` array pushed the section marker from byte
+  **3676 → 5288**, and the tree stopped building again — this time with *nothing
+  at all* prepended.
+
+  ⚠ **The manifest was never re-read, so the symptom pointed nowhere near it.**
+  `cyrius build` reaches the resolver through `_auto_deps` (cyrius
+  `cbt/deps.cyr:1983`), which does `alloc(4096)` + `file_read_all(manifest, buf,
+  4095)` and scans **only that prefix** for `[deps]` / `[deps.`. Past 4095 the
+  marker is invisible, `_auto_deps` returns 0, `cmd_deps()` never runs, and no
+  `include` is emitted for anything. The build died on
+  `undefined variable 'IoNotFound'` in `src/util.cyr` — a file whose only change
+  was four kilobytes away, in a different file.
+
+  ⛔ **A populated `lib/` does not save you, which is what made it stick.**
+  `cmd_deps` reads **32767** bytes, so an explicit `cyrius deps` sees the section
+  fine and vendors all 70 modules. They sit on disk, complete and correct, while
+  the build behaves as if nothing were declared. Running `cyrius deps` — the
+  obvious thing to try — changes nothing and argues for the wrong hypothesis.
+  Two readers of one file, disagreeing by 8×.
+
+  Boundary measured exactly, by padding the manifest: clean at byte **4095**,
+  broken at **4100**. **Not a regression** — reproduced on 6.0.43, 6.2.11,
+  6.3.40, 6.4.62, 6.5.21 and 6.5.27, i.e. the entire 6.x line. kavach had been
+  sitting at **3676 / 4095** with no idea the ceiling existed. Filed upstream
+  with its own repro — cyrius
+  `docs/development/issues/2026-08-17-auto-deps-4095-byte-manifest-window.md`.
+
+  **Fixed structurally, not by deleting the documentation**: `cyrius.cyml` now
+  carries a 4-line pointer above `[deps]` and the full **MANIFEST HAZARDS** block
+  *below* the array, where its length is free. Headroom back to **299 bytes**.
+
+- **New CI gate: "Manifest [deps] within the 4095-byte auto_deps window".** A
+  comment edit is an easy way back into the above and the symptom does not point
+  at the manifest, so [`ci.yml`](.github/workflows/ci.yml) now fails the build
+  when the marker crosses 4095 — naming the byte offset — and warns under 300
+  bytes of headroom.
+
+- **The demo banner had printed `kavach v3.2.0` for nine releases.**
+  `src/main.cyr` carried a hardcoded literal that was never bumped after
+  v3.2.0, while `VERSION` read `3.11.13`. Nothing caught it: CI's smoke test
+  greps only for `kavach v`, and `src/main.cyr` is excluded from
+  `[lib].modules`, so the wrong number never reached `dist/` or a consumer.
+  ⚠ `scripts/version-bump.sh` **asserted in a comment that no such literal
+  existed** — the reason nobody looked. The literal is corrected, the script
+  now owns it as a bump step, and the false comment is replaced with the
+  history.
+
+- **`tests/samay_integration.tcyr` fmt drift closed.** One wrapped-call
+  continuation indent, drifting under both 6.5.21 and 6.5.27 (so **not**
+  introduced by this pin move). The tree is now `fmt`-clean end to end. Safe to
+  fix here because the pin matches the installed `cycc`.
+
+### Performance
+
+Recorded as `3.11.14` in [`benches/bench-history.csv`](benches/bench-history.csv)
+(25 benches), on a settled box (load **0.18**), against the v3.11.13 row.
+
+**Broad improvement across the CPU-bound set, −4 % to −10 %:** `cgroup_wrap_argv`
+398 → **359 ns** (−9.8 %), `http_path_extract` 119 → **108 ns** (−9.2 %),
+`policy_strict_create` 65 → **60 ns** (−7.7 %), `credential_env_vars_100` 14.7 →
+**13.6 µs** (−7.5 %), `gate_clean_output` 335.8 → **312.1 µs** (−7.1 %),
+`score_all_backends_strict` 342 → **318 ns** (−7.0 %), `secrets_scan_with_secrets`
+7.6 → **7.1 µs** (−6.9 %), `code_scan_large_ac` 505.4 → **474.5 µs** (−6.1 %).
+No source change explains these; they track the 6.5.22–6.5.27 codegen.
+
+⚠ **Two fork/exec benches moved the other way, and the first published number
+for one of them was wrong.** `process_exec_echo` 2.73 → **2.93 ms** (+7.8 %) is
+reproducible — four consecutive runs at 2.930–2.953 ms. `process_exec_confined`
+2.77 → **3.24 ms** (+14.3 %) is **not** a tight measurement: 50 iterations with
+min 2.60 ms and max 4.17 ms, a 60 % spread, so the mean is tail-driven. Nothing
+in this release touches the exec path, and the sibling `process_exec_large_output`
+(same fork+exec, dominated by I/O volume) *improved* 120.7 → **116.5 ms**
+(−3.5 %), as did `sandbox_full_lifecycle` (−3.6 %) — so a systematic fork
+regression is not supported by the data. Recorded as-is rather than explained
+away; re-check at the next release before treating it as signal.
+
+⛔ **The first `3.11.14` row taken was CONTENDED and was discarded, not
+published.** Measured at load 1.09, it read `cgroup_wrap_argv` **505 ns
+(+26.9 %)** — a regression that does not exist. Three settled re-runs gave
+368/377/379 ns and the re-recorded row reads 359 ns, i.e. a −9.8 % *improvement*.
+The CSV carries only the settled row. Waiting for load to fall below 0.40 was
+the whole difference between publishing a fabricated 27 % regression and a real
+10 % win.
+
 ## [3.11.13] — 2026-08-14 — kavach and sigil were sharing 14 error-constructor names
 
 ### Breaking
