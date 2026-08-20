@@ -51,6 +51,34 @@ addressed the instance; this one addresses the remaining names.
 current fold — verified across all of `lib/` — but they are latent, and a future library defining
 `PROCESS` or `WASM` would collide silently. Left alone here to keep this release to the live defect.
 
+### Fixed — the Format check gate could never pass, and said so about every file
+
+The step diffed `cyrius fmt`'s **stdout** against the committed file. `cyrius fmt` rewrites the file
+**in place** and prints nothing (`cyrius fmt` usage: *"(no flag) rewrite the file in place"*), so the
+comparison was always against an empty stream: every file reported drift, including ones
+`cyrfmt --check` calls correctly formatted.
+
+The step's own comment had the premise exactly backwards — it claimed fmt "writes formatted source
+to stdout" and that `--check` "only sets the exit code without emitting output, so diffing its
+stdout always reports spurious drift". `--check` emitting no stdout is the *correct* behaviour and
+the flag built for this job; the diff-the-stdout form is what produced the spurious drift.
+
+Because the step was `(informational)` and never `exit 1`, this was invisible: CI stayed green while
+the output was pure noise, and the roadmap v3.2 item to "flip this step to `exit 1` once src/ and
+tests/ are clean" could never be judged done — the gate would have failed on a perfectly clean tree.
+
+Now uses `cyrius fmt "$f" --check`, and is **blocking**.
+
+### Fixed — 21 files carrying fmt drift
+
+`src/{credential,composite,confine,security,persistent,backend_process,scanning_gate,scanning_code,scanning_secrets,scanning_data,audit,scanning_runtime,backend_oci,credential_http,backend_sy_agnos,backend_wasm,quarantine,mac}.cyr`
+and `tests/{kavach.tcyr,kavach.bcyr,samay_integration.tcyr}`.
+
+**Pre-existing** — verified: all 21 were already unformatted at tag 3.11.14, so the rename in this
+release added none of it. This is the v3.2 backlog item, cleared here so the gate above could be made
+blocking rather than left as noise. Build clean and **698 assertions green, 0 failed** — identical
+to the pre-change baseline.
+
 ### Changed — Cyrius pin 6.5.27 → 6.5.32
 
 Also clears real drift: the installed toolchain was 6.5.32 while the manifest pinned 6.5.27, which
