@@ -1,6 +1,16 @@
-# WASM backend: hardcoded unavailable, no stdin channel, no guest exit code
+# WASM backend: hardcoded unavailable, no stdin channel, no guest exit code — RESOLVED
 
-**Status:** ✅ **FIXED in 3.11.8** — all three findings. §1 probes with `_wasm_binary_path`
+**Status:** ✅ **RESOLVED in kavach 3.11.8**, re-verified against live code at 3.11.15:
+§1 `_wasm_binary_path()` exists at `src/backend.cyr:93` and availability calls it at `:126`
+(`if (_wasm_binary_path() == 0) { return 0; }`) rather than returning a hardcoded value;
+§2 `confine_capture_input` exists at `src/confine.cyr:391` and `backend_wasm.cyr` carries the stdin
+path; §3 `wasm_exec` (`src/backend_wasm.cyr:139`) reads `SandboxConfig_policy` and
+`SandboxConfig_timeout_ms` and routes through the confined capture, per its own `3.11.8` note.
+
+⚠ One sub-item remains genuinely unaddressed and is carried here rather than lost: the
+`_wasm_binary_path`-vs-"not found in PATH" wording note. Re-file if it matters.
+
+*Original resolution note:* **FIXED in 3.11.8** — all three findings. §1 probes with `_wasm_binary_path`
 (moved into `backend.cyr`); §2 is `confine_capture_input` plus `SandboxConfig.stdin`; §3
 comes free from routing `wasm_exec` through the confined capture, which also restores the
 guest's stderr and the `timeout_ms`/`policy` this path was ignoring. The smaller

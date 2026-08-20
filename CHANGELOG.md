@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [3.11.15] — 2026-08-20 — definitive names for three symbols ai-hwaccel also defined
+## [3.11.15] — 2026-08-19 — definitive names for three symbols ai-hwaccel also defined
 
 ### Security — `_backend_fp`'s bounds check was disabled wherever ai-hwaccel was co-resident
 
@@ -88,8 +88,6 @@ means `lib sync --full` and `deps` were provisioning from a version the manifest
 `dist/kavach.cyr` regenerated (11,280 lines) and verified to carry the new names and none of the old.
 Cross-checked against `dist/ai-hwaccel.cyr` 2.3.18: **0 remaining collisions** between the two.
 
-
-## [3.11.15] — 2026-08-20
 
 ## [3.11.14] — 2026-08-17 — a declared stdlib module that arrives transitively is never included
 

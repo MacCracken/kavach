@@ -1,7 +1,38 @@
-# `BACKEND_COUNT` collides with ai-hwaccel — the `_backend_fp` bounds check is defeated
+# `BACKEND_COUNT` collides with ai-hwaccel — the `_backend_fp` bounds check is defeated — RESOLVED
 
-**Status:** 🔴 **OPEN** — memory-safety. The guard that exists to stop a wild function-pointer load
-is disabled in any binary that links kavach and ai-hwaccel together.
+**Status:** ✅ **RESOLVED in kavach 3.11.15** (with ai-hwaccel 2.3.18). Both libraries renamed the
+three symbols they shared: `BACKEND_COUNT` → `KAVACH_BACKEND_COUNT` / `AIHW_BACKEND_COUNT`,
+`enum Backend` → `KavachBackend` / `AiHwBackend`, `fn path_exists` → `kavach_path_exists` /
+`aihw_path_exists`. Fixed at the source in both rather than worked around downstream.
+
+**Verified against live code, not against this file's claim.** A probe including *both* regenerated
+dists co-resident and asserting each constant separately exits 0:
+
+```cyrius
+include "lib/kavach.cyr"
+include "lib/ai-hwaccel.cyr"
+fn main(): i64 {
+    alloc_init();
+    if (KAVACH_BACKEND_COUNT != 10) { return 1; }
+    if (AIHW_BACKEND_COUNT != 18) { return 2; }
+    return 0;
+}
+```
+
+A symbol-level diff of the two dists reports **0 remaining collisions**. kavach 698 assertions and
+ai-hwaccel 636 assertions, both unchanged from their pre-rename baselines.
+
+⚠ **Not fixed, and still live:** kavach's `KavachBackend` *members* remain generic and unprefixed
+(`PROCESS`, `WASM`, `OCI`, `NOOP`, …). They collide with nothing in the current fold — verified
+across all of `lib/` — but the exposure is the same shape as this issue and a future library
+defining `PROCESS` would hit it silently. Left for a later release to keep 3.11.15 to the live
+defect.
+
+⚠ **Also observed while verifying, out of scope here:** kavach and sigil both define the `syserr_*`
+family (`syserr_pack`, `syserr_new`, `syserr_kind`, `syserr_errno`, `syserr_message`,
+`result_print_err`, `is_syscall_err`, `wrap_syscall`) plus several `agnosys_*` helpers. Those DO warn
+at build time — they are `fn`, not `var` — so they are visible rather than silent, but they are the
+same class and unaddressed.
 **Severity:** **HIGH** — out-of-bounds function-pointer load followed by an indirect call.
 **Discovered:** 2026-08-20, while linking AgnosAI in-process into **agnostic**.
 **Affects:** kavach 3.11.14 + ai-hwaccel 2.3.17 co-resident. That is **agnosai 2.0.3** today
