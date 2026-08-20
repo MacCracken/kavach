@@ -169,7 +169,7 @@ fn config_new() {
     var c = alloc(SANDBOX_CONFIG_SIZE);
     var i = 0;
     while (i < SANDBOX_CONFIG_SIZE) { store64(c + i, 0); i = i + 8; }
-    SandboxConfig_set_backend(c, Backend.PROCESS);
+    SandboxConfig_set_backend(c, KavachBackend.PROCESS);
     SandboxConfig_set_policy(c, policy_basic());
     SandboxConfig_set_timeout_ms(c, 30000);
     SandboxConfig_set_inner_backend(c, 0 - 1);

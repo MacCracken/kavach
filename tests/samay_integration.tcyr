@@ -59,7 +59,7 @@ fn test_bridge_cpu_floor() {
 fn test_bridge_from_task() {
     test_group("samay_bridge_task");
     var task = scheduled_task_new(str_from("t"), str_from("d"), str_from("a"), 6,
-    resource_req_new(f64_from(4), 8192, REQ_NONE, 0, 1, 0));
+      resource_req_new(f64_from(4), 8192, REQ_NONE, 0, 1, 0));
     var p = sandbox_policy_from_samay_task(task);
     assert_eq(SandboxPolicy_cpu_limit_tenths(p), 40, "4.0 cores -> 40 tenths");
     assert_eq(SandboxPolicy_memory_limit_mb(p), 8192, "8192 MB from task");

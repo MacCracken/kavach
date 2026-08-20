@@ -44,10 +44,10 @@ fn sy_agnos_tier_parse(s) {
 # ---- Runtime detection ---------------------------------------------------
 
 fn _sy_agnos_runtime() {
-    if (path_exists("/usr/local/bin/docker") == 1) { return "/usr/local/bin/docker"; }
-    if (path_exists("/usr/bin/docker") == 1) { return "/usr/bin/docker"; }
-    if (path_exists("/usr/local/bin/podman") == 1) { return "/usr/local/bin/podman"; }
-    if (path_exists("/usr/bin/podman") == 1) { return "/usr/bin/podman"; }
+    if (kavach_path_exists("/usr/local/bin/docker") == 1) { return "/usr/local/bin/docker"; }
+    if (kavach_path_exists("/usr/bin/docker") == 1) { return "/usr/bin/docker"; }
+    if (kavach_path_exists("/usr/local/bin/podman") == 1) { return "/usr/local/bin/podman"; }
+    if (kavach_path_exists("/usr/bin/podman") == 1) { return "/usr/bin/podman"; }
     return 0;
 }
 
@@ -58,7 +58,7 @@ fn _sy_agnos_runtime() {
 
 fn _phylax_emit(text, lower, result, category, matched) {
     return code_emit(text, lower, result, Severity.CRITICAL, category,
-    "Phylax indicator", matched);
+      "Phylax indicator", matched);
 }
 
 fn phylax_scan(text, result) {
@@ -202,8 +202,8 @@ fn sy_agnos_health(sandbox) {
 fn sy_agnos_destroy(sandbox) { return 0; }
 
 fn backend_sy_agnos_register() {
-    backend_register_exec(Backend.SY_AGNOS, &sy_agnos_exec);
-    backend_register_health(Backend.SY_AGNOS, &sy_agnos_health);
-    backend_register_destroy(Backend.SY_AGNOS, &sy_agnos_destroy);
+    backend_register_exec(KavachBackend.SY_AGNOS, &sy_agnos_exec);
+    backend_register_health(KavachBackend.SY_AGNOS, &sy_agnos_health);
+    backend_register_destroy(KavachBackend.SY_AGNOS, &sy_agnos_destroy);
     return 0;
 }

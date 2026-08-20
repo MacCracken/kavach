@@ -12,13 +12,13 @@
 #   - Live snapshots / migration
 
 fn _sev_qemu_path() {
-    if (path_exists("/usr/local/bin/qemu-system-x86_64") == 1) { return "/usr/local/bin/qemu-system-x86_64"; }
-    if (path_exists("/usr/bin/qemu-system-x86_64") == 1) { return "/usr/bin/qemu-system-x86_64"; }
+    if (kavach_path_exists("/usr/local/bin/qemu-system-x86_64") == 1) { return "/usr/local/bin/qemu-system-x86_64"; }
+    if (kavach_path_exists("/usr/bin/qemu-system-x86_64") == 1) { return "/usr/bin/qemu-system-x86_64"; }
     return 0;
 }
 
 fn _sev_device_present() {
-    return path_exists("/dev/sev");
+    return kavach_path_exists("/dev/sev");
 }
 
 fn sev_exec(sandbox, command) {
@@ -82,8 +82,8 @@ fn sev_health(sandbox) {
 fn sev_destroy(sandbox) { return 0; }
 
 fn backend_sev_register() {
-    backend_register_exec(Backend.SEV, &sev_exec);
-    backend_register_health(Backend.SEV, &sev_health);
-    backend_register_destroy(Backend.SEV, &sev_destroy);
+    backend_register_exec(KavachBackend.SEV, &sev_exec);
+    backend_register_health(KavachBackend.SEV, &sev_health);
+    backend_register_destroy(KavachBackend.SEV, &sev_destroy);
     return 0;
 }

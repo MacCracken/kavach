@@ -14,8 +14,8 @@
 #   - `--log-path` wiring — replaced with /dev/null for v3.0
 
 fn _fc_binary_path() {
-    if (path_exists("/usr/local/bin/firecracker") == 1) { return "/usr/local/bin/firecracker"; }
-    if (path_exists("/usr/bin/firecracker") == 1) { return "/usr/bin/firecracker"; }
+    if (kavach_path_exists("/usr/local/bin/firecracker") == 1) { return "/usr/local/bin/firecracker"; }
+    if (kavach_path_exists("/usr/bin/firecracker") == 1) { return "/usr/bin/firecracker"; }
     return 0;
 }
 
@@ -71,7 +71,7 @@ fn firecracker_exec(sandbox, command) {
         return backend_guard_result(violations);
     }
 
-    if (path_exists(command) == 0) {
+    if (kavach_path_exists(command) == 0) {
         return backend_error_result("kernel image not found");
     }
 
@@ -126,8 +126,8 @@ fn firecracker_health(sandbox) {
 fn firecracker_destroy(sandbox) { return 0; }
 
 fn backend_firecracker_register() {
-    backend_register_exec(Backend.FIRECRACKER, &firecracker_exec);
-    backend_register_health(Backend.FIRECRACKER, &firecracker_health);
-    backend_register_destroy(Backend.FIRECRACKER, &firecracker_destroy);
+    backend_register_exec(KavachBackend.FIRECRACKER, &firecracker_exec);
+    backend_register_health(KavachBackend.FIRECRACKER, &firecracker_health);
+    backend_register_destroy(KavachBackend.FIRECRACKER, &firecracker_destroy);
     return 0;
 }

@@ -229,7 +229,7 @@ fn security_apply_landlock(rules, count): i64 {
             store32(&beneath + 8, path_fd);
 
             var ret = syscall(SYS_LANDLOCK_ADD_RULE,
-            ruleset_fd, LANDLOCK_RULE_PATH_BENEATH, &beneath, 0);
+              ruleset_fd, LANDLOCK_RULE_PATH_BENEATH, &beneath, 0);
             syscall(SYS_CLOSE, path_fd);
 
             if (ret < 0) {
@@ -425,7 +425,7 @@ fn security_create_exec_seccomp_filter(): i64 {
     var i = 0;
     while (i < n) {
         security_bpf_write_insn(filter, (1 + i) * 8, BPF_JMP_JEQ_K,
-        n - i, 0, vec_get(deny, i));
+          n - i, 0, vec_get(deny, i));
         i = i + 1;
     }
     # insn n+1: fell through every JEQ — allow.

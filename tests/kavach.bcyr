@@ -53,13 +53,13 @@ fn _ensure_strict() {
 # Sub-µs operations use batch timing to avoid clock-overhead bias.
 
 fn bench_score_backend_process_strict() {
-    score_backend(Backend.PROCESS, _strict_policy);
+    score_backend(KavachBackend.PROCESS, _strict_policy);
     return 0;
 }
 
 fn bench_score_all_backends_strict() {
     var i = 0;
-    while (i < BACKEND_COUNT) {
+    while (i < KAVACH_BACKEND_COUNT) {
         score_backend(i, _strict_policy);
         i = i + 1;
     }
@@ -73,7 +73,7 @@ fn bench_policy_strict_create() {
 
 fn bench_config_builder_full() {
     var c = config_new();
-    config_backend(c, Backend.GVISOR);
+    config_backend(c, KavachBackend.GVISOR);
     config_policy_seccomp(c, "strict");
     config_network(c, 0);
     config_timeout_ms(c, 60000);
@@ -198,7 +198,7 @@ fn bench_gate_clean_output() {
 
 fn bench_health_check_noop() {
     var cfg = config_new();
-    config_backend(cfg, Backend.NOOP);
+    config_backend(cfg, KavachBackend.NOOP);
     var sb = sandbox_create(cfg);
     health_probe(sb);
     return 0;
@@ -207,7 +207,7 @@ fn bench_health_check_noop() {
 # ---- the exec path, which nothing measured until 3.11.7 -------------------
 #
 # **Every benchmark above this line is in-process.** `sandbox_full_lifecycle`
-# uses `Backend.NOOP` and execs nothing, so scoring, policy, scanning and the
+# uses `KavachBackend.NOOP` and execs nothing, so scoring, policy, scanning and the
 # audit chain were covered while `confine_capture` — fork, exec, the drain loop
 # and the deadline — was not. That is the code 3.11.3 through 3.11.6 rewrote,
 # and none of those releases recorded a `bench-history.csv` row either, so a
@@ -218,7 +218,7 @@ fn bench_health_check_noop() {
 # throughput.
 fn _bench_exec(cmd, pol) {
     var cfg = config_new();
-    SandboxConfig_set_backend(cfg, Backend.PROCESS);
+    SandboxConfig_set_backend(cfg, KavachBackend.PROCESS);
     if (pol != 0) { SandboxConfig_set_policy(cfg, pol); }
     config_timeout_ms(cfg, 30000);
     var s = sandbox_create(cfg);
@@ -258,7 +258,7 @@ fn bench_process_exec_confined() {
 
 fn bench_sandbox_full_lifecycle() {
     var cfg = config_new();
-    config_backend(cfg, Backend.NOOP);
+    config_backend(cfg, KavachBackend.NOOP);
     var sb = sandbox_create(cfg);
     sandbox_transition(sb, SandboxState.RUNNING);
     sandbox_transition(sb, SandboxState.STOPPED);
@@ -284,7 +284,7 @@ fn bench_audit_chain_record() {
 # Constant-time HMAC verify (just the compare, not full verify path).
 fn bench_ct_streq_64() {
     ct_streq("abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
-    "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789");
+      "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789");
     return 0;
 }
 

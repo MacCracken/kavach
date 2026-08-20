@@ -6,8 +6,8 @@
 # binary, run with --network <mode>, clean up the container on exit.
 
 fn _gvisor_runsc_path() {
-    if (path_exists("/usr/local/bin/runsc") == 1) { return "/usr/local/bin/runsc"; }
-    if (path_exists("/usr/bin/runsc") == 1) { return "/usr/bin/runsc"; }
+    if (kavach_path_exists("/usr/local/bin/runsc") == 1) { return "/usr/local/bin/runsc"; }
+    if (kavach_path_exists("/usr/bin/runsc") == 1) { return "/usr/bin/runsc"; }
     return 0;
 }
 
@@ -75,8 +75,8 @@ fn gvisor_health(sandbox) {
 fn gvisor_destroy(sandbox) { return 0; }
 
 fn backend_gvisor_register() {
-    backend_register_exec(Backend.GVISOR, &gvisor_exec);
-    backend_register_health(Backend.GVISOR, &gvisor_health);
-    backend_register_destroy(Backend.GVISOR, &gvisor_destroy);
+    backend_register_exec(KavachBackend.GVISOR, &gvisor_exec);
+    backend_register_health(KavachBackend.GVISOR, &gvisor_health);
+    backend_register_destroy(KavachBackend.GVISOR, &gvisor_destroy);
     return 0;
 }

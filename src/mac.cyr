@@ -243,7 +243,7 @@ fn mac_set_selinux_context(context, on_exec): i64 {
     }
     if (colon_count < 3) {
         return kavach_err_invalid_argument(
-        "invalid SELinux context format (expected user:role:type:level)");
+          "invalid SELinux context format (expected user:role:type:level)");
     }
 
     var path = "/proc/self/attr/current";

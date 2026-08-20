@@ -17,10 +17,10 @@ fn _backend_slot(backend_id) {
 # Bounds-checked fn-pointer fetch. `backend_id` flows from semi-trusted
 # config (backend_parse can yield -1); an out-of-range id would otherwise
 # index _backend_table[320] out of bounds and load a wild function pointer.
-# Returns 0 (== "no implementation") for any id outside [0, BACKEND_COUNT).
+# Returns 0 (== "no implementation") for any id outside [0, KAVACH_BACKEND_COUNT).
 fn _backend_fp(backend_id, offset) {
     if (backend_id < 0) { return 0; }
-    if (backend_id >= BACKEND_COUNT) { return 0; }
+    if (backend_id >= KAVACH_BACKEND_COUNT) { return 0; }
     return load64(_backend_slot(backend_id) + offset);
 }
 

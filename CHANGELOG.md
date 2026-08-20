@@ -7,6 +7,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.11.15] — 2026-08-20 — definitive names for three symbols ai-hwaccel also defined
+
+### Security — `_backend_fp`'s bounds check was disabled wherever ai-hwaccel was co-resident
+
+`var BACKEND_COUNT = 10;` collided with ai-hwaccel's `var BACKEND_COUNT = 18;`. Cyrius has one flat
+symbol table with last-definition-wins and is **silent** on a duplicate `var`, so in any binary
+linking both, kavach's guard read **18**:
+
+```cyrius
+# an out-of-range id would otherwise index _backend_table[320] out of bounds
+# and load a wild function pointer.
+if (backend_id >= BACKEND_COUNT) { return 0; }
+```
+
+`_backend_table` is 320 bytes at `BACKEND_SLOT_SIZE = 32` — **10 slots**. With the guard admitting
+0–17, `_backend_slot(17)` reads **224 bytes past the table**, and `backend_dispatch_exec` then
+`fncall2`s the result. The `fp == 0` check does not help: non-zero `.bss` gets called.
+
+Measured, not inferred — a probe returning `BACKEND_COUNT` as its exit code printed **18** at
+cyrius 6.5.32 in a project linking both libraries through agnosai.
+
+Nothing caught it: the compiler is silent for `var`, and `scripts/check-symbols.sh` here and in every
+sibling scans `src/` only, so a `lib/`↔`lib/` collision between two dependencies is invisible.
+
+⚠ This is the **second** instance of the same class in this file. The comment above
+`kavach_backend_name` already records renaming `backend_name` at 3.8.2 for exactly this reason —
+ai-hwaccel, pulled transitively via `[deps.samay]`, defining its own over a different enum. That fix
+addressed the instance; this one addresses the remaining names.
+
+### Changed — three symbols renamed
+
+| was | now | why |
+|---|---|---|
+| `var BACKEND_COUNT` | `var KAVACH_BACKEND_COUNT` | the collision above |
+| `enum Backend` | `enum KavachBackend` | type name, also defined by ai-hwaccel |
+| `fn path_exists` | `fn kavach_path_exists` | also defined by ai-hwaccel |
+
+**Breaking for direct consumers of these three names.** `KavachBackend`'s *members* are unchanged
+(`PROCESS`, `WASM`, `OCI`, …), so `KavachBackend.OCI` is the only edit at each of the 83 call sites.
+
+⚠ Those members are still generic and still unprefixed. They do not collide with anything in the
+current fold — verified across all of `lib/` — but they are latent, and a future library defining
+`PROCESS` or `WASM` would collide silently. Left alone here to keep this release to the live defect.
+
+### Changed — Cyrius pin 6.5.27 → 6.5.32
+
+Also clears real drift: the installed toolchain was 6.5.32 while the manifest pinned 6.5.27, which
+means `lib sync --full` and `deps` were provisioning from a version the manifest did not name.
+
+**698 assertions green, 0 failed** — identical to the pre-rename baseline. Build clean.
+`dist/kavach.cyr` regenerated (11,280 lines) and verified to carry the new names and none of the old.
+Cross-checked against `dist/ai-hwaccel.cyr` 2.3.18: **0 remaining collisions** between the two.
+
+
+## [3.11.15] — 2026-08-20
+
 ## [3.11.14] — 2026-08-17 — a declared stdlib module that arrives transitively is never included
 
 ### Changed

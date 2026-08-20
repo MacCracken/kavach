@@ -82,7 +82,7 @@ fn _sign_input(serial, event_type, payload, timestamp, prev_hmac) {
     var serial_buf[24];
     var serial_len = fmt_int_buf(serial, &serial_buf);
     var user_lens = checked_sum4(strlen(event_type), strlen(payload),
-    strlen(timestamp), strlen(prev_hmac));
+      strlen(timestamp), strlen(prev_hmac));
     if (user_lens < 0) { return 0; }
     var total = checked_add(user_lens, serial_len + 5);
     if (total < 0) { return 0; }
@@ -116,7 +116,7 @@ fn _entry_to_jsonl(entry) {
     var h = AuditEntry_hmac(entry);
     var ph = AuditEntry_prev_hmac(entry);
     var user_lens = checked_sum4(strlen(ev), strlen(pl), strlen(ts),
-    strlen(h) + strlen(ph));
+      strlen(h) + strlen(ph));
     if (user_lens < 0) { return 0; }
     var cap = checked_add(user_lens, slen + 256);
     if (cap < 0) { return 0; }
@@ -177,7 +177,7 @@ fn audit_chain_record(chain, event_type, payload) {
     var prev = AuditChain_last_hmac(chain);
     var msg = _sign_input(serial, event_type, payload, timestamp, prev);
     var hmac_hex = _hmac_hex(AuditChain_hmac_key(chain),
-    AuditChain_hmac_key_len(chain), msg);
+      AuditChain_hmac_key_len(chain), msg);
 
     var entry = audit_entry_new();
     AuditEntry_set_serial(entry, serial);
@@ -213,10 +213,10 @@ fn audit_chain_len(chain) {
 # Returns 1 if valid, 0 otherwise.
 fn audit_entry_verify(entry, key, key_len) {
     var msg = _sign_input(AuditEntry_serial(entry),
-    AuditEntry_event_type(entry),
-    AuditEntry_payload(entry),
-    AuditEntry_timestamp(entry),
-    AuditEntry_prev_hmac(entry));
+      AuditEntry_event_type(entry),
+      AuditEntry_payload(entry),
+      AuditEntry_timestamp(entry),
+      AuditEntry_prev_hmac(entry));
     var expected = _hmac_hex(key, key_len, msg);
     return ct_streq(expected, AuditEntry_hmac(entry));
 }

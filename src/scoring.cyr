@@ -2,16 +2,16 @@
 # Ported from rust-old/src/scoring/mod.rs
 
 fn base_score(backend) {
-    if (backend == Backend.NOOP) { return 0; }
-    if (backend == Backend.PROCESS) { return 50; }
-    if (backend == Backend.OCI) { return 55; }
-    if (backend == Backend.WASM) { return 65; }
-    if (backend == Backend.GVISOR) { return 70; }
-    if (backend == Backend.SGX) { return 80; }
-    if (backend == Backend.SEV) { return 82; }
-    if (backend == Backend.TDX) { return 85; }
-    if (backend == Backend.SY_AGNOS) { return 80; }
-    if (backend == Backend.FIRECRACKER) { return 90; }
+    if (backend == KavachBackend.NOOP) { return 0; }
+    if (backend == KavachBackend.PROCESS) { return 50; }
+    if (backend == KavachBackend.OCI) { return 55; }
+    if (backend == KavachBackend.WASM) { return 65; }
+    if (backend == KavachBackend.GVISOR) { return 70; }
+    if (backend == KavachBackend.SGX) { return 80; }
+    if (backend == KavachBackend.SEV) { return 82; }
+    if (backend == KavachBackend.TDX) { return 85; }
+    if (backend == KavachBackend.SY_AGNOS) { return 80; }
+    if (backend == KavachBackend.FIRECRACKER) { return 90; }
     return 0;
 }
 
@@ -51,14 +51,14 @@ fn score_backend(backend, policy) {
 }
 
 # Rank all available backends by score under `policy`. Returns strongest
-# available backend code. Falls back to Backend.NOOP if nothing else passes.
+# available backend code. Falls back to KavachBackend.NOOP if nothing else passes.
 fn resolve_best_backend(policy) {
-    var best = Backend.NOOP;
+    var best = KavachBackend.NOOP;
     var best_score = 0 - 1;
     var i = 0;
-    while (i < BACKEND_COUNT) {
+    while (i < KAVACH_BACKEND_COUNT) {
         var b = backend_at(i);
-        if (b != Backend.NOOP) {
+        if (b != KavachBackend.NOOP) {
             if (backend_is_available(b) == 1) {
                 var s = score_backend(b, policy);
                 if (s > best_score) {
@@ -77,7 +77,7 @@ fn resolve_min_strength_backend(policy, min_score) {
     var best = 0 - 1;
     var best_score = min_score - 1;
     var i = 0;
-    while (i < BACKEND_COUNT) {
+    while (i < KAVACH_BACKEND_COUNT) {
         var b = backend_at(i);
         if (backend_is_available(b) == 1) {
             var s = score_backend(b, policy);

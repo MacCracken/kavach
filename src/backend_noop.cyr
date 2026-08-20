@@ -15,8 +15,8 @@ fn noop_health(sandbox) { return 1; }
 fn noop_destroy(sandbox) { return 0; }
 
 fn backend_noop_register() {
-    backend_register_exec(Backend.NOOP, &noop_exec);
-    backend_register_health(Backend.NOOP, &noop_health);
-    backend_register_destroy(Backend.NOOP, &noop_destroy);
+    backend_register_exec(KavachBackend.NOOP, &noop_exec);
+    backend_register_health(KavachBackend.NOOP, &noop_health);
+    backend_register_destroy(KavachBackend.NOOP, &noop_destroy);
     return 0;
 }

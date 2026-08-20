@@ -1,7 +1,7 @@
 # kavach — Backend enum and metadata
 # Ported from rust-old/src/backend/mod.rs
 
-enum Backend {
+enum KavachBackend {
     PROCESS = 0;
     GVISOR = 1;
     FIRECRACKER = 2;
@@ -14,49 +14,49 @@ enum Backend {
     NOOP = 9;
 }
 
-var BACKEND_COUNT = 10;
+var KAVACH_BACKEND_COUNT = 10;
 
 # Renamed from `backend_name` (3.8.2): ai-hwaccel — pulled transitively via
 # [deps.samay] since 3.8.0 — defines its own `backend_name(b)` over a DIFFERENT
 # enum (BACKEND_CUDA..BACKEND_WINDOWS, 17 hardware-detection backends). Both
 # enums start at 0, cycc resolves duplicate fns last-definition-wins, and
 # ai-hwaccel sorts after kavach — so the collision silently returned hardware
-# names for OS backends (`backend_name(Backend.OCI)` → "intel-npu"). `os_`
+# names for OS backends (`backend_name(KavachBackend.OCI)` → "intel-npu"). `os_`
 # marks this as the OS/isolation-backend namer; ai-hwaccel keeps the bare name.
 fn os_backend_name(b) {
-    if (b == Backend.PROCESS) { return "process"; }
-    if (b == Backend.GVISOR) { return "gvisor"; }
-    if (b == Backend.FIRECRACKER) { return "firecracker"; }
-    if (b == Backend.WASM) { return "wasm"; }
-    if (b == Backend.OCI) { return "oci"; }
-    if (b == Backend.SGX) { return "sgx"; }
-    if (b == Backend.SEV) { return "sev"; }
-    if (b == Backend.TDX) { return "tdx"; }
-    if (b == Backend.SY_AGNOS) { return "sy-agnos"; }
-    if (b == Backend.NOOP) { return "noop"; }
+    if (b == KavachBackend.PROCESS) { return "process"; }
+    if (b == KavachBackend.GVISOR) { return "gvisor"; }
+    if (b == KavachBackend.FIRECRACKER) { return "firecracker"; }
+    if (b == KavachBackend.WASM) { return "wasm"; }
+    if (b == KavachBackend.OCI) { return "oci"; }
+    if (b == KavachBackend.SGX) { return "sgx"; }
+    if (b == KavachBackend.SEV) { return "sev"; }
+    if (b == KavachBackend.TDX) { return "tdx"; }
+    if (b == KavachBackend.SY_AGNOS) { return "sy-agnos"; }
+    if (b == KavachBackend.NOOP) { return "noop"; }
     return "unknown";
 }
 
 # Case-insensitive parse. Returns backend code on success, -1 on unknown.
 fn backend_parse(s) {
-    if (strieq(s, "process") == 1) { return Backend.PROCESS; }
-    if (strieq(s, "gvisor") == 1) { return Backend.GVISOR; }
-    if (strieq(s, "firecracker") == 1) { return Backend.FIRECRACKER; }
-    if (strieq(s, "wasm") == 1) { return Backend.WASM; }
-    if (strieq(s, "oci") == 1) { return Backend.OCI; }
-    if (strieq(s, "sgx") == 1) { return Backend.SGX; }
-    if (strieq(s, "sev") == 1) { return Backend.SEV; }
-    if (strieq(s, "tdx") == 1) { return Backend.TDX; }
-    if (strieq(s, "sy-agnos") == 1) { return Backend.SY_AGNOS; }
-    if (strieq(s, "syagnos") == 1) { return Backend.SY_AGNOS; }
-    if (strieq(s, "noop") == 1) { return Backend.NOOP; }
+    if (strieq(s, "process") == 1) { return KavachBackend.PROCESS; }
+    if (strieq(s, "gvisor") == 1) { return KavachBackend.GVISOR; }
+    if (strieq(s, "firecracker") == 1) { return KavachBackend.FIRECRACKER; }
+    if (strieq(s, "wasm") == 1) { return KavachBackend.WASM; }
+    if (strieq(s, "oci") == 1) { return KavachBackend.OCI; }
+    if (strieq(s, "sgx") == 1) { return KavachBackend.SGX; }
+    if (strieq(s, "sev") == 1) { return KavachBackend.SEV; }
+    if (strieq(s, "tdx") == 1) { return KavachBackend.TDX; }
+    if (strieq(s, "sy-agnos") == 1) { return KavachBackend.SY_AGNOS; }
+    if (strieq(s, "syagnos") == 1) { return KavachBackend.SY_AGNOS; }
+    if (strieq(s, "noop") == 1) { return KavachBackend.NOOP; }
     return 0 - 1;
 }
 
 # Existence check via the stdlib access(2) wrapper with F_OK (mode 0).
 # Returns 1 if the path exists, 0 otherwise. (Was a raw `syscall(21, ...)`;
 # routing through sys_access drops the bare syscall + magic number — S2.)
-fn path_exists(path) {
+fn kavach_path_exists(path) {
     if (sys_access(path, 0) == 0) { return 1; }
     return 0;
 }
@@ -69,30 +69,30 @@ fn which_exists(name) {
     var p1 = "/usr/local/bin/";
     memcpy(buf, p1, strlen(p1));
     memcpy(buf + strlen(p1), name, nlen + 1);
-    if (path_exists(buf) == 1) { return 1; }
+    if (kavach_path_exists(buf) == 1) { return 1; }
 
     var p2 = "/usr/bin/";
     memcpy(buf, p2, strlen(p2));
     memcpy(buf + strlen(p2), name, nlen + 1);
-    if (path_exists(buf) == 1) { return 1; }
+    if (kavach_path_exists(buf) == 1) { return 1; }
 
     var p3 = "/bin/";
     memcpy(buf, p3, strlen(p3));
     memcpy(buf + strlen(p3), name, nlen + 1);
-    if (path_exists(buf) == 1) { return 1; }
+    if (kavach_path_exists(buf) == 1) { return 1; }
 
     var p4 = "/usr/sbin/";
     memcpy(buf, p4, strlen(p4));
     memcpy(buf + strlen(p4), name, nlen + 1);
-    if (path_exists(buf) == 1) { return 1; }
+    if (kavach_path_exists(buf) == 1) { return 1; }
 
     return 0;
 }
 
 # Look for wasmtime on PATH. Returns path cstr, or 0 if none.
 fn _wasm_binary_path() {
-    if (path_exists("/usr/local/bin/wasmtime") == 1) { return "/usr/local/bin/wasmtime"; }
-    if (path_exists("/usr/bin/wasmtime") == 1) { return "/usr/bin/wasmtime"; }
+    if (kavach_path_exists("/usr/local/bin/wasmtime") == 1) { return "/usr/local/bin/wasmtime"; }
+    if (kavach_path_exists("/usr/bin/wasmtime") == 1) { return "/usr/bin/wasmtime"; }
     # Fall back to a cargo-installed wasmtime under $HOME/.cargo/bin. getenv
     # ships in the stdlib now (reads /proc/self/environ + allocates) — call it
     # here at config time only, never post-fork (it is not async-signal-safe).
@@ -106,15 +106,15 @@ fn _wasm_binary_path() {
             memcpy(path, home, hlen);
             memcpy(path + hlen, suffix, slen);
             store8(path + hlen + slen, 0);
-            if (path_exists(path) == 1) { return path; }
+            if (kavach_path_exists(path) == 1) { return path; }
         }
     }
     return 0;
 }
 
 fn backend_is_available(b) {
-    if (b == Backend.NOOP) { return 1; }
-    if (b == Backend.PROCESS) { return 1; }
+    if (b == KavachBackend.NOOP) { return 1; }
+    if (b == KavachBackend.PROCESS) { return 1; }
     # 3.11.8: PROBE, like every sibling below. This was a hardcoded 0 while
     # `wasm_health` right next to it did the correct check — and because
     # `sandbox_create` refuses a backend that reports unavailable, the WASM path
@@ -122,21 +122,21 @@ fn backend_is_available(b) {
     # A consumer could register the backend, configure it and never reach
     # `wasm_exec`. `_wasm_binary_path` moved here from `backend_wasm.cyr` so
     # this file can call it; Cyrius resolves single-pass, callees first.
-    if (b == Backend.WASM) {
+    if (b == KavachBackend.WASM) {
         if (_wasm_binary_path() == 0) { return 0; }
         return 1;
     }
-    if (b == Backend.GVISOR) { return which_exists("runsc"); }
-    if (b == Backend.FIRECRACKER) { return which_exists("firecracker"); }
-    if (b == Backend.OCI) {
+    if (b == KavachBackend.GVISOR) { return which_exists("runsc"); }
+    if (b == KavachBackend.FIRECRACKER) { return which_exists("firecracker"); }
+    if (b == KavachBackend.OCI) {
         if (which_exists("runc") == 1) { return 1; }
         if (which_exists("crun") == 1) { return 1; }
         return 0;
     }
-    if (b == Backend.SGX) { return path_exists("/dev/sgx_enclave"); }
-    if (b == Backend.SEV) { return path_exists("/dev/sev"); }
-    if (b == Backend.TDX) { return path_exists("/dev/tdx_guest"); }
-    if (b == Backend.SY_AGNOS) {
+    if (b == KavachBackend.SGX) { return kavach_path_exists("/dev/sgx_enclave"); }
+    if (b == KavachBackend.SEV) { return kavach_path_exists("/dev/sev"); }
+    if (b == KavachBackend.TDX) { return kavach_path_exists("/dev/tdx_guest"); }
+    if (b == KavachBackend.SY_AGNOS) {
         if (which_exists("docker") == 1) { return 1; }
         if (which_exists("podman") == 1) { return 1; }
         return 0;
@@ -144,7 +144,7 @@ fn backend_is_available(b) {
     return 0;
 }
 
-# Iterate all 10 backends by index 0..BACKEND_COUNT.
+# Iterate all 10 backends by index 0..KAVACH_BACKEND_COUNT.
 fn backend_at(i) {
     return i;
 }

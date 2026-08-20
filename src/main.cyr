@@ -54,7 +54,7 @@ include "src/attestation.cyr"
 include "src/sandbox_exec.cyr"
 
 fn _print_banner() {
-    var banner = "kavach v3.11.14 — Cyrius port\n";
+    var banner = "kavach v3.11.15 — Cyrius port\n";
     sys_write(1, banner, strlen(banner));
     return 0;
 }
@@ -85,7 +85,7 @@ fn main() {
 
     # End-to-end demo: noop sandbox + safe exec + audit chain
     var cfg = config_new();
-    config_backend(cfg, Backend.NOOP);
+    config_backend(cfg, KavachBackend.NOOP);
     var sb = sandbox_create(cfg);
     if (sb == 0) { return 1; }
 

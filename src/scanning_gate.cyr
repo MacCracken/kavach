@@ -90,7 +90,7 @@ fn gate_apply(result, policy) {
     var total = olen + elen;
     if (total > ExternalizationPolicy_max_artifact_size_bytes(policy)) {
         scan_result_push(sr, finding_new("gate", Severity.CRITICAL,
-        "size_limit", "output size exceeds limit", 0));
+            "size_limit", "output size exceeds limit", 0));
         ScanResult_set_verdict(sr, ScanVerdict.BLOCK);
         return sr;
     }

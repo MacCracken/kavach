@@ -106,7 +106,7 @@ fn _wasm_append_limits(args, policy, fuel) {
     # Always emitted — see `WASM_DEFAULT_MEMORY_LIMIT_MB` for why a missing
     # policy limit must not mean "unbounded".
     _wasm_push_w_opt(args, "max-memory-size",
-    _wasm_effective_memory_mb(policy) * 1048576);
+      _wasm_effective_memory_mb(policy) * 1048576);
 
     if (fuel > 0) {
         _wasm_push_w_opt(args, "fuel", fuel);
@@ -148,7 +148,7 @@ fn wasm_exec(sandbox, command) {
     if (strlen(wasm_path) == 0) {
         return backend_error_result("WASM backend requires a .wasm file path as the command");
     }
-    if (path_exists(wasm_path) == 0) {
+    if (kavach_path_exists(wasm_path) == 0) {
         return backend_error_result("WASM module file not found");
     }
 
@@ -201,7 +201,7 @@ fn wasm_exec(sandbox, command) {
     # bound it — and confining the wasmtime PROCESS itself with landlock would
     # also block it from reading the module. Stated so the 0 reads as a decision.
     var n = confine_capture_input(args, policy, 0, 0, 0, out_buf, out_cap, 0,
-    timeout, 0, SandboxConfig_stdin(cfg), SandboxConfig_stdin_len(cfg));
+      timeout, 0, SandboxConfig_stdin(cfg), SandboxConfig_stdin_len(cfg));
     var end_ns = mono_now_ns();
 
     var r = backend_capture_finish(out_buf, n, out_cap, "wasmtime run failed", start_ns, end_ns);
@@ -221,8 +221,8 @@ fn wasm_health(sandbox) {
 fn wasm_destroy(sandbox) { return 0; }
 
 fn backend_wasm_register() {
-    backend_register_exec(Backend.WASM, &wasm_exec);
-    backend_register_health(Backend.WASM, &wasm_health);
-    backend_register_destroy(Backend.WASM, &wasm_destroy);
+    backend_register_exec(KavachBackend.WASM, &wasm_exec);
+    backend_register_health(KavachBackend.WASM, &wasm_health);
+    backend_register_destroy(KavachBackend.WASM, &wasm_destroy);
     return 0;
 }

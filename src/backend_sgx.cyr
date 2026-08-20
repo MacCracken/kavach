@@ -11,13 +11,13 @@
 #     wrapper and AES-GCM support in sigil
 
 fn _sgx_gramine_path() {
-    if (path_exists("/usr/local/bin/gramine-sgx") == 1) { return "/usr/local/bin/gramine-sgx"; }
-    if (path_exists("/usr/bin/gramine-sgx") == 1) { return "/usr/bin/gramine-sgx"; }
+    if (kavach_path_exists("/usr/local/bin/gramine-sgx") == 1) { return "/usr/local/bin/gramine-sgx"; }
+    if (kavach_path_exists("/usr/bin/gramine-sgx") == 1) { return "/usr/bin/gramine-sgx"; }
     return 0;
 }
 
 fn _sgx_device_present() {
-    return path_exists("/dev/sgx_enclave");
+    return kavach_path_exists("/dev/sgx_enclave");
 }
 
 # Generate a minimal Gramine manifest. Writes to <workdir>/app.manifest
@@ -145,8 +145,8 @@ fn sgx_health(sandbox) {
 fn sgx_destroy(sandbox) { return 0; }
 
 fn backend_sgx_register() {
-    backend_register_exec(Backend.SGX, &sgx_exec);
-    backend_register_health(Backend.SGX, &sgx_health);
-    backend_register_destroy(Backend.SGX, &sgx_destroy);
+    backend_register_exec(KavachBackend.SGX, &sgx_exec);
+    backend_register_health(KavachBackend.SGX, &sgx_health);
+    backend_register_destroy(KavachBackend.SGX, &sgx_destroy);
     return 0;
 }

@@ -105,7 +105,7 @@ fn process_exec(sandbox, command) {
             if (SandboxConfig_require_ns(cfg) == 1) { want_ns = 1; }
         }
         n = confine_capture(args, pol, rootfs, cgroup_path, sec, buf, PROCESS_MAX_OUTPUT, want_ns,
-        tmo, 1);
+          tmo, 1);
         cgroup_teardown(cgroup_path);
         var end_rf = mono_now_ns();
         var rr = backend_capture_finish(buf, n, PROCESS_MAX_OUTPUT, "exec failed", start_ns, end_rf);
@@ -143,8 +143,8 @@ fn process_health(sandbox) { return 1; }
 fn process_destroy(sandbox) { return 0; }
 
 fn backend_process_register() {
-    backend_register_exec(Backend.PROCESS, &process_exec);
-    backend_register_health(Backend.PROCESS, &process_health);
-    backend_register_destroy(Backend.PROCESS, &process_destroy);
+    backend_register_exec(KavachBackend.PROCESS, &process_exec);
+    backend_register_health(KavachBackend.PROCESS, &process_health);
+    backend_register_destroy(KavachBackend.PROCESS, &process_destroy);
     return 0;
 }

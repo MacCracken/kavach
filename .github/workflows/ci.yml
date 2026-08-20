@@ -103,29 +103,32 @@ jobs:
             echo "::warning::cyrius.lock not committed — skipping hash verification"
           fi
 
-      - name: Format check (informational)
-        # `cyrius fmt <file>` writes formatted source to stdout; diff
-        # against the committed file surfaces drift. `--check` only
-        # sets the exit code without emitting output, so diffing its
-        # stdout always reports spurious drift — same workaround as
-        # agnosys / agnostik / nein.
+      - name: Format check
+        # ⚠ The premise this step was built on is false, and it inverted the
+        # outcome. `cyrius fmt <file>` does NOT write to stdout — it rewrites
+        # the file IN PLACE and prints nothing (`cyrius fmt` usage: "(no flag)
+        # rewrite the file in place"). Diffing its empty stdout against the
+        # file reported drift for EVERY file, including ones `cyrfmt --check`
+        # calls correctly formatted, so the output was pure noise and the
+        # v3.2 "flip to exit 1" item could never be judged done.
         #
-        # Informational at v3.1.0: pre-modernization src/ + tests/
-        # carry fmt drift inherited from the v3.0 cut. Closing the
-        # gap is queued in roadmap v3.2 under the "`cyrius audit`
-        # clean" item — flip this step to `exit 1` once src/ and
-        # tests/ are clean against the cc 5.10.34 fmt output.
+        # `--check` is the purpose-built flag: exit 1 if not canonically
+        # formatted, and say where. It emits no stdout by design — that was
+        # the property the old comment mistook for a defect.
+        #
+        # Now blocking, and the drift it was tracking is cleared (3.11.15).
         run: |
           drift=0
           for f in src/*.cyr tests/*.tcyr tests/*.bcyr tests/*.fcyr; do
             [ -f "$f" ] || continue
-            if ! diff -q <(cyrius fmt "$f" 2>/dev/null) "$f" > /dev/null; then
+            if ! cyrius fmt "$f" --check > /dev/null 2>&1; then
               echo "needs fmt: $f"
               drift=1
             fi
           done
           if [ $drift -ne 0 ]; then
-            echo "::warning::fmt drift present — informational at v3.1.0; tracked in roadmap v3.2"
+            echo "::error::fmt drift — run 'cyrius fmt <file>' on the files above"
+            exit 1
           fi
 
       - name: Lint

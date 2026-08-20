@@ -12,10 +12,10 @@
 
 # Discover a usable OCI runtime. Returns path cstr, or 0 if none.
 fn _oci_runtime_path() {
-    if (path_exists("/usr/local/bin/runc") == 1) { return "/usr/local/bin/runc"; }
-    if (path_exists("/usr/bin/runc") == 1) { return "/usr/bin/runc"; }
-    if (path_exists("/usr/local/bin/crun") == 1) { return "/usr/local/bin/crun"; }
-    if (path_exists("/usr/bin/crun") == 1) { return "/usr/bin/crun"; }
+    if (kavach_path_exists("/usr/local/bin/runc") == 1) { return "/usr/local/bin/runc"; }
+    if (kavach_path_exists("/usr/bin/runc") == 1) { return "/usr/bin/runc"; }
+    if (kavach_path_exists("/usr/local/bin/crun") == 1) { return "/usr/local/bin/crun"; }
+    if (kavach_path_exists("/usr/bin/crun") == 1) { return "/usr/bin/crun"; }
     return 0;
 }
 
@@ -304,7 +304,7 @@ fn oci_exec(sandbox, command) {
     # Refuse rather than run against a state directory we cannot vouch for.
     if (_oci_state_root() == 0) {
         return backend_error_result(
-        "OCI state directory under /tmp is not a private directory owned by this user; refusing to run");
+          "OCI state directory under /tmp is not a private directory owned by this user; refusing to run");
     }
 
     var guard_cfg = runtime_guard_config_default();
@@ -389,8 +389,8 @@ fn oci_health(sandbox) {
 fn oci_destroy(sandbox) { return 0; }
 
 fn backend_oci_register() {
-    backend_register_exec(Backend.OCI, &oci_exec);
-    backend_register_health(Backend.OCI, &oci_health);
-    backend_register_destroy(Backend.OCI, &oci_destroy);
+    backend_register_exec(KavachBackend.OCI, &oci_exec);
+    backend_register_health(KavachBackend.OCI, &oci_health);
+    backend_register_destroy(KavachBackend.OCI, &oci_destroy);
     return 0;
 }

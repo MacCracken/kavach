@@ -7,13 +7,13 @@
 # measurement. Waits on sigil TDX helpers.
 
 fn _tdx_qemu_path() {
-    if (path_exists("/usr/local/bin/qemu-system-x86_64") == 1) { return "/usr/local/bin/qemu-system-x86_64"; }
-    if (path_exists("/usr/bin/qemu-system-x86_64") == 1) { return "/usr/bin/qemu-system-x86_64"; }
+    if (kavach_path_exists("/usr/local/bin/qemu-system-x86_64") == 1) { return "/usr/local/bin/qemu-system-x86_64"; }
+    if (kavach_path_exists("/usr/bin/qemu-system-x86_64") == 1) { return "/usr/bin/qemu-system-x86_64"; }
     return 0;
 }
 
 fn _tdx_device_present() {
-    return path_exists("/dev/tdx_guest");
+    return kavach_path_exists("/dev/tdx_guest");
 }
 
 fn tdx_exec(sandbox, command) {
@@ -77,8 +77,8 @@ fn tdx_health(sandbox) {
 fn tdx_destroy(sandbox) { return 0; }
 
 fn backend_tdx_register() {
-    backend_register_exec(Backend.TDX, &tdx_exec);
-    backend_register_health(Backend.TDX, &tdx_health);
-    backend_register_destroy(Backend.TDX, &tdx_destroy);
+    backend_register_exec(KavachBackend.TDX, &tdx_exec);
+    backend_register_health(KavachBackend.TDX, &tdx_health);
+    backend_register_destroy(KavachBackend.TDX, &tdx_destroy);
     return 0;
 }

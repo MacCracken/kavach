@@ -245,14 +245,14 @@ fn confine_child(policy, rootfs, cgroup_path, uid, gid, seccomp_info, want_ns) {
             var _ll = SandboxPolicy_landlock_rules(policy);
             if (_ll == 0) { _ll = vec_new(); }
             if (is_ok(security_apply_landlock(_ll,
-            SandboxPolicy_landlock_rules_len(policy))) == 0) {
+                  SandboxPolicy_landlock_rules_len(policy))) == 0) {
                 sys_exit(SPAWN_EXIT_LANDLOCK);
             }
         }
     }
     if (seccomp_info != 0) {
         if (is_ok(security_load_seccomp(security_seccomp_filter_ptr(seccomp_info),
-        security_seccomp_filter_len(seccomp_info))) == 0) {
+              security_seccomp_filter_len(seccomp_info))) == 0) {
             sys_exit(SPAWN_EXIT_SECCOMP);
         }
     }
@@ -353,7 +353,7 @@ fn spawn_seccomp_available() {
     if (pid < 0) { return 0; }
     if (pid == 0) {
         if (is_ok(security_load_seccomp(security_seccomp_filter_ptr(info),
-        security_seccomp_filter_len(info))) == 0) {
+              security_seccomp_filter_len(info))) == 0) {
             sys_exit(1);
         }
         sys_exit(0);
@@ -389,7 +389,7 @@ fn spawn_seccomp_available() {
 # path a real exit code and a deadline; `exec_capture` discards the wait status
 # and has no seam for either.
 fn confine_capture_input(args, policy, rootfs, cgroup_path, seccomp_info, buf, buflen,
-want_ns, timeout_ms, do_confine, input, input_len) {
+  want_ns, timeout_ms, do_confine, input, input_len) {
     # ⛔ LINUX ONLY — the fork/confine/execve/capture path. agnos has no fork by design and its
     # sandboxing goes through backend_sy_agnos, not this file.
     # ⚠ -1, never a fabricated success: a caller must not receive an empty capture buffer and
@@ -593,9 +593,9 @@ want_ns, timeout_ms, do_confine, input, input_len) {
 # The pre-3.11.8 shape: capture with the child inheriting the parent's stdin.
 # Every existing caller lands here, so none of them changed behaviour.
 fn confine_capture(args, policy, rootfs, cgroup_path, seccomp_info, buf, buflen, want_ns,
-timeout_ms, do_confine) {
+  timeout_ms, do_confine) {
     return confine_capture_input(args, policy, rootfs, cgroup_path, seccomp_info, buf,
-    buflen, want_ns, timeout_ms, do_confine, 0, 0);
+      buflen, want_ns, timeout_ms, do_confine, 0, 0);
 }
 
 # Exit code of the most recent confine_capture. The capture returns a byte
