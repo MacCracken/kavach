@@ -157,11 +157,12 @@ struct SandboxConfig {
     stdin;
     stdin_len;
     fuel;
+    env;
 }
 
-# 112 (3.11.11): `fuel` appended, so no existing field offset moves — the same
-# discipline `stdin`/`stdin_len` followed at 104 and `require_ns` at 88.
-var SANDBOX_CONFIG_SIZE = 112;
+# 120: `env` appended, so no existing field offset moves — the same discipline
+# `fuel` followed at 112, `stdin`/`stdin_len` at 104 and `require_ns` at 88.
+var SANDBOX_CONFIG_SIZE = 120;
 
 # Defaults match Rust's SandboxConfig::default():
 #   backend=Process, policy=basic(), timeout_ms=30000, inner_backend=-1 (none)
@@ -252,6 +253,51 @@ fn config_rootfs(c, path)      { SandboxConfig_set_rootfs(c, path); return c; }
 # policy would start scanning output for every existing consumer that never
 # asked for it, which is a behaviour change rather than a new capability.
 fn config_externalization(c, p) { SandboxConfig_set_externalization(c, p); return c; }
+
+# The payload's environment — an EXPLICIT, caller-supplied vec of "KEY=VALUE"
+# cstrs. Default 0, which execs with an empty environment exactly as before.
+#
+# This does NOT reverse kavach's standing position that the caller's environment
+# is never leaked into a sandbox (`backend_oci.cyr`). The two are opposites:
+# inheritance is implicit and carries whatever the host happened to export;
+# this is a list the caller wrote down. Nothing is inherited — an entry reaches
+# the payload only because a caller put it there. That distinction is the whole
+# reason this is safe to add: the default stays empty, so every existing
+# consumer is byte-identical, and `getenv` in a sandbox still returns nothing
+# unless someone explicitly asked for it.
+#
+# Reported by stiva, whose containers silently lost the OCI image's declared
+# `process.env`: it parsed the image config, persisted the vars, built them into
+# its RuntimeSpec — and then had no kavach setter to hand them to, so every
+# container ran without the environment its image declared. The Rust runtime
+# stiva was ported from applied them via `Command::env`, so this was a parity
+# regression with no expressible fix on the consumer side.
+#
+# Honoured by the process backend (`confine_capture_input`), `sandbox_spawn`,
+# and the OCI backend's `process.env`. NOT honoured by persistent sandboxes,
+# which have no config in scope — see `_persistent_spawn_inner`.
+fn config_env(c, v) { SandboxConfig_set_env(c, v); return c; }
+
+# Build a NULL-terminated envp from a vec of "KEY=VALUE" cstrs. `v == 0` (the
+# default) yields the empty envp every kavach exec path used unconditionally
+# before 3.12.0, so an unset config is bit-for-bit the old behaviour.
+#[must_use]
+fn kv_envp_from_vec(v) {
+    if (v == 0) {
+        var e0 = alloc(8);
+        store64(e0, 0);
+        return e0;
+    }
+    var n = vec_len(v);
+    var envp = alloc((n + 1) * 8);
+    var i = 0;
+    while (i < n) {
+        store64(envp + i * 8, vec_get(v, i));
+        i = i + 1;
+    }
+    store64(envp + n * 8, 0);
+    return envp;
+}
 
 # Convenience: enable seccomp with a profile name on the config's policy.
 fn config_policy_seccomp(c, profile) {

@@ -7,6 +7,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.12.0] — 2026-08-21 — a sandbox can be given an environment
+
+### Added — `config_env`: an explicit, caller-supplied payload environment
+
+Every kavach exec path built `envp` as a hardcoded empty array — `src/spawn.cyr:136`,
+`src/confine.cyr:419`, `src/persistent.cyr:135`, `src/backend_oci.cyr:171` — and the OCI
+spec emitted a fixed `"env":["PATH=…","TERM=xterm"]` (`src/oci_spec.cyr:191`). There was no
+way for a caller to hand a payload a variable, and `SandboxConfig` had no field to carry one.
+
+**This does not reverse the standing position that the caller's environment is never leaked
+into a sandbox** (`src/backend_oci.cyr:24-30`). The two are opposites. Inheritance is
+implicit and carries whatever the host happened to export; `config_env` takes a list the
+caller wrote down. Nothing is inherited — a variable reaches the payload only because
+someone put it in the vec. The default is `0`, which is the empty envp every path used
+before, so **every existing consumer is byte-identical**.
+
+New surface:
+
+- `config_env(c, v)` — attach a vec of `"KEY=VALUE"` cstrs to a `SandboxConfig`.
+- `kv_envp_from_vec(v)` — build a NULL-terminated `envp`; `v == 0` yields the empty one.
+- `confine_capture_input_env(…, env)` — the capture path with an explicit environment.
+  `confine_capture_input` forwards `env = 0`, so no existing caller changed — the same
+  wrapper discipline `confine_capture` follows for `input`.
+
+Honoured by the **process backend** (`src/backend_process.cyr`), **`sandbox_spawn`**, and the
+**OCI backend's `process.env`**. On the OCI path an explicit list **replaces** the default
+PATH/TERM pair rather than appending to it: an OCI image declares its own `PATH`, and
+silently prepending kavach's would shadow it. A caller wanting the defaults includes them.
+
+Not honoured by **persistent sandboxes** (`_persistent_spawn_inner`), which have no config in
+scope; noted at the call site rather than left to be discovered.
+
+`SandboxConfig` goes **112 → 120 bytes**, `env` appended so no existing field offset moves —
+the discipline `fuel` followed at 112, `stdin`/`stdin_len` at 104 and `require_ns` at 88. The
+layout guard in `tests/kavach.tcyr` is updated and still asserts every prior field reads back
+at its old offset.
+
+### Why this was reported — and the testing lesson attached to it
+
+Filed by **stiva**, whose containers silently lost the OCI image's declared `process.env`. It
+parsed the image config, persisted the variables to `state.json`, and built them into its
+`RuntimeSpec` — then had no setter to hand them to kavach, so `build_sandbox` dropped them.
+Every container ran without the environment its image declared. The Rust runtime stiva was
+ported from applied them via `Command::env`, making it a parity regression with no fix
+expressible on the consumer side.
+
+⚠ **It survived a 2175-test suite because the test asserted the wrong half.** stiva checked
+that its spec *carried* the env — which it did — and never that a payload could *read* it.
+`test_confine_capture_env` is written to that lesson: it runs `/bin/sh -c 'printf %s "$VAR"'`
+and asserts on what the payload observed, plus the negative case that an unset config still
+yields an empty environment.
+
+⚠ A note for whoever writes the next such test: **do not probe with `PATH`.** `/bin/sh`
+synthesises a default when the variable is absent, so `$PATH` is non-empty even under
+`execve` with a genuinely empty `envp` — measured, `env -i /bin/sh -c 'printf %s "$PATH"'`
+prints 39 characters. Asserting on `PATH` tests the shell, not the environment, and fails
+against correct code. The test probes `HOME`, which is not synthesised.
+
+684 → **692 assertions**, 0 failed.
+
 ## [3.11.15] — 2026-08-19 — definitive names for three symbols ai-hwaccel also defined
 
 ### Security — `_backend_fp`'s bounds check was disabled wherever ai-hwaccel was co-resident
@@ -44,12 +104,26 @@ addressed the instance; this one addresses the remaining names.
 | `enum Backend` | `enum KavachBackend` | type name, also defined by ai-hwaccel |
 | `fn path_exists` | `fn kavach_path_exists` | also defined by ai-hwaccel |
 
-**Breaking for direct consumers of these three names.** `KavachBackend`'s *members* are unchanged
-(`PROCESS`, `WASM`, `OCI`, …), so `KavachBackend.OCI` is the only edit at each of the 83 call sites.
+**Not breaking for the enum rename** — and the reason is worth recording, because it also bounds
+what that rename achieved. In Cyrius an enum **qualifier is cosmetic**: `Backend.WASM` and
+`KavachBackend.WASM` both resolve to the member `WASM`, and the type name plays no part in
+resolution. Verified in agnosai, which calls `Backend.WASM` / `Backend.NOOP` / `Backend.PROCESS` /
+`Backend.OCI` at 8 sites and builds unchanged against this release, with every value correct.
 
-⚠ Those members are still generic and still unprefixed. They do not collide with anything in the
-current fold — verified across all of `lib/` — but they are latent, and a future library defining
-`PROCESS` or `WASM` would collide silently. Left alone here to keep this release to the live defect.
+So of the three renames only two closed a real collision:
+
+- `BACKEND_COUNT` — **the memory-safety fix.** A `var`, silently resolved, wrong value.
+- `path_exists` — a real `fn` collision; last-definition-wins picked one implementation for both
+  libraries. This one at least warned at build time.
+- `enum Backend` — **defensive, not load-bearing.** It removes a duplicate symbol-table entry, but
+  since the qualifier is never resolved through, the collision was inert.
+
+⚠ The corollary matters more than the rename: because only member names resolve, renaming the enum
+**type** does not protect the members. `PROCESS`, `WASM`, `OCI`, `NOOP` and the rest are still
+generic, still unprefixed, and still the real exposure. They collide with nothing in the current
+fold — verified across all of `lib/` — but that is luck, not design.
+
+Left alone here to keep this release to the live defect.
 
 ### Fixed — the Format check gate could never pass, and said so about every file
 

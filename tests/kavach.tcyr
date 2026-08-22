@@ -1552,14 +1552,70 @@ fn test_config_stdin() {
 
     # ⚠ Appending a field must not move any existing offset — the same discipline
     # `require_ns` followed at 88 and `stdin`/`stdin_len` at 104. `fuel` took it
-    # to 112 in 3.11.11; these read-backs are what say the append was clean.
+    # to 112 in 3.11.11 and `env` to 120 in 3.12.0; these read-backs are what say
+    # the append was clean.
     assert_eq(SandboxConfig_backend(cfg), KavachBackend.PROCESS, "backend still reads");
     assert_eq(SandboxConfig_timeout_ms(cfg), 30000, "timeout still reads");
     assert_eq(SandboxConfig_inner_backend(cfg), 0 - 1, "inner_backend still reads");
     assert_eq(SandboxConfig_stdin(cfg), payload,
       "stdin still reads its own value, at its old offset");
     assert_eq(SandboxConfig_fuel(cfg), 0, "and fuel defaults to 0 — derive from timeout");
-    assert_eq(SANDBOX_CONFIG_SIZE, 112, "and the struct is 112 bytes");
+    assert_eq(SandboxConfig_env(cfg), 0, "and env defaults to 0 — empty envp, as before");
+    assert_eq(SANDBOX_CONFIG_SIZE, 120, "and the struct is 120 bytes");
+    return 0;
+}
+
+# 3.12.0: the payload really receives the caller's environment.
+#
+# ⚠ This test exists because a WEAKER one let a real bug ship in a consumer.
+# stiva asserted that its RuntimeSpec carried the env — which it did — and never
+# asserted that a container could READ it. The env was built, persisted, and
+# silently dropped at the kavach boundary for several releases with a green
+# suite. The lesson generalises: assert on what the payload observes, not on
+# what the caller assembled.
+fn test_confine_capture_env() {
+    test_group("confine_capture_env");
+    var buf = alloc(4096);
+
+    var args = vec_new();
+    vec_push(args, "/bin/sh");
+    vec_push(args, "-c");
+    vec_push(args, "printf %s \"$KAVACH_TEST_VAR\"");
+
+    # Unset env is the historical empty envp — the variable must NOT be visible.
+    var n0 = confine_capture_input(args, 0, 0, 0, 0, buf, 4096, 0, 5000, 0, "", 0);
+    assert_eq(n0, 0, "with no env, the variable is unset and expands to nothing");
+    assert_eq(confine_last_exit(), 0, "and the shell still exits cleanly");
+
+    # Explicitly supplied, it reaches the payload.
+    var env = vec_new();
+    vec_push(env, "KAVACH_TEST_VAR=reached-the-payload");
+    var n1 = confine_capture_input_env(args, 0, 0, 0, 0, buf, 4096, 0, 5000, 0, "", 0, env);
+    assert_eq(n1, strlen("reached-the-payload"), "the payload reads the supplied value");
+    assert_eq(memeq(buf, "reached-the-payload", strlen("reached-the-payload")), 1,
+      "byte for byte — this is the assertion the consumer bug was missing");
+    assert_eq(confine_last_exit(), 0, "and exits 0");
+
+    # Nothing is inherited: kavach's own environment must not leak through.
+    #
+    # ⚠ Probe with HOME, NOT PATH. `/bin/sh` SYNTHESISES a default PATH when the
+    # variable is absent, so `$PATH` is non-empty even under `execve` with a
+    # genuinely empty envp — measured: `env -i /bin/sh -c 'printf %s "$PATH"'`
+    # prints 39 characters. Asserting on PATH tests the shell, not the envp, and
+    # fails against correct code. HOME is not synthesised.
+    var home = getenv("HOME");
+    if (home != 0) {
+        var pargs = vec_new();
+        vec_push(pargs, "/bin/sh");
+        vec_push(pargs, "-c");
+        vec_push(pargs, "printf %s \"$HOME\"");
+        var n2 = confine_capture_input_env(pargs, 0, 0, 0, 0, buf, 4096, 0, 5000, 0, "", 0, env);
+        assert_eq(n2, 0, "HOME is NOT inherited — an explicit list replaces, never extends");
+    }
+
+    # An empty vec is still an empty environment, not a fallback to inheritance.
+    var n3 = confine_capture_input_env(args, 0, 0, 0, 0, buf, 4096, 0, 5000, 0, "", 0, vec_new());
+    assert_eq(n3, 0, "an empty list yields an empty environment");
     return 0;
 }
 
@@ -3687,6 +3743,7 @@ fn main() {
     test_wasm_registered();
     test_wasm_availability_is_probed();
     test_config_stdin();
+    test_confine_capture_env();
     test_confine_capture_input();
     test_wasm_fuel_calculation();
     test_wasm_trim();

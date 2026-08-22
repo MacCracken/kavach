@@ -390,6 +390,15 @@ fn spawn_seccomp_available() {
 # and has no seam for either.
 fn confine_capture_input(args, policy, rootfs, cgroup_path, seccomp_info, buf, buflen,
   want_ns, timeout_ms, do_confine, input, input_len) {
+    return confine_capture_input_env(args, policy, rootfs, cgroup_path, seccomp_info, buf,
+      buflen, want_ns, timeout_ms, do_confine, input, input_len, 0);
+}
+
+# 3.12.0: the same path with an explicit payload environment. `env == 0` is the
+# empty envp every caller got before, so the wrapper above is unchanged
+# behaviour — the same discipline `confine_capture` follows for `input`.
+fn confine_capture_input_env(args, policy, rootfs, cgroup_path, seccomp_info, buf, buflen,
+  want_ns, timeout_ms, do_confine, input, input_len, env) {
     # ⛔ LINUX ONLY — the fork/confine/execve/capture path. agnos has no fork by design and its
     # sandboxing goes through backend_sy_agnos, not this file.
     # ⚠ -1, never a fabricated success: a caller must not receive an empty capture buffer and
@@ -416,8 +425,9 @@ fn confine_capture_input(args, policy, rootfs, cgroup_path, seccomp_info, buf, b
         i = i + 1;
     }
     store64(argv + argc * 8, 0);
-    var envp = alloc(8);
-    store64(envp, 0);
+    # Caller-supplied payload environment, or the empty envp when unset. Built
+    # in the PARENT — alloc after fork is unsafe, same rule as the argv above.
+    var envp = kv_envp_from_vec(env);
 
     # Read the ids in the PARENT — inside the new user namespace getuid()
     # reports the mapped id, not the one the map must be written against.

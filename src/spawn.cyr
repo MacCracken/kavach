@@ -133,8 +133,13 @@ fn sandbox_spawn(sandbox, command, log_path) {
         i = i + 1;
     }
     store64(argv + argc * 8, 0);
-    var envp = alloc(8);
-    store64(envp, 0);
+    # The config's explicit env, or the empty envp when unset (the pre-3.12.0
+    # behaviour for every caller that does not call `config_env`). Built in the
+    # PARENT for the same reason the seccomp filter is: alloc after fork is
+    # unsafe.
+    var spawn_env = 0;
+    if (cfg != 0) { spawn_env = SandboxConfig_env(cfg); }
+    var envp = kv_envp_from_vec(spawn_env);
 
     var pid = kv_fork();
     if (pid < 0) {

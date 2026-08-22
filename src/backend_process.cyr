@@ -104,8 +104,12 @@ fn process_exec(sandbox, command) {
         if (cfg != 0) {
             if (SandboxConfig_require_ns(cfg) == 1) { want_ns = 1; }
         }
-        n = confine_capture(args, pol, rootfs, cgroup_path, sec, buf, PROCESS_MAX_OUTPUT, want_ns,
-          tmo, 1);
+        # 3.12.0: hand the payload the config's explicit environment. Unset (the
+        # default) is the empty envp this path always used.
+        var pexec_env = 0;
+        if (cfg != 0) { pexec_env = SandboxConfig_env(cfg); }
+        n = confine_capture_input_env(args, pol, rootfs, cgroup_path, sec, buf,
+          PROCESS_MAX_OUTPUT, want_ns, tmo, 1, 0, 0, pexec_env);
         cgroup_teardown(cgroup_path);
         var end_rf = mono_now_ns();
         var rr = backend_capture_finish(buf, n, PROCESS_MAX_OUTPUT, "exec failed", start_ns, end_rf);

@@ -147,7 +147,33 @@ fn oci_generate_spec(sandbox, command) {
     var netns = "{\"type\":\"network\"},";
     if (SandboxPolicy_network_enabled(policy) == 1) { netns = ""; }
 
+    # 3.12.0: `process.env`. Unset (the default) keeps the fixed PATH/TERM pair
+    # every spec carried before, so an existing consumer is byte-identical. Set,
+    # the caller's list REPLACES that pair rather than appending to it — an OCI
+    # image declares its own PATH, and silently prepending kavach's would shadow
+    # it. A caller that wants the defaults includes them in its own list.
+    var env_json = "],\"env\":[\"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\",\"TERM=xterm\"],";
+    var cfg_env = SandboxConfig_env(config);
+    if (cfg_env != 0) {
+        if (vec_len(cfg_env) > 0) {
+            var esb = str_builder_new();
+            str_builder_add_cstr(esb, "],\"env\":[");
+            var ei = 0;
+            while (ei < vec_len(cfg_env)) {
+                if (ei > 0) { str_builder_add_cstr(esb, ","); }
+                str_builder_add_cstr(esb, "\"");
+                str_builder_add_cstr(esb, oci_json_escape(vec_get(cfg_env, ei)));
+                str_builder_add_cstr(esb, "\"");
+                ei = ei + 1;
+            }
+            str_builder_add_cstr(esb, "],");
+            env_json = str_data(str_builder_build(esb));
+        }
+    }
+
     var cap = checked_add(strlen(cmd_escaped), strlen(resources));
+    if (cap < 0) { return 0; }
+    cap = checked_add(cap, strlen(env_json));
     if (cap < 0) { return 0; }
     cap = checked_add(cap, 2048);
     var scfg_cap = Sandbox_config(sandbox);
@@ -188,7 +214,7 @@ fn oci_generate_spec(sandbox, command) {
         memcpy(buf + pos, cmd_escaped, strlen(cmd_escaped)); pos = pos + strlen(cmd_escaped);
         store8(buf + pos, 34); pos = pos + 1;                            # closing '"'
     }
-    var mid1a = "],\"env\":[\"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\",\"TERM=xterm\"],";
+    var mid1a = env_json;
     # root.path: the sandbox's OWN rootfs when it has one, else the bundle's
     # empty "rootfs" dir. The relative form is what every release before 3.9.1
     # emitted unconditionally — an EMPTY directory — so an OCI-backed container
