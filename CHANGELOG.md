@@ -45,7 +45,15 @@ caught by the test asserting on the payload's `$PWD` rather than on the setter.
 source-compatible and is at the end of its useful life; the next capability here should take a
 config struct rather than a 15th positional.
 
-701 → **707 assertions**, 0 failed.
+701 → **713 assertions**, 0 failed — `test_confine_capture_workdir` (the payload's actual
+`$PWD`, plus the fail-closed path) and `test_oci_spec_cwd_from_config` (the runc half, which the
+process-backend test does not touch, including escaping of a caller-supplied path).
+
+⚠ **Both halves needed their own test, and the second was nearly missed.** An end-to-end probe
+through stiva was inconclusive — a container with no `/bin/sh` fails at exec *before* runc ever
+chdirs, so a missing `cwd` and a present one produce the identical error. Asserting on the
+generated spec settled it directly. When a runtime error could have two causes, assert on the
+artifact, not on the symptom.
 
 ## [3.12.1] — 2026-08-21 — the command blocklist made kavach unusable as a container runtime
 

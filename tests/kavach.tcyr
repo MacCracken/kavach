@@ -1415,6 +1415,46 @@ fn test_gvisor_oci_spec_shape() {
     return 0;
 }
 
+# 3.12.2: the OCI spec carries the config's workdir as `process.cwd`, where it
+# hardcoded "/". The runc path is the OTHER half of the workdir fix — the process
+# backend's half is `test_confine_capture_workdir`, and a container that takes
+# the OCI backend goes nowhere near it.
+fn test_oci_spec_cwd_from_config() {
+    test_group("oci_spec_cwd_from_config");
+
+    # Unset -> the historical default, so existing consumers are unchanged.
+    var cfg0 = config_new();
+    config_backend(cfg0, KavachBackend.OCI);
+    var sb0 = alloc(SANDBOX_SIZE);
+    Sandbox_set_config(sb0, cfg0);
+    var spec0 = oci_generate_spec(sb0, "echo hi");
+    assert(cstr_contains(spec0, "\"cwd\":\"/\"") == 1, "unset workdir keeps cwd /");
+
+    # Set -> it reaches process.cwd.
+    var cfg = config_new();
+    config_backend(cfg, KavachBackend.OCI);
+    config_workdir(cfg, "/app");
+    var sb = alloc(SANDBOX_SIZE);
+    Sandbox_set_config(sb, cfg);
+    var spec = oci_generate_spec(sb, "echo hi");
+    assert(cstr_contains(spec, "\"cwd\":\"/app\"") == 1,
+      "the configured workdir reaches process.cwd — 0 here is the decorative-setter bug");
+    assert(cstr_contains(spec, "\"cwd\":\"/\"}") == 0, "and the hardcoded / is gone");
+    # The rest of the spec must still be intact around the substitution.
+    assert(cstr_contains(spec, "\"ociVersion\":\"1.0.2\"") == 1, "spec still well-formed");
+    assert(cstr_contains(spec, "\"root\":{\"path\":") == 1, "root object still emitted");
+
+    # Caller-supplied, so it must be escaped rather than injected.
+    var cfg2 = config_new();
+    config_backend(cfg2, KavachBackend.OCI);
+    config_workdir(cfg2, "/a\"b");
+    var sb2 = alloc(SANDBOX_SIZE);
+    Sandbox_set_config(sb2, cfg2);
+    var spec2 = oci_generate_spec(sb2, "echo hi");
+    assert(cstr_contains(spec2, "\"cwd\":\"/a\\\"b\"") == 1, "a quote in the workdir is escaped");
+    return 0;
+}
+
 fn test_gvisor_oci_spec_host_network() {
     test_group("gvisor_spec_host_net");
     var cfg = config_new();
@@ -3817,6 +3857,7 @@ fn main() {
     test_gvisor_container_id_unique();
     test_gvisor_json_escape();
     test_gvisor_oci_spec_shape();
+    test_oci_spec_cwd_from_config();
     test_gvisor_oci_spec_host_network();
     test_gvisor_oci_spec_readonly();
     test_oci_network_mode();
