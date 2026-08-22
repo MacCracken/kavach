@@ -55,6 +55,41 @@ fn runtime_guard_config_default() {
     return c;
 }
 
+# 3.12.1 — the guard config for a sandbox that has its OWN ROOTFS.
+#
+# Identical to the default in every respect EXCEPT the command blocklist, which
+# is disabled. Sensitive-path detection and the shell-metacharacter check both
+# stay on; only the "is this binary named `sh`" test is dropped.
+#
+# ⚠ WHY. The blocklist exists to stop an agent sandbox shelling out to an
+# interpreter **on the host**, where the name `sh` resolves to the host's
+# `/bin/sh` and running it is an escape. When the sandbox has a rootfs, that
+# premise is gone: the name resolves INSIDE the container's filesystem, to a
+# binary the caller supplied, reached only after `_spawn_enter_rootfs` has
+# chrooted and the namespaces are up. The isolation there is the rootfs, the
+# namespaces, seccomp and the cgroup — not the payload's filename.
+#
+# Applying it anyway made kavach unusable as a container runtime, which is what
+# the `rootfs` field added at 3.9.1 exists for. Reported by stiva, reproduced
+# end-to-end: `stiva run <image>` with no CMD defaults its command to `/bin/sh`,
+# and every backend refused it — `blocked command: sh`, exit 126, before fork.
+# The same refusal hit any image whose entrypoint is `sh`, `bash`, `python3`,
+# `node`, `ruby`, `perl` or `php`, i.e. most of them. No container that needed a
+# shell could ever start.
+#
+# ⚠ This does NOT weaken a rootfs-less sandbox: `rootfs == 0` returns the
+# unchanged default, so every agent-sandbox consumer keeps the blocklist exactly
+# as before. The narrowing is conditional on a field only a container runtime
+# sets.
+#[must_use]
+fn runtime_guard_config_for_rootfs(rootfs) {
+    var c = runtime_guard_config_default();
+    if (rootfs != 0) {
+        RuntimeGuardConfig_set_enforce_command_blocklist(c, 0);
+    }
+    return c;
+}
+
 # ---- Command parsing -----------------------------------------------------
 
 # Return heap cstr of base command name (first whitespace-separated token,

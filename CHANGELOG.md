@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.12.1] — 2026-08-21 — the command blocklist made kavach unusable as a container runtime
+
+### Fixed — a rootfs'd sandbox could not run a shell, so most images could not start
+
+`check_command`'s interpreter blocklist (`sh`, `bash`, `zsh`, `dash`, `python`,
+`python3`, `perl`, `ruby`, `php`, `lua`, `node`, `deno`, `bun`, `gcc`, `cc`, …) was
+enforced on **every** backend, unconditionally, via `runtime_guard_config_default()` —
+`backend_process`, `spawn`, `backend_oci`, `backend_gvisor`, `backend_firecracker` and six
+more. A sandbox carrying its own `rootfs` got it too.
+
+That made the `rootfs` field added at 3.9.1 — which exists so kavach can back a container
+runtime — largely useless. Reproduced end-to-end in stiva:
+
+```
+$ stiva run <image>          # no CMD, so stiva defaults the command to /bin/sh
+[INFO] executing one-shot container via kavach: /bin/sh
+[INFO] container execution complete, exit_code=126
+blocked command: sh
+```
+
+The same refusal hit any image whose entrypoint is a shell or an interpreter — which is
+most of them. No such container could ever start, on any backend.
+
+**The blocklist's premise does not hold once there is a rootfs.** It exists to stop an agent
+sandbox shelling out to an interpreter **on the host**, where `sh` resolves to the host's
+`/bin/sh` and running it is an escape. With a rootfs the name resolves *inside the
+container's filesystem*, to a binary the caller supplied, reached only after
+`_spawn_enter_rootfs` has chrooted and the namespaces are up. The isolation there is the
+rootfs, the namespaces, seccomp and the cgroup — not the payload's filename.
+
+New `runtime_guard_config_for_rootfs(rootfs)` returns the default config with **only** the
+command blocklist cleared, and only when `rootfs != 0`. The five container-capable backends
+call it instead of `runtime_guard_config_default()`.
+
+⚠ **Nothing changes for a rootfs-less sandbox.** `rootfs == 0` returns the unchanged
+default, so every agent-sandbox consumer keeps the blocklist exactly as before. The
+narrowing is conditional on a field only a container runtime sets, and
+`test_runtime_guard_rootfs_narrowing` asserts **both** halves — the negative one is the
+load-bearing one, because if the rootfs-less path ever stopped enforcing the blocklist,
+nothing else in the suite would notice.
+
+⚠ **Only the blocklist is dropped.** Sensitive-path detection (`cat /etc/shadow`) and
+shell-metacharacter detection (`curl … | sh`, `echo hi; bash -c …`) stay on inside a
+container, and the test asserts that too — otherwise this would be a hole rather than a fix.
+
+*(Note for the next test author: `_check_shell_meta` matches chaining/piping **into a
+shell** — `| sh`, `; bash` — not arbitrary metacharacters. `echo hi; rm -rf /` is not
+flagged by it. Asserting on that shape fails against correct code.)*
+
+692 → **701 assertions**, 0 failed.
+
 ## [3.12.0] — 2026-08-21 — a sandbox can be given an environment
 
 ### Added — `config_env`: an explicit, caller-supplied payload environment

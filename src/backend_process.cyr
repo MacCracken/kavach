@@ -25,7 +25,11 @@ fn process_exec(sandbox, command) {
     }
 
     # Runtime-guard precheck — policy-violating commands never hit fork.
-    var guard_cfg = runtime_guard_config_default();
+    # 3.12.1: a rootfs'd sandbox is a container — its command resolves inside
+    # the image, so the host-interpreter blocklist does not apply. See
+    # `runtime_guard_config_for_rootfs`.
+    var guard_cfg = runtime_guard_config_for_rootfs(
+      SandboxConfig_rootfs(Sandbox_config(sandbox)));
     var violations = check_command(command, guard_cfg);
     if (vec_len(violations) > 0) {
         return backend_guard_result(violations);
