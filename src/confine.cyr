@@ -31,6 +31,7 @@ enum SpawnExit {
     SPAWN_EXIT_SECCOMP = 125;
     SPAWN_EXIT_ROOTFS = 119;
     SPAWN_EXIT_IDMAP = 118;
+    SPAWN_EXIT_WORKDIR = 117;
 }
 
 # Namespace flags implied by the policy.
@@ -127,6 +128,33 @@ fn _spawn_enter_rootfs(rootfs) {
     #endif
 }
 
+# 3.12.2: chdir into the payload's configured working directory.
+#
+# ⚠ MUST run AFTER `_spawn_enter_rootfs`, or the path resolves against the HOST
+# filesystem — a `workdir` of `/app` would land in the host's `/app` and the
+# payload would run outside the container with no error. `_spawn_enter_rootfs`
+# already `chdir("/")`s after chroot, so this refines a cwd that is already
+# inside the root rather than establishing one.
+#
+# ⚠ FAILS CLOSED. A workdir the caller asked for and did not get is a silently
+# wrong environment — the payload runs somewhere it was not told to. runc errors
+# out in the same situation, and so does this: the child `_exit`s with
+# SPAWN_EXIT_WORKDIR rather than falling through to execve from the wrong
+# directory. `workdir == 0` (the default) is not a request and returns 0.
+fn _spawn_enter_workdir(workdir) {
+    if (workdir == 0) { return 0; }
+    if (strlen(workdir) == 0) { return 0; }
+    #ifdef CYRIUS_TARGET_AGNOS
+    # agnos has no chdir syscall — see _spawn_enter_rootfs. A caller that asked
+    # for a workdir must be told it did not get one.
+    return 0 - 1;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    if (syscall(SYS_CHDIR, workdir) < 0) { return 0 - 1; }
+    return 0;
+    #endif
+}
+
 # Close every descriptor from `from` up to SPAWN_MAX_FD. Errors are expected
 # and ignored — most of the range is simply not open.
 fn _spawn_close_inherited(from) {
@@ -198,6 +226,14 @@ fn _spawn_redirect_stdio(log_path) {
 # a caller wanting that guarantee uses a rootfs-bearing sandbox or
 # `sandbox_spawn`, both of which still fail closed.
 fn confine_child(policy, rootfs, cgroup_path, uid, gid, seccomp_info, want_ns) {
+    return confine_child_wd(policy, rootfs, cgroup_path, uid, gid, seccomp_info, want_ns, 0);
+}
+
+# 3.12.2: the same sequence with the payload's working directory. `workdir == 0`
+# is the pre-3.12.2 behaviour (cwd `/` inside the rootfs), so the wrapper above
+# is unchanged for every existing caller — the same discipline `confine_capture`
+# follows for `input` and `confine_capture_input_env` for `env`.
+fn confine_child_wd(policy, rootfs, cgroup_path, uid, gid, seccomp_info, want_ns, workdir) {
     # ⛔ THE WHOLE SEQUENCE IS LINUX-SPECIFIC and none of it exists on agnos: no cgroups, no
     # `prctl`, no namespaces, no landlock, no seccomp. `SYS_PRCTL` is not even in the agnos syscall
     # enum, so this function failed to COMPILE for `--agnos` and took every consumer of
@@ -231,6 +267,8 @@ fn confine_child(policy, rootfs, cgroup_path, uid, gid, seccomp_info, want_ns) {
         }
     }
     if (_spawn_enter_rootfs(rootfs) != 0) { sys_exit(SPAWN_EXIT_ROOTFS); }
+    # After the chroot, so the path resolves inside the container. See the fn's header.
+    if (_spawn_enter_workdir(workdir) != 0) { sys_exit(SPAWN_EXIT_WORKDIR); }
 
     if (policy != 0) {
         if (SandboxPolicy_landlock_rules_len(policy) > 0) {
@@ -399,6 +437,18 @@ fn confine_capture_input(args, policy, rootfs, cgroup_path, seccomp_info, buf, b
 # behaviour — the same discipline `confine_capture` follows for `input`.
 fn confine_capture_input_env(args, policy, rootfs, cgroup_path, seccomp_info, buf, buflen,
   want_ns, timeout_ms, do_confine, input, input_len, env) {
+    return confine_capture_input_env_wd(args, policy, rootfs, cgroup_path, seccomp_info, buf,
+      buflen, want_ns, timeout_ms, do_confine, input, input_len, env, 0);
+}
+
+# 3.12.2: …and the payload's working directory. `workdir == 0` is unchanged
+# behaviour, so the wrapper above covers every 3.12.0/3.12.1 caller.
+#
+# ⚠ The parameter list has grown to 14 by strict append-and-wrap, which has kept
+# every release source-compatible but is at the end of its useful life. The next
+# capability here should take a config struct instead of a 15th positional.
+fn confine_capture_input_env_wd(args, policy, rootfs, cgroup_path, seccomp_info, buf, buflen,
+  want_ns, timeout_ms, do_confine, input, input_len, env, workdir) {
     # ⛔ LINUX ONLY — the fork/confine/execve/capture path. agnos has no fork by design and its
     # sandboxing goes through backend_sy_agnos, not this file.
     # ⚠ -1, never a fabricated success: a caller must not receive an empty capture buffer and
@@ -483,9 +533,17 @@ fn confine_capture_input_env(args, policy, rootfs, cgroup_path, seccomp_info, bu
         kv_dup2(ewfd, 2);
         sys_close(wfd);
         sys_close(ewfd);
+        # ⚠ workdir is passed as 0 here and applied BELOW instead, so it lands
+        # whether or not the child is confined. A working directory is process
+        # setup, not a confinement primitive — the same reasoning that makes
+        # `envp` unconditional. Applying it inside `confine_child_wd` only would
+        # mean an UNCONFINED capture silently ignored the caller's workdir, which
+        # is the decorative-setter shape this release exists to remove.
         if (do_confine != 0) {
-            confine_child(policy, rootfs, cgroup_path, uid, gid, seccomp_info, want_ns);
+            confine_child_wd(policy, rootfs, cgroup_path, uid, gid, seccomp_info, want_ns, 0);
         }
+        # After confinement, so the path resolves inside the rootfs when there is one.
+        if (_spawn_enter_workdir(workdir) != 0) { sys_exit(SPAWN_EXIT_WORKDIR); }
         kv_execve(vec_get(args, 0), argv, envp);
         # execve failed — 127 is the shell's "command not found", and it is
         # visible to the caller instead of being swallowed into a success.

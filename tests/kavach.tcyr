@@ -1565,6 +1565,45 @@ fn test_config_stdin() {
     return 0;
 }
 
+# 3.12.2: the payload really lands in the caller's working directory.
+#
+# ⚠ Same lesson as `test_confine_capture_env`: assert on what the PAYLOAD observes.
+# `config_workdir` existed since before 3.12.0 and was DECORATIVE — its only reader
+# was the WASM backend's `--dir` preopen, so every process/OCI caller set it and got
+# cwd `/`. A test that only checked the setter round-tripped would have passed
+# throughout.
+fn test_confine_capture_workdir() {
+    test_group("confine_capture_workdir");
+    var buf = alloc(4096);
+
+    var args = vec_new();
+    vec_push(args, "/bin/sh");
+    vec_push(args, "-c");
+    vec_push(args, "printf %s \"$PWD\"");
+
+    # Unset -> the pre-3.12.2 behaviour: whatever cwd the parent had. Only assert
+    # that it is NOT the directory we are about to ask for, so the positive case
+    # below cannot pass vacuously.
+    var n0 = confine_capture_input_env(args, 0, 0, 0, 0, buf, 4096, 0, 5000, 0, "", 0, 0);
+    assert(n0 > 0, "unset workdir still runs and reports some cwd");
+    assert_eq(memeq(buf, "/tmp", 4), 0, "and it is not /tmp — the control is real");
+
+    # Set -> the payload runs there.
+    var n1 = confine_capture_input_env_wd(args, 0, 0, 0, 0, buf, 4096, 0, 5000, 0, "", 0, 0,
+      "/tmp");
+    assert_eq(n1, strlen("/tmp"), "the payload's cwd is the requested directory");
+    assert_eq(memeq(buf, "/tmp", 4), 1, "byte for byte — this is the decorative-setter check");
+    assert_eq(confine_last_exit(), 0, "and it exits 0");
+
+    # ⚠ FAILS CLOSED. A workdir that does not exist must not silently run from
+    # somewhere else — the child _exits with SPAWN_EXIT_WORKDIR before execve.
+    confine_capture_input_env_wd(args, 0, 0, 0, 0, buf, 4096, 0, 5000, 0, "", 0, 0,
+      "/nonexistent-workdir-probe");
+    assert_eq(confine_last_exit(), SPAWN_EXIT_WORKDIR,
+      "a missing workdir refuses the spawn rather than running from the wrong place");
+    return 0;
+}
+
 # 3.12.0: the payload really receives the caller's environment.
 #
 # ⚠ This test exists because a WEAKER one let a real bug ship in a consumer.
@@ -3788,6 +3827,7 @@ fn main() {
     test_wasm_registered();
     test_wasm_availability_is_probed();
     test_config_stdin();
+    test_confine_capture_workdir();
     test_confine_capture_env();
     test_confine_capture_input();
     test_wasm_fuel_calculation();

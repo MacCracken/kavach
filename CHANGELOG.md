@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.12.2] — 2026-08-21 — `config_workdir` was decorative; the payload now lands in it
+
+### Fixed — a sandbox's configured working directory was never applied
+
+`config_workdir` has existed since before 3.12.0 and **its only reader was the WASM backend's
+`--dir` preopen** (`_wasm_append_preopens`). Every process- and OCI-backend caller set a
+workdir and got cwd `/`: `_spawn_enter_rootfs` `chdir("/")`s after chroot and nothing refined
+it, and `oci_generate_spec` hardcoded `"cwd":"/"`. Exactly the `SandboxConfig.externalization`
+shape — a setter that stores and is never consulted.
+
+Reported by stiva, where `stiva run -w /app` was accepted, stored, threaded onto its
+`RuntimeSpec` and silently ignored.
+
+- `_spawn_enter_workdir(workdir)` — `chdir` into the configured directory, **after**
+  `_spawn_enter_rootfs`, so the path resolves *inside* the container rather than against the
+  host. `workdir == 0` is not a request and is a no-op.
+- `confine_child_wd(…, workdir)` and `confine_capture_input_env_wd(…, workdir)`; the existing
+  `confine_child` / `confine_capture_input_env` forward `0`, so **every 3.12.0/3.12.1 caller is
+  unchanged**.
+- `sandbox_spawn` and the process backend read `SandboxConfig_workdir` and pass it down.
+- `oci_generate_spec` emits `process.cwd` from the config (JSON-escaped), replacing the
+  hardcoded `"/"` — so the runc path honours it too.
+
+⚠ **It FAILS CLOSED.** A workdir that cannot be entered `_exit`s the child with the new
+`SPAWN_EXIT_WORKDIR` (117) rather than running the payload from the wrong directory. runc
+behaves the same way. A silently-wrong cwd is a worse outcome than a refused spawn.
+
+⚠ **Applied whether or not the child is confined.** A working directory is process setup, not
+a confinement primitive — the same reasoning that makes `envp` unconditional. The capture path
+therefore applies it *after* the `do_confine` block and passes `0` down to `confine_child_wd`,
+so it lands exactly once. An earlier draft applied it only under confinement, and an
+unconfined capture silently ignored the caller's workdir — the same defect in a new place,
+caught by the test asserting on the payload's `$PWD` rather than on the setter.
+
+⚠ **The parameter list has reached 14 by strict append-and-wrap.** That has kept every release
+source-compatible and is at the end of its useful life; the next capability here should take a
+config struct rather than a 15th positional.
+
+701 → **707 assertions**, 0 failed.
+
 ## [3.12.1] — 2026-08-21 — the command blocklist made kavach unusable as a container runtime
 
 ### Fixed — a rootfs'd sandbox could not run a shell, so most images could not start

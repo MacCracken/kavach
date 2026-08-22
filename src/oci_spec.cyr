@@ -171,9 +171,26 @@ fn oci_generate_spec(sandbox, command) {
         }
     }
 
+    # 3.12.2: `process.cwd` from the config, where this hardcoded "/" — so a
+    # caller's workdir was dropped on the runc path exactly as it was on the
+    # process path. Escaped, since it is caller-supplied.
+    var cwd_json = "\"cwd\":\"/\"";
+    var cfg_wd = SandboxConfig_workdir(config);
+    if (cfg_wd != 0) {
+        if (strlen(cfg_wd) > 0) {
+            var wsb = str_builder_new();
+            str_builder_add_cstr(wsb, "\"cwd\":\"");
+            str_builder_add_cstr(wsb, oci_json_escape(cfg_wd));
+            str_builder_add_cstr(wsb, "\"");
+            cwd_json = str_data(str_builder_build(wsb));
+        }
+    }
+
     var cap = checked_add(strlen(cmd_escaped), strlen(resources));
     if (cap < 0) { return 0; }
     cap = checked_add(cap, strlen(env_json));
+    if (cap < 0) { return 0; }
+    cap = checked_add(cap, strlen(cwd_json));
     if (cap < 0) { return 0; }
     cap = checked_add(cap, 2048);
     var scfg_cap = Sandbox_config(sandbox);
@@ -223,8 +240,11 @@ fn oci_generate_spec(sandbox, command) {
     var cfg_rf = 0;
     var scfg = Sandbox_config(sandbox);
     if (scfg != 0) { cfg_rf = SandboxConfig_rootfs(scfg); }
-    var mid1b = "\"cwd\":\"/\"},\"root\":{\"path\":\"rootfs\",\"readonly\":";
-    if (cfg_rf != 0) { mid1b = "\"cwd\":\"/\"},\"root\":{\"path\":\""; }
+    var _mb = str_builder_new();
+    str_builder_add_cstr(_mb, cwd_json);
+    if (cfg_rf != 0) { str_builder_add_cstr(_mb, "},\"root\":{\"path\":\""); }
+    else { str_builder_add_cstr(_mb, "},\"root\":{\"path\":\"rootfs\",\"readonly\":"); }
+    var mid1b = str_data(str_builder_build(_mb));
     memcpy(buf + pos, mid1a, strlen(mid1a)); pos = pos + strlen(mid1a);
     memcpy(buf + pos, mid1b, strlen(mid1b)); pos = pos + strlen(mid1b);
     if (cfg_rf != 0) {

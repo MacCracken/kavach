@@ -143,6 +143,8 @@ fn sandbox_spawn(sandbox, command, log_path) {
     # unsafe.
     var spawn_env = 0;
     if (cfg != 0) { spawn_env = SandboxConfig_env(cfg); }
+    var spawn_wd = 0;
+    if (cfg != 0) { spawn_wd = SandboxConfig_workdir(cfg); }
     var envp = kv_envp_from_vec(spawn_env);
 
     var pid = kv_fork();
@@ -166,7 +168,10 @@ fn sandbox_spawn(sandbox, command, log_path) {
         # 1: sandbox_spawn's namespace contract is unchanged by 3.11.3 — it
         # fails closed when the host denies them, and a test asserts exactly
         # that.
-        confine_child(policy, rootfs, cgroup_path, spawn_uid, spawn_gid, seccomp_info, 1);
+        # 3.12.2: the config's workdir, applied inside the rootfs. Read in the
+        # parent (cfg is not touched after fork).
+        confine_child_wd(policy, rootfs, cgroup_path, spawn_uid, spawn_gid, seccomp_info, 1,
+          spawn_wd);
         kv_execve(vec_get(args, 0), argv, envp);
         sys_exit(127);
     }

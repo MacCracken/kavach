@@ -112,8 +112,11 @@ fn process_exec(sandbox, command) {
         # default) is the empty envp this path always used.
         var pexec_env = 0;
         if (cfg != 0) { pexec_env = SandboxConfig_env(cfg); }
-        n = confine_capture_input_env(args, pol, rootfs, cgroup_path, sec, buf,
-          PROCESS_MAX_OUTPUT, want_ns, tmo, 1, 0, 0, pexec_env);
+        # 3.12.2: and the working directory, applied inside the rootfs.
+        var pexec_wd = 0;
+        if (cfg != 0) { pexec_wd = SandboxConfig_workdir(cfg); }
+        n = confine_capture_input_env_wd(args, pol, rootfs, cgroup_path, sec, buf,
+          PROCESS_MAX_OUTPUT, want_ns, tmo, 1, 0, 0, pexec_env, pexec_wd);
         cgroup_teardown(cgroup_path);
         var end_rf = mono_now_ns();
         var rr = backend_capture_finish(buf, n, PROCESS_MAX_OUTPUT, "exec failed", start_ns, end_rf);
