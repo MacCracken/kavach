@@ -32,6 +32,44 @@ output = "build/kavach"
 # bhumi/agnosys learned). src/lib.cyr is also excluded: it is a pure
 # aggregation header (only `include` directives), so bundling it would
 # add unresolved `include "src/..."` lines to the flat bundle.
+# [lib.confine] — the LEAN CONFINED-EXEC profile (3.12.3).
+#
+# Published for consumers that want kavach's process confinement (namespaces, seccomp, Landlock, cgroups)
+# WITHOUT the rest of the framework — no exotic backends (firecracker/gvisor/SEV/SGX/TDX/WASM/OCI), no
+# externalization scanners, no credential proxy, no attestation, and no audit chain.
+#
+# Requested by thoth, whose `shell` / `edit` tools run unconfined today and whose own source says so
+# plainly ("a COARSE convenience pre-filter, NOT a sandbox"). thoth cannot take the full fold: at 11,648
+# lines it pushes thoth's expanded source past the cyrius preprocessor's 8 MB ceiling, and most of what it
+# carries duplicates seams thoth already consumes (its audit chain vs the vendored libro, its scanners vs
+# t-ron).
+#
+# This is the same arrangement sit's [lib.read] and sankoch's [lib.zlib] give their consumers, and the one
+# agnosai's [lib.guard] gave thoth at 2.0.7: ONE source of truth, so the consumer is not hand-extracting
+# files that go stale silently.
+[lib.confine]
+modules = [
+    "src/util.cyr",
+    "src/error.cyr",
+    "src/sys_security_syscalls.cyr",
+    "src/sys_error.cyr",
+    "src/sys_util.cyr",
+    "src/security.cyr",
+    "src/backend.cyr",
+    "src/policy.cyr",
+    "src/scoring.cyr",
+    "src/lifecycle.cyr",
+    "src/scanning_types.cyr",
+    "src/aho_corasick.cyr",
+    "src/scanning_runtime.cyr",
+    "src/cgroup.cyr",
+    "src/confine.cyr",
+    "src/backend_dispatch.cyr",
+    "src/backend_noop.cyr",
+    "src/backend_process.cyr",
+    "src/spawn.cyr",
+]
+
 [lib]
 modules = [
     "src/util.cyr",

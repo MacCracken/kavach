@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.12.3] - 2026-08-24
+
+### Added
+
+- **`[lib.confine]` — a lean confined-exec distlib profile.** `cyrius distlib confine` →
+  `dist/kavach-confine.cyr`, **4,796 lines** against the full fold's 11,524: the confinement path
+  (namespaces, seccomp, Landlock, cgroups, the runtime guard, the process backend) without the exotic
+  backends (firecracker / gVisor / SEV / SGX / TDX / WASM / OCI), the externalization scanners, the
+  credential proxy, attestation, or the audit chain.
+
+  Requested by **thoth**, whose `shell` and `edit` tools run unconfined and whose own source says so
+  plainly ("a COARSE convenience pre-filter, NOT a sandbox"). thoth cannot take the full fold for two
+  measured reasons: at 11,524 lines it pushes thoth's **expanded source past the cyrius preprocessor's
+  8 MB ceiling** (a hard error, not a warning — `preprocess_out` is a fixed arena slot), and most of what
+  it carries duplicates seams thoth already consumes (kavach's audit chain vs thoth's vendored libro, the
+  scanners vs t-ron). Same arrangement sit's `[lib.read]` and sankoch's `[lib.zlib]` already give their
+  consumers.
+
+### Changed
+
+- **`cstr_contains` and `str_to_lower_into` moved `src/scanning_code.cyr` → `src/util.cyr`.** Both are
+  generic string helpers with no scanner content, and **`src/scanning_runtime.cyr` also calls them** — so
+  the confine profile could not close without dragging the entire code scanner and its 25 pattern groups
+  into a bundle whose whole point is to carry only the confinement path. Cyrius has ONE flat namespace
+  regardless of file, so **every existing caller is unaffected** and the full `dist/kavach.cyr` is
+  equivalent apart from the moved definitions.
+
+### Note for consumers
+
+`sys_error.cyr` is in the confine profile, so a consumer that also links **sigil** will see benign
+`duplicate fn 'syserr_*'` warnings: kavach and sigil both inherit the same `sys_error.cyr` from agnosys,
+so the definitions are **identical** and last-def-wins is a no-op. Documented rather than silenced —
+a duplicate-symbol warning that turns out to be harmless still deserves to be explained, because the next
+one might not be.
+
 ## [3.12.2] — 2026-08-21 — `config_workdir` was decorative; the payload now lands in it
 
 ### Fixed — a sandbox's configured working directory was never applied

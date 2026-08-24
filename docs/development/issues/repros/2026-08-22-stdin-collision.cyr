@@ -1,0 +1,18 @@
+# Repro: kavach's `InjectionMethod.STDIN` (2) vs `io.cyr`'s `var STDIN` (0).
+#
+# Build in a project carrying agnosai 2.0.5's [deps] set on cyrius 6.5.32.
+# `io` is a declared leaf of dist/kavach.deps, so both definitions are always
+# co-resident; last-definition-wins picks io.cyr's, and STDIN collapses to 0 —
+# the same value as ENV_VAR, making the two members indistinguishable.
+#
+#   exit 1 = ALIASED (the defect)      exit 0 = distinct (correct)
+#
+# Neither ordering produces a warning: cycc is silent for `var` and enum members.
+fn main(): i64 {
+    alloc_init();
+    if (InjectionMethod.STDIN == InjectionMethod.ENV_VAR) { return 1; }
+    return 0;
+}
+
+var _probe_rc = main();
+sys_exit_group(_probe_rc);
