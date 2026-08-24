@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [3.12.3] - 2026-08-24
+## [3.12.3] — 2026-08-24 — a lean confined-exec profile for consumers that cannot take the whole engine
 
 ### Added
 
@@ -33,6 +33,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   into a bundle whose whole point is to carry only the confinement path. Cyrius has ONE flat namespace
   regardless of file, so **every existing caller is unaffected** and the full `dist/kavach.cyr` is
   equivalent apart from the moved definitions.
+
+### Changed — toolchain and dependency refresh
+
+- **Cyrius pin `6.5.32` → `6.5.35`** and **ai-hwaccel `2.3.16` → `2.3.18`**. sigil (`3.12.9`) and samay
+  (`1.0.1`) re-checked against their upstream `VERSION` and already latest, so no move.
+
+  Validated with the full pin-move sequence CLAUDE.md prescribes — `deps → build → lint → vet → test` —
+  and checked against all five documented pin-move hazards rather than just the pass/fail:
+  **(3)** the `duplicate fn` set is unchanged at 17 names, all the known sigil↔kavach `sys_error.cyr`
+  and `agnosys_*` overlaps; neither symbol moved in this release appears in it.
+  **(4)** no new `undefined function` on a stdlib symbol.
+  **(5)** the `[deps]` marker sits at byte **3796** — see below.
+
+  ⚠ **`lib/patra.cyr` was stale at 1.13.9 after `cyrius deps`** (the snapshot carries 1.13.10). `deps`
+  only overlays declared `[deps.NAME]` modules; it does not refresh a stdlib leaf that is already
+  present. Fixed with `cyrius lib sync --full` followed by a file-by-file `cmp` sweep against
+  `~/.cyrius/versions/6.5.35/lib` — 0 differing after. `lib/` is gitignored, so this affects local and CI
+  builds rather than the tree, but a stale floor is exactly the kind of thing that reproduces as "works
+  on my machine".
+
+  Pre-existing and **not** introduced here, recorded so it is not re-diagnosed: `json_v_parse_str` is
+  referenced by `samay`, `yantra` and `ai-hwaccel` and defined by none of them — stale after bayan 1.3.0
+  renamed `_parse_str` → `_parse_buf`. ai-hwaccel **2.3.16 referenced it too**, so the bump did not cause
+  it. It is a warning on an unreachable path; the build is clean.
+
+- **CLAUDE.md's pin reference corrected** — it read `6.5.27` while the manifest was already on `6.5.32`.
+
+### Fixed — the `[lib.confine]` block was filed above `[deps]` and broke the build
+
+- ⛔ **The first cut of this release put `[lib.confine]` and its commentary ABOVE the `[deps]` array**,
+  pushing the `[deps]` marker from byte 3796 to **5352** — past the **4095-byte `_auto_deps` window**.
+  That is hazard (5) in CLAUDE.md, the one this project already hit for real at v3.11.14 and built a CI
+  gate for, walked into again by the next person adding a documented section. The gate did its job and
+  failed loud with the byte offset.
+
+  The block now sits at the END of the manifest, below every `[deps.*]` section, which is where
+  CLAUDE.md says long commentary belongs. Offset back to **3796** (headroom 299).
+
+  ⭐ The lesson the gate's own comment already states, restated because it was still not enough: the
+  natural place to document a section is directly above it, and for `[deps]` that is the one place it
+  must never go. A profile block is not a dep block, but anything added above `[deps]` costs the window
+  regardless of what it is.
 
 ### Note for consumers
 
