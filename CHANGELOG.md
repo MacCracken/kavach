@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.12.5] — 2026-09-10
+
+### Fixed — `audit_entry_new` mis-bound against agnostik
+
+kavach and agnostik both exported `audit_entry_new`, at different arities for different types:
+kavach's a zero-argument constructor for a 48-byte entry, agnostik's
+`audit_entry_new(id, agent_id, action, severity)` over its own 112-byte record. Any consumer
+vendoring both — **aethersafha** — got "last definition wins", so every call to the loser read
+garbage. cyrius 6.6.2 makes a same-name different-arity duplicate a hard error, which is the only
+reason it surfaced.
+
+kavach's side moved to `kavach_audit_entry_new`: one caller here against agnostik's five.
+Second instance of this class after `health_check_new` (agnostik ↔ argonaut, fixed in agnostik
+1.6.1).
+
 ## [3.12.4] — 2026-09-10
 
 
