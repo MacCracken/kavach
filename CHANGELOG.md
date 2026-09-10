@@ -5,7 +5,63 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.13.0] — 2026-09-10
+
+**Migrated to the cyrius 6.6.x value form.** A minor rather than a patch: one public function
+changed arity. All four trees green — main, tcyr, bcyr, fuzz.
+
+### Changed — cyrius pin 6.5.35 → **6.6.2**
+
+cyrius 6.6.0 flipped `Result` / `Option` / `Either` declared `: stack` to a **value form**: a
+payload variant returns a `(tag, payload)` REGISTER PAIR and allocates nothing. `payload()` is
+deleted permanently.
+
+**43 sites migrated** across 11 files. The compiler enumerated every one.
+
+⚠ **13 were the propagation trap.** `if (is_err_result(res) == 1) { return res; }` migrated
+naively returns the **payload alone**, so `Err(77)` reaches the caller as `tag=77`,
+`is_err_result == 0` — an error that reads as SUCCESS. In `kernel_audit` (×7), `mac` (×4) and
+`util` (×2) that would have turned a refused audit-rule load or a failed MAC transition into a
+silent success. All re-wrapped as `return Err(res_v);`.
+
+### ⚠ BREAKING — `result_print_err` takes both halves
+
+```
+- fn result_print_err(res)
++ fn result_print_err(res_tag, res)
+```
+
+A `Result` passed as a *parameter* is now two registers. Call it as
+`var t, v = f(); result_print_err(t, v);`.
+
+⭐ **This also removes a hard build error, not just a stale signature.** kavach's 1-arity
+definition and sigil's 2-arity one were both in scope, and cyrius 6.6.2 makes a same-name
+different-arity duplicate a **hard error** (it was a silent "last definition wins" before, meaning
+every call to the loser mis-bound). Signature now matches sigil and agnodrm, which made this move
+first — kavach was the last of the three still on the boxed form.
+
+### Changed — dependency pins
+
+| dep | from | to |
+|---|---|---|
+| `sigil` | 3.12.9 | **3.12.16** |
+| `ai-hwaccel` | 2.3.19 → **2.3.22** | |
+| `samay` | 1.0.1 | **1.1.2** |
+
+⚠ The `samay` bump was **required, not hygiene**. samay ≤1.1.1 was pinned to cyrius 6.5.36 and
+carried unmigrated value-form code in its shipped bundle, plus a stale `bayan` 1.5.2 pin whose
+`dist/bayan-json.cyr` still reads payloads the boxed way (`load64(fd_r + 8)`). Both reached kavach
+through vendoring and neither was kavach's to patch. samay 1.1.2 fixes both upstream.
+
+### Fixed — a doc comment that taught the trap
+
+`src/sys_error.cyr`'s "Propagate error" block documented the pre-flip idiom verbatim, ending
+`if (is_err_result(res) == 1) { return res; }` — the exact silent-failure shape, in the file that
+defines error handling. Rewritten to the value form with the failure mode spelled out.
+
 ## [Unreleased]
+
+## [3.13.0] — 2026-09-10
 
 ## [3.12.3] — 2026-08-24 — a lean confined-exec profile for consumers that cannot take the whole engine
 

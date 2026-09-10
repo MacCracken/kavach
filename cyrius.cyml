@@ -241,7 +241,7 @@ optional = true
 [deps.samay]
 git = "https://github.com/MacCracken/samay.git"
 path = "../samay"
-tag = "1.1.1"
+tag = "1.1.2"
 modules = ["dist/samay.cyr"]
 optional = true
 
