@@ -83,11 +83,11 @@ fn persistent_spawn_confined_ns(command, policy, require_ns) {
 
     var sec = 0;
     if (SandboxPolicy_seccomp_enabled(policy) == 1) {
-        var sres = security_create_exec_seccomp_filter();
+        var sres_t, sres_v = security_create_exec_seccomp_filter();
         # Fail closed: a policy that asked for seccomp and did not get a filter
         # must not fall through to an unconfined spawn.
-        if (is_ok(sres) == 0) { return 0; }
-        sec = result_unwrap(sres);
+        if (is_ok(sres_t) == 0) { return 0; }
+        sec = result_unwrap(sres_t, sres_v);
     }
     # Read in the PARENT: inside a new user namespace `getuid` reports the
     # mapped id, not the one the map must be written against.

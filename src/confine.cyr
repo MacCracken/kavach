@@ -384,9 +384,9 @@ fn spawn_seccomp_available() {
     #ifdef CYRIUS_TARGET_AGNOS
     return 0;
     #endif
-    var res = security_create_exec_seccomp_filter();
-    if (is_ok(res) == 0) { return 0; }
-    var info = result_unwrap(res);
+    var res_t, res_v = security_create_exec_seccomp_filter();
+    if (is_ok(res_t) == 0) { return 0; }
+    var info = result_unwrap(res_t, res_v);
     var pid = kv_fork();
     if (pid < 0) { return 0; }
     if (pid == 0) {

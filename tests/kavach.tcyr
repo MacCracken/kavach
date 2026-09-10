@@ -2128,15 +2128,15 @@ fn test_file_write_secure_r() {
     memcpy(path + strlen(prefix), rid, 16);
     store8(path + strlen(prefix) + 16, 0);
 
-    var w = file_write_secure_r(path, "hello", 5);
-    assert_eq(is_ok(w), 1, "fresh secure write is Ok");
-    assert_eq(result_unwrap(w), 5, "wrote 5 bytes");
+    var w_t, w_v = file_write_secure_r(path, "hello", 5);
+    assert_eq(is_ok(w_t), 1, "fresh secure write is Ok");
+    assert_eq(result_unwrap(w_t, w_v), 5, "wrote 5 bytes");
     sys_unlink(path);
 
     # Missing parent directory → ENOENT → IoNotFound (distinguishable error).
-    var w2 = file_write_secure_r("/no/such/kavach/dir/file", "x", 1);
-    assert_eq(is_err_result(w2), 1, "missing dir -> Err");
-    assert_eq(err_code_of(w2), IoNotFound, "ENOENT maps to IoNotFound");
+    var w2_t, w2_v = file_write_secure_r("/no/such/kavach/dir/file", "x", 1);
+    assert_eq(is_err_result(w2_t), 1, "missing dir -> Err");
+    assert_eq(err_code_of(w2_t, w2_v), IoNotFound, "ENOENT maps to IoNotFound");
 
     # Back-compat int wrapper still returns -1 on the same failure.
     assert_eq(file_write_secure("/no/such/kavach/dir/file", "x", 1), 0 - 1, "int wrapper -1 on failure");
@@ -2728,12 +2728,13 @@ fn test_seccomp_filter_actually_loads() {
         assert_eq(1, 1, "host refuses seccomp — load path not exercisable here");
         return 0;
     }
-    var info = result_unwrap(security_create_exec_seccomp_filter());
+    var sf_t, sf_v = security_create_exec_seccomp_filter();
+    var info = result_unwrap(sf_t, sf_v);
     var pid = sys_fork();
     if (pid == 0) {
-        var r = security_load_seccomp(security_seccomp_filter_ptr(info),
+        var r_t, r_v = security_load_seccomp(security_seccomp_filter_ptr(info),
           security_seccomp_filter_len(info));
-        if (is_ok(r) == 0) { sys_exit(60); }
+        if (is_ok(r_t) == 0) { sys_exit(60); }
         # The whole point of the exec-safe profile: execve survives it.
         var argv = alloc(16);
         store64(argv, "/bin/true");
@@ -2760,12 +2761,12 @@ fn test_exec_seccomp_filter_shape() {
     # The allowlist profile cannot be used pre-exec: execve(59) is not in it, so
     # loading it before an exec kills the child on that exec. This is the
     # property that forced a second filter to exist, so pin it.
-    var basic = security_create_basic_seccomp_filter();
-    assert(is_ok(basic) == 1, "basic filter builds");
+    var basic_t, basic_v = security_create_basic_seccomp_filter();
+    assert(is_ok(basic_t) == 1, "basic filter builds");
 
-    var exec_res = security_create_exec_seccomp_filter();
-    assert(is_ok(exec_res) == 1, "exec-safe filter builds");
-    var info = result_unwrap(exec_res);
+    var exec_res_t, exec_res_v = security_create_exec_seccomp_filter();
+    assert(is_ok(exec_res_t) == 1, "exec-safe filter builds");
+    var info = result_unwrap(exec_res_t, exec_res_v);
     var len = security_seccomp_filter_len(info);
     assert(len % 8 == 0, "filter is a whole number of BPF insns");
     var n_deny = vec_len(_seccomp_deny_list());

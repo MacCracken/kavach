@@ -112,12 +112,12 @@ fn sandbox_spawn(sandbox, command, log_path) {
     var seccomp_info = 0;
     if (policy != 0) {
         if (SandboxPolicy_seccomp_enabled(policy) == 1) {
-            var sres = security_create_exec_seccomp_filter();
-            if (is_ok(sres) == 0) {
+            var sres_t, sres_v = security_create_exec_seccomp_filter();
+            if (is_ok(sres_t) == 0) {
                 kavach_err_print(KAVACH_ERR_EXEC_FAILED, "cannot build seccomp filter");
                 return 0;
             }
-            seccomp_info = result_unwrap(sres);
+            seccomp_info = result_unwrap(sres_t, sres_v);
         }
     }
 

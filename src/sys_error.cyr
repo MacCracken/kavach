@@ -243,9 +243,14 @@ fn syserr_print(e): i64 {
 
 # Print error from a Result if it's Err, then return the error code.
 # Returns 0 if the Result is Ok.
-fn result_print_err(res): i64 {
-    if (is_ok(res) == 1) { return 0; }
-    var e = payload(res);
+# 6.6.0 value form: a Result is a register PAIR, so both halves must be passed —
+# `var t, v = f(); result_print_err(t, v);`. Was 1-arg over the boxed form.
+# Signature matches sigil's and agnodrm's `result_print_err`. ⚠ Until this change
+# kavach's 1-arg definition and sigil's 2-arg one were BOTH in scope here, and
+# "last definition wins" meant every call to the loser silently mis-bound.
+fn result_print_err(res_tag, res): i64 {
+    if (is_ok(res_tag) == 1) { return 0; }
+    var e = res;
     syserr_print(e);
     return syserr_errno(e);
 }
@@ -258,9 +263,12 @@ fn result_print_err(res): i64 {
 # Use at top of functions: var val = try_unwrap(res); if (val == 0) { ... }
 # Note: Cyrius has no ? operator, so error propagation is manual.
 # Pattern:
-#   var res = some_call();
-#   if (is_err_result(res) == 1) { return res; }
-#   var val = payload(res);
+#   var res_t, res_v = some_call();
+#   if (is_err_result(res_t) == 1) { return Err(res_v); }
+#   var val = res_v;
+# ⛔ NOT `return res_t;` and NOT `return res_v;`. Returning the payload alone
+#    delivers Err(77) to the caller as tag=77 / is_err_result==0 — an error that
+#    reads as SUCCESS. That shape cost yukti 19 silent defects at the flip.
 
 # Check if a syscall return value indicates error (negative = errno)
 fn is_syscall_err(ret): i64 {

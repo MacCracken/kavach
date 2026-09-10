@@ -442,8 +442,8 @@ fn audit_send_event(handle, event_type, message): i64 {
     var nlmsg = audit_build_nlmsg(AUDIT_USER, payload_data, payload_len);
     var total_len = audit_nlmsg_len(nlmsg);
 
-    var res = audit_send_raw(handle, nlmsg, total_len);
-    if (is_err_result(res) == 1) { return res; }
+    var res_t, res_v = audit_send_raw(handle, nlmsg, total_len);
+    if (is_err_result(res_t) == 1) { return Err(res_v); }
 
     return Ok(0);
 }
@@ -463,17 +463,17 @@ fn audit_get_status(handle): i64 {
     var nlmsg = audit_build_nlmsg(AUDIT_GET, 0, 0);
     var total_len = audit_nlmsg_len(nlmsg);
 
-    var sres = audit_send_raw(handle, nlmsg, total_len);
-    if (is_err_result(sres) == 1) { return sres; }
+    var sres_t, sres_v = audit_send_raw(handle, nlmsg, total_len);
+    if (is_err_result(sres_t) == 1) { return Err(sres_v); }
 
     # Receive response
     var recv_buf = alloc(4096);
     memset(recv_buf, 0, 4096);
 
-    var rres = audit_recv_raw(handle, recv_buf, 4096);
-    if (is_err_result(rres) == 1) { return rres; }
+    var rres_t, rres_v = audit_recv_raw(handle, recv_buf, 4096);
+    if (is_err_result(rres_t) == 1) { return Err(rres_v); }
 
-    var nbytes = payload(rres);
+    var nbytes = rres_v;
     # Audit F-6 (2026-04-26): validate the full nlmsghdr, not just length.
     # Per CVE-2026-31495 (ctnetlink) and the broader netlink validation
     # CVE class, defensive parsers must verify type + seq match the
@@ -544,8 +544,8 @@ fn audit_set_enabled(handle, enabled): i64 {
     var nlmsg = audit_build_nlmsg(AUDIT_SET, pld, pld_len);
     var total_len = audit_nlmsg_len(nlmsg);
 
-    var res = audit_send_raw(handle, nlmsg, total_len);
-    if (is_err_result(res) == 1) { return res; }
+    var res_t, res_v = audit_send_raw(handle, nlmsg, total_len);
+    if (is_err_result(res_t) == 1) { return Err(res_v); }
 
     return Ok(0);
 }
@@ -590,8 +590,8 @@ fn audit_send_rule_msg(handle, rule, msg_type): i64 {
     var nlmsg = audit_build_nlmsg(msg_type, rule_data, rule_len);
     var total_len = audit_nlmsg_len(nlmsg);
 
-    var res = audit_send_raw(handle, nlmsg, total_len);
-    if (is_err_result(res) == 1) { return res; }
+    var res_t, res_v = audit_send_raw(handle, nlmsg, total_len);
+    if (is_err_result(res_t) == 1) { return Err(res_v); }
 
     return Ok(0);
 }
@@ -602,8 +602,8 @@ fn audit_send_rule_msg(handle, rule, msg_type): i64 {
 # ================================================================
 
 fn audit_add_rule(handle, rule): i64 {
-    var vres = audit_rule_validate(rule);
-    if (is_err_result(vres) == 1) { return vres; }
+    var vres_t, vres_v = audit_rule_validate(rule);
+    if (is_err_result(vres_t) == 1) { return Err(vres_v); }
 
     return audit_send_rule_msg(handle, rule, AUDIT_ADD_RULE);
 }
@@ -614,8 +614,8 @@ fn audit_add_rule(handle, rule): i64 {
 # ================================================================
 
 fn audit_delete_rule(handle, rule): i64 {
-    var vres = audit_rule_validate(rule);
-    if (is_err_result(vres) == 1) { return vres; }
+    var vres_t, vres_v = audit_rule_validate(rule);
+    if (is_err_result(vres_t) == 1) { return Err(vres_v); }
 
     return audit_send_rule_msg(handle, rule, AUDIT_DEL_RULE);
 }

@@ -87,14 +87,14 @@ fn process_exec(sandbox, command) {
         var sec = 0;
         if (pol != 0) {
             if (SandboxPolicy_seccomp_enabled(pol) == 1) {
-                var sres = security_create_exec_seccomp_filter();
+                var sres_t, sres_v = security_create_exec_seccomp_filter();
                 # **Fail closed.** A policy that asked for seccomp and did not
                 # get a filter must not fall through to an unconfined exec —
                 # that is the shape of the bug this whole branch fixes.
-                if (is_ok(sres) == 0) {
+                if (is_ok(sres_t) == 0) {
                     return backend_error_result("seccomp requested but the filter could not be built");
                 }
-                sec = result_unwrap(sres);
+                sec = result_unwrap(sres_t, sres_v);
             }
         }
         # Namespaces where they were already attempted (with a rootfs), or

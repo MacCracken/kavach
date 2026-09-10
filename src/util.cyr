@@ -318,20 +318,21 @@ fn io_error_name(e) {
 # (ADR-005 §C4). Returns Ok(len) or Err(IoError).
 fn file_write_secure_r(path, buf, len): Result {
     var flags = 1 + 64 + 512 + 128 + 131072;
-    var fo = file_open_r(path, flags, 384);
-    if (is_err_result(fo) == 1) { return fo; }
-    var fd = result_unwrap(fo);
-    var wr = file_write_r(fd, buf, len);
+    var fo_t, fo_v = file_open_r(path, flags, 384);
+    if (is_err_result(fo_t) == 1) { return Err(fo_v); }
+    var fd = result_unwrap(fo_t, fo_v);
+    var wr_t, wr_v = file_write_r(fd, buf, len);
     file_close_r(fd);
-    if (is_err_result(wr) == 1) { return wr; }
-    if (result_unwrap(wr) != len) { return Err(IoFailed); }
+    if (is_err_result(wr_t) == 1) { return Err(wr_v); }
+    if (result_unwrap(wr_t, wr_v) != len) { return Err(IoFailed); }
     return Ok(len);
 }
 
 # Back-compat int wrapper: returns bytes written, or -1 on any failure.
 # Existing callers that don't need the distinguished error keep using this.
 fn file_write_secure(path, buf, len) {
-    return result_unwrap_or(file_write_secure_r(path, buf, len), 0 - 1);
+    var fw_t, fw_v = file_write_secure_r(path, buf, len);
+    return result_unwrap_or(fw_t, fw_v, 0 - 1);
 }
 
 # As file_write_secure, but honors a caller-supplied final mode via fchmod

@@ -111,12 +111,12 @@ fn mac_file_exists(path): i64 {
 # ================================================================
 
 fn mac_detect_system(): i64 {
-    var res = mac_read_file("/sys/kernel/security/lsm");
-    if (is_err_result(res) == 1) {
+    var res_t, res_v = mac_read_file("/sys/kernel/security/lsm");
+    if (is_err_result(res_t) == 1) {
         # Cannot read LSM file — no MAC detection available
         return MAC_NONE;
     }
-    var contents = payload(res);
+    var contents = res_v;
 
     # Check SELinux first (higher priority if both are listed)
     if (str_contains(contents, str_from("selinux")) == 1) {
@@ -151,10 +151,10 @@ fn mac_get_selinux_mode(): i64 {
         return Ok(SELINUX_DISABLED);
     }
 
-    var res = mac_read_file(enforce_path);
-    if (is_err_result(res) == 1) { return res; }
+    var res_t, res_v = mac_read_file(enforce_path);
+    if (is_err_result(res_t) == 1) { return Err(res_v); }
 
-    var contents = payload(res);
+    var contents = res_v;
     var trimmed = str_trim(contents);
     var data = str_data(trimmed);
     var tlen = str_len(trimmed);
@@ -209,10 +209,10 @@ fn mac_get_selinux_context(): i64 {
         return kavach_err_not_supported("selinux");
     }
 
-    var res = mac_read_file(path);
-    if (is_err_result(res) == 1) { return res; }
+    var res_t, res_v = mac_read_file(path);
+    if (is_err_result(res_t) == 1) { return Err(res_v); }
 
-    var raw = payload(res);
+    var raw = res_v;
     # Trim trailing nulls and whitespace
     var trimmed = str_trim(raw);
     return Ok(trimmed);
@@ -272,10 +272,10 @@ fn mac_get_apparmor_mode(): i64 {
         return kavach_err_not_supported("apparmor");
     }
 
-    var res = mac_read_file(path);
-    if (is_err_result(res) == 1) { return res; }
+    var res_t, res_v = mac_read_file(path);
+    if (is_err_result(res_t) == 1) { return Err(res_v); }
 
-    var raw = payload(res);
+    var raw = res_v;
     var trimmed = str_trim(raw);
 
     # AppArmor format: "profile_name (mode)" or "unconfined"
@@ -510,8 +510,8 @@ fn mac_apply_agent_profile(agent_type, profiles, profile_count): i64 {
     }
 
     # Validate the profile
-    var vres = mac_profile_validate(found, mac_system);
-    if (is_err_result(vres) == 1) { return vres; }
+    var vres_t, vres_v = mac_profile_validate(found, mac_system);
+    if (is_err_result(vres_t) == 1) { return Err(vres_v); }
 
     if (mac_system == MAC_SELINUX) {
         var ctx = mac_profile_selinux_ctx(found);
