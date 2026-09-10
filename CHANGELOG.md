@@ -5,10 +5,12 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [3.13.0] — 2026-09-10
+## [Unreleased]
 
-**Migrated to the cyrius 6.6.x value form.** A minor rather than a patch: one public function
-changed arity. All four trees green — main, tcyr, bcyr, fuzz.
+## [3.12.4] — 2026-09-10
+
+
+**Migrated to the cyrius 6.6.x value form.** All four trees green — main, tcyr, bcyr, fuzz.
 
 ### Changed — cyrius pin 6.5.35 → **6.6.2**
 
@@ -58,10 +60,6 @@ through vendoring and neither was kavach's to patch. samay 1.1.2 fixes both upst
 `src/sys_error.cyr`'s "Propagate error" block documented the pre-flip idiom verbatim, ending
 `if (is_err_result(res) == 1) { return res; }` — the exact silent-failure shape, in the file that
 defines error handling. Rewritten to the value form with the failure mode spelled out.
-
-## [Unreleased]
-
-## [3.13.0] — 2026-09-10
 
 ## [3.12.3] — 2026-08-24 — a lean confined-exec profile for consumers that cannot take the whole engine
 
