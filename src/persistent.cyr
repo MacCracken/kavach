@@ -163,8 +163,15 @@ fn _persistent_spawn_inner(command, policy, seccomp_info, want_ns, uid, gid) {
         sys_close(in_rfd);
         kv_dup2(out_wfd, 1);
         sys_close(out_wfd);
-        var devnull = sys_open("/dev/null", 1, 0);   # 1 = O_WRONLY (mirrors exec_capture)
+        var devnull = file_open("/dev/null", O_WRONLY, 0);
         if (devnull >= 0) { kv_dup2(devnull, 2); sys_close(devnull); }
+        # ⛔ Close everything else the guest would inherit (3.12.9), as
+        # `confine_child` does for the other paths. This path never did: a
+        # confined persistent guest found the credential proxy's listener at fd 3
+        # and could accept on it. Only the pinned exec fd survives, and it is
+        # close-on-exec.
+        _kv_exec_keep_fd = pin;
+        _spawn_close_inherited(3);
         # The seam. Namespaces, then landlock, then seccomp — installed HERE,
         # after the pipes are wired and before `execve`. The pipes come first
         # because none of these three affect descriptors that were already open,

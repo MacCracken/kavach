@@ -12,6 +12,21 @@ classification, credential proxy, HMAC-SHA256 audit chain — all in pure Cyrius
 
 ## Status
 
+**v3.12.9 — P(-1) closeout.** A credential-routing fix: `InjectionMethod`'s
+`STDIN` could resolve to the stdlib's `var STDIN = 0` in a consumer, so a stdin
+secret was returned as an env var. Its members are now `KAVACH_INJECT_*`, and a
+new CI gate (`scripts/check-symbols.py`) fails on any kavach name that another
+module in the build can take over. The seccomp deny list closes two ways around
+it: the new mount API is denied, and `clone`/`clone3` can no longer create
+namespaces. A rootfs is always entered inside a mount namespace of its own, and
+seven `mkdir`s that meant something else on agnos go through a shim. A security
+review of twelve modules fixed six more: a heap overflow in OCI spec
+generation, host fds (the credential proxy's listener among them) leaking into
+persistent guests, netlink audit controls reported as applied when the kernel
+refused them, two symlink-following quarantine writes, and a stale flag that
+skipped the externalization gate. The native aarch64 CI job is blocking.
+**879** assertions green on x86-64, **850** on aarch64 under qemu.
+
 **v3.12.8 — ABI repairs.** The seccomp filter now checks the architecture.
 Through 3.12.7 an x86-64 payload could make a denied call through the i386 gate
 (`int 0x80`) or as an x32 call, and on aarch64 the filter compared x86-64
@@ -226,7 +241,7 @@ cyrius deps
 cyrius build src/main.cyr build/kavach
 ./build/kavach
 
-# Run the test suite (812 assertions).
+# Run the test suite (879 assertions).
 cyrius test tests/kavach.tcyr
 
 # Run the bench harness (25 benches).
@@ -296,7 +311,7 @@ include "lib/kavach.cyr"
 fn app() {
     kavach_init();
     var cfg = config_new();
-    config_backend(cfg, Backend.PROCESS);
+    config_backend(cfg, KavachBackend.PROCESS);
     var sb = sandbox_create(cfg);
     sandbox_transition(sb, SandboxState.RUNNING);
     var r = sandbox_exec(sb, "echo hello");
@@ -315,21 +330,21 @@ sigil/patra/bhumi); CI gates their freshness. See
 **Known integration caveats** (kavach is a heavy security engine — see
 ADR-006 §Consequences):
 
-- **Symbol overlaps with sigil.** kavach and sigil each internalized an
-  `sys_error`/`sys_util` (the agnosys→agnodrm split), so a consumer sees
-  `duplicate fn` (`last definition wins`) warnings — the same ones kavach's
-  own build emits. The `err_*` third of that overlap is **resolved as of
-  v3.11.13**: sigil renamed its copies `sigil_err_*` at 3.12.8 and kavach
-  renamed its own `kavach_err_*`, so the two families no longer share a name.
-  ⚠ Those fourteen were benign *in effect* — the two copies are still
-  byte-identical forks of the same agnosys file, which is why the collision
-  went unnoticed for the whole 3.x line — but nothing made them **stay**
-  identical, and a divergence would have changed a consumer's error
-  classification with no build error at all.
-  Still overlapping, and still resolved by source order: `syserr_*` (7) and
-  the `agnosys_*` helpers (7), plus `path_exists` (vs ai-hwaccel) and
-  `attestation_result_new` (vs sigil). Those are compatible in practice today
-  but are not *structurally* safe; they are tracked for the same treatment.
+- **No symbol overlaps with kavach's dependencies (v3.12.9).** cyrius has one
+  flat namespace with last-definition-wins, and it warns only on a duplicate
+  `fn`; a shared `var` or enum member resolves silently by source order. kavach
+  and sigil each internalized an `sys_error`/`sys_util` (the agnosys→agnodrm
+  split), and until 3.12.9 seventeen of those functions still shared names with
+  sigil's. They are now `kavach_`-prefixed or gone (unused), and the enum
+  members that could be taken over are prefixed too: `KAVACH_INJECT_*` (a
+  consumer's stdlib `var STDIN = 0` had made a stdin secret route as an env var)
+  and `KAVACH_TRUST_*`. `scripts/check-symbols.py`, run in CI, fails on any name
+  kavach defines twice, any `fn` it shares with `lib/`, and any constant it
+  shares at a different value; the 29 errno constants it shares with sigil and
+  the stdlib at equal values are reported, not failed. `--tree ..` also lists
+  names shared with sibling first-party bundles a consumer may compile next to
+  kavach (`policy_new` with shakti, `finding_new` with phylax, …); those are
+  tracked on the roadmap.
 - **Namespaced error kinds (no `ERR_UNKNOWN` collision).** kavach's
   `SysErrorKind` members are prefixed `KAVACH_ERR_*` — e.g.
   `KAVACH_ERR_UNKNOWN = 7`, `KAVACH_ERR_SYSCALL_FAILED = 1` — precisely so
@@ -342,9 +357,10 @@ ADR-006 §Consequences):
   `kavach_err_not_supported()`, … — because sigil 3.12.8 namespaced its own
   identically-named copies to `sigil_err_*` (both trees descend from the same
   agnosys `sys_error.cyr`). Consumers on ≤3.11.12 that called a bare `err_*`
-  must add the prefix; see the CHANGELOG 3.11.13 migration table. The
-  `syserr_*` accessors (`syserr_kind()`, `syserr_errno()`, `syserr_message()`)
-  are unchanged.
+  must add the prefix; see the CHANGELOG 3.11.13 migration table. **As of
+  v3.12.9 the accessors are prefixed too**: `kavach_syserr_kind()`,
+  `kavach_syserr_errno()`, `kavach_syserr_message()` (and
+  `kavach_result_print_err()`), since sigil and agnodrm define the bare names.
 - **~13 MB static scan tables** ride along; build with `CYRIUS_DCE=1` to
   drop the unreachable surface.
 
@@ -360,7 +376,7 @@ fn app() {
 
     # 1. Configure
     var cfg = config_new();
-    config_backend(cfg, Backend.PROCESS);
+    config_backend(cfg, KavachBackend.PROCESS);
     config_policy_seccomp(cfg, "strict");
     config_network(cfg, 0);
 

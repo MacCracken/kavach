@@ -263,8 +263,10 @@ enum BpfConst {
     BPF_LD_W_ABS = 0x20;
     BPF_JMP_JEQ_K = 0x15;
     BPF_JMP_JGE_K = 0x35;
+    BPF_JMP_JSET_K = 0x45;
     BPF_RET_K = 0x06;
     SECCOMP_RET_ALLOW = 0x7FFF0000;
+    SECCOMP_RET_ERRNO = 0x00050000;     # | errno, returned to the caller
     SECCOMP_RET_KILL_PROCESS = 0x80000000;
     SECCOMP_RET_TRAP = 0x00030000;
     BPF_MAXINSNS = 4096;
@@ -274,6 +276,12 @@ enum BpfConst {
     # struct seccomp_data (linux/seccomp.h): int nr at +0, __u32 arch at +4.
     SECCOMP_DATA_NR = 0;
     SECCOMP_DATA_ARCH = 4;
+    SECCOMP_DATA_ARG0 = 16;             # __u64 args[6]; the low word, little-endian
+    # clone(2)'s CLONE_NEW* flags (linux/sched.h): NEWNS | NEWCGROUP | NEWUTS |
+    # NEWIPC | NEWUSER | NEWPID | NEWNET. CLONE_NEWTIME (0x80) is left out: in
+    # clone() that bit is part of the exit signal, and the kernel accepts
+    # NEWTIME only from unshare and clone3, both handled on their own.
+    SECCOMP_CLONE_NS_FLAGS = 0x7E020000;
     # An x32-ABI call enters as AUDIT_ARCH_X86_64 with this bit set in nr
     # (__X32_SYSCALL_BIT, asm/unistd.h).
     X32_SYSCALL_BIT = 0x40000000;
@@ -439,6 +447,19 @@ fn _seccomp_deny_list() {
     _seccomp_push(v, 323, 282);     # userfaultfd    — a classic exploit-timing primitive
     _seccomp_push(v, 139, 0 - 1);   # sysfs          — x86-64 only
     _seccomp_push(v, 103, 116);     # syslog
+    # The mount API that is not mount(2) (3.12.9). Each reaches what the denied
+    # mount does: fsopen + fsconfig + fsmount + move_mount builds and attaches a
+    # filesystem; open_tree + move_mount attaches a bind mount; mount_setattr
+    # changes an existing mount's flags. Numbered since Linux 5.1 in the shared
+    # table, so both columns agree. An older kernel returns ENOSYS for them anyway.
+    _seccomp_push(v, 428, 428);     # open_tree
+    _seccomp_push(v, 429, 429);     # move_mount
+    _seccomp_push(v, 430, 430);     # fsopen
+    _seccomp_push(v, 431, 431);     # fsconfig
+    _seccomp_push(v, 432, 432);     # fsmount
+    _seccomp_push(v, 433, 433);     # fspick
+    _seccomp_push(v, 442, 442);     # mount_setattr
+    _seccomp_push(v, 467, 467);     # open_tree_attr (Linux 6.15)
     _SECCOMP_DENY = v;
     return v;
 }
@@ -577,11 +598,64 @@ fn _seccomp_build(nrs, hit_action, miss_action): i64 {
 # actually appear in container-escape chains is the honest, applicable middle:
 # strictly better than no filter, and explicitly weaker than the allowlist.
 #
-# Layout: the architecture check; one JEQ per denied nr jumping to KILL;
-# RET ALLOW; RET KILL. 27 instructions on x86-64, 25 on aarch64.
+# Layout (n denied numbers, p prologue instructions):
+#
+#   p .. p+n-1   JEQ deny[i] -> KILL
+#   p+n          JEQ clone3  -> ERRNO(ENOSYS)
+#   p+n+1        JEQ clone   -> next, else ALLOW
+#   p+n+2        LD  args[0]                       clone's flags
+#   p+n+3        JSET SECCOMP_CLONE_NS_FLAGS -> KILL, else ALLOW
+#   p+n+4        RET ALLOW
+#   p+n+5        RET ERRNO | ENOSYS
+#   p+n+6        RET KILL
+#
+# 40 instructions on x86-64, 38 on aarch64.
+#
+# **Why the clone tail (3.12.9).** unshare and setns are denied because a
+# payload must not re-namespace itself, but clone(2) creates namespaces too:
+# CLONE_NEWUSER | CLONE_NEWNS makes a child that can mount in its own mount
+# namespace, which is the thing the mount entries above deny. A filter can
+# test clone's flags because they are an argument. clone3(2) passes them in a
+# struct that seccomp cannot read, so it gets ENOSYS rather than KILL: glibc
+# answers ENOSYS by falling back to clone, which the filter can test. Payloads
+# that fork, spawn threads or run posix_spawn keep working.
 fn security_create_exec_seccomp_filter(): i64 {
-    return _seccomp_build(_seccomp_deny_list(), SECCOMP_RET_KILL_PROCESS,
-      SECCOMP_RET_ALLOW);
+    var deny = _seccomp_deny_list();
+    var n = vec_len(deny);
+    var p = _seccomp_prologue_len();
+    var allow_idx = p + n + 4;
+    var errno_idx = p + n + 5;
+    var kill_idx = p + n + 6;
+    var filter_size = (kill_idx + 1) * 8;
+    var filter = alloc(filter_size);
+
+    _seccomp_write_prologue(filter, kill_idx);
+    # From index p+i, the jump to kill_idx skips kill_idx - (p+i) - 1 = n + 5 - i.
+    var i = 0;
+    while (i < n) {
+        security_bpf_write_insn(filter, (p + i) * 8, BPF_JMP_JEQ_K,
+          n + 5 - i, 0, vec_get(deny, i));
+        i = i + 1;
+    }
+    var at = p + n;
+    security_bpf_write_insn(filter, at * 8, BPF_JMP_JEQ_K,
+      errno_idx - at - 1, 0, _seccomp_native_nr(435, 435));          # clone3
+    at = at + 1;
+    security_bpf_write_insn(filter, at * 8, BPF_JMP_JEQ_K,
+      0, allow_idx - at - 1, _seccomp_native_nr(56, 220));           # clone
+    at = at + 1;
+    security_bpf_write_insn(filter, at * 8, BPF_LD_W_ABS, 0, 0, SECCOMP_DATA_ARG0);
+    at = at + 1;
+    security_bpf_write_insn(filter, at * 8, BPF_JMP_JSET_K,
+      kill_idx - at - 1, allow_idx - at - 1, SECCOMP_CLONE_NS_FLAGS);
+    security_bpf_write_insn(filter, allow_idx * 8, BPF_RET_K, 0, 0, SECCOMP_RET_ALLOW);
+    security_bpf_write_insn(filter, errno_idx * 8, BPF_RET_K, 0, 0, SECCOMP_RET_ERRNO | ENOSYS);
+    security_bpf_write_insn(filter, kill_idx * 8, BPF_RET_K, 0, 0, SECCOMP_RET_KILL_PROCESS);
+
+    var info = alloc(16);
+    store64(info, filter);
+    store64(info + 8, filter_size);
+    return Ok(info);
 }
 
 # Create a basic seccomp filter allowing safe syscalls.

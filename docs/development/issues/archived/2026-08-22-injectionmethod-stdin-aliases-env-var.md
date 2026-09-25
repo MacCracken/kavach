@@ -1,7 +1,22 @@
-# `InjectionMethod.STDIN` collides with `io.cyr`'s `var STDIN` and collapses onto `ENV_VAR`
+# `InjectionMethod.STDIN` collides with `io.cyr`'s `var STDIN` and collapses onto `ENV_VAR` — RESOLVED
 
-**Status:** open. Filed from **agnosai 2.0.5** (kavach 3.11.15 → 3.12.2), found by a
-`lib/`↔`lib/` symbol sweep run *before* the bump rather than after.
+**Status:** RESOLVED in kavach 3.12.9. Filed from **agnosai 2.0.5** (kavach 3.11.15 →
+3.12.2), found by a `lib/`↔`lib/` symbol sweep run *before* the bump rather than after.
+
+> **Resolution (3.12.9).** The members are `KAVACH_INJECT_ENV_VAR` / `KAVACH_INJECT_FILE` /
+> `KAVACH_INJECT_STDIN`: the crate-name prefix ADR-006 §4 set, rather than the `KV_INJECT_*`
+> suggested below. The rest of the sweep this issue asked for went in with it:
+> `AttestationTrust`'s members are `KAVACH_TRUST_*`, kavach's `AuditEntry` is
+> `KavachAuditEntry` (stiva defines its own), and the seventeen sigil-shared functions are
+> prefixed or removed. `scripts/check-symbols.py` now runs in CI and fails on any kavach
+> constant shared with `lib/` at a different value, which is what this one was.
+> `test_credential_methods_do_not_alias` pins the values, checks that `STDIN` is the stdlib's
+> 0 in kavach's own unit, and routes a mixed list of refs. On one reading below: kavach's
+> builders (`credential_proxy_env_vars`, `credential_proxy_stdin_payload`) returned the wrong
+> lists, and a consumer exporting them would have put the stdin secret in the environment.
+> agnosai's `scripts/lib-symbol-allow.txt` entry for `STDIN` can go once it is on 3.12.9.
+> Generic public names (`PROCESS`, `WASM`, `policy_new`, …) are on kavach's roadmap: a rename
+> there breaks consumers, so it waits for a minor release.
 
 **Severity:** a **credential-routing** defect, not a cosmetic name clash. It is **live in the
 emitted binary** for any consumer whose include ordering puts `lib/io.cyr` last — measured

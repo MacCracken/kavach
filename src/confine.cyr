@@ -273,8 +273,15 @@ fn confine_child_wd(policy, rootfs, cgroup_path, uid, gid, seccomp_info, want_ns
 
     # `want_ns` is 0 only for the capture path added in 3.11.3 — see the note
     # on `confine_child`'s signature.
+    #
+    # ⛔ A rootfs always gets its namespaces, whatever `want_ns` says (3.12.9).
+    # `_spawn_enter_rootfs` makes `/` private and chroots, and with no mount
+    # namespace of our own that `mount` lands in the caller's: as root, the
+    # host's propagation. kavach's own callers pass want_ns = 1 whenever there
+    # is a rootfs, but this function is exported (`dist/kavach-confine.cyr`),
+    # and a caller passing 0 with a rootfs reached exactly that.
     var nsf = 0;
-    if (want_ns != 0) { nsf = _spawn_ns_flags(policy, rootfs); }
+    if (want_ns != 0 || rootfs != 0) { nsf = _spawn_ns_flags(policy, rootfs); }
     if (nsf != 0) {
         if (is_ok(security_create_namespace(nsf)) == 0) { sys_exit(SPAWN_EXIT_NS); }
         if ((nsf & NS_USER) != 0) {

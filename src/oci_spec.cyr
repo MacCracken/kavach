@@ -201,6 +201,17 @@ fn oci_generate_spec(sandbox, command) {
     if (cap < 0) { return 0; }
     cap = checked_add(cap, 512);        # rootless user-ns + id mappings + mounts
     if (cap < 0) { return 0; }
+    # ⛔ The argv form's framing (3.12.9). A rootfs-bearing sandbox writes each
+    # token as `"tok",`, 3 bytes around the escaped token where the command
+    # string had one separator, and nothing above counted it: past ~1000 tokens
+    # the fixed slack ran out and the loop below wrote past `buf` (1500 tokens
+    # crashed the process). Split first, and add 3 bytes per token.
+    var av = 0;
+    if (cfg_rootfs_for_args != 0) {
+        av = _split_command(command);
+        cap = checked_add(cap, checked_mul(vec_len(av), 3));
+        if (cap < 0) { return 0; }
+    }
     var buf = alloc_checked(cap);
     if (buf == 0) { return 0; }
     var pos = 0;
@@ -215,7 +226,6 @@ fn oci_generate_spec(sandbox, command) {
     # legacy wrapper is kept, since a caller relying on shell syntax there has
     # a host shell by definition.
     if (cfg_rootfs_for_args != 0) {
-        var av = _split_command(command);
         var ai = 0;
         while (ai < vec_len(av)) {
             if (ai > 0) { store8(buf + pos, 44); pos = pos + 1; }        # ','
@@ -300,6 +310,12 @@ fn oci_generate_spec(sandbox, command) {
     memcpy(buf + pos, resources, strlen(resources)); pos = pos + strlen(resources);
     var tail = "}}";
     memcpy(buf + pos, tail, strlen(tail)); pos = pos + strlen(tail);
+    # The sizing above must cover every byte written (3.12.9). A bump allocator
+    # hides a write past `buf`: the bytes land in memory already handed out, and
+    # the spec still looks right, which is how the argv undercount survived. So
+    # an undercount is refused here, and a test can see it, rather than being
+    # returned as if the buffer held it.
+    if (pos >= cap) { return 0; }
     store8(buf + pos, 0);
     return buf;
 }
@@ -318,7 +334,7 @@ fn oci_prepare_bundle(container_id, sandbox, command) {
     store8(bundle + pos, 0);
     # Mode 0700 = 448. EEXIST aborts (random id, so collision is attack-
     # signal, not natural occurrence).
-    if (sys_mkdir(bundle, 448) < 0) { return 0; }
+    if (kv_mkdir(bundle, 448) < 0) { return 0; }
 
     # Only stage an empty bundle rootfs when the sandbox has none of its own;
     # with a configured rootfs the spec points at it absolutely.
@@ -329,7 +345,7 @@ fn oci_prepare_bundle(container_id, sandbox, command) {
     memcpy(rootfs, bundle, strlen(bundle));
     memcpy(rootfs + strlen(bundle), "/rootfs", 8);
     if (cfg_rootfs == 0) {
-        if (sys_mkdir(rootfs, 448) < 0) { kv_rmdir(bundle); return 0; }
+        if (kv_mkdir(rootfs, 448) < 0) { kv_rmdir(bundle); return 0; }
     }
 
     var cfg_path = alloc(strlen(bundle) + 16);

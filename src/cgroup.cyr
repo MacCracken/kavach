@@ -155,7 +155,7 @@ fn cgroup_setup(policy) {
     var path = _cgroup_path(scope);
     # sys_mkdir mode is ignored by cgroupfs (it owns the dir mode), but
     # passing 0700 keeps the intent visible.
-    if (sys_mkdir(path, 448) < 0) { return 0; }
+    if (kv_mkdir(path, 448) < 0) { return 0; }
 
     var mem_mb = SandboxPolicy_memory_limit_mb(policy);
     if (mem_mb > 0) {
@@ -220,8 +220,14 @@ fn _cgroup_sh_body(cgroup_path) {
 # Wrap a user argv vec with the cgroup-join shell prelude, returning a
 # new argv vec. The resulting argv shape is:
 #
-#   ["sh", "-c", "echo $$ > <cgroup_path>/cgroup.procs; exec \"$@\"",
+#   ["/bin/sh", "-c", "echo $$ > <cgroup_path>/cgroup.procs; exec \"$@\"",
 #    "--", <user argv...>]
+#
+# ⛔ `/bin/sh`, absolute (3.12.9). It was a bare "sh", and kavach execs with
+# execve, which does no PATH search: "sh" resolved against the child's working
+# directory. With no `./sh` there, every cgroup-limited payload exited 127
+# without running; with one, that file ran in place of the prelude. Absolute,
+# it is also pinned before fork like every other exec (ADR-005 §H4).
 #
 # `--` separates sh's own positional args ($0 = "--", $1.. = user argv).
 # Per `man sh`, $0 receives whatever follows "-c <body>", so the first
@@ -232,7 +238,7 @@ fn _cgroup_sh_body(cgroup_path) {
 # (callers can free / reuse it).
 fn cgroup_wrap_argv(cgroup_path, user_argv) {
     var out = vec_new();
-    vec_push(out, "sh");
+    vec_push(out, "/bin/sh");
     vec_push(out, "-c");
     vec_push(out, _cgroup_sh_body(cgroup_path));
     vec_push(out, "--");

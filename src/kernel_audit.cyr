@@ -27,10 +27,10 @@ include "lib/process.cyr"
 enum AuditConst {
     AF_NETLINK = 16;
     SOCK_RAW = 3;
-    SOCK_CLOEXEC = 524288;
     NETLINK_AUDIT = 9;
     NLMSG_HDRLEN = 16;
     NLM_F_REQUEST = 1;
+    NLM_F_ACK = 4;
     NLMSG_NOOP = 1;
     NLMSG_ERROR = 2;
     NLMSG_DONE = 3;
@@ -266,7 +266,7 @@ fn audit_build_nlmsg(msg_type, payload_ptr, payload_len): i64 {
     hdr.nlmsg_len = total_len;
     hdr.nlmsg_type = msg_type;
     hdr.nlmsg_flags = NLM_F_REQUEST;
-    hdr.nlmsg_seq = 1;
+    hdr.nlmsg_seq = _audit_next_seq();
     hdr.nlmsg_pid = sys_getpid();
 
     if (payload_len > 0) {
@@ -279,6 +279,61 @@ fn audit_build_nlmsg(msg_type, payload_ptr, payload_len): i64 {
 # Get total length of a built nlmsg (read from the header)
 fn audit_nlmsg_len(buf): i64 {
     return load32(buf);
+}
+
+# Netlink sequence numbers, one per request (3.12.9). Every request used seq 1,
+# so a reply left queued by an earlier request was indistinguishable from the
+# current one's.
+var _audit_seq = 0;
+
+fn _audit_next_seq(): i64 {
+    _audit_seq = _audit_seq + 1;
+    return _audit_seq;
+}
+
+# struct nlmsgerr's `error` is an s32; `load32` zero-extends, so -1 read as
+# 4294967295 and the errno reported was garbage.
+fn _audit_s32(v): i64 {
+    if (v >= 2147483648) { return v - 4294967296; }
+    return v;
+}
+
+# Send a request with NLM_F_ACK and wait for the kernel's answer to it (3.12.9).
+#
+# ⛔ The control calls below sent their request and returned Ok(0) as soon as
+# the SEND succeeded; none read a reply. The kernel answers a failure with an
+# NLMSG_ERROR whether or not an ack was asked for, so, unprivileged, enabling
+# auditing or adding a watch rule failed with EPERM in a reply nobody read, and
+# the caller was told the control was in place. Now the reply decides: an
+# NLMSG_ERROR carrying 0 is the ack, anything else the errno. Replies to other
+# sequence numbers are skipped, a bounded number of them.
+fn _audit_request_acked(handle, nlmsg, what): i64 {
+    var hdr: nlmsghdr = nlmsg;
+    hdr.nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK;
+    var seq = hdr.nlmsg_seq;
+    var sres_t, sres_v = audit_send_raw(handle, nlmsg, audit_nlmsg_len(nlmsg));
+    if (is_err_result(sres_t) == 1) { return Err(sres_v); }
+    var buf = alloc(1024);
+    var tries = 0;
+    while (tries < 8) {
+        memset(buf, 0, 1024);
+        var rres_t, rres_v = audit_recv_raw(handle, buf, 1024);
+        if (is_err_result(rres_t) == 1) { return Err(rres_v); }
+        if (rres_v < NLMSG_HDRLEN + 4) {
+            return kavach_err_unknown("audit reply truncated (no nlmsgerr)");
+        }
+        var rh: nlmsghdr = buf;
+        if (rh.nlmsg_seq == seq) {
+            if (rh.nlmsg_type != NLMSG_ERROR) {
+                return kavach_err_unknown("audit reply is not an acknowledgement");
+            }
+            var nerr = _audit_s32(load32(buf + NLMSG_HDRLEN));
+            if (nerr == 0) { return Ok(0); }
+            return kavach_err_syscall_failed(0 - nerr, what);
+        }
+        tries = tries + 1;
+    }
+    return kavach_err_unknown("no acknowledgement for the audit request");
 }
 
 # ================================================================
@@ -440,12 +495,7 @@ fn audit_send_event(handle, event_type, message): i64 {
 
     # Build netlink message with AUDIT_USER type
     var nlmsg = audit_build_nlmsg(AUDIT_USER, payload_data, payload_len);
-    var total_len = audit_nlmsg_len(nlmsg);
-
-    var res_t, res_v = audit_send_raw(handle, nlmsg, total_len);
-    if (is_err_result(res_t) == 1) { return Err(res_v); }
-
-    return Ok(0);
+    return _audit_request_acked(handle, nlmsg, "AUDIT_USER refused by the kernel");
 }
 
 # ================================================================
@@ -462,6 +512,8 @@ fn audit_get_status(handle): i64 {
     # Send AUDIT_GET request (no payload)
     var nlmsg = audit_build_nlmsg(AUDIT_GET, 0, 0);
     var total_len = audit_nlmsg_len(nlmsg);
+    var get_hdr: nlmsghdr = nlmsg;
+    var get_seq = get_hdr.nlmsg_seq;
 
     var sres_t, sres_v = audit_send_raw(handle, nlmsg, total_len);
     if (is_err_result(sres_t) == 1) { return Err(sres_v); }
@@ -486,15 +538,15 @@ fn audit_get_status(handle): i64 {
     if (hdr.nlmsg_len > nbytes) {
         return kavach_err_unknown("AUDIT_GET reply nlmsg_len exceeds bytes received");
     }
-    if (hdr.nlmsg_seq != 1) {
-        return kavach_err_unknown("AUDIT_GET reply seq mismatch (expected 1)");
+    if (hdr.nlmsg_seq != get_seq) {
+        return kavach_err_unknown("AUDIT_GET reply seq mismatch");
     }
     if (hdr.nlmsg_type == NLMSG_ERROR) {
         # struct nlmsgerr { s32 error; struct nlmsghdr msg; }
         if (nbytes < NLMSG_HDRLEN + 4) {
             return kavach_err_unknown("NLMSG_ERROR reply truncated (no error code)");
         }
-        var nerr = load32(recv_buf + NLMSG_HDRLEN);  # negative errno
+        var nerr = _audit_s32(load32(recv_buf + NLMSG_HDRLEN));  # negative errno
         if (nerr == 0) {
             return kavach_err_unknown("NLMSG_ERROR with zero error (ack-only)");
         }
@@ -542,12 +594,7 @@ fn audit_set_enabled(handle, enabled): i64 {
     ks.enabled = enabled;
 
     var nlmsg = audit_build_nlmsg(AUDIT_SET, pld, pld_len);
-    var total_len = audit_nlmsg_len(nlmsg);
-
-    var res_t, res_v = audit_send_raw(handle, nlmsg, total_len);
-    if (is_err_result(res_t) == 1) { return Err(res_v); }
-
-    return Ok(0);
+    return _audit_request_acked(handle, nlmsg, "AUDIT_SET refused by the kernel");
 }
 
 # ================================================================
@@ -588,12 +635,7 @@ fn audit_send_rule_msg(handle, rule, msg_type): i64 {
     var rule_len = str_len(rule_text);
 
     var nlmsg = audit_build_nlmsg(msg_type, rule_data, rule_len);
-    var total_len = audit_nlmsg_len(nlmsg);
-
-    var res_t, res_v = audit_send_raw(handle, nlmsg, total_len);
-    if (is_err_result(res_t) == 1) { return Err(res_v); }
-
-    return Ok(0);
+    return _audit_request_acked(handle, nlmsg, "audit rule refused by the kernel");
 }
 
 # ================================================================

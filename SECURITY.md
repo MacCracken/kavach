@@ -39,9 +39,9 @@ with residual risk, see [ADR-005](docs/adr/005-v2-hardening-pass.md).
 
 | Version | Supported |
 |---------|-----------|
-| 2.1.x (Cyrius) | **Yes — active** |
-| 2.0.x (Cyrius) | Security fixes only |
-| 1.x (Rust) | End-of-life; archived in git history |
+| 3.12.x (Cyrius) | **Yes — active.** Fixes land in the next 3.12.x release; nothing is backported. |
+| < 3.12 (Cyrius) | No — upgrade to the latest 3.12.x. |
+| 1.x, 2.x (Rust) | End-of-life; archived in git history. |
 
 ## Response
 
@@ -61,6 +61,17 @@ and unblocking conditions:
 
 Resolved since earlier releases:
 
+- **v3.12.9:**
+  - a stdin credential could be routed as an env var in a consumer
+    (`InjectionMethod.STDIN` taken over by the stdlib's `STDIN`);
+  - the exec filter's mount-API and `clone`/`clone3` bypasses;
+  - a heap overflow in OCI spec generation;
+  - host fds, the credential proxy's listener among them, inherited by persistent guests;
+  - netlink audit controls reported as applied when the kernel refused them;
+  - two symlink-following quarantine writes;
+  - a stale flag that let `sandbox_exec` skip the externalization gate.
+
+  See CHANGELOG 3.12.9.
 - **Seccomp architecture check** (v3.12.8). The filter checks
   `seccomp_data.arch` and uses a table per architecture, so a denied call can
   no longer be made through another ABI: the i386 gate (`int 0x80`) or an x32

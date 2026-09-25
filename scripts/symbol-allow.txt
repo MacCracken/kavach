@@ -1,0 +1,11 @@
+# Names scripts/check-symbols.py may accept although kavach shares them with a
+# module in lib/ (or defines them twice). One name per line, with a `#` comment
+# saying why the duplicate is safe here and, if it is a divergence, where it is
+# filed upstream.
+#
+# An entry is a deferral, not a dispensation. Delete it when the cause is fixed,
+# and the gate protects the name again. Do not add a name to turn a red build
+# green: STDIN sat in agnosai's equivalent of this file as a known divergence
+# from 2026-08-22 until kavach fixed it at 3.12.9.
+#
+#   <NAME>   # <why it is safe here> — <issue>

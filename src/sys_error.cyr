@@ -74,15 +74,15 @@ enum Errno {
 # Packed error: kind << 16 | errno (no message, no heap, value < 0x100000)
 # Heap error:   pointer to { kind, errno, message_ptr } (24 bytes, value >= 0x100000)
 #
-# syserr_kind/errno/message dispatch on the value automatically.
+# kavach_syserr_kind/errno/message dispatch on the value automatically.
 
 # Pack kind + errno into a single integer (zero allocation)
-fn syserr_pack(kind, errno): i64 {
+fn kavach_syserr_pack(kind, errno): i64 {
     return kind << 16 | errno;
 }
 
 # Create a new error with message (heap-allocated, cold path)
-fn syserr_new(kind, errno, message): i64 {
+fn kavach_syserr_new(kind, errno, message): i64 {
     var e = alloc(24);
     store64(e, kind);
     store64(e + 8, errno);
@@ -91,19 +91,19 @@ fn syserr_new(kind, errno, message): i64 {
 }
 
 # Get error kind (works for both packed and heap errors)
-fn syserr_kind(e): i64 {
+fn kavach_syserr_kind(e): i64 {
     if (e < 0x100000) { return e >> 16; }
     return load64(e);
 }
 
 # Get errno value (works for both packed and heap errors)
-fn syserr_errno(e): i64 {
+fn kavach_syserr_errno(e): i64 {
     if (e < 0x100000) { return e & 0xFFFF; }
     return load64(e + 8);
 }
 
 # Get error message pointer (0 for packed errors)
-fn syserr_message(e): i64 {
+fn kavach_syserr_message(e): i64 {
     if (e < 0x100000) { return 0; }
     return load64(e + 16);
 }
@@ -113,23 +113,23 @@ fn syserr_message(e): i64 {
 # ================================================================
 
 fn kavach_err_syscall_failed_nr(errno): i64 {
-    return Err(syserr_pack(KAVACH_ERR_SYSCALL_FAILED, errno));
+    return Err(kavach_syserr_pack(KAVACH_ERR_SYSCALL_FAILED, errno));
 }
 
 fn kavach_err_permission_denied_nr(errno): i64 {
-    return Err(syserr_pack(KAVACH_ERR_PERMISSION_DENIED, errno));
+    return Err(kavach_syserr_pack(KAVACH_ERR_PERMISSION_DENIED, errno));
 }
 
 fn kavach_err_would_block(): i64 {
-    return Err(syserr_pack(KAVACH_ERR_WOULD_BLOCK, EAGAIN));
+    return Err(kavach_syserr_pack(KAVACH_ERR_WOULD_BLOCK, EAGAIN));
 }
 
 fn kavach_err_invalid_argument_nr(): i64 {
-    return Err(syserr_pack(KAVACH_ERR_INVALID_ARGUMENT, EINVAL));
+    return Err(kavach_syserr_pack(KAVACH_ERR_INVALID_ARGUMENT, EINVAL));
 }
 
 fn kavach_err_not_supported_nr(): i64 {
-    return Err(syserr_pack(KAVACH_ERR_NOT_SUPPORTED, ENOSYS));
+    return Err(kavach_syserr_pack(KAVACH_ERR_NOT_SUPPORTED, ENOSYS));
 }
 
 # ================================================================
@@ -137,31 +137,31 @@ fn kavach_err_not_supported_nr(): i64 {
 # ================================================================
 
 fn kavach_err_syscall_failed(errno, message): i64 {
-    return Err(syserr_new(KAVACH_ERR_SYSCALL_FAILED, errno, message));
+    return Err(kavach_syserr_new(KAVACH_ERR_SYSCALL_FAILED, errno, message));
 }
 
 fn kavach_err_invalid_argument(message): i64 {
-    return Err(syserr_new(KAVACH_ERR_INVALID_ARGUMENT, EINVAL, message));
+    return Err(kavach_syserr_new(KAVACH_ERR_INVALID_ARGUMENT, EINVAL, message));
 }
 
 fn kavach_err_permission_denied(operation): i64 {
-    return Err(syserr_new(KAVACH_ERR_PERMISSION_DENIED, EPERM, operation));
+    return Err(kavach_syserr_new(KAVACH_ERR_PERMISSION_DENIED, EPERM, operation));
 }
 
 fn kavach_err_module_not_loaded(module): i64 {
-    return Err(syserr_new(KAVACH_ERR_MODULE_NOT_LOADED, ENODEV, module));
+    return Err(kavach_syserr_new(KAVACH_ERR_MODULE_NOT_LOADED, ENODEV, module));
 }
 
 fn kavach_err_not_supported(feature): i64 {
-    return Err(syserr_new(KAVACH_ERR_NOT_SUPPORTED, ENOSYS, feature));
+    return Err(kavach_syserr_new(KAVACH_ERR_NOT_SUPPORTED, ENOSYS, feature));
 }
 
 fn kavach_err_unknown(message): i64 {
-    return Err(syserr_new(KAVACH_ERR_UNKNOWN, 0, message));
+    return Err(kavach_syserr_new(KAVACH_ERR_UNKNOWN, 0, message));
 }
 
 fn kavach_err_io(errno, message): i64 {
-    return Err(syserr_new(KAVACH_ERR_IO, errno, message));
+    return Err(kavach_syserr_new(KAVACH_ERR_IO, errno, message));
 }
 
 # ================================================================
@@ -186,9 +186,9 @@ fn kavach_err_from_syscall_ret(ret): i64 {
 # Error printing
 # ================================================================
 
-fn syserr_print(e): i64 {
-    var kind = syserr_kind(e);
-    var msg = syserr_message(e);
+fn kavach_syserr_print(e): i64 {
+    var kind = kavach_syserr_kind(e);
+    var msg = kavach_syserr_message(e);
     var msglen = 0;
     if (msg != 0) { msglen = strlen(msg); }
 
@@ -200,7 +200,7 @@ fn syserr_print(e): i64 {
         KAVACH_ERR_SYSCALL_FAILED => {
             sys_write(2, "syscall failed (errno ", 22);
             var ebuf[24];
-            var elen = fmt_int_buf(syserr_errno(e), &ebuf);
+            var elen = fmt_int_buf(kavach_syserr_errno(e), &ebuf);
             sys_write(2, &ebuf, elen);
             sys_write(2, "): ", 3);
             sys_write(2, msg, msglen);
@@ -231,7 +231,7 @@ fn syserr_print(e): i64 {
         KAVACH_ERR_IO => {
             sys_write(2, "io error (errno ", 16);
             var ibuf[24];
-            var ilen = fmt_int_buf(syserr_errno(e), &ibuf);
+            var ilen = fmt_int_buf(kavach_syserr_errno(e), &ibuf);
             sys_write(2, &ibuf, ilen);
             sys_write(2, "): ", 3);
             sys_write(2, msg, msglen);
@@ -244,15 +244,17 @@ fn syserr_print(e): i64 {
 # Print error from a Result if it's Err, then return the error code.
 # Returns 0 if the Result is Ok.
 # 6.6.0 value form: a Result is a register PAIR, so both halves must be passed —
-# `var t, v = f(); result_print_err(t, v);`. Was 1-arg over the boxed form.
-# Signature matches sigil's and agnodrm's `result_print_err`. ⚠ Until this change
-# kavach's 1-arg definition and sigil's 2-arg one were BOTH in scope here, and
-# "last definition wins" meant every call to the loser silently mis-bound.
-fn result_print_err(res_tag, res): i64 {
+# `var t, v = f(); kavach_result_print_err(t, v);`. Was 1-arg over the boxed form.
+# ⚠ Named `kavach_` since 3.12.9, like the `kavach_syserr_*` accessors above.
+# sigil and agnodrm each define `result_print_err` and `syserr_*` from the same
+# agnosys fork, and under "last definition wins" only one copy survives in a
+# consumer. When kavach's took 1 argument and sigil's 2, every call to the loser
+# silently mis-bound; matching the signature (6.6.0) only hid the collision.
+fn kavach_result_print_err(res_tag, res): i64 {
     if (is_ok(res_tag) == 1) { return 0; }
     var e = res;
-    syserr_print(e);
-    return syserr_errno(e);
+    kavach_syserr_print(e);
+    return kavach_syserr_errno(e);
 }
 
 # ================================================================
@@ -270,13 +272,5 @@ fn result_print_err(res_tag, res): i64 {
 #    delivers Err(77) to the caller as tag=77 / is_err_result==0 — an error that
 #    reads as SUCCESS. That shape cost yukti 19 silent defects at the flip.
 
-# Check if a syscall return value indicates error (negative = errno)
-fn is_syscall_err(ret): i64 {
-    return ret < 0;
-}
-
-# Wrap a raw syscall return: Ok(ret) if >= 0, Err(from_errno) if < 0
-fn wrap_syscall(ret): i64 {
-    if (ret < 0) { return kavach_err_from_syscall_ret(ret); }
-    return Ok(ret);
-}
+# (`is_syscall_err` and `wrap_syscall` lived here until 3.12.9: no caller in
+# kavach or any consumer, and sigil and agnodrm define the same two names.)

@@ -366,11 +366,11 @@ fn mac_profile_new(agent_type): i64 {
 # cstring support lands.
 fn mac_profile_to_json(p, sb): i64 {
     str_builder_add_cstr(sb, "{\"agent_type\":");
-    agnosys_json_emit_cstr_or_null(sb, mac_profile_agent_type(p));
+    kavach_json_emit_cstr_or_null(sb, mac_profile_agent_type(p));
     str_builder_add_cstr(sb, ",\"selinux_ctx\":");
-    agnosys_json_emit_cstr_or_null(sb, mac_profile_selinux_ctx(p));
+    kavach_json_emit_cstr_or_null(sb, mac_profile_selinux_ctx(p));
     str_builder_add_cstr(sb, ",\"apparmor_name\":");
-    agnosys_json_emit_cstr_or_null(sb, mac_profile_apparmor_name(p));
+    kavach_json_emit_cstr_or_null(sb, mac_profile_apparmor_name(p));
     str_builder_add_cstr(sb, "}");
     return 0;
 }

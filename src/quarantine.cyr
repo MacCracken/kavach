@@ -33,9 +33,22 @@ fn quarantine_storage_new(base_dir) {
     # Mode 0700 — only owner may enter. EEXIST is acceptable for the
     # storage dir (unlike per-entry files) since operators intentionally
     # reuse the location across runs.
-    sys_mkdir(base_dir, 448);
-    # Best-effort tighten in case a pre-existing dir was wider.
-    sys_chmod(base_dir, 448);
+    kv_mkdir(base_dir, 448);
+    # ⛔ Tighten through an fd, and refuse what is not a real directory
+    # (3.12.9). This was `sys_chmod(base_dir, 0700)`, which follows symlinks:
+    # with `base_dir` pre-planted as a link, the chmod landed on the link's
+    # target and every `.bin` / `.meta` after it was written there. Opening with
+    # O_DIRECTORY | O_NOFOLLOW refuses the link; a 0 return means "no usable
+    # store", as `_oci_state_root` does for runc's.
+    #ifndef CYRIUS_TARGET_AGNOS
+    var dfd = file_open(base_dir, O_RDONLY | O_DIRECTORY | O_NOFOLLOW, 0);
+    if (dfd < 0) { return 0; }
+    var st[144];
+    if (sys_fstat(dfd, &st) < 0) { sys_close(dfd); return 0; }
+    if (load32(&st + STAT_UID) != sys_getuid()) { sys_close(dfd); return 0; }
+    if (sys_fchmod(dfd, 448) < 0) { sys_close(dfd); return 0; }
+    sys_close(dfd);
+    #endif
     var q = alloc(16);
     QuarantineStorage_set_base_dir(q, base_dir);
     # next_id field retained for API compat; actual entry IDs are 64-bit
@@ -151,6 +164,17 @@ fn quarantine_update_status(storage, id, status) {
     # For v3.0 we just drop a new meta — readers see the latest. Parsing the
     # previous file requires a JSON parser and is deferred.
     var placeholder = _meta_jsonl(id, 0, ScanVerdict.QUARANTINE, status);
-    file_write_all(meta_path, placeholder, strlen(placeholder));
+    # ⛔ Rewrite the entry's OWN file, or fail (3.12.9). This was
+    # `file_write_all`, which creates at 0644 and follows a symlink, and its
+    # result was dropped: a `.meta` link truncated and overwrote the link's
+    # target, and a write that failed still returned OK, so an approve or
+    # reject could be lost while the caller was told it was recorded. No O_CREAT:
+    # the entry must already exist (`quarantine_store` made it, 0600).
+    var fd = file_open(meta_path, O_WRONLY | O_TRUNC | O_NOFOLLOW, 0);
+    if (fd < 0) { return KAVACH_ERR_IO_ERROR; }
+    var len = strlen(placeholder);
+    var n = file_write(fd, placeholder, len);
+    sys_close(fd);
+    if (n != len) { return KAVACH_ERR_IO_ERROR; }
     return KAVACH_ERR_OK;
 }

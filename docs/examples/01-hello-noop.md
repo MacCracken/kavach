@@ -12,7 +12,7 @@ fn main() {
     kavach_init();
 
     var cfg = config_new();
-    config_backend(cfg, Backend.NOOP);
+    config_backend(cfg, KavachBackend.NOOP);
 
     var sb = sandbox_create(cfg);
     sandbox_transition(sb, SandboxState.RUNNING);
@@ -39,7 +39,7 @@ syscall(60, r);
 
 1. `kavach_init()` registers all 10 backends into the dispatch table.
 2. `config_new()` constructs a default config (backend=Process, policy=basic).
-3. `config_backend(Backend.NOOP)` overrides to Noop.
+3. `config_backend(KavachBackend.NOOP)` overrides to Noop.
 4. `sandbox_create` allocates a Sandbox with a random UUID-v4-equivalent id.
 5. `sandbox_transition(RUNNING)` moves the FSM.
 6. `sandbox_exec("echo hello")` runs the full pipeline:

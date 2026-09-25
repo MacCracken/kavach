@@ -2,7 +2,7 @@
 
 > **Principle**: Security correctness first, then backend breadth, then performance. Every sandbox gets a number.
 
-This roadmap is **future-facing only** — shipped work lives in [CHANGELOG.md](../../CHANGELOG.md). Current release: **v3.12.8**. Toolchain pin: cc `6.6.6`; sigil `3.12.18` (the snapshot's — see CLAUDE.md hazard 4), samay `1.1.5`, ai-hwaccel `2.4.0` (agnosys dropped at v3.5.0 — its security backends are internalized).
+This roadmap is **future-facing only** — shipped work lives in [CHANGELOG.md](../../CHANGELOG.md). Current release: **v3.12.9**. Toolchain pin: cc `6.6.6`; sigil `3.12.18` (the snapshot's — see CLAUDE.md hazard 4), samay `1.1.5`, ai-hwaccel `2.4.0` (agnosys dropped at v3.5.0 — its security backends are internalized).
 
 **Every release below is pinned.** Each names what ships in it, in the order the principle sets. To
 move an item, edit this file; do not let it drift. Every release runs the CLAUDE.md development
@@ -13,45 +13,14 @@ what it is.
 
 ---
 
-## 3.12.9 — P(-1) closeout
-
-The scaffold-hardening pass (CLAUDE.md, P(-1) steps 0–9), run to completion before feature work
-starts at 3.13.0.
-
-- [ ] Test and benchmark sweep; cleanliness (fmt, lint, vet); baseline benchmarks.
-- [ ] Audit (performance, memory, security, edge cases). Known items going in:
-  - `SpawnedProcess_pid` / `_set_pid` are defined in both `spawn.cyr` and `observability.cyr`,
-    a `duplicate fn` inside kavach itself;
-  - the remaining sigil overlaps (`syserr_*`, the `agnosys_*` helpers, `attestation_result_new`)
-    get the `<crate>_` prefix that ADR-006 describes;
-  - `file_restrict_mode` has had no caller since 3.12.6;
-  - agnos: sweep every `sys_*` call reachable there for the Linux argument order (3.12.6 fixed the
-    opens);
-  - **the exec-safe deny list has two doors around it** (found at 3.12.8). The new mount API
-    (`open_tree`, `move_mount`, `fsopen`, `fsconfig`, `fsmount`, `fspick`: 428–433;
-    `mount_setattr`: 442; the same numbers on x86-64 and aarch64) does what the denied `mount`
-    does. `clone` and `clone3` with `CLONE_NEW*` flags re-namespace the way the denied `unshare`
-    does. Decide per call whether to deny it, filter its flags, or record why not. `clone`'s flags
-    are an argument a filter can test; `clone3` passes them in a struct, which seccomp cannot
-    read;
-  - **`confine_child` with a rootfs and `want_ns = 0`** makes `/` private in the caller's own
-    mount namespace, which as root is the host's. kavach's own callers always pass 1 with a rootfs;
-    a direct caller of the exported function can pass 0. Enforce "a rootfs implies `NS_MOUNT`"
-    inside it;
-  - **flip `aarch64-native` in CI to blocking** once it has run green; that run is the first on
-    aarch64 hardware, and the point at which aarch64 exec support can be claimed.
-- [ ] **Benchmark tooling.** `bench-history.sh` pins to one CPU: unpinned exec timings are bimodal
-  on the development host (3.12.7). A checked-in interleaved A/B script replaces the ad-hoc ones
-  used for 3.12.6 and 3.12.7.
-- [ ] **Documentation audit.** ADR-004 (several of its deferred features have shipped); guides and
-  examples against the current API; `doc-health.md`; the zugot recipe, still at 3.4.2.
-- [ ] Post-audit benchmarks against the 3.12.9 baseline.
-
-## 3.13.x — TEE attestation I: SGX and TDX quote verification (ADR-004 §6)
+## 3.13.x — TEE attestation I: SGX and TDX quote verification (ADR-004 §2)
 
 **Unblocked:** sigil 3.12.18 ships `sgx_quote_parse`, `sgx_quote_verify_full`, `tdx_quote_parse`
 and `tdx_quote_verify_full`.
 
+- [ ] **Record aarch64 as supported**, apart from namespaces and rootfs entry (ADR-007), once
+  the `aarch64 (native)` CI job's notice shows the full count with seccomp loaded. 3.12.9 made
+  the job blocking and added that notice; before it, a green run said only that nothing failed.
 - [ ] Fetch the quote from the running guest: Gramine for SGX, the TD quote for TDX.
 - [ ] Verify it with sigil against the vendor root, and report the result through
   `src/attestation.cyr`, which today only stores the report's shape.
@@ -117,6 +86,18 @@ default, writes only with kavach approval).
 
 ## Beyond 3.x — unpinned
 
+- **Generic public names — a decision, then a breaking release.** Found by 3.12.9's
+  `scripts/check-symbols.py --tree ..`. kavach's public API still has names that other
+  first-party bundles also define: `policy_new` (shakti); `finding_new`, `scan_result_new` and
+  `severity_name` (phylax); `which_exists` (nous); `audit_chain_len` (t-ron). Several enum members
+  are also generic (`KavachBackend`'s `PROCESS`, `WASM`, `OCI`, `NOOP`, …; `SandboxState`'s).
+  None of those repos is compiled next to kavach by any consumer today, and cyrius warns on a
+  duplicate `fn`, but a shared enum member would be silent (the 3.12.9 `STDIN` bug). A prefix
+  sweep breaks every consumer's call sites, so it needs a version decision before it is pinned.
+- **Landlock network rules and scopes — apply them, or stop scoring them.** The policy fields
+  (TCP bind/connect port allowlist, ABI v4; abstract-unix and signal scopes, ABI v6) are stored
+  and add 3 + 2 + 2 to the strength score, but nothing applies them (`overview.md`'s modifier
+  table, rechecked at 3.12.9).
 - The rest of [Foreign Platform Containers](#foreign-platform-containers): Windows and macOS
   guests, display through aethersafta, audio through dhvani, clipboard, USB and GPU passthrough,
   phylax boundary scanning, libro audit, templates.
@@ -144,7 +125,7 @@ Each entry carries **what it means**, **who owns the upstream work**, and **trig
 
 ### Stiva OCI backend
 
-- **What it means.** Today `backend_oci.cyr::_oci_runtime_path()` returns the first of `runc` / `crun` found in PATH. ADR-004 §7 plans to prepend stiva when available, so the kavach OCI backend transparently uses stiva's hardened OCI runtime instead of upstream runc.
+- **What it means.** Today `backend_oci.cyr::_oci_runtime_path()` returns the first of `runc` / `crun` found in PATH. `src/backend_oci.cyr`'s header plans to prepend stiva when available, so the kavach OCI backend transparently uses stiva's hardened OCI runtime instead of upstream runc.
 - **Who owns it.** Upstream — the **stiva Cyrius port**, now live at **v3.0.0** (a synchronous single-node OCI runtime with a 19-verb `stiva` CLI: run/ps/stop/rm/inspect/images/…). What kavach's OCI backend needs, though, is stiva as a **runc-compatible OCI runtime** — the `stiva create/start/state/kill/delete` CLI over a bundle — which the port does **not** expose yet. The OCI state/bundle primitives (`parse_bundle` / `build_state` / `to_oci_status`) **are** ported (stiva `oci` module); the container lifecycle it drives (`start` = run the container) is the **stiva v3.0.x runtime-completion line** (blocking, over the ported sync core), with detached `run -d` specifically being stiva's v3.1 residue blocked on this issue's `sandbox_spawn`; a runc-compatible OCI-runtime CLI on top is not yet scoped in stiva's roadmap.
 - **Trigger condition.** stiva ships a stable OCI-runtime CLI (`stiva create/start/state/kill/delete` over a bundle — the runc drop-in) wrapping its v3.0.x lifecycle. Single-line addition to `_oci_runtime_path()` once it does. No upstream filing needed — stiva is a sibling repo, tracked in its own roadmap.
 

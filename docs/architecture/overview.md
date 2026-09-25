@@ -119,7 +119,7 @@ The `memory_limit_mb` / `cpu_limit_tenths` / `max_pids` fields are honored by `s
 resolve_best_backend(policy) walks Backend enum by index,
   filters by backend_is_available(),
   scores each via score_backend(backend, policy),
-  returns the highest (default: Backend.NOOP if nothing else registers).
+  returns the highest (default: KavachBackend.NOOP if nothing else registers).
 ```
 
 ### Exec pipeline
@@ -164,19 +164,20 @@ Policy modifiers (additive, clamped to [0, 100]). The score reflects what the
 sandbox *claims* to enforce; runtime enforcement is per-feature: cgroups v2
 since v3.2.0, and seccomp (v3.9.0) and Landlock filesystem rules (v3.11.1) in
 the exec child on the process backend, `sandbox_spawn` and persistent guests.
-The rows still marked "claim only" predate that work and are rechecked in the
-3.12.9 documentation audit:
+Rechecked against the source at v3.12.9. The score counts what the policy
+asks for, so the three "claim only" rows still add points for controls nothing
+applies; the roadmap tracks either applying them or no longer scoring them:
 
 | Modifier | +Score | Enforced at runtime today? |
 |----------|-------:|----------------------------|
 | seccomp enabled | +5 | **Yes** on the process backend, `sandbox_spawn` and persistent guests (v3.9.0; the rootfs-less process path since v3.11.3; architecture-checked since v3.12.8); OCI-family backends leave it to their runtime |
 | landlock rules present | +3 | **Yes** on the same paths (v3.11.1) |
-| network disabled | +5 | Backend-dependent (microVM/OCI yes, Process no) |
+| network disabled | +5 | microVM / OCI: yes. Process: yes with a rootfs, or with `config_require_namespaces(cfg, 1)` (v3.11.5), as a network namespace that is refused, not skipped, where the host denies one (and on aarch64 until cyrius names `unshare`, ADR-007); otherwise claim only |
 | read-only rootfs | +3 | Backend-dependent (OCI/gVisor/microVM yes) |
 | memory OR cpu limit set | +2 | **Yes** (v3.2.0 via cgroups v2 on process backend) |
-| TCP bind/connect port allowlist | +3 | No — claim only; v3.5.0 (Landlock ABI v4) |
-| landlock scope: abstract unix socket | +2 | No — claim only; v3.5.0 |
-| landlock scope: signal | +2 | No — claim only; v3.5.0 |
+| TCP bind/connect port allowlist | +3 | No — claim only. The policy fields exist; no Landlock network rule (ABI v4) is applied |
+| landlock scope: abstract unix socket | +2 | No — claim only; no Landlock scope (ABI v6) is applied |
+| landlock scope: signal | +2 | No — claim only; no Landlock scope (ABI v6) is applied |
 
 ---
 
@@ -191,7 +192,7 @@ The rows still marked "claim only" predate that work and are rechecked in the
 
 **Credential proxy** (`src/credential.cyr` + `src/credential_http.cyr`)
 - `CredentialProxy` keeps a `map_new()` of `name → value`.
-- `SecretRef{ name, inject_via: ENV_VAR | FILE | STDIN, param1, param2 }`.
+- `SecretRef{ name, inject_via: KAVACH_INJECT_ENV_VAR | KAVACH_INJECT_FILE | KAVACH_INJECT_STDIN, param1, param2 }`. The members were bare `ENV_VAR` / `FILE` / `STDIN` until v3.12.9, and a consumer's stdlib `var STDIN = 0` could replace kavach's `STDIN = 2`, routing a stdin secret as an env var.
 - Resolution returns raw cstr (in-memory); the sandbox process sees only the destination form (env var, mounted file, stdin byte stream, or HTTP fetch).
 - **HTTP variant (v3.2.0+):** `CredentialHttpProxy` exposes `GET /v1/secret/<name>` on a 127.0.0.1 listener; per-instance allowlist gates which names this proxy serves; every fetch + every 403/404 hits the audit chain when wired. Secrets never land on disk in this path — the "no on-disk artifact" alternative to file injection.
 

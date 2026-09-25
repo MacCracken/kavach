@@ -53,7 +53,7 @@ include "src/main.cyr"
 
 fn configure() {
     var cfg = config_new();
-    config_backend(cfg, Backend.PROCESS);     # pick a backend
+    config_backend(cfg, KavachBackend.PROCESS);     # pick a backend
     config_policy(cfg, policy_strict());      # or policy_basic()/policy_minimal()
     config_timeout_ms(cfg, 30000);
     config_agent_id(cfg, "my-agent-42");
@@ -124,11 +124,11 @@ sandbox_exec(sb, cmd)
 All 10 backends are registered. Probe availability before depending on one:
 
 ```cyrius
-if (backend_is_available(Backend.GVISOR) == 1) {
-    config_backend(cfg, Backend.GVISOR);
+if (backend_is_available(KavachBackend.GVISOR) == 1) {
+    config_backend(cfg, KavachBackend.GVISOR);
 }
 else {
-    config_backend(cfg, Backend.PROCESS);
+    config_backend(cfg, KavachBackend.PROCESS);
 }
 
 # Or let kavach pick the strongest available:

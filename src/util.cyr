@@ -57,6 +57,31 @@ fn kv_rmdir(path): i64 {
     #endif
 }
 
+# socket(2) / accept4(2) close-on-exec flag (Linux ABI; the same on x86-64 and aarch64). Here, in
+# the module every build includes first, because both the netlink audit socket (kernel_audit.cyr)
+# and the credential proxy (credential_http.cyr) need it, and the test build includes only the
+# second. The stdlib names SOCK_STREAM but not this.
+enum KavachSockFlag {
+    SOCK_CLOEXEC = 524288;
+}
+
+# kv_mkdir(path, mode) — 3.12.9. ⛔ SAME ARITY, DIFFERENT MEANING, so the compiler cannot catch it:
+# Linux is `sys_mkdir(path, mode)` and agnos is `sys_mkdir(path, pathlen)`. kavach called the Linux
+# form at seven sites that compile for agnos, so there every `sys_mkdir(dir, 448)` asked for a
+# directory whose name is the first 448 bytes at `dir`: the path, its NUL and whatever follows. The
+# one reachable on agnos is the quarantine store. The same class as the opens 3.12.6 fixed.
+#
+# agnos has no permission bits (its `sys_chmod` is a no-op; access is the capability layer's), so
+# the agnos arm has no mode to pass.
+fn kv_mkdir(path, mode): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return sys_mkdir(path, strlen(path));
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    return sys_mkdir(path, mode);
+    #endif
+}
+
 # kv_waitpid(pid, status_out, opts) — portable reap. Returns the pid (>0) or -1.
 #
 # ⛔ THIS IS NOT AN ARITY DIFFERENCE, IT IS A MODEL DIFFERENCE, and treating it as the former would
@@ -116,9 +141,10 @@ fn kv_getgid(): i64 {
 # it exists to catch. agnos's `sys_stat(path, pathlen, statbuf)` FOLLOWS links, so substituting it
 # would turn a security check into its own bypass while every caller still read 0 = "verified ours".
 #
-# ⚠ It would also return the wrong SHAPE: agnos's stat buffer carries no `st_uid`, and the caller
-# reads the owner out of `+24 >> 32` (see the xstat-bridges-the-call-not-the-struct finding). A
-# successful-looking return would hand it a garbage uid to compare against.
+# ⚠ It would also return the wrong SHAPE: agnos's stat buffer carries no `st_uid` (the stdlib
+# defines no `STAT_UID` there), and the caller reads the owner through `STAT_UID` (3.12.8; see the
+# xstat-bridges-the-call-not-the-struct finding). A successful-looking return would hand it a
+# garbage uid to compare against.
 #
 # So agnos answers -1, the caller returns "no usable state root", and the OCI backend — which is
 # Linux-only by construction — stays refused.
@@ -497,13 +523,6 @@ fn file_write_secure_modal(path, buf, len, mode) {
     #endif
     sys_close(fd);
     return n;
-}
-
-# Restrict an existing file to owner-only (best-effort; ignores errors so
-# that failing platforms don't break the exec path — caller still wrote).
-fn file_restrict_mode(path) {
-    sys_chmod(path, 384);
-    return 0;
 }
 
 # ---- random bytes --------------------------------------------------------

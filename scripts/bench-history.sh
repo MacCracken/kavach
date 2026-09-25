@@ -13,6 +13,12 @@
 #   score_backend_process_strict: 42ns avg (min=37ns max=62ns) [500000 iters]
 # We record the avg, normalized to nanoseconds, into the CSV history.
 # Results are appended to benches/bench-history.csv.
+#
+# Pinned to one CPU (3.12.9) with `taskset`, the last CPU unless
+# KAVACH_BENCH_CPU names another. Unpinned, the exec rows were bimodal on a
+# frequency-scaling host: 3.12.7 and 3.12.8 each recorded exec swings of 7-24%
+# that a pinned run of the same builds did not reproduce. A row is still one
+# run; to compare two builds, use scripts/bench-ab.py, which interleaves them.
 
 set -euo pipefail
 
@@ -34,8 +40,16 @@ if [ ! -f "$CSV" ]; then
     echo "label,benchmark,time_ns,time_unit" > "$CSV"
 fi
 
-# Run benchmarks and capture output
-BENCH_OUTPUT=$(cd "$PROJECT_DIR" && cyrius bench "$BENCH_SRC" 2>&1)
+# Run benchmarks and capture output, pinned to one CPU where taskset exists.
+PIN=()
+if command -v taskset >/dev/null 2>&1; then
+    CPU="${KAVACH_BENCH_CPU:-$(( $(nproc) - 1 ))}"
+    PIN=(taskset -c "$CPU")
+    echo "pinned to CPU $CPU"
+else
+    echo "warning: taskset not found; running unpinned (exec rows may be bimodal)" >&2
+fi
+BENCH_OUTPUT=$(cd "$PROJECT_DIR" && "${PIN[@]}" cyrius bench "$BENCH_SRC" 2>&1)
 
 # Parse "  <name>: <avg><unit> avg (...)" lines. Normalize avg to ns.
 COUNT=0

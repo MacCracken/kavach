@@ -179,3 +179,27 @@ which are TODO.
    deferred, it doesn't ship either.
 4. **Rollouts are per-feature**, not per-module. Adding real seccomp support
    is a v3.0 unblock, not a v3.0 rewrite.
+
+## Status update (v3.12.9, 2026-09-25)
+
+This ADR is a record of what v3.0 deferred; it is not rewritten. Each item's
+state, checked against the source at 3.12.9 (the pinned roadmap schedules what
+remains):
+
+| § | Item | State at 3.12.9 |
+|---|---|---|
+| 1 | Async exec | **Still deferred.** Every backend's exec is a synchronous fork + wait. |
+| 2 | 8 remaining backends | **Shipped:** gVisor, Firecracker, OCI, WASM, SGX, SEV, TDX and SyAgnos are all registered (`src/backend_*.cyr`). **Still open** from this item: quote verification for SGX / TDX / SEV. `src/attestation.cyr` stores a report's shape only; sigil 3.12.18 now has the verifiers, and the roadmap pins them to 3.13.x and 3.14.x. |
+| 3 | Seccomp / Landlock / cgroups | **Shipped:** cgroups v2 (3.2.0); seccomp in the exec child (3.9.0; architecture-checked since 3.12.8); Landlock's full filesystem right set (3.11.1). **Not enforced:** Landlock's network rules and scopes (ABI v4 and later), which exist as policy fields only. The jailer's `setresuid` is 3.15.x. |
+| 4 | HTTP credential proxy | **Shipped** as the loopback `GET /v1/secret/<name>` proxy (3.2.0). **Still open:** HTTPS `CONNECT` tunnelling. The mitigation above ("host allowlisting via Landlock TCP port rules … at the policy level") holds only at the policy level: those rules are not applied (row 3). |
+| 5 | OffenderTracker | **Shipped** in the v3.0 closeout (`src/scanning_threat.cyr`). |
+| 6 | Sandbox integrity monitoring | **Shipped** in the v3.0 closeout (`src/scanning_runtime.cyr`, the `/proc` readers). |
+| 7 | Secret redaction on WARN | **Shipped** in the v3.0 closeout (`src/scanning_secrets.cyr`, `[REDACTED:CATEGORY]`). |
+| 8 | UUID v4 IDs | **Shipped** in the v3.0 closeout (`rand_uuid_hex`, `rand_hex_id` in `src/util.cyr`, from `getrandom`). |
+| 9 | Full regex | **Still deferred.** The scanners match literals (the code scanner through Aho-Corasick since 3.4.0) and hand-rolled character classes. |
+
+Two things this ADR does not cover are recorded elsewhere. The stiva OCI runtime
+is not a deferral from the Rust port: the plan to prepend it is in
+`src/backend_oci.cyr`'s header, and the roadmap tracks it as blocked on stiva.
+The aarch64 refusals of namespaces and rootfs entry (3.12.8) are in ADR-007.
+

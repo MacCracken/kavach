@@ -7,6 +7,296 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.12.9] — 2026-09-25
+
+The P(-1) closeout before 3.13 feature work. It fixes a credential-routing defect filed from
+agnosai. It adds a CI gate for the class of bug behind it: a kavach name that another module in
+the build silently takes over. It closes two ways around the seccomp deny list, makes a rootfs
+always enter its own mount namespace, and fixes an agnos `mkdir` that took the mode as a path
+length. It also makes the native aarch64 CI job blocking, pins the benchmarks, and audits the
+docs. A security review of twelve modules found six more defects, all fixed here with tests: a
+heap overflow in OCI spec generation, host fds leaking into persistent guests, netlink audit
+controls reported as applied when the kernel refused them, two symlink-following quarantine
+writes, and a stale flag that let `sandbox_exec` skip the externalization gate. 812 → **879**
+assertions on x86-64; 791 → **850** on aarch64 under qemu.
+
+### Breaking
+
+No first-party consumer (aethersafha, agnosai, mehman, stiva) uses any of these names; each
+migration is a mechanical rename.
+
+- **Renamed:**
+  - `InjectionMethod`'s `ENV_VAR` / `FILE` / `STDIN` → `KAVACH_INJECT_ENV_VAR` / `_FILE` /
+    `_STDIN`;
+  - `AttestationTrust`'s `CONTRAINDICATED` / `WARNING` / `NONE` / `AFFIRMING` → `KAVACH_TRUST_*`;
+  - `syserr_new` / `_pack` / `_kind` / `_errno` / `_message` / `_print` → `kavach_syserr_*`,
+    and `result_print_err` → `kavach_result_print_err`;
+  - `attestation_result_new` → `kavach_attestation_result_new`;
+  - `agnosys_json_emit_cstr_or_null` → `kavach_json_emit_cstr_or_null`;
+  - `struct AuditEntry` → `KavachAuditEntry`, so its accessors are `KavachAuditEntry_*`.
+- **Removed, unused in kavach and in every consumer:** `agnosys_is_hex_char`,
+  `agnosys_is_name_char`, `agnosys_cstr_starts_with`, `agnosys_run_capture`,
+  `agnosys_run_checked` (which exec'd by path), `agnosys_read_fd_to_str`, `is_syscall_err`,
+  `wrap_syscall`, `file_restrict_mode`, and `observability.cyr`'s `SpawnedProcess` with
+  `spawned_process_new`.
+- **The exec-safe seccomp filter denies more.** `clone` with any `CLONE_NEW*` flag and the new
+  mount API are now killed, and `clone3` returns `ENOSYS`. A payload that creates namespaces (a
+  nested container runtime, a user-namespace sandbox) dies under the filter.
+- **`confine_child` with a rootfs creates namespaces even when `want_ns` is 0**, and fails closed
+  (exit 123) where the host has none. Only a direct caller of the exported function sees this;
+  kavach's own paths always passed 1 with a rootfs.
+- **Calls that failed quietly now return errors.** `audit_set_enabled`, `audit_add_rule`,
+  `audit_delete_rule` and `audit_send_event` return the kernel's refusal; unprivileged, that is
+  EPERM. `quarantine_update_status` returns `KAVACH_ERR_IO_ERROR` for a failed write, a symlinked
+  entry, or an unknown id. `quarantine_storage_new` returns 0 for a `base_dir` that is a symlink
+  or not ours.
+
+### Fixed — a stdin secret could be returned as an env var (`InjectionMethod.STDIN`)
+
+Filed from agnosai 2.0.5 on 2026-08-22, open since. cyrius hoists enum members to global names
+under last-definition-wins and is silent when two constants share a name; the enum qualifier is
+cosmetic. The stdlib's `lib/io.cyr` defines `var STDIN = 0`, and kavach's `InjectionMethod` had
+`STDIN = 2` next to `ENV_VAR = 0`. agnosai measured the result in its own dependency set: where
+`io.cyr` came last, `InjectionMethod.STDIN == InjectionMethod.ENV_VAR`. Then:
+
+- `credential_proxy_env_vars` returned each stdin secret as an env pair with a null variable name;
+- `credential_proxy_stdin_payload` picked up every env-var secret as well.
+
+kavach's own unit orders `io.cyr` first, so its tests never saw it.
+
+- **Fix.** The members are `KAVACH_INJECT_*` (ADR-006's crate prefix). `AttestationTrust`
+  went the same way in the same pass: `attestation_is_acceptable` compares its members
+  numerically, so a foreign `WARNING` resolving to 3 would have passed an `AFFIRMING` bar, and
+  dhancha already defines `NONE = 0`.
+- **Test.** `credential_methods_do_not_alias` pins the three values. It asserts that `STDIN` is
+  the stdlib's 0 in kavach's unit, which a re-added bare `STDIN` member fails. It also routes a
+  mixed list of env, stdin and file refs, each exactly once.
+- The issue is archived with its resolution.
+
+### Added — a CI gate for names another module can take over (`scripts/check-symbols.py`)
+
+Fixing these one at a time leaves the next one live, so 3.12.9 gates the class.
+
+- **What it checks.** The gate parses every top-level `fn`, `var`, enum member, and derived struct
+  accessor in kavach's `[lib]` modules and in every `lib/` module (skipping macOS / Windows
+  blocks, which kavach never builds). Enum members get cyrius's implicit numbering.
+- **What fails.** A name kavach defines twice; a `fn` or accessor shared with `lib/`; or a
+  constant shared with `lib/` at a different value.
+- **What is only reported.** The 29 errno constants kavach shares with sigil and the stdlib at
+  equal values. `--tree ..` also lists names shared with sibling first-party bundles, which no
+  single repo's CI sees.
+- **On 3.12.8 it reports exactly 20 violations**, all fixed here:
+  - the internal `SpawnedProcess_pid` / `_set_pid` duplicate, from a dead second struct;
+  - `STDIN = {0, 2}`;
+  - seventeen functions shared with sigil: the `syserr_*` family, `result_print_err`, seven
+    `agnosys_*` helpers, `is_syscall_err`, `wrap_syscall` and `attestation_result_new`.
+- **On 3.12.9 it reports none.** `duplicate fn` warnings in a kavach build go from 149 to 130, and
+  the remaining 130 are all `lib/`-internal (below).
+- **Also renamed:** kavach's `AuditEntry`. stiva, a consumer, defines its own `AuditEntry`, where
+  `timestamp` is field 0 rather than 3, and both generated `AuditEntry_timestamp`. In stiva's
+  binary one accessor served both structs. stiva does not use kavach's audit chain, so it was
+  latent there.
+- Exceptions go in `scripts/symbol-allow.txt`, which is empty.
+
+### Fixed — two ways around the exec-safe deny list
+
+The filter denies `mount` and `unshare` because a payload must not re-namespace itself or mount,
+but two other routes reached the same place.
+
+- **The new mount API.** `open_tree`, `move_mount`, `fsopen`, `fsconfig`, `fsmount`, `fspick`,
+  `mount_setattr` and `open_tree_attr` (428–433, 442, 467; the same on both architectures) are
+  now denied. `fsopen` + `fsconfig` + `fsmount` + `move_mount` builds and attaches a filesystem
+  without `mount(2)`.
+- **`clone` and `clone3`.** `CLONE_NEWUSER | CLONE_NEWNS` in a clone makes a child that can mount
+  in its own namespace. The filter now loads `clone`'s flags and kills on any of the seven
+  `CLONE_NEW*` bits (`0x7E020000`). The exit-signal byte stays out of the mask, so a plain fork
+  passes. `clone3` passes its flags in a struct seccomp cannot read, so it gets `ENOSYS`, not
+  `KILL`: glibc then falls back to `clone`, which the filter tests.
+- **Measured.** A multithreaded Python program (`pthread_create` tries `clone3` first) runs under
+  the filter and exits 0.
+- **Size.** The filter is 40 instructions on x86-64 (27 before) and 38 on aarch64.
+- **Tests.** Four new probes in `seccomp_kills_what_it_denies`:
+  - `clone(CLONE_NEWNS)` dies by SIGSYS, where unfiltered it returns;
+  - `clone3` gets `ENOSYS`, where unfiltered the kernel refuses its empty struct with `EINVAL`;
+  - `fsopen` dies by SIGSYS, where unfiltered it returns;
+  - `clone(SIGCHLD)`, a plain fork, still runs under the filter.
+
+  The shape test reads back every tail instruction. The x86-only i386-gate probe now skips on its
+  own instead of returning early.
+
+### Fixed — a rootfs is always entered inside a mount namespace of its own
+
+`_spawn_enter_rootfs` makes `/` private and then chroots. `confine_child_wd` created namespaces
+only when `want_ns` was set, so a caller passing 0 with a rootfs ran that `mount` in its own mount
+namespace, which as root is the host's. kavach's callers always passed 1 with a rootfs, but the
+function is exported (`dist/kavach-confine.cyr`). Now a rootfs implies its namespaces.
+
+`rootfs_always_gets_a_mount_namespace` runs the sequence in a child with `want_ns = 0` and
+compares `/proc/self/ns/mnt` with the parent's. It ends in a new namespace here, and accepts the
+fail-closed 123/118 on a host without namespaces. Without the fix it exits 119.
+
+### Fixed — agnos: `mkdir` took the mode as a path length
+
+`sys_mkdir` is `(path, mode)` on Linux and `(path, pathlen)` on agnos. The compiler cannot catch
+that: the arity is the same, only the meaning differs. kavach called the Linux form at seven sites
+that compile for agnos. There every `sys_mkdir(dir, 448)` asked for a directory named by the first
+448 bytes at `dir`, and the quarantine store is reachable on agnos. The sites now go through
+`kv_mkdir`, a shim beside `kv_unlink` / `kv_rmdir`.
+
+The sweep compared every `sys_*` call that compiles for agnos with the agnos peer's signature. The
+other mismatches (`sys_unlink`, `sys_rmdir`, `sys_waitpid`) are already the agnos arms of those
+shims.
+
+### Fixed — defects from a security review of twelve modules
+
+The P(-1) audit ran a review over `credential_http`, `quarantine`, `scanning_gate`,
+`sandbox_exec`, `cgroup`, `persistent`, `spawn`, `backend_wasm`, `backend_firecracker`,
+`oci_spec`, `mac` and `kernel_audit`. Each finding was reproduced before it was fixed. Each fix
+has a test that fails without it (a mutant per fix). The HTTP proxy's parsing, allowlist and
+loopback bind, `oci_json_escape`, and `mac.cyr`'s context validation came back clean.
+
+- **Heap overflow in OCI spec generation.** With a rootfs, `oci_generate_spec` writes argv as
+  `"tok",` per token, and the buffer counted the command once with no framing: past about 1000
+  tokens it wrote past `buf`, and the review's 1500-token probe crashed. The token count is now
+  part of the size. A final check refuses the spec if the writes ever reach the capacity: a bump
+  allocator hides such a write, since the bytes land in memory already handed out and the spec
+  still looks right, which is how this one survived. `oci_spec_argv_many_tokens` builds 3000.
+- **Host fds leaked into persistent guests.** `sandbox_spawn` and the confined capture close
+  inherited fds before exec; the persistent guest never did. The credential proxy's listener was
+  also not close-on-exec, and the review found it at fd 3 inside a confined guest, where the guest
+  could accept on it. The persistent child now runs the same sweep (keeping only the pinned exec
+  fd). The listener is created with `SOCK_CLOEXEC` and connections accepted with
+  `accept4(…, SOCK_CLOEXEC)`. `SOCK_CLOEXEC` moved to `util.cyr` so every build has it.
+  `persistent_guest_closes_inherited_fds` plants fd 57 and lists the guest's fds;
+  `credential_http_listener_is_cloexec` reads the flag back.
+- **Netlink audit controls reported success the kernel had refused.** `audit_set_enabled`,
+  `audit_add_rule` / `audit_delete_rule` and `audit_send_event` returned Ok as soon as the request
+  was sent; none read the reply. The kernel answers a refusal with an NLMSG_ERROR regardless, so,
+  unprivileged, enabling auditing or adding a watch failed with EPERM and the caller was told it
+  was in place. They now ask for an ack and return the kernel's answer. Each request has its own
+  sequence number; every request used to be seq 1, so a stale reply looked current.
+  `audit_get_status` read the errno with a zero-extending load: -1 came back as 4294967295. The
+  test suite had never included `kernel_audit.cyr`; `audit_control_reports_kernel_refusal`
+  (unprivileged only: as root it would really change the host) checks all three calls. Under
+  qemu-user the refusal is EINVAL (qemu's netlink translation), and the test accepts any errno.
+- **`quarantine_update_status` followed symlinks and hid failures.** It wrote with
+  `file_write_all`, which creates at 0644 and follows a link, and returned OK whatever happened.
+  A `.meta` symlink truncated and overwrote its target, and a lost approve or reject was reported
+  as recorded. It now opens the existing entry with `O_TRUNC | O_NOFOLLOW` (no `O_CREAT`) and
+  returns `KAVACH_ERR_IO_ERROR` on any failure.
+- **`quarantine_storage_new` chmod'ed through a symlinked `base_dir`.** `chmod` by path followed
+  a pre-planted link to its target, and every entry after it was stored there. It now opens the
+  directory `O_DIRECTORY | O_NOFOLLOW`, checks the owner, `fchmod`s the fd, and returns 0 for
+  anything else.
+- **A stale flag let `sandbox_exec` skip the gate.** The "this result is a diagnostic" flag is
+  process-global. It was set by the diagnostic constructors and cleared only by
+  `backend_capture_finish`, so a backend building its result another way (noop does; a consumer's
+  registered backend may) inherited the previous exec's flag. The review's probe got an RSA private
+  key through unscanned that way; the test reproduces the skip on the noop backend. The flag is now
+  cleared before every dispatch (`backend_diagnostic_reset`).
+- **The cgroup prelude exec'd a bare `sh`.** `execve` does no PATH search, so on a host where
+  kavach creates cgroups every limited payload either ran `./sh` from its working directory or
+  exited 127 without running. It is `/bin/sh` now, pinned like every other exec.
+- **The credential proxy's memory grew with every request.** Each request allocated 8 KiB from an
+  allocator that never frees (the review measured about 8.5 KB a request). One buffer per proxy is
+  reused now, since
+  connections are served one at a time. `credential_http_proxy_serves_over_loopback`, the proxy's
+  first end-to-end test, serves two requests on it (200 with the secret, 403 off the allowlist).
+
+### CI
+
+- **`aarch64 (native)` is blocking.** It ran green on both 3.12.8 runs (CI and the release gate).
+- **Every test job now emits a notice** with its pass count and, where it matters, whether
+  seccomp loaded. Job logs need admin rights; the checks API serves notices without
+  authentication, so a run can be read from outside. A green run had only said that nothing
+  failed.
+- **A symbol-collisions step** runs `scripts/check-symbols.py`.
+- **Actions moved off Node 20**, which runners were forcing onto Node 24 with a deprecation
+  warning: `checkout` v7, `upload-artifact` v7, `download-artifact` v8, and
+  `softprops/action-gh-release` v3. Each major's release notes were checked; nothing here depends
+  on what changed.
+
+### Benchmark tooling
+
+- `scripts/bench-history.sh` runs the benchmarks pinned to one CPU (`taskset`; the last CPU,
+  or `KAVACH_BENCH_CPU`). Unpinned, the exec rows were bimodal, so 3.12.7 and 3.12.8 each needed
+  a separate pinned comparison.
+- `scripts/bench-ab.py <ref-a> <ref-b>` builds two refs, or one ref and the working tree (`.`), in
+  temporary worktrees. It runs them interleaved on one CPU and prints medians, whether the ranges
+  overlap, and the delta. It replaces the ad-hoc scripts used for 3.12.6 to 3.12.8.
+
+### Docs
+
+- **ADR-004** gets a status table checked against the source. Seven of its nine deferrals have
+  shipped; async exec and full regex remain, and so does §2's quote verification (3.13–3.14).
+- **ADR-006** gets an amendment: its §4 overlaps are closed, and gated.
+- **The guides and examples** were checked against the current API. No removed or renamed call
+  remained, but they used `Backend.X`. The enum has been `KavachBackend` since 3.11.15; the old
+  qualifier compiled only because qualifiers are cosmetic.
+- **`overview.md`** has the `KAVACH_INJECT_*` names. Its scoring rows now say when the process
+  backend isolates the network, and that the three Landlock network and scope rows add score for
+  controls nothing applies; the roadmap tracks either applying them or no longer scoring them.
+- **`SECURITY.md`**'s Supported Versions table listed 2.1.x as the active Cyrius line; 1.x and 2.x
+  were the Rust line. It now names 3.12.x, with fixes forward-only.
+- **The roadmap** drops 3.12.9. Its ADR-004 references pointed at the wrong sections. Two
+  decisions go to "Beyond 3.x": the generic public names still shared with sibling bundles, and
+  the Landlock network rules. The aarch64-support record goes to 3.13.x.
+- **CLAUDE.md** gains two DO-NOTs, one for names another module can own and one for `sys_*` calls
+  whose agnos form differs.
+
+### Verified
+
+- fmt 0 drift; lint 0 in `src/` (the test file keeps its 7 pre-existing long lines); `vet` clean;
+  `check --with-deps src/lib.cyr` clean; `scripts/check-symbols.py` ok (1064 names, 61 `lib/`
+  modules).
+- Builds: plain, `CYRIUS_DCE=1`, `--agnos` and `--aarch64`. All four have 0 undefined and no
+  raw-syscall warning. `duplicate fn` names: 149 → **130**; every one kavach owned is gone.
+  - 129 of the 130 are the stdlib's `bayan-json.cyr` against its `bayan.cyr`. samay and
+    ai-hwaccel pull bayan 1.5.7's JSON profile beside the 6.6.6 snapshot's bayan 1.5.6, and one of
+    the doubled functions (`bayan_f64_parse`) differs: 1.5.7's fix for parsing past 19
+    significant digits.
+  - The 1.5.7 copy is defined last and wins. kavach parses no JSON floats. It resolves when the
+    cyrius snapshot carries bayan 1.5.7.
+  - The last is `uname_release`, sigil against the stdlib's `sys.cyr`.
+- Tests **879/879** (x86-64); **850/850** (aarch64) under Ubuntu 24.04's qemu 8.2.2, also with
+  `CYRIUS_DCE=1`, and under 11.1.1. samay **12/12**; fuzz ok.
+- Mutants: 14, each failing at least one assertion without its fix. Eight are for the review's
+  findings (both halves of the fd leak count separately), and six for the filter tail, the mount
+  API, the rootfs namespace, and a re-added bare `STDIN`.
+- `distlib --all --check` fresh; `deps --verify` 75/0; the CI security scan, run under `bash -e`
+  with GNU grep, is clean.
+- Consumers on cyrius 6.6.6, both building clean and running:
+  - a confine-only one, declaring exactly the 18 sidecar leaves: a 40-instruction exec filter, with
+    seccomp available;
+  - one with a real `[deps.kavach]` and the README's 33 leaves, which vendors the 3.12.9 bundle and
+    runs `sandbox_exec`.
+
+### Performance
+
+`bench-history.csv` gains a **3.12.9** row, the first taken pinned to one CPU. The comparison is
+`scripts/bench-ab.py 3.12.8 .`: 5 interleaved rounds per build, pinned.
+
+| bench | 3.12.8 | 3.12.9 | Δ |
+|---|---|---|---|
+| `process_exec_echo` | 2.842 ms | 2.809 ms | −1.2% (ranges overlap) |
+| `process_exec_confined` | 2.785 ms | 2.681 ms | −3.7% (ranges overlap) |
+| `gate_clean_output` | 338.03 µs | 333.90 µs | −1.2% (ranges overlap) |
+| `credential_env_vars_100` | 14.71 µs | 14.35 µs | −2.4% (ranges overlap) |
+| `http_path_extract` | 97 ns | 101 ns | +4.1% (separate) |
+
+- **No measured change from any code this release touched.** The exec filter is 13 instructions
+  longer, and `process_exec_confined` does not show it.
+- **`http_path_extract` is the one row with separate ranges**, and its function
+  (`_http_extract_secret_name`) is unchanged. Other functions in the same file changed size, and
+  this row has moved with code placement since 3.12.6 (marked † there).
+- ⚠ **A first run of the same A/B read `gate_clean_output` +10.8% with separate ranges.** It ran
+  while the security review was building and testing unpinned in the background. Re-run on a quiet
+  host, it is −1.2% with overlapping ranges.
+- ⚠ **Row against row, the CPU-only benchmarks read +2% to +9%** against 3.12.8, whose row was
+  unpinned. The interleaved comparison shows none of that, so the difference is the pinned CPU. The
+  exec rows, bimodal unpinned in 3.12.7 and 3.12.8, are within ±1.6% of the previous row.
+
+
 ## [3.12.8] — 2026-09-25
 
 The ABI repairs pinned ahead of 3.13. The seccomp filter now checks the architecture. Every

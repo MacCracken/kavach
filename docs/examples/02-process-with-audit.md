@@ -15,7 +15,7 @@ fn main() {
     sandbox_exec_set_audit_chain(chain);
 
     var cfg = config_new();
-    config_backend(cfg, Backend.PROCESS);
+    config_backend(cfg, KavachBackend.PROCESS);
     config_policy(cfg, policy_strict());
 
     var sb = sandbox_create(cfg);

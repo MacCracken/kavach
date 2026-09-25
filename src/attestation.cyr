@@ -8,18 +8,26 @@
 
 # Ordering matters: Contraindicated < Warning < None < Affirming
 # (higher = more trusted). Values chosen so direct comparison works.
+#
+# **Prefixed, deliberately (3.12.9).** The members were `CONTRAINDICATED`,
+# `WARNING`, `NONE` and `AFFIRMING`. cyrius hoists enum members to global
+# names under last-definition-wins, and the qualifier is cosmetic, so a
+# dependency defining a bare `WARNING` or `NONE` (dhancha defines `NONE = 0`)
+# could replace these values in a consumer. `attestation_is_acceptable`
+# compares them numerically: a `WARNING` that resolved to 3 would pass an
+# `AFFIRMING` bar.
 enum AttestationTrust {
-    CONTRAINDICATED = 0;
-    WARNING = 1;
-    NONE = 2;
-    AFFIRMING = 3;
+    KAVACH_TRUST_CONTRAINDICATED = 0;
+    KAVACH_TRUST_WARNING = 1;
+    KAVACH_TRUST_NONE = 2;
+    KAVACH_TRUST_AFFIRMING = 3;
 }
 
 fn attestation_trust_name(t) {
-    if (t == AttestationTrust.CONTRAINDICATED) { return "contraindicated"; }
-    if (t == AttestationTrust.WARNING) { return "warning"; }
-    if (t == AttestationTrust.NONE) { return "none"; }
-    if (t == AttestationTrust.AFFIRMING) { return "affirming"; }
+    if (t == KAVACH_TRUST_CONTRAINDICATED) { return "contraindicated"; }
+    if (t == KAVACH_TRUST_WARNING) { return "warning"; }
+    if (t == KAVACH_TRUST_NONE) { return "none"; }
+    if (t == KAVACH_TRUST_AFFIRMING) { return "affirming"; }
     return "unknown";
 }
 
@@ -37,10 +45,12 @@ struct AttestationResult {
     details;
 }
 
-fn attestation_result_new(backend) {
+# Named `kavach_` because sigil defines its own `attestation_result_new`, and
+# under last-definition-wins only one of the two survives in a consumer.
+fn kavach_attestation_result_new(backend) {
     var a = alloc(48);
     AttestationResult_set_backend(a, backend);
-    AttestationResult_set_trust(a, AttestationTrust.NONE);
+    AttestationResult_set_trust(a, KAVACH_TRUST_NONE);
     AttestationResult_set_measurement_hex(a, "");
     AttestationResult_set_signer_hex(a, "");
     AttestationResult_set_svn(a, 0);

@@ -61,7 +61,9 @@ fn sandbox_exec(sandbox, command) {
 
     _audit_record_if(audit, "exec_begin", command);
 
-    # 1. Backend dispatch
+    # 1. Backend dispatch. The diagnostic flag is cleared first, so it can only
+    # describe this dispatch's result (see backend_diagnostic_reset).
+    backend_diagnostic_reset();
     var result = backend_dispatch_exec(sandbox, command);
     if (result == 0) {
         _audit_record_if(audit, "exec_error", "backend dispatch failed");

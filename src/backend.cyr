@@ -177,6 +177,13 @@ var _backend_diag_only = 0;
 #[must_use]
 fn backend_result_is_diagnostic() { return _backend_diag_only; }
 
+# Clear the flag before a dispatch (3.12.9). Only the two diagnostic
+# constructors set it and only `backend_capture_finish` cleared it, so a backend
+# that builds its ExecResult any other way (noop does; a consumer's registered
+# backend may) left the PREVIOUS exec's value in place: after one guard
+# diagnostic, the next exec's real output skipped the gate, secrets and all.
+fn backend_diagnostic_reset() { _backend_diag_only = 0; return 0; }
+
 # Simple failure result: exit 1, no stdout, caller-supplied stderr, zero
 # duration. Replaces the per-backend `_X_error` helpers.
 fn backend_error_result(msg) {

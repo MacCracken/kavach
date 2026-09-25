@@ -80,22 +80,8 @@ fn sandbox_metrics_from_result(result) {
     return m;
 }
 
-# ---- SpawnedProcess ------------------------------------------------------
-# Fire-and-forget handle for long-running workloads. Backends that do not
-# support spawning (noop, wasm per-invocation) return 0 and the caller
-# falls back to exec().
-
-#derive(accessors)
-struct SpawnedProcess {
-    pid;
-    backend;
-    started_at;
-}
-
-fn spawned_process_new(pid, backend) {
-    var s = alloc(24);
-    SpawnedProcess_set_pid(s, pid);
-    SpawnedProcess_set_backend(s, backend);
-    SpawnedProcess_set_started_at(s, clock_epoch_secs());
-    return s;
-}
+# (A second `struct SpawnedProcess` {pid, backend, started_at} and its
+# `spawned_process_new` lived here until 3.12.9. Nothing called them, and the
+# struct shadowed spawn.cyr's real `SpawnedProcess`, the `sandbox_spawn`
+# handle: both generated `SpawnedProcess_pid`, kavach's one internal
+# `duplicate fn`.)

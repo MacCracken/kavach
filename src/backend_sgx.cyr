@@ -113,7 +113,7 @@ fn sgx_exec(sandbox, command) {
     memcpy(workdir, prefix, strlen(prefix));
     memcpy(workdir + strlen(prefix), rid, 16);
     store8(workdir + strlen(prefix) + 16, 0);
-    if (sys_mkdir(workdir, 448) < 0) {
+    if (kv_mkdir(workdir, 448) < 0) {
         return backend_error_result("failed to create SGX workdir");
     }
 

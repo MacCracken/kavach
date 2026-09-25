@@ -28,7 +28,7 @@ jobs:
     name: Build & Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Cyrius toolchain
         # The cyrius.cyml `[package].cyrius` pin is the single source of
@@ -65,6 +65,15 @@ jobs:
           else
             echo "::warning::cyrius.lock not committed — skipping hash verification"
           fi
+
+      - name: Symbol collisions
+        # 3.12.9. cyrius resolves a name defined twice by source order and only
+        # warns when it is a `fn`; a shared `var` or enum member is silent. So
+        # `InjectionMethod.STDIN` (2) became the stdlib's `var STDIN = 0` in a
+        # consumer, and a stdin secret was routed as an env var. This fails on a
+        # kavach name defined twice, a `fn` shared with lib/, or a constant shared
+        # with lib/ at a different value. See the script's header.
+        run: python3 scripts/check-symbols.py
 
       - name: Format check
         # ⚠ The premise this step was built on is false, and it inverted the
@@ -156,7 +165,18 @@ jobs:
           grep -q "kavach v" /tmp/kavach_out || { echo "FAIL: banner missing"; cat /tmp/kavach_out; exit 1; }
 
       - name: Tests
-        run: cyrius test tests/kavach.tcyr
+        # 3.12.9: the summary also goes out as a notice, which the checks API
+        # serves without authentication. Job logs need admin rights, so this is
+        # how a run's count, and whether seccomp actually loaded, can be read.
+        run: |
+          rc=0
+          cyrius test tests/kavach.tcyr > /tmp/kavach_tests.txt 2>&1 || rc=$?
+          cat /tmp/kavach_tests.txt
+          sum=$(grep -E '^[0-9]+ passed' /tmp/kavach_tests.txt | tail -1)
+          sec="seccomp loaded"
+          grep -q "host refuses seccomp" /tmp/kavach_tests.txt && sec="seccomp refused by host"
+          echo "::notice title=tests (x86_64)::${sum:-no summary line} — ${sec}"
+          exit $rc
 
       - name: Benchmarks
         run: cyrius bench tests/kavach.bcyr
@@ -179,7 +199,7 @@ jobs:
     name: aarch64 (cross-build + qemu)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Cyrius toolchain
         # Same step as build-and-test: the cyrius.cyml pin, via the upstream
@@ -220,10 +240,16 @@ jobs:
           grep -q "kavach v" /tmp/kavach_a64_out || { echo "FAIL: banner missing"; cat /tmp/kavach_a64_out; exit 1; }
 
       - name: Tests (aarch64, qemu)
-        run: qemu-aarch64 build/kavach-test-aarch64
+        run: |
+          rc=0
+          qemu-aarch64 build/kavach-test-aarch64 > /tmp/kavach_tests.txt 2>&1 || rc=$?
+          cat /tmp/kavach_tests.txt
+          sum=$(grep -E '^[0-9]+ passed' /tmp/kavach_tests.txt | tail -1)
+          echo "::notice title=tests (aarch64, qemu)::${sum:-no summary line}"
+          exit $rc
 
       - name: Upload the aarch64 test binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: kavach-test-aarch64
           path: build/kavach-test-aarch64
@@ -231,17 +257,16 @@ jobs:
 
   aarch64-native:
     # The same test binary on aarch64 hardware, where seccomp filters load and
-    # the per-arch tables meet a real kernel. Informational until its first
-    # green run (it has never run before 3.12.8): drop `continue-on-error`
-    # then, and aarch64 exec support can be claimed.
-    name: aarch64 (native, informational)
+    # the per-arch tables meet a real kernel. Added at 3.12.8 as informational;
+    # blocking since 3.12.9, after it ran green on both 3.12.8 runs (CI and the
+    # release gate).
+    name: aarch64 (native)
     needs: aarch64
     runs-on: ubuntu-24.04-arm
-    continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: kavach-test-aarch64
           path: build
@@ -249,14 +274,20 @@ jobs:
       - name: Tests (aarch64, native)
         run: |
           chmod +x build/kavach-test-aarch64
-          uname -m
-          build/kavach-test-aarch64
+          rc=0
+          build/kavach-test-aarch64 > /tmp/kavach_tests.txt 2>&1 || rc=$?
+          cat /tmp/kavach_tests.txt
+          sum=$(grep -E '^[0-9]+ passed' /tmp/kavach_tests.txt | tail -1)
+          sec="seccomp loaded"
+          grep -q "host refuses seccomp" /tmp/kavach_tests.txt && sec="seccomp refused by host"
+          echo "::notice title=tests (aarch64, native $(uname -m))::${sum:-no summary line} — ${sec}"
+          exit $rc
 
   security:
     name: Security Scan
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Scan for dangerous patterns
         # Code-only matches (the awk filter drops `#` comment lines).
         # kavach's `backend_process.cyr` execve is the whole point —
@@ -324,7 +355,7 @@ jobs:
     name: Documentation
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Check required docs
         run: |
           MISSING=0

@@ -50,7 +50,7 @@ reflecting both layers, with a +5 bonus for the defense-in-depth stack:
 
 ```cyrius
 # gVisor outer (base 70) + Process inner (base 50), strict policy
-var s = score_composite(Backend.GVISOR, Backend.PROCESS, policy_strict());
+var s = score_composite(KavachBackend.GVISOR, KavachBackend.PROCESS, policy_strict());
 # s ≈ 94 (clamped to 100)
 ```
 
@@ -61,8 +61,8 @@ policy-enforcement layer.
 ## Executing through a composite
 
 ```cyrius
-var outer_backend = Backend.GVISOR;
-var inner_backend = Backend.PROCESS;
+var outer_backend = KavachBackend.GVISOR;
+var inner_backend = KavachBackend.PROCESS;
 var inner_policy = policy_strict();
 
 var cfg = config_new();

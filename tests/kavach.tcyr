@@ -19,6 +19,7 @@ include "src/scanning_gate.cyr"
 include "src/scanning_runtime.cyr"
 include "src/scanning_threat.cyr"
 include "src/audit.cyr"
+include "src/kernel_audit.cyr"
 include "src/credential.cyr"
 include "src/credential_http.cyr"
 include "src/quarantine.cyr"
@@ -796,6 +797,43 @@ fn test_credential_inject_files() {
     return 0;
 }
 
+# 3.12.9: the injection methods were `ENV_VAR` / `FILE` / `STDIN`, and the
+# stdlib's `var STDIN = 0` (lib/io.cyr) could win over kavach's `STDIN = 2` in a
+# consumer, making STDIN equal ENV_VAR. kavach's own unit orders io.cyr first,
+# so the aliasing never showed here; scripts/check-symbols.py is the gate for
+# that class. What this pins: the three values are distinct, `STDIN` is the
+# stdlib's fd 0 again (a kavach member named STDIN would shadow it in this unit
+# and fail the first check), and a mixed list routes each ref exactly once.
+fn test_credential_methods_do_not_alias() {
+    test_group("credential_methods_do_not_alias");
+    assert_eq(STDIN, 0, "STDIN is the stdlib's fd 0, not an injection method");
+    assert_eq(KAVACH_INJECT_ENV_VAR, 0, "env var = 0");
+    assert_eq(KAVACH_INJECT_FILE, 1, "file = 1");
+    assert_eq(KAVACH_INJECT_STDIN, 2, "stdin = 2");
+
+    var p = credential_proxy_new();
+    credential_proxy_register(p, "E", "env-secret");
+    credential_proxy_register(p, "S", "stdin-secret");
+    credential_proxy_register(p, "F", "file-secret");
+    var refs = vec_new();
+    vec_push(refs, secret_ref_stdin("S"));
+    vec_push(refs, secret_ref_env("E", "MY_E"));
+    vec_push(refs, secret_ref_file("F", "/tmp/kavach-never-written", 384));
+
+    var env = credential_proxy_env_vars(p, refs);
+    assert_eq(vec_len(env), 2, "one env pair: the stdin ref is not an env var");
+    assert_eq(streq(vec_get(env, 0), "MY_E"), 1, "its name");
+    assert_eq(streq(vec_get(env, 1), "env-secret"), 1, "its value");
+
+    var s = credential_proxy_stdin_payload(p, refs);
+    assert(s != 0, "a stdin payload");
+    if (s != 0) {
+        assert_eq(streq(s, "stdin-secret"), 1, "only the stdin secret, not the env one");
+    }
+    assert_eq(vec_len(credential_proxy_file_injections(p, refs)), 1, "one file injection");
+    return 0;
+}
+
 fn test_credential_stdin_payload() {
     test_group("credential_stdin_payload");
     var p = credential_proxy_new();
@@ -832,8 +870,8 @@ fn test_audit_chain_linkage() {
     var e1 = audit_chain_record(c, "a", "p1");
     var e2 = audit_chain_record(c, "b", "p2");
     # e2.prev_hmac should equal e1.hmac
-    assert_eq(streq(AuditEntry_prev_hmac(e2), AuditEntry_hmac(e1)), 1, "linked");
-    assert(streq(AuditEntry_hmac(e1), AuditEntry_hmac(e2)) == 0, "distinct hmacs");
+    assert_eq(streq(KavachAuditEntry_prev_hmac(e2), KavachAuditEntry_hmac(e1)), 1, "linked");
+    assert(streq(KavachAuditEntry_hmac(e1), KavachAuditEntry_hmac(e2)) == 0, "distinct hmacs");
     return 0;
 }
 
@@ -1364,21 +1402,21 @@ fn test_sandbox_metrics_from_result() {
 
 fn test_attestation_trust_ordering() {
     test_group("attestation_ordering");
-    assert(AttestationTrust.CONTRAINDICATED < AttestationTrust.WARNING, "c<w");
-    assert(AttestationTrust.WARNING < AttestationTrust.NONE, "w<n");
-    assert(AttestationTrust.NONE < AttestationTrust.AFFIRMING, "n<a");
+    assert(KAVACH_TRUST_CONTRAINDICATED < KAVACH_TRUST_WARNING, "c<w");
+    assert(KAVACH_TRUST_WARNING < KAVACH_TRUST_NONE, "w<n");
+    assert(KAVACH_TRUST_NONE < KAVACH_TRUST_AFFIRMING, "n<a");
     return 0;
 }
 
 fn test_attestation_acceptable() {
     test_group("attestation_acceptable");
-    var r = attestation_result_new(KavachBackend.SGX);
-    AttestationResult_set_trust(r, AttestationTrust.AFFIRMING);
-    assert_eq(attestation_is_acceptable(r, AttestationTrust.NONE), 1, "affirming passes NONE bar");
-    assert_eq(attestation_is_acceptable(r, AttestationTrust.AFFIRMING), 1, "affirming passes AFFIRMING bar");
+    var r = kavach_attestation_result_new(KavachBackend.SGX);
+    AttestationResult_set_trust(r, KAVACH_TRUST_AFFIRMING);
+    assert_eq(attestation_is_acceptable(r, KAVACH_TRUST_NONE), 1, "affirming passes NONE bar");
+    assert_eq(attestation_is_acceptable(r, KAVACH_TRUST_AFFIRMING), 1, "affirming passes AFFIRMING bar");
 
-    AttestationResult_set_trust(r, AttestationTrust.WARNING);
-    assert_eq(attestation_is_acceptable(r, AttestationTrust.NONE), 0, "warning fails NONE bar");
+    AttestationResult_set_trust(r, KAVACH_TRUST_WARNING);
+    assert_eq(attestation_is_acceptable(r, KAVACH_TRUST_NONE), 0, "warning fails NONE bar");
     return 0;
 }
 
@@ -1446,7 +1484,7 @@ fn test_audit_entry_verify() {
     assert_eq(audit_entry_verify(e, "wrong", 5), 0, "wrong key fails");
 
     # Tamper the payload in place; verification must fail with original key.
-    AuditEntry_set_payload(e, "tampered payload");
+    KavachAuditEntry_set_payload(e, "tampered payload");
     assert_eq(audit_entry_verify(e, "mykey", 5), 0, "tamper detected");
     return 0;
 }
@@ -1547,6 +1585,84 @@ fn test_sandbox_exec_not_running_rejected() {
     return 0;
 }
 
+# 3.12.9: `quarantine_update_status` wrote with `file_write_all`, which follows a
+# symlink and creates at 0644, and returned OK whatever happened. A `.meta` link
+# now fails the update and leaves the link's target alone; a real entry updates.
+fn test_quarantine_update_refuses_a_symlinked_entry() {
+    test_group("quarantine_update_refuses_a_symlinked_entry");
+    var base = _t_unique_tmp_path("/tmp/kavach-t-qupd-");
+    var q = quarantine_storage_new(base);
+    assert(q != 0, "a store");
+    if (q == 0) { return 0; }
+    var sr = scan_result_new();
+    ScanResult_set_verdict(sr, ScanVerdict.BLOCK);
+    var id = quarantine_store(q, "blocked", 7, sr, "sb-u");
+    assert_eq(quarantine_update_status(q, id, 1), KAVACH_ERR_OK, "a real entry updates");
+
+    var victim = _t_unique_tmp_path("/tmp/kavach-t-qvictim-");
+    file_write_all(victim, "keep", 4);
+    var meta = _qpath(base, id, "meta");
+    kv_unlink(meta);
+    sys_symlink(victim, meta);
+    assert(quarantine_update_status(q, id, 2) != KAVACH_ERR_OK, "a symlinked .meta is refused");
+    var n = 0;
+    var back = file_read_whole(victim, &n);
+    assert(n == 4 && streq(back, "keep") == 1, "and the link's target is untouched");
+    assert(quarantine_update_status(q, 424242, 2) != KAVACH_ERR_OK, "an unknown id is an error, not a new file");
+    kv_unlink(meta);
+    kv_unlink(victim);
+    return 0;
+}
+
+# 3.12.9: `quarantine_storage_new` chmod'ed its base_dir by PATH, following a
+# pre-planted symlink to the target, and then stored every entry there. A link
+# is now refused (no store), and the target's mode is left alone.
+fn test_quarantine_refuses_a_symlinked_base_dir() {
+    test_group("quarantine_refuses_a_symlinked_base_dir");
+    var target = _t_unique_tmp_path("/tmp/kavach-t-qtarget-");
+    kv_mkdir(target, 493);                                 # 0755
+    var link = _t_unique_tmp_path("/tmp/kavach-t-qlink-");
+    sys_symlink(target, link);
+    assert_eq(quarantine_storage_new(link), 0, "a symlinked base_dir is refused");
+    var sb[144];
+    if (kv_lstat(target, &sb) == 0) {
+        assert_eq(load32(&sb + STAT_MODE) & 511, 493, "and the link's target keeps its mode");
+    }
+    kv_unlink(link);
+    kv_rmdir(target);
+    return 0;
+}
+
+# 3.12.9: the persistent guest never closed what it inherited. Hold an fd open
+# (not close-on-exec) at a distinctive number, and list the guest's fds.
+fn test_persistent_guest_closes_inherited_fds() {
+    test_group("persistent_guest_closes_inherited_fds");
+    var fd = file_open("/dev/null", O_RDONLY, 0);
+    assert(fd >= 0, "an fd to leak");
+    if (fd < 0) { return 0; }
+    kv_dup2(fd, 57);
+    sys_close(fd);
+    var g = persistent_spawn("/bin/ls /proc/self/fd");
+    assert(g != 0, "a guest");
+    if (g == 0) { sys_close(57); return 0; }
+    sys_close(PersistentGuest_stdin_fd(g));
+    var buf = alloc(4096);
+    var total = 0;
+    var r = persistent_read(g, buf, 4095);
+    while (r > 0 && total < 4095) {
+        total = total + r;
+        r = persistent_read(g, buf + total, 4095 - total);
+    }
+    store8(buf + total, 0);
+    var st[8];
+    store64(&st, 0);
+    kv_waitpid(PersistentGuest_pid(g), &st, 0);
+    sys_close(57);
+    assert(cstr_contains(buf, "0\n") == 1, "the guest listed its fds");
+    assert(cstr_contains(buf, "57\n") == 0, "and fd 57 was not among them");
+    return 0;
+}
+
 fn test_quarantine_store() {
     test_group("quarantine_store");
     var q = quarantine_storage_new("/tmp/kavach-test-quar");
@@ -1591,6 +1707,42 @@ fn test_gvisor_json_escape() {
     assert_eq(streq(out, "a\\\"b\\\\c"), 1, "quote+backslash escaped");
     var plain = oci_json_escape("hello world");
     assert_eq(streq(plain, "hello world"), 1, "clean text unchanged");
+    return 0;
+}
+
+# 3.12.9: with a rootfs the spec writes real argv, `"tok",` per token, and the
+# buffer had not counted that framing: 1500 one-character tokens wrote past it
+# and crashed. The spec must come back whole, with every token in it.
+fn test_oci_spec_argv_many_tokens() {
+    test_group("oci_spec_argv_many_tokens");
+    var cfg = config_new();
+    config_backend(cfg, KavachBackend.OCI);
+    config_rootfs(cfg, "/r");
+    var sb = alloc(SANDBOX_SIZE);
+    Sandbox_set_config(sb, cfg);
+    var n = 3000;
+    var cmd = alloc(n * 2 + 1);
+    var i = 0;
+    while (i < n) {
+        store8(cmd + i * 2, 97);                       # 'a'
+        store8(cmd + i * 2 + 1, 32);                   # ' '
+        i = i + 1;
+    }
+    store8(cmd + n * 2 - 1, 0);
+    var spec = oci_generate_spec(sb, cmd);
+    assert(spec != 0, "a spec for 3000 argv tokens");
+    if (spec == 0) { return 0; }
+    var quoted = 0;
+    var j = 0;
+    var len = strlen(spec);
+    while (j + 2 < len) {
+        if (load8(spec + j) == 34 && load8(spec + j + 1) == 97 && load8(spec + j + 2) == 34) {
+            quoted = quoted + 1;
+        }
+        j = j + 1;
+    }
+    assert_eq(quoted, n, "every token is in the args array");
+    assert(cstr_contains(spec, "\"a\"]") == 1, "and the array is closed after the last one");
     return 0;
 }
 
@@ -2409,6 +2561,58 @@ fn test_process_backend_rejects_bash() {
     return 0;
 }
 
+# 3.12.9: a diagnostic result set a process-global flag that only the capture
+# path cleared, so a backend building its ExecResult directly (noop does; a
+# consumer's registered backend may) inherited the previous exec's flag and
+# skipped the gate. Leave the flag set, then exec on noop: the gate must run.
+fn test_gate_not_skipped_by_a_stale_diagnostic() {
+    test_group("gate_not_skipped_by_a_stale_diagnostic");
+    kavach_init();
+    sandbox_exec_set_audit_chain(0);
+    var cfg = config_new();
+    config_backend(cfg, KavachBackend.NOOP);
+    var sb = sandbox_create(cfg);
+    sandbox_transition(sb, SandboxState.RUNNING);
+    backend_error_result("an earlier exec's diagnostic");
+    assert_eq(backend_result_is_diagnostic(), 1, "the flag is left set");
+    var r = sandbox_exec(sb, "echo hi");
+    assert(r != 0, "exec returned a result");
+    assert_eq(backend_result_is_diagnostic(), 0, "cleared for this dispatch");
+    assert(sandbox_exec_last_scan_result() != 0, "and the gate scanned the output");
+    return 0;
+}
+
+# 3.12.9: the netlink audit control calls returned Ok as soon as the request was
+# SENT; none read the kernel's reply. Unprivileged, the kernel refuses these
+# with EPERM, which was queued and never read. Not run as root: it would really
+# turn on auditing and add a rule on this host.
+fn test_audit_control_reports_kernel_refusal() {
+    test_group("audit_control_reports_kernel_refusal");
+    if (sys_getuid() == 0) {
+        assert_eq(1, 1, "root: would change this host's audit state — not run");
+        return 0;
+    }
+    var h_t, h_v = audit_open(audit_config_new());
+    if (is_ok(h_t) == 0) {
+        assert_eq(1, 1, "no NETLINK_AUDIT socket on this host — not exercisable");
+        return 0;
+    }
+    var r_t, r_v = audit_set_enabled(h_v, 1);
+    assert_eq(is_ok(r_t), 0, "an unprivileged AUDIT_SET is refused, not reported as done");
+    if (is_ok(r_t) == 0) {
+        # EPERM on a kernel; qemu-user's netlink translation answers EINVAL. What
+        # this checks is the signed read: it used to come back as -4294967295.
+        var e = kavach_syserr_errno(r_v);
+        assert(e >= 1 && e < 4096, "... with the kernel's errno, read as a signed value");
+    }
+    var a_t, a_v = audit_add_rule(h_v, audit_rule_file_watch("/etc/passwd", "kavach-t"));
+    assert_eq(is_ok(a_t), 0, "an unprivileged watch rule is refused");
+    var e_t, e_v = audit_send_event(h_v, "KAVACH_TEST", "probe");
+    assert_eq(is_ok(e_t), 0, "an unprivileged AUDIT_USER event is refused");
+    audit_close(h_v);
+    return 0;
+}
+
 fn test_end_to_end_with_audit() {
     test_group("end_to_end_audit");
     kavach_init();
@@ -2628,9 +2832,14 @@ fn test_cgroup_wrap_argv_shape() {
     vec_push(user_args, "ls");
     vec_push(user_args, "/tmp");
     var wrapped = cgroup_wrap_argv("/sys/fs/cgroup/kavach-42", user_args);
-    # Expected: ["sh", "-c", "echo $$ > .../cgroup.procs; exec \"$@\"", "--", "ls", "/tmp"]
+    # Expected: ["/bin/sh", "-c", "echo $$ > .../cgroup.procs; exec \"$@\"", "--", "ls", "/tmp"]
     assert_eq(vec_len(wrapped), 6, "6 args in wrapped argv");
-    assert_eq(streq(vec_get(wrapped, 0), "sh"), 1, "argv[0] = sh");
+    assert_eq(streq(vec_get(wrapped, 0), "/bin/sh"), 1, "argv[0] = /bin/sh, absolute (3.12.9)");
+    # A bare "sh" went to execve with no PATH search, so it ran ./sh from the
+    # child's cwd or failed with 127. Absolute, it pins like any other exec.
+    var pin = kv_exec_pin(vec_get(wrapped, 0));
+    assert(pin >= 0, "and it pins");
+    if (pin >= 0) { sys_close(pin); }
     assert_eq(streq(vec_get(wrapped, 1), "-c"), 1, "argv[1] = -c");
     assert_eq(streq(vec_get(wrapped, 3), "--"), 1, "argv[3] = --");
     assert_eq(streq(vec_get(wrapped, 4), "ls"), 1, "argv[4] = ls (user)");
@@ -2677,6 +2886,96 @@ fn test_credential_http_proxy_new_shape() {
     assert_eq(CredentialHttpProxy_listen_fd(http), 0 - 1, "listen_fd starts at -1");
     assert_eq(CredentialHttpProxy_request_count(http), 0, "request_count = 0");
     assert_eq(CredentialHttpProxy_proxy_ref(http), proxy, "proxy_ref wired");
+    return 0;
+}
+
+# One GET to 127.0.0.1:port from a forked child; the child exits 0 when the reply
+# holds `want_status` and, if given, `want_body`, else 1 (2 if it cannot connect).
+fn _t_http_get_child(port, path, want_status, want_body) {
+    var pid = kv_fork();
+    if (pid != 0) { return pid; }
+    var s_t, s_v = tcp_socket();
+    if (is_err_result(s_t) == 1) { sys_exit(2); }
+    var c_t, c_v = sock_connect(s_v, INADDR_LOOPBACK(), port);
+    if (is_err_result(c_t) == 1) { sys_exit(2); }
+    var req = str_builder_new();
+    str_builder_add_cstr(req, "GET ");
+    str_builder_add_cstr(req, path);
+    str_builder_add_cstr(req, " HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    var r = str_builder_build(req);
+    sock_send(s_v, str_data(r), str_len(r));
+    var buf = alloc(4096);
+    var total = 0;
+    var go = 1;
+    while (go == 1 && total < 4095) {
+        var g_t, g_v = sock_recv(s_v, buf + total, 4095 - total);
+        if (is_err_result(g_t) == 1) { go = 0; }
+        elif (g_v <= 0) { go = 0; }
+        else { total = total + g_v; }
+    }
+    store8(buf + total, 0);
+    if (cstr_contains(buf, want_status) == 0) { sys_exit(1); }
+    if (want_body != 0) {
+        if (cstr_contains(buf, want_body) == 0) { sys_exit(1); }
+    }
+    sys_exit(0);
+    return 0;
+}
+
+# The proxy end to end over loopback, two requests on one proxy (3.12.9, when
+# its request buffer became one per proxy, reused): an allowed name gets the
+# secret, a name off the allowlist gets 403.
+fn test_credential_http_proxy_serves_over_loopback() {
+    test_group("credential_http_proxy_serves_over_loopback");
+    var proxy = credential_proxy_new();
+    credential_proxy_register(proxy, "API_KEY", "sk-loopback-123");
+    credential_proxy_register(proxy, "OTHER", "not-for-you");
+    var allowed = vec_new();
+    vec_push(allowed, "API_KEY");
+    var http = credential_http_proxy_new(proxy, allowed, 0);
+    if (credential_http_proxy_listen(http, 0) != 0) {
+        assert_eq(1, 1, "no loopback listener on this host — not exercisable");
+        return 0;
+    }
+    # Port 0 lets the kernel pick; read it back (sockaddr_in port, big-endian).
+    var sa[16];
+    var salen[8];
+    store64(&salen, 16);
+    sys_getsockname(CredentialHttpProxy_listen_fd(http), &sa, &salen);
+    var port = (load8(&sa + 2) << 8) | load8(&sa + 3);
+    assert(port > 0, "a port");
+
+    var c1 = _t_http_get_child(port, "/v1/secret/API_KEY", "200", "sk-loopback-123");
+    assert_eq(credential_http_proxy_serve_one(http), 1, "first request served");
+    var st[8];
+    store64(&st, 0);
+    kv_waitpid(c1, &st, 0);
+    assert_eq(load32(&st) & 65535, 0, "an allowed name gets 200 and its secret");
+
+    var c2 = _t_http_get_child(port, "/v1/secret/OTHER", "403", 0);
+    assert_eq(credential_http_proxy_serve_one(http), 1, "second request served, same buffer");
+    store64(&st, 0);
+    kv_waitpid(c2, &st, 0);
+    assert_eq(load32(&st) & 65535, 0, "a name off the allowlist gets 403");
+    credential_http_proxy_close(http);
+    return 0;
+}
+
+# 3.12.9: the listener was created without close-on-exec, so every child kavach
+# exec'd while the proxy was up inherited it. F_GETFD (1) reports FD_CLOEXEC (1).
+fn test_credential_http_listener_is_cloexec() {
+    test_group("credential_http_listener_is_cloexec");
+    var http = credential_http_proxy_new(credential_proxy_new(), vec_new(), 0);
+    if (credential_http_proxy_listen(http, 0) != 0) {
+        assert_eq(1, 1, "no loopback listener on this host — not exercisable");
+        return 0;
+    }
+    var fd = CredentialHttpProxy_listen_fd(http);
+    # SAFETY: fcntl(fd, F_GETFD) on the fd just opened; reads its flags only.
+    var flags = syscall(SYS_FCNTL, fd, 1, 0);
+    assert(flags >= 0, "F_GETFD answered");
+    assert_eq(flags & 1, 1, "the listener is close-on-exec");
+    credential_http_proxy_close(http);
     return 0;
 }
 
@@ -3055,16 +3354,19 @@ fn test_exec_seccomp_filter_shape() {
     assert(len % 8 == 0, "filter is a whole number of BPF insns");
     var deny = _seccomp_deny_list();
     var n_deny = vec_len(deny);
-    assert_eq(n_deny, _t_nr(20, 19), "20 denied calls on x86-64, 19 on aarch64 (no sysfs)");
+    assert_eq(n_deny, _t_nr(28, 27),
+      "28 denied calls on x86-64, 27 on aarch64 (no sysfs), with the new mount API");
     var p = _t_nr(5, 4);
-    assert_eq(len / 8, p + n_deny + 2,
-      "arch check + one JEQ per denied call + RET ALLOW + RET KILL");
+    assert_eq(len / 8, p + n_deny + 7,
+      "arch check + one JEQ per denied call + the clone tail (4) + ALLOW, ERRNO, KILL");
 
     # Every denied syscall must appear as a JEQ's k operand, and each JEQ must
     # jump to the LAST instruction (the KILL). An off-by-one in that jump would
-    # silently send a denied syscall to ALLOW.
+    # silently send a denied syscall to ALLOW, or to the ERRNO just before it.
     var ptr = security_seccomp_filter_ptr(info);
-    var kill_idx = p + n_deny + 1;
+    var allow_idx = p + n_deny + 4;
+    var errno_idx = p + n_deny + 5;
+    var kill_idx = p + n_deny + 6;
     _t_check_seccomp_prologue(ptr, kill_idx);
     var i = 0;
     var ok_jumps = 1;
@@ -3074,11 +3376,31 @@ fn test_exec_seccomp_filter_shape() {
         if (_t_insn_k(ptr, at) != vec_get(deny, i)) { ok_jumps = 0; }
         # from index at, skipping jt lands on at+1+jt; that must be kill_idx.
         if (at + 1 + _t_insn_jt(ptr, at) != kill_idx) { ok_jumps = 0; }
+        if (_t_insn_jf(ptr, at) != 0) { ok_jumps = 0; }
         i = i + 1;
     }
     assert_eq(ok_jumps, 1, "every denied syscall JEQs to the KILL instruction");
-    assert_eq(_t_insn_k(ptr, p + n_deny), 2147418112, "falling through every JEQ is ALLOW");
-    assert_eq(_t_insn_k(ptr, kill_idx), 2147483648, "the jump target is KILL_PROCESS");
+
+    # The clone tail (3.12.9). clone3 gets ENOSYS; clone is tested on its flags.
+    var t = p + n_deny;
+    assert_eq(_t_insn_code(ptr, t), 21, "clone3: JEQ");
+    assert_eq(_t_insn_k(ptr, t), 435, "... on clone3 (435 on both)");
+    assert_eq(t + 1 + _t_insn_jt(ptr, t), errno_idx, "... to the ERRNO");
+    assert_eq(_t_insn_code(ptr, t + 1), 21, "clone: JEQ");
+    assert_eq(_t_insn_k(ptr, t + 1), _t_nr(56, 220), "... on clone (x86-64 56 / aarch64 220)");
+    assert_eq(_t_insn_jt(ptr, t + 1), 0, "... a match goes on to its flags");
+    assert_eq(t + 2 + _t_insn_jf(ptr, t + 1), allow_idx, "... anything else is ALLOW");
+    assert_eq(_t_insn_code(ptr, t + 2), 32, "LD");
+    assert_eq(_t_insn_k(ptr, t + 2), 16, "... of args[0], clone's flags");
+    assert_eq(_t_insn_code(ptr, t + 3), 69, "JSET");
+    # NEWNS | NEWCGROUP | NEWUTS | NEWIPC | NEWUSER | NEWPID | NEWNET; never the
+    # low byte, which is clone's exit signal (SIGCHLD for a fork).
+    assert_eq(_t_insn_k(ptr, t + 3), 2114060288, "... on every CLONE_NEW* flag (0x7E020000)");
+    assert_eq(t + 4 + _t_insn_jt(ptr, t + 3), kill_idx, "... a namespace flag is KILL");
+    assert_eq(t + 4 + _t_insn_jf(ptr, t + 3), allow_idx, "... a plain clone is ALLOW");
+    assert_eq(_t_insn_k(ptr, allow_idx), 2147418112, "RET ALLOW");
+    assert_eq(_t_insn_k(ptr, errno_idx), 327718, "RET ERRNO | ENOSYS (0x00050026)");
+    assert_eq(_t_insn_k(ptr, kill_idx), 2147483648, "RET KILL_PROCESS");
 
     # The numbers are this architecture's own. Through 3.12.7 the table was
     # x86-64's on every arch, and on aarch64 it denied nanosleep (101) while
@@ -3086,6 +3408,8 @@ fn test_exec_seccomp_filter_shape() {
     assert_eq(_t_vec_has(deny, _t_nr(165, 40)), 1, "mount is denied (x86-64 165 / aarch64 40)");
     assert_eq(_t_vec_has(deny, _t_nr(101, 117)), 1, "ptrace is denied (x86-64 101 / aarch64 117)");
     assert_eq(_t_vec_has(deny, _t_nr(272, 97)), 1, "unshare is denied (x86-64 272 / aarch64 97)");
+    assert_eq(_t_vec_has(deny, 430), 1, "fsopen is denied (430 on both)");
+    assert_eq(_t_vec_has(deny, 442), 1, "mount_setattr is denied (442 on both)");
     assert_eq(_t_vec_has(deny, _t_nr(35, 101)), 0, "nanosleep is not (x86-64 35 / aarch64 101)");
     return 0;
 }
@@ -3131,9 +3455,15 @@ fn test_basic_seccomp_filter_shape() {
 #   1  umount2 by the stdlib's name — a denied call in the native ABI
 #   2  getpid as an x32 call (x86-64: nr 39 with bit 30 set)
 #   3  getpid through the i386 gate (x86-64: `int 0x80`, i386 nr 20)
-# Unfiltered, each returns (an error or a pid) and the child exits 0. Filtered,
-# each must be SECCOMP_RET_KILL_PROCESS: death by SIGSYS. The core limit is
-# zeroed first so an expected kill does not leave a core dump behind.
+#   4  clone(CLONE_NEWNS | SIGCHLD) — a namespace through clone (3.12.9)
+#   5  clone3(NULL, 0) — exits with the errno it got back (3.12.9)
+#   6  fsopen("tmpfs", 0) — the new mount API (3.12.9)
+#   7  clone(SIGCHLD), a plain fork, which the filter must still allow
+# Unfiltered, each returns (an error, a pid, or a child that exits at once) and
+# the child exits 0, or with way 5's errno. Filtered, ways 1-4 and 6 must be
+# SECCOMP_RET_KILL_PROCESS: death by SIGSYS. Way 5 must return ENOSYS, and way 7
+# must run. The core limit is zeroed first so an expected kill does not leave a
+# core dump behind.
 fn _t_seccomp_probe(way, filtered, info) {
     var pid = kv_fork();
     if (pid == 0) {
@@ -3151,6 +3481,32 @@ fn _t_seccomp_probe(way, filtered, info) {
         if (way == 2) { syscall(1073741863); }
         if (way == 3) { _t_int80_getpid(); }
         #endif
+        if (way == 4 || way == 7) {
+            var flags = SIGCHLD;
+            if (way == 4) { flags = flags | CLONE_NEWNS; }
+            # SAFETY: clone with no new stack is fork: the child returns 0 on a
+            # copy of this stack and leaves at once. Unprivileged, NEWNS fails
+            # with EPERM and makes no child.
+            var c = syscall(SYS_CLONE, flags, 0, 0, 0, 0);
+            if (c == 0) { sys_exit(0); }
+            if (c > 0) {
+                var cst[8];
+                store64(&cst, 0);
+                kv_waitpid(c, &cst, 0);
+            }
+        }
+        if (way == 5) {
+            # SAFETY: clone3 with no argument struct; the kernel rejects a
+            # size of 0 (EINVAL) before reading anything. 435 on both arches.
+            var e = syscall(435, 0, 0);
+            if (e < 0) { sys_exit((0 - e) & 255); }
+            sys_exit(0);
+        }
+        if (way == 6) {
+            # SAFETY: fsopen(name, flags) only reads the name; 430 on both
+            # arches. Unprivileged it fails with EPERM.
+            syscall(430, "tmpfs", 0);
+        }
         sys_exit(0);
     }
     var st[8];
@@ -3202,11 +3558,32 @@ fn test_seccomp_kills_what_it_denies() {
     ctl = _t_seccomp_probe(3, 0, info);
     if ((ctl & 127) != 0) {
         assert_eq(1, 1, "no IA32 emulation on this kernel — the i386 gate is not exercisable");
-        return 0;
     }
-    st = _t_seccomp_probe(3, 1, info);
-    assert_eq(st & 127, 31, "filtered, an i386 int 0x80 call dies by SIGSYS (the arch is checked)");
+    if ((ctl & 127) == 0) {
+        st = _t_seccomp_probe(3, 1, info);
+        assert_eq(st & 127, 31, "filtered, an i386 int 0x80 call dies by SIGSYS (the arch is checked)");
+    }
     #endif
+
+    # 3.12.9: the doors around the mount and unshare entries.
+    ctl = _t_seccomp_probe(4, 0, info);
+    assert_eq(ctl & 127, 0, "unfiltered, clone(CLONE_NEWNS) returns (EPERM, or a child as root)");
+    st = _t_seccomp_probe(4, 1, info);
+    assert_eq(st & 127, 31, "filtered, clone with a namespace flag dies by SIGSYS");
+
+    ctl = _t_seccomp_probe(5, 0, info);
+    assert(((ctl >> 8) & 255) != 38, "unfiltered, clone3(NULL, 0) is refused by the kernel, not ENOSYS");
+    st = _t_seccomp_probe(5, 1, info);
+    assert_eq(st & 127, 0, "filtered, clone3 is not killed");
+    assert_eq((st >> 8) & 255, 38, "... it gets ENOSYS, so glibc falls back to clone");
+
+    ctl = _t_seccomp_probe(6, 0, info);
+    assert_eq(ctl & 127, 0, "unfiltered, fsopen returns (EPERM unprivileged)");
+    st = _t_seccomp_probe(6, 1, info);
+    assert_eq(st & 127, 31, "filtered, fsopen (the new mount API) dies by SIGSYS");
+
+    st = _t_seccomp_probe(7, 1, info);
+    assert_eq(st & 65535, 0, "filtered, a plain clone(SIGCHLD) fork still runs and exits 0");
     return 0;
 }
 
@@ -3358,6 +3735,55 @@ fn test_ns_flags_for_rootfs() {
     }
     # No rootfs and networking allowed -> nothing to unshare.
     assert_eq(_spawn_ns_flags(p, 0), 0, "no rootfs, network allowed -> no namespaces");
+    return 0;
+}
+
+# The mount namespace a process is in, as `readlink /proc/self/ns/mnt`
+# ("mnt:[4026531841]"), into `buf`. Returns the length, or -1.
+fn _t_mnt_ns(buf, cap) {
+    var n = sys_readlink("/proc/self/ns/mnt", buf, cap - 1);
+    if (n < 0) { return 0 - 1; }
+    store8(buf + n, 0);
+    return n;
+}
+
+# 3.12.9: `confine_child_wd` enters a rootfs only inside a mount namespace of
+# its own, even when the caller passes want_ns = 0. With no namespace, its
+# `mount(/, MS_REC|MS_PRIVATE)` lands in the caller's mount namespace, which as
+# root is the host's. Measured in a child: with rootfs "/" the sequence has to
+# end in a different mount namespace from the parent's (exit 0), or refuse on a
+# host without namespaces (123, or 118 for the id maps). Before the fix it ran
+# with no namespace: unprivileged the private mount was refused (119); as root
+# it would have succeeded in the host's namespace (exit 1 here).
+fn test_rootfs_always_gets_a_mount_namespace() {
+    test_group("rootfs_always_gets_a_mount_namespace");
+    var parent_ns[64];
+    if (_t_mnt_ns(&parent_ns, 64) < 0) {
+        assert_eq(1, 1, "no /proc/self/ns/mnt here — not measurable");
+        return 0;
+    }
+    var uid = sys_getuid();
+    var gid = kv_getgid();
+    var pid = kv_fork();
+    if (pid == 0) {
+        confine_child_wd(0, "/", 0, uid, gid, 0, 0, 0);     # want_ns = 0
+        var child_ns[64];
+        if (_t_mnt_ns(&child_ns, 64) < 0) { sys_exit(2); }
+        if (streq(&child_ns, &parent_ns) == 1) { sys_exit(1); }
+        sys_exit(0);
+    }
+    var st[8];
+    store64(&st, 0);
+    kv_waitpid(pid, &st, 0);
+    var code = (load32(&st) >> 8) & 255;
+    assert(code != 1, "never the caller's mount namespace");
+    assert(code != 119, "the private mount was not refused for want of a namespace");
+    if (spawn_namespaces_available(_spawn_ns_flags(0, "/")) == 1) {
+        assert_eq(code, 0, "entered inside a mount namespace of its own");
+    }
+    if (spawn_namespaces_available(_spawn_ns_flags(0, "/")) == 0) {
+        assert(code == 123 || code == 118, "or refused: no namespaces on this host");
+    }
     return 0;
 }
 
@@ -4419,11 +4845,14 @@ fn main() {
     test_credential_file_injections();
     test_credential_inject_files();
     test_credential_stdin_payload();
+    test_credential_methods_do_not_alias();
     test_cgroup_policy_has_limits();
     test_cgroup_wrap_argv_shape();
     test_cgroup_supported_graceful();
     test_cgroup_setup_graceful_when_unsupported();
     test_credential_http_proxy_new_shape();
+    test_credential_http_listener_is_cloexec();
+    test_credential_http_proxy_serves_over_loopback();
     test_credential_http_allowlist_check();
     test_credential_http_path_extract();
     test_credential_http_listen_close();
@@ -4434,7 +4863,12 @@ fn main() {
     test_sandbox_exec_noop();
     test_sandbox_exec_not_running_rejected();
     test_end_to_end_with_audit();
+    test_gate_not_skipped_by_a_stale_diagnostic();
+    test_audit_control_reports_kernel_refusal();
     test_quarantine_store();
+    test_quarantine_update_refuses_a_symlinked_entry();
+    test_quarantine_refuses_a_symlinked_base_dir();
+    test_persistent_guest_closes_inherited_fds();
     test_quarantine_status_names();
     test_process_backend_real_exec();
     test_process_backend_rejects_bash();
@@ -4442,6 +4876,7 @@ fn main() {
     test_gvisor_container_id_unique();
     test_gvisor_json_escape();
     test_gvisor_oci_spec_shape();
+    test_oci_spec_argv_many_tokens();
     test_oci_spec_cwd_from_config();
     test_gvisor_oci_spec_host_network();
     test_gvisor_oci_spec_readonly();
@@ -4525,6 +4960,7 @@ fn main() {
     test_spawn_exit_name();
     test_rootfs_config_field();
     test_ns_flags_for_rootfs();
+    test_rootfs_always_gets_a_mount_namespace();
     test_oci_run_reports_nonzero_exit();
     test_oci_run_reports_zero_only_on_success();
     test_oci_run_missing_runtime_binary();

@@ -265,3 +265,43 @@ refuses to emit a binary. Corrected at v3.12.6 (`atomic`, `math` and
 toolchain snapshot: `tls` → `tls_native` includes `lib/sigil.cyr`, and
 `cyrius deps` (6.5.39+) will not let a `[deps.sigil]` artifact replace a
 stdlib leaf.
+
+## Amendment — the rest of §4, closed, and gated (v3.12.9, 2026-09-25)
+
+§4 left three families "still overlapping, and still resolved only by source
+order": the `syserr_*` accessors, the `agnosys_*` helpers, and
+`attestation_result_new`, all shared with sigil (and, for `syserr_*` /
+`result_print_err` / `is_syscall_err` / `wrap_syscall`, with agnodrm). At
+3.12.9 each took the crate prefix this ADR set, or was removed:
+
+- `syserr_*` → `kavach_syserr_*`; `result_print_err` → `kavach_result_print_err`;
+  `attestation_result_new` → `kavach_attestation_result_new`;
+  `agnosys_json_emit_cstr_or_null` → `kavach_json_emit_cstr_or_null`.
+- Removed as unused, in kavach and in every consumer: six `agnosys_*` helpers
+  (one of them exec'd by path through the stdlib's `exec_vec`),
+  `is_syscall_err`, and `wrap_syscall`.
+
+The same release found the class this section's `KavachError` finding
+predicted, live. `InjectionMethod.STDIN` (2) resolved to the stdlib's
+`var STDIN = 0` in a consumer, so a stdin secret matched the env-var branch
+(filed from agnosai; now archived). Its members are `KAVACH_INJECT_*`, and
+`AttestationTrust`'s generic `CONTRAINDICATED` / `WARNING` / `NONE` /
+`AFFIRMING` are `KAVACH_TRUST_*`: `attestation_is_acceptable` compares them
+numerically, so a foreign `WARNING` could have passed an `AFFIRMING` bar.
+kavach's `struct AuditEntry` is `KavachAuditEntry`, because stiva, a consumer,
+has its own `AuditEntry` with a different layout and both generated
+`AuditEntry_timestamp`.
+
+**Gated.** Fixing instances one at a time leaves the next one live, so
+`scripts/check-symbols.py` now runs in CI. It fails on any name kavach defines
+twice, any `fn` or struct accessor it shares with `lib/`, and any constant it
+shares with `lib/` at a different value. On the 3.12.8 tree it reports exactly
+the 20 names above; on 3.12.9 it reports none. Constants shared at equal values
+(the 29 errno numbers) are listed, not failed. Its `--tree` mode also lists
+names shared with sibling first-party bundles, which no single repo's CI can
+see. Those still include generic public names (`policy_new` with shakti;
+`finding_new`, `scan_result_new` and `severity_name` with phylax; `which_exists`
+with nous; `audit_chain_len` with t-ron). None of those repos is co-resident
+with kavach in any consumer today, and renaming public API is a breaking change,
+so they are on the roadmap rather than in a patch release.
+

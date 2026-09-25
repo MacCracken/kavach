@@ -38,7 +38,7 @@ fn _oci_state_root() {
     memcpy(p, prefix, plen);
     memcpy(p + plen, &b, n);
     store8(p + plen + n, 0);
-    sys_mkdir(p, 448);                      # 0700
+    kv_mkdir(p, 448);                      # 0700
     # VALIDATE, do not assume. The name is fully predictable — "kavach-runc-"
     # plus the victim's uid — and it lives in a world-writable directory, so on
     # a shared host another user can create it (or symlink it) FIRST and then
