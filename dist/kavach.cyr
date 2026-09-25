@@ -11046,20 +11046,112 @@ fn _wasm_effective_fuel(cfg, timeout_ms) {
     return _wasm_fuel_from_timeout(timeout_ms);
 }
 
-# Append "--dir <path>" pair for each landlock rule. Writes into argv vec.
-# Cyrius stdlib doesn't yet expose landlock_rules as a vec — our SandboxPolicy
-# only carries a cached length — so for v3.0 we preopen the configured
-# `workdir` (if any) read-only, matching the most common caller pattern.
+# Whether `policy` asks for landlock: a rule, or deny-all. On this backend that
+# makes the policy the guest's whole filesystem grant, and confines wasmtime.
+fn _wasm_policy_has_landlock(policy) {
+    if (policy == 0) { return 0; }
+    if (SandboxPolicy_landlock_rules_len(policy) > 0) { return 1; }
+    return 0;
+}
+
+# Append `--dir <path>`, or return -1 for a path `--dir` would misread:
+# wasmtime splits its value at `::` into a host and a guest path, so
+# `/srv/a::/etc` preopens the host's `/srv/a`, and names it `/etc`.
+fn _wasm_push_dir(args, path) {
+    if (cstr_contains(path, "::") == 1) { return 0 - 1; }
+    vec_push(args, "--dir");
+    vec_push(args, path);
+    return 0;
+}
+
+# The directories the guest may reach, as `--dir` preopens. Returns 0, or -1
+# for a path `--dir` cannot express.
+#
+# **A policy with landlock is the whole grant**, as it is for a process: each
+# rule the child would apply (the first `landlock_rules_len`) is preopened at
+# its own path, and nothing else is, the workdir included. A deny-all policy
+# preopens nothing. `--dir` is read-write, and wasmtime's CLI has no read-only
+# form (wasmtime 49 takes `--dir X::/a::ro` and ignores the `::ro`), so an
+# `FS_READ_ONLY` rule is held read-only by landlock on the wasmtime process
+# (`_wasm_host_policy`).
+#
+# With no landlock the workdir, if set, is preopened, as before. That preopen
+# is read-write: the comment here called it read-only through 3.13.0, and a
+# guest could create files in it.
+#
+# Through 3.13.0 this read no rule. Its comment said the policy carried only a
+# count, which stopped being so at 3.11.3. A deny-all policy's guest got the
+# workdir, and a policy naming paths gave its guest the workdir and not them.
 fn _wasm_append_preopens(args, sandbox) {
     var cfg = Sandbox_config(sandbox);
+    var policy = SandboxConfig_policy(cfg);
+    if (_wasm_policy_has_landlock(policy) == 1) {
+        if (policy_landlock_is_deny_all(policy) == 1) { return 0; }
+        var rules = policy_landlock_rules(policy);
+        var n = SandboxPolicy_landlock_rules_len(policy);
+        var i = 0;
+        while (i < n) {
+            if (_wasm_push_dir(args, security_fs_rule_path(vec_get(rules, i))) != 0) {
+                return 0 - 1;
+            }
+            i = i + 1;
+        }
+        return 0;
+    }
     var wd = SandboxConfig_workdir(cfg);
     if (wd != 0) {
-        if (strlen(wd) > 0) {
-            vec_push(args, "--dir");
-            vec_push(args, wd);
-        }
+        if (strlen(wd) > 0) { return _wasm_push_dir(args, wd); }
     }
     return 0;
+}
+
+# The directory holding `path`: the text before its last `/`, `/` for a path
+# directly under the root, and `.` for a bare name.
+fn _wasm_dir_of(path) {
+    var n = strlen(path);
+    var last = 0 - 1;
+    var i = 0;
+    while (i < n) {
+        if (load8(path + i) == 47) { last = i; }
+        i = i + 1;
+    }
+    if (last < 0) { return "."; }
+    if (last == 0) { return "/"; }
+    var out = alloc(last + 1);
+    memcpy(out, path, last);
+    store8(out + last, 0);
+    return out;
+}
+
+# The landlock ruleset for the wasmtime process, when the policy asks for
+# landlock. The guest reaches only its preopens either way; this ruleset is what
+# makes an `FS_READ_ONLY` rule read-only inside its preopen, since `--dir`
+# cannot, and it holds wasmtime itself to these paths.
+#
+# The policy's applied rules, with their access, and read-only access to what
+# wasmtime needs to start and load the module: its binary's directory, `/usr`,
+# `/lib` and `/lib64` where they exist, and the module's directory. A deny-all
+# policy contributes no rule, so only wasmtime's own paths remain, and the
+# guest has no preopen to reach them. The module's directory rather than the
+# module: `security_apply_landlock` grants a file rule directory rights, which
+# landlock refuses, so a rule naming a file fails the exec closed on every path.
+fn _wasm_host_policy(policy, wasmtime, module) {
+    var host = policy_new();
+    policy_landlock_add(host, _wasm_dir_of(wasmtime), FS_READ_ONLY);
+    policy_landlock_add(host, "/usr", FS_READ_ONLY);
+    if (kavach_path_exists("/lib") == 1) { policy_landlock_add(host, "/lib", FS_READ_ONLY); }
+    if (kavach_path_exists("/lib64") == 1) { policy_landlock_add(host, "/lib64", FS_READ_ONLY); }
+    policy_landlock_add(host, _wasm_dir_of(module), FS_READ_ONLY);
+    if (policy_landlock_is_deny_all(policy) == 1) { return host; }
+    var rules = policy_landlock_rules(policy);
+    var n = SandboxPolicy_landlock_rules_len(policy);
+    var i = 0;
+    while (i < n) {
+        var r = vec_get(rules, i);
+        policy_landlock_add(host, security_fs_rule_path(r), security_fs_rule_access(r));
+        i = i + 1;
+    }
+    return host;
 }
 
 # Append resource-limit flags from policy.
@@ -11162,11 +11254,26 @@ fn wasm_exec(sandbox, command) {
     var policy = SandboxConfig_policy(cfg);
     var timeout = SandboxConfig_timeout_ms(cfg);
 
+    # A policy with landlock confines wasmtime itself (`_wasm_host_policy`).
+    var confined = _wasm_policy_has_landlock(policy);
+    var run_policy = policy;
+    if (confined == 1) { run_policy = _wasm_host_policy(policy, wasmtime, wasm_path); }
+
     var args = vec_new();
     vec_push(args, wasmtime);
     vec_push(args, "run");
+    # Confined, wasmtime cannot reach its module cache: it looks up the cache's
+    # config under the user's home, and stops with "config file not specified
+    # and failed to get the default" (wasmtime 49). So a confined run compiles
+    # the module afresh.
+    if (confined == 1) {
+        vec_push(args, "-C");
+        vec_push(args, "cache=n");
+    }
     _wasm_append_limits(args, policy, _wasm_effective_fuel(cfg, timeout));
-    _wasm_append_preopens(args, sandbox);
+    if (_wasm_append_preopens(args, sandbox) != 0) {
+        return backend_error_result("WASM backend cannot preopen a path containing \"::\"");
+    }
     # `--` separator guards against .wasm paths starting with '-'.
     vec_push(args, "--");
     vec_push(args, wasm_path);
@@ -11192,12 +11299,15 @@ fn wasm_exec(sandbox, command) {
     #     parameters. That is what agnosai filed: a WASM tool that cannot
     #     receive its input is not a tool.
     #
-    # `do_confine = 0`: wasmtime's own WASI sandbox is the boundary for the
-    # guest — no preopens means no filesystem, and `--fuel`/`--max-memory-size`
-    # bound it — and confining the wasmtime PROCESS itself with landlock would
-    # also block it from reading the module. Stated so the 0 reads as a decision.
-    var n = confine_capture_input(args, policy, 0, 0, 0, out_buf, out_cap, 0,
-      timeout, 0, SandboxConfig_stdin(cfg), SandboxConfig_stdin_len(cfg));
+    # `do_confine`: wasmtime's own WASI sandbox is the boundary for the guest:
+    # no preopen means no filesystem, and fuel and the memory ceiling bound it.
+    # A policy with landlock also confines the wasmtime process: `confine_child`
+    # sets NO_NEW_PRIVS, closes inherited descriptors and applies the ruleset
+    # from `_wasm_host_policy`, which lets wasmtime read its module. No
+    # namespaces, cgroup or seccomp: those arguments are 0. A policy without
+    # landlock leaves wasmtime unconfined, as every policy did through 3.13.0.
+    var n = confine_capture_input(args, run_policy, 0, 0, 0, out_buf, out_cap, 0,
+      timeout, confined, SandboxConfig_stdin(cfg), SandboxConfig_stdin_len(cfg));
     var end_ns = mono_now_ns();
 
     var r = backend_capture_finish(out_buf, n, out_cap, "wasmtime run failed", start_ns, end_ns);

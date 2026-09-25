@@ -102,6 +102,57 @@ named.
 - `docs/guides/composite-backends.md`: a deny-all policy applies no rule alone either, and a
   composite exec with a deny-all side does not start its payload.
 
+### Fixed — the WASM backend ignored the policy's filesystem rules
+
+`_wasm_append_preopens` read no landlock rule. It preopened the workdir, if one was set, and
+nothing else, whatever the policy said. Its comment said the policy carried only a count, which
+stopped being true at 3.11.3, and called the preopen read-only; wasmtime's `--dir` is read-write.
+`score_backend` still added 3 for the rules on WASM.
+
+Measured before the change with wasmtime 49 and landlock ABI 10, using a WASI probe that lists
+its preopens and tries to read and write in each. A deny-all policy's guest read and wrote its
+workdir. A policy allowing one directory, read-only or read-write, gave its guest the workdir
+instead, or no directory at all when none was set. With no landlock the guest got the workdir,
+and created a file in it.
+
+**A policy with landlock is the guest's whole filesystem grant**, as it is for a process:
+
+- Each rule the child would apply (the first `landlock_rules_len`) is preopened at its own path,
+  as the Rust original mapped rules to WASI preopens. Nothing else is, the workdir included: a
+  process under landlock cannot use its workdir either unless a rule names it.
+- A deny-all policy preopens nothing. The guest still runs, because wasmtime reads the module on
+  the host. On WASM, unlike the backends that exec their payload, a deny-all guest that reads its
+  input from stdin can start.
+- **Read-only rules are held by landlock on the wasmtime process.** wasmtime's CLI has no
+  read-only preopen: wasmtime 49 accepts `--dir X::/a::ro` and ignores the `::ro`, and the Rust
+  original used the API's `DirPerms::READ`. So the child confines wasmtime to the policy's rules,
+  plus read-only access to what wasmtime needs: its binary's directory, `/usr`, `/lib` and
+  `/lib64` where they exist, and the module's directory. A guest's write under a read-only rule
+  fails with WASI's EACCES. On a kernel without landlock nothing holds it, as on the process
+  backend, and the guest still sees only the rules' directories, read-write.
+- A confined run passes `-C cache=n`. Under the ruleset wasmtime cannot find its cache
+  configuration ("config file not specified and failed to get the default"), so it compiles the
+  module on every run.
+- A path holding `::` is refused (exit 1) before wasmtime runs. `--dir` splits its value there
+  into a host and a guest path, so `/srv/a::/etc` would preopen the host's `/srv/a` under the name
+  `/etc`. This applies to the workdir as well.
+- A rule on a missing path fails closed (exit 124), as on the process backend: landlock cannot
+  open it.
+- With no landlock nothing changes: the workdir, if set, is preopened read-write, and wasmtime
+  runs unconfined. The comment now says read-write.
+- Scoring is unchanged; its +3 for landlock rules now describes what WASM applies.
+  `docs/architecture/overview.md` says so.
+- ⚠ **A WASM guest under a policy with landlock rules now sees exactly those rules' directories.**
+  It gains them (a rule allowing `/data` read-only now gives the guest `/data`), and it loses the
+  workdir unless a rule names it; a deny-all guest loses the workdir too.
+
+Found on the way, not fixed here: `security_apply_landlock` gives a rule naming a regular file the
+directory rights as well (`READ_DIR` is in the read-only mask), and `landlock_add_rule` refuses
+that with EINVAL. So a rule naming a file fails the exec closed on every backend that applies
+landlock. On the process backend, `/bin/cat` of a file that a rule names exits 124, and the same
+rule on the file's directory reads it. That is why the WASM backend grants wasmtime the module's
+directory rather than the module.
+
 ### Tests
 
 Three tests, all of which fail against 3.13.0's merge (checked by restoring it: 18 assertions
@@ -160,6 +211,37 @@ recognising deny-all by effect, a count over an empty list. That one stops the s
 `composite_merge_deny_all_wins`: the merge copies a count's worth of rules from a shorter list,
 and `vec_get` aborts.
 
+Three tests for the WASM fix, all of which fail against the backend before it: 24 assertions,
+built against this tree's previous `backend_wasm.cyr`. The new `_wasm_host_policy` was stood in
+there by a function returning the caller's policy, which is what the old code passed, with
+wasmtime unconfined.
+
+- `wasm_preopens_follow_the_policy`, which needs no wasmtime: with no landlock, the workdir, and
+  nothing without one. A deny-all policy preopens nothing, not even the workdir. A policy with
+  rules preopens exactly their paths, not the workdir. A count below the list preopens the rules
+  it counts, and a count above it nothing. A path holding `::` is refused, as a rule or as the
+  workdir.
+- `wasm_host_policy_confines_wasmtime`, which needs no wasmtime: the ruleset holds the policy's
+  rules with their access, wasmtime's directory, `/usr` and the module's directory, and is not
+  deny-all; the policy itself is left as it was. For a deny-all policy it keeps wasmtime's paths
+  and names none of the policy's. A rule past the count is left out. A module under the root gives
+  `/`, and a bare name the working directory.
+- `wasm_guest_sees_the_policys_paths`, with wasmtime: runs the probe in `tests/wasm_fs_probe.wat`,
+  carried in the suite as 818 hand-assembled bytes. With no landlock the guest has its workdir and
+  reads it. A deny-all guest runs with no directory. A guest under a read-only rule and a
+  read-write rule has both directories and not its workdir, reads both, and writes in the
+  read-write one; where landlock is present, it cannot write in the read-only one. A guest out of
+  fuel still fails while confined, and a `::` rule is refused with the reason.
+
+CI installs no wasmtime, so there the third test returns at once and the first two cover the
+change.
+
+Eight mutants of the fix, each failing the suite at the assertions written for it: deny-all
+falling back to the workdir (3 assertions), rules also preopening the workdir (3), no `::` check
+(4), wasmtime left unconfined (1: the read-only write, which needs wasmtime and landlock), the
+host ruleset without the module's directory (11), no `-C cache=n` (7), the host ruleset taking
+rules past the count (1), and a deny-all host ruleset (3).
+
 ### Verified
 
 - x86-64: the suite, 971 → **1004**. fmt `--check` with no drift across the tree, lint with 0
@@ -179,6 +261,14 @@ and `vec_get` aborts.
 - With the deny-all fix, on aarch64: cross-built, and the suite 971 → **997** under qemu-aarch64
   11.1.1. The seven new assertions that need landlock enforcement skip there. The agnos build
   links.
+- With the WASM fix, on x86-64 (wasmtime 49): the suite, 1037 → **1074**; fmt `--check` with no
+  drift, lint with 0 warnings, vet, `check-symbols.py`, the security scan, fuzz (500), the bench
+  harness and the smoke build. `cyrius distlib --all` changes only `dist/kavach.cyr`, since
+  `backend_wasm.cyr` is not in `[lib.confine]`; every module section of both bundles matches its
+  source, and `check-bundles.py` passes. The `duplicate fn` set is unchanged (130 names).
+- With the WASM fix, on aarch64: cross-built, and the suite 997 → **1033** under qemu-aarch64
+  11.1.1. The WASM tests run there, since qemu execs the host's wasmtime, and the one assertion
+  that needs landlock skips. The agnos build links.
 
 ### Performance
 
@@ -208,6 +298,31 @@ on a benchmarked path.
   `state_valid_transition_check` 6 → 5 ns, `ct_streq_64` 198 → 206 ns (+4.0%) and
   `gate_clean_output` 355.97 → 344.31 µs (−3.3%). That is the pattern the earlier A/Bs recorded;
   code placement is the likely cause, and it was not isolated.
+
+The WASM fix changes the WASM exec path, which no benchmark covers, so `wasm_exec` was timed
+directly: the median of 21 runs of the probe, three rounds interleaved between the two builds,
+pinned to one CPU. **A policy without landlock is unchanged, 5.4 → 5.4 ms. A policy with rules
+goes from 5.4 ms (wasmtime unconfined and cached, the rules ignored) to 13.1 ms.**
+
+- Most of that is `-C cache=n`: wasmtime compiling the module instead of loading it from its
+  cache. Run directly, with fuel and the memory ceiling as `wasm_exec` sets them, the probe takes
+  3.7 ms cached and 7.0 ms without the cache, and the cost grows with the module.
+  `NO_NEW_PRIVS`, closing inherited descriptors and the landlock ruleset add about 0.1–0.3 ms
+  (measured without the fuel and memory flags, where the run stays under the polling step below).
+- The rest is the capture loop's polling, not work. It polls every 1 ms for its first 8 idle
+  rounds and every 5 ms after, so a payload still running after about 8 ms is noticed at the next
+  5 ms poll. The confined run crosses that line; the cached, unconfined run ends well inside it.
+- Keeping the cache under confinement would take wasmtime's cache configuration and a writable
+  cache directory in the ruleset. Not done.
+
+The 29 benchmarks, `scripts/bench-ab.py`'s method against the deny-all fix (HEAD): **26 show no
+measured change**, among them the exec paths (`process_exec_confined` 2.677 → 2.682 ms) and both
+merges.
+
+- ⚠ **Three benchmarks on functions this change does not touch have separate ranges:**
+  `ct_streq_64` 205 → 198 ns (−3.4%), `http_allowlist_hit` 70 → 75 ns (+7.1%) and
+  `http_allowlist_miss` 79 → 81 ns (+2.5%). `backend_wasm.cyr` is the only source file changed;
+  code placement again, not isolated.
 
 ## [3.13.0] — 2026-09-25
 

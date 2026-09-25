@@ -2375,6 +2375,212 @@ fn test_wasm_exec_missing_file() {
     return 0;
 }
 
+# ---- the WASM guest's filesystem is the policy's --------------------------
+#
+# Through 3.13.0 `_wasm_append_preopens` read no landlock rule and preopened the
+# workdir, read-write, whatever the policy said. Measured against wasmtime 49: a
+# deny-all policy's guest read and wrote its workdir, and a policy allowing one
+# directory read-only gave its guest the workdir instead, or no directory at all.
+
+# The WASI probe in tests/wasm_fs_probe.wat, 818 bytes: for each preopen it
+# prints `P <path>`, then `R <probe.txt>` or `R E<errno>`, then `W ok` or
+# `W E<errno>` for creating `created.txt`.
+var WASM_FS_PROBE_LEN = 818;
+var WASM_FS_PROBE_HEX = "0061736d0100000001340860027f7f017f60037f7f7f017f60097f7f7f7f7f7e7e7f7f017f60047f7f7f7f017f60017f017f60027f7f0060017f0060000002de010616776173695f736e617073686f745f70726576696577310e66645f707265737461745f676574000016776173695f736e617073686f745f70726576696577311366645f707265737461745f6469725f6e616d65000116776173695f736e617073686f745f707265766965773109706174685f6f70656e000216776173695f736e617073686f745f70726576696577310766645f72656164000316776173695f736e617073686f745f70726576696577310866645f7772697465000316776173695f736e617073686f745f70726576696577310866645f636c6f73650004030504050606070503010001071302066d656d6f72790200065f737461727400090a9703041b004100200036020041042001360200410141004101411810041a0b3901017f413f21010340200141302000410a706a3a00002000410a6e2100200141016b210120004100470d000b200141016a413f20016b10060b0d00419c0141011006200010070bb00201047f4103210002400340200041104b0d0120004110100021012001450440411428020021032000418004200310011a418c01410210064180042003100641980141011006419001410210062000410141e400410941004202420041004118100221012001450440411828020021024108418008360200410c41e807360200200241084101411c100321012001450440418008411c28020010060520011008419801410110060b200210051a0520011008419801410110060b419401410210062000410141f800410b410942c00042004100411810022101200145044041182802002102410841a401360200410c4101360200200241084101411c10042101200145044041a0014102100605200110080b200210051a05200110080b419801410110060b200041016a21000c000b0b0b0b56090041e4000b0970726f62652e7478740041f8000b0b637265617465642e74787400418c010b025020004190010b025220004194010b025720004198010b010a00419c010b01450041a0010b026f6b0041a4010b0178";
+
+# `args` joined by single spaces.
+fn _t_wa_join(args) {
+    var s = str_from("");
+    var i = 0;
+    while (i < vec_len(args)) {
+        if (i > 0) { s = str_cat(s, str_from(" ")); }
+        s = str_cat(s, str_from(vec_get(args, i)));
+        i = i + 1;
+    }
+    return str_cstr(s);
+}
+
+# A WASM sandbox with `policy` and, unless 0, `workdir`.
+fn _t_wa_sandbox(policy, workdir) {
+    var cfg = config_new();
+    config_backend(cfg, KavachBackend.WASM);
+    config_policy(cfg, policy);
+    config_timeout_ms(cfg, 10000);
+    if (workdir != 0) { config_workdir(cfg, workdir); }
+    var sb = alloc(SANDBOX_SIZE);
+    Sandbox_set_config(sb, cfg);
+    return sb;
+}
+
+# The preopens `_wasm_append_preopens` gives such a sandbox, joined, or
+# "REFUSED" when it returns -1.
+fn _t_wa_preopens(policy, workdir) {
+    var args = vec_new();
+    if (_wasm_append_preopens(args, _t_wa_sandbox(policy, workdir)) != 0) { return "REFUSED"; }
+    return _t_wa_join(args);
+}
+
+# Whether `out` holds the probe's line for a preopen at `path`.
+fn _t_wa_sees(out, path) {
+    return cstr_contains(out, str_cstr(str_cat(str_cat(str_from("P "), str_from(path)), str_from("\n"))));
+}
+
+fn test_wasm_preopens_follow_the_policy() {
+    test_group("wasm_preopens_follow_the_policy");
+    # No landlock: the workdir, as before.
+    assert(streq(_t_wa_preopens(policy_minimal(), "/srv/work"), "--dir /srv/work") == 1,
+      "with no landlock the workdir is preopened");
+    assert(streq(_t_wa_preopens(policy_minimal(), 0), "") == 1, "...and without one, nothing");
+
+    # Deny-all: nothing, the workdir included.
+    var d = policy_minimal();
+    policy_landlock_deny_all(d);
+    assert(streq(_t_wa_preopens(d, "/srv/work"), "") == 1,
+      "a deny-all policy preopens nothing, not even the workdir");
+
+    # Rules: each at its own path, and not the workdir.
+    var r = policy_minimal();
+    policy_landlock_add(r, "/srv/a", FS_READ_ONLY);
+    policy_landlock_add(r, "/srv/b", FS_READ_WRITE);
+    assert(streq(_t_wa_preopens(r, "/srv/work"), "--dir /srv/a --dir /srv/b") == 1,
+      "a policy with rules preopens exactly their paths, and not the workdir");
+
+    # The rules the child applies: a count below the list preopens only those,
+    # and a count above it is deny-all.
+    var low = policy_minimal();
+    policy_landlock_add(low, "/srv/a", FS_READ_ONLY);
+    policy_landlock_add(low, "/srv/b", FS_READ_ONLY);
+    SandboxPolicy_set_landlock_rules_len(low, 1);
+    assert(streq(_t_wa_preopens(low, "/srv/work"), "--dir /srv/a") == 1,
+      "a count below the list preopens the rules it counts");
+    SandboxPolicy_set_landlock_rules_len(low, 3);
+    assert(streq(_t_wa_preopens(low, "/srv/work"), "") == 1, "a count above the list preopens nothing");
+
+    # `--dir` splits its value at `::`, so a path holding one is refused, as a
+    # rule or as the workdir.
+    var c = policy_minimal();
+    policy_landlock_add(c, "/srv/x::/etc", FS_READ_ONLY);
+    assert(streq(_t_wa_preopens(c, 0), "REFUSED") == 1, "a rule path with :: is refused");
+    assert(streq(_t_wa_preopens(policy_minimal(), "/srv/w::/etc"), "REFUSED") == 1,
+      "...and so is such a workdir");
+    return 0;
+}
+
+fn test_wasm_host_policy_confines_wasmtime() {
+    test_group("wasm_host_policy_confines_wasmtime");
+    var r = policy_minimal();
+    policy_landlock_add(r, "/srv/a", FS_READ_ONLY);
+    policy_landlock_add(r, "/srv/b", FS_READ_WRITE);
+    var h = _wasm_host_policy(r, "/opt/wt/bin/wasmtime", "/opt/tools/t.wasm");
+    assert_eq(_t_ll_has(h, "/srv/a", FS_READ_ONLY), 1, "the ruleset holds the policy's rules, each with its access");
+    assert_eq(_t_ll_has(h, "/srv/b", FS_READ_WRITE), 1, "...both of them");
+    assert_eq(_t_ll_has(h, "/opt/wt/bin", FS_READ_ONLY), 1, "wasmtime's directory, read-only");
+    assert_eq(_t_ll_has(h, "/usr", FS_READ_ONLY), 1, "/usr, for its libraries");
+    assert_eq(_t_ll_has(h, "/opt/tools", FS_READ_ONLY), 1, "and the module's directory");
+    assert_eq(policy_landlock_is_deny_all(h), 0, "it is a ruleset of those paths, not deny-all");
+    assert(h != r && _t_ll_len(r) == 2, "the policy itself is left as it was");
+
+    # Deny-all adds no rule of its own: wasmtime keeps its paths, and the guest,
+    # with no preopen, reaches none of them.
+    var d = policy_minimal();
+    policy_landlock_deny_all(d);
+    var hd = _wasm_host_policy(d, "/usr/bin/wasmtime", "/opt/tools/t.wasm");
+    assert_eq(policy_landlock_is_deny_all(hd), 0, "a deny-all policy still lets wasmtime start");
+    assert_eq(_t_ll_has(hd, "/opt/tools", FS_READ_ONLY), 1, "...and read its module");
+    assert_eq(_t_ll_has(hd, "/srv/a", FS_READ_ONLY), 0, "...and names no path of the policy's");
+
+    # Only the rules the child applies, and the module's directory for a module
+    # under the root or named relative to the working directory.
+    var low = policy_minimal();
+    policy_landlock_add(low, "/srv/a", FS_READ_ONLY);
+    policy_landlock_add(low, "/srv/b", FS_READ_ONLY);
+    SandboxPolicy_set_landlock_rules_len(low, 1);
+    assert_eq(_t_ll_has(_wasm_host_policy(low, "/usr/bin/wasmtime", "/t.wasm"), "/srv/b", FS_READ_ONLY), 0,
+      "a rule past the count is left out");
+    assert_eq(_t_ll_has(_wasm_host_policy(r, "/usr/bin/wasmtime", "/t.wasm"), "/", FS_READ_ONLY), 1,
+      "a module under the root gives /");
+    assert_eq(_t_ll_has(_wasm_host_policy(r, "/usr/bin/wasmtime", "t.wasm"), ".", FS_READ_ONLY), 1,
+      "and a bare name gives the working directory");
+    return 0;
+}
+
+fn test_wasm_guest_sees_the_policys_paths() {
+    test_group("wasm_guest_sees_the_policys_paths");
+    kavach_init();
+    if (_wasm_binary_path() == 0) { return 0; }
+    var root = _t_unique_tmp_path("/tmp/kavach-t-wasmfs-");
+    kv_mkdir(root, 493);                                   # 0755
+    var a = _t_merge_path(root, "a", 0);
+    var b = _t_merge_path(root, "b", 0);
+    var w = _t_merge_path(root, "w", 0);
+    kv_mkdir(a, 493);
+    kv_mkdir(b, 493);
+    kv_mkdir(w, 493);
+    file_write_all(_t_merge_path(root, "a", 1), "WASM-A\n", 7);
+    file_write_all(_t_merge_path(root, "b", 1), "WASM-B\n", 7);
+    file_write_all(_t_merge_path(root, "w", 1), "WASM-W\n", 7);
+    var probe = str_cstr(str_cat(str_from(root), str_from("/probe.wasm")));
+    file_write_all(probe, hex_decode(WASM_FS_PROBE_HEX, 2 * WASM_FS_PROBE_LEN), WASM_FS_PROBE_LEN);
+
+    # The control: no landlock, so the workdir, which the guest reads.
+    var r0 = wasm_exec(_t_wa_sandbox(policy_minimal(), w), probe);
+    assert_eq(ExecResult_exit_code(r0), 0, "the probe runs");
+    assert_eq(_t_wa_sees(ExecResult_stdout(r0), w), 1, "with no landlock the guest has its workdir");
+    assert_eq(cstr_contains(ExecResult_stdout(r0), "WASM-W"), 1, "...and reads it");
+
+    # Deny-all: no directory, and the guest still runs. wasmtime reads the
+    # module on the host, so here, unlike on the process backend, deny-all does
+    # not stop the payload.
+    var d = policy_minimal();
+    policy_landlock_deny_all(d);
+    var rd = wasm_exec(_t_wa_sandbox(d, w), probe);
+    assert_eq(ExecResult_exit_code(rd), 0, "a deny-all guest runs");
+    assert_eq(cstr_contains(ExecResult_stdout(rd), "P "), 0, "...with no directory, not even its workdir");
+
+    # Rules: their directories, not the workdir.
+    var p = policy_minimal();
+    policy_landlock_add(p, a, FS_READ_ONLY);
+    policy_landlock_add(p, b, FS_READ_WRITE);
+    var rp = wasm_exec(_t_wa_sandbox(p, w), probe);
+    var out = ExecResult_stdout(rp);
+    assert_eq(ExecResult_exit_code(rp), 0, "the guest runs, wasmtime confined");
+    assert_eq(_t_wa_sees(out, a), 1, "the guest has the read-only rule's directory");
+    assert_eq(_t_wa_sees(out, b), 1, "...and the read-write one's");
+    assert_eq(_t_wa_sees(out, w), 0, "...and not the workdir");
+    assert_eq(cstr_contains(out, "WASM-A"), 1, "it reads the read-only directory");
+    assert_eq(cstr_contains(out, "WASM-B"), 1, "...and the read-write one");
+    assert_eq(file_exists(str_cstr(str_cat(str_from(b), str_from("/created.txt")))), 1,
+      "and writes in the read-write one");
+    # `--dir` is read-write; landlock on wasmtime holds the read-only rule. With
+    # no landlock in the kernel nothing does, so this asserts only where it is.
+    if (security_landlock_abi_version() > 0) {
+        assert_eq(file_exists(str_cstr(str_cat(str_from(a), str_from("/created.txt")))), 0,
+          "but cannot write in the read-only one");
+    }
+
+    # Confined, a guest that traps is still reported as failing.
+    var t = _t_wa_sandbox(p, 0);
+    config_fuel(Sandbox_config(t), 1);
+    assert_neq(ExecResult_exit_code(wasm_exec(t, probe)), 0, "a guest out of fuel still fails");
+
+    # A path `--dir` would split is refused before wasmtime runs.
+    var c = policy_minimal();
+    policy_landlock_add(c, "/srv/x::/etc", FS_READ_ONLY);
+    var rc = wasm_exec(_t_wa_sandbox(c, 0), probe);
+    assert_eq(ExecResult_exit_code(rc), 1, "a rule path with :: is refused");
+    assert_eq(cstr_contains(ExecResult_stderr(rc), "::"), 1, "...saying why");
+
+    kv_unlink(str_cstr(str_cat(str_from(b), str_from("/created.txt"))));
+    kv_unlink(str_cstr(str_cat(str_from(a), str_from("/created.txt"))));
+    kv_unlink(str_cstr(str_cat(str_from(w), str_from("/created.txt"))));
+    kv_unlink(probe);
+    _t_merge_probe(root, "a", 0);
+    _t_merge_probe(root, "b", 0);
+    _t_merge_probe(root, "w", 0);
+    kv_rmdir(root);
+    return 0;
+}
+
 fn test_gvisor_exec_without_runsc() {
     test_group("gvisor_no_runsc");
     kavach_init();
@@ -5620,6 +5826,9 @@ fn main() {
     test_wasm_exec_explicit_fuel();
     test_wasm_default_memory_ceiling();
     test_wasm_exec_missing_file();
+    test_wasm_preopens_follow_the_policy();
+    test_wasm_host_policy_confines_wasmtime();
+    test_wasm_guest_sees_the_policys_paths();
     test_all_ten_backends_registered();
     test_sy_agnos_tier_strength();
     test_phylax_detects_namespace_escape();
