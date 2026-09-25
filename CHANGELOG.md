@@ -9,8 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [3.12.6] — 2026-09-24
 
-Toolchain and dependency refresh, a lean manifest, and a fix for a `[lib.confine]` bundle that had
-not compiled since 3.12.4. No API change.
+Toolchain and dependency refresh, a lean manifest, fixes for raw x86 syscall values that aarch64
+ran as other calls, and a fix for a `[lib.confine]` bundle that had not compiled since 3.12.4. No
+breaking API change; `kv_o_nofollow()` is new.
 
 ### Changed — cyrius pin 6.6.2 → **6.6.6**
 
@@ -60,6 +61,39 @@ to 75 hashed files (`sys.cyr`, plus 6.6.5's `alloc_cx.cyr` peer) and now records
 samay and ai-hwaccel both pin cyrius 6.6.6 and their stdlib sidecars are unchanged. kavach reaches
 them only through `src/samay_bridge.cyr`, which is not in `[lib]`. The samay integration suite is
 12/12.
+
+### Fixed — raw x86 syscall values misbehaved on aarch64
+
+kavach hardcoded two x86_64-only values, and aarch64 Linux executed them as something else. Each
+fix was checked by cross-building with `cyrius build --aarch64` and running under
+`qemu-aarch64 -strace`:
+
+| call site | 3.12.5 on 6.6.2 | 3.12.6 on 6.6.6 |
+|---|---|---|
+| `file_write_secure_modal`: fchmod as raw `syscall(91)` | `capset`; asked 0644, file stays 0600 | `fchmod(3,0644) = 0`; file is 0644 |
+| open flag `131072` (x86 `O_NOFOLLOW`), four sites | `O_LARGEFILE`; `O_NOFOLLOW` lost | `O_NOFOLLOW` |
+| `_oci_take_file` on a planted symlink | follows it, reads the target | `ELOOP`; reads nothing |
+| `kv_sleep_ms`: raw `syscall(35)` | `unlinkat`; no sleep | `nanosleep`; sleeps |
+
+- **fchmod.** `sys_fchmod(fd, mode)` replaces `syscall(91, …)`. Its result is now checked, so a
+  failed chmod fails the write instead of being ignored. The 6.6.6 aarch64 build had flagged the old
+  line: "raw syscall 91 is x86_64 `fchmod`; on ELF-aarch64 that number is `capset`". agnos has no
+  fchmod (91 there is `gpu_blit_bb`) and no POSIX modes, so no chmod is issued on that target.
+- **O_NOFOLLOW.** A new `kv_o_nofollow()` returns the stdlib's per-arch `O_NOFOLLOW` (x86_64
+  `0x20000`, aarch64 `0x8000`). On agnos it returns the x86 value, which the `file_open` bridge maps
+  to `AO_NOFOLLOW`. It replaces the literal at all four sites: both secure writes in `src/util.cyr`
+  and both OCI scratch-file opens in `src/backend_oci.cyr`. The filed issue named only one.
+  `_oci_take_file` has no `O_EXCL`, so this flag is its only defence against a planted symlink.
+- **nanosleep** needed no kavach change: cyrius 6.6.5 translates raw x86 `35`.
+- **Tests.** `credential_inject_files` claimed to check the mode but only checked the content; it
+  now asserts 0644. A new `oci_take_file_refuses_a_symlink` plants a link, with a regular-file
+  control. Each fails against a mutant of its fix ("got 384, expected 420"; "got 15, expected 0").
+- Resolves `docs/development/issues/archived/2026-09-12-raw-x86-syscall-numbers-on-aarch64.md`.
+
+The whole suite, cross-built and run under qemu-user, fails the same 19 assertions in the same
+9 fork/exec groups (`process_real_exec`, `oci_run_*`) on both 3.12.5 and 3.12.6, and both runs
+crash at the same point. That is pre-existing, and it is not yet known whether qemu-user or kavach's
+aarch64 exec path is at fault (roadmap). The groups this fix touches pass there.
 
 ### Fixed — `dist/kavach-confine.cyr` did not compile on the toolchain it shipped for
 
@@ -132,12 +166,15 @@ Local build, and a copy of the tree resolved from git tags as CI does:
 
 - `deps --verify` 75/0; fmt 0 drift; lint 0. The fmt and lint gates were checked against
   deliberately bad files to prove they still fire.
-- `vet` clean; plain, `CYRIUS_DCE=1` and `--agnos` builds clean; `check --with-deps src/lib.cyr`
-  clean; `distlib --all --check` fresh.
-- Tests **713/713**, samay **12/12**, fuzz ok.
+- `vet` clean; plain, `CYRIUS_DCE=1`, `--agnos` and `--aarch64` builds clean (the aarch64 build
+  with no raw-syscall warnings); `check --with-deps src/lib.cyr` clean; `distlib --all --check`
+  fresh.
+- Tests **718/718**, samay **12/12**, fuzz ok.
+- Both bundles rebuilt into consumer projects on cyrius 6.6.6: a confine-only one (thoth's shape),
+  and one using a real `[deps.kavach]` that runs `kavach_init` → … → `sandbox_destroy`.
 
 In the tag-resolved copy, `test_confine_capture_workdir`'s control assertion ("not /tmp") fails
-because that copy lives under `/tmp`. Run from a directory outside `/tmp`, it passes 713/713.
+because that copy lives under `/tmp`. Run from a directory outside `/tmp`, it passes 718/718.
 
 ### Performance
 
@@ -167,23 +204,8 @@ built on 6.6.4, 6.6.5 and 6.6.6:
 6.6.5 pads every call made inside an expression to 16-byte stack alignment. That is an ABI
 correctness fix, and a plausible cost for call-dense scan loops; it is not root-caused further here.
 
-### aarch64 — the pin fixes one of the three raw-syscall defects; two remain in kavach
-
-Measured by cross-building with `cyrius build --aarch64` and running under `qemu-aarch64 -strace`
-on both toolchains:
-
-| call site | 3.12.5 on 6.6.2 | 3.12.6 on 6.6.6 |
-|---|---|---|
-| `kv_sleep_ms`, raw `syscall(35)` | `unlinkat` → EFAULT, no sleep | **`nanosleep`**, sleeps |
-| `file_write_secure_modal`, raw `syscall(91)` | `capset`; mode stays 0600 | same |
-| open flag `131072` (both secure writes) | `O_LARGEFILE`; `O_NOFOLLOW` lost | same |
-
-The nanosleep fix is cyrius 6.6.5's raw-x86 `35 → 101` translation row. The other two are
-kavach's own raw x86 values, and cyrius now supplies the replacements: per-arch `SYS_FCHMOD` with
-`sys_fchmod`, and per-arch `O_NOFOLLOW`. 6.6.6's aarch64 build warns at `src/util.cyr:359`: "raw
-syscall 91 is x86_64 `fchmod`; on ELF-aarch64 that number is `capset`". It does not translate 91,
-because that number is a real call on aarch64, and it does not translate flag values.
-`docs/development/issues/2026-09-12-raw-x86-syscall-numbers-on-aarch64.md` stays open for those two.
+The 3.12.6 row predates the aarch64 fix above. No benchmark exercises the functions it changed
+(`file_write_secure*`, `_oci_take_file`), and on x86_64 the flag values are unchanged.
 
 ## [3.12.5] — 2026-09-10
 

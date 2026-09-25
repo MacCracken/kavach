@@ -209,7 +209,7 @@ fn _oci_run(runtime, bundle, container_id, out_buf, out_cap) {
         #     this write, and O_EXCL additionally refuses a pre-created file.
         # A refused open costs this run's stderr, never a wrong or attacker-
         # chosen one; the container still runs.
-        var efd = sys_open(err_path, 131265, 384);
+        var efd = sys_open(err_path, 1 + 64 + 128 + kv_o_nofollow(), 384);
         if (efd >= 0) {
             kv_dup2(efd, 2);
             sys_close(efd);
@@ -251,10 +251,12 @@ fn _oci_take_file(path) {
     if (path == 0) { return ""; }
     var buf = alloc(_OCI_ERR_MAX + 1);
     store8(buf, 0);
-    # O_RDONLY|O_NOFOLLOW (131072) — without O_NOFOLLOW an attacker who wins the
+    # O_RDONLY|O_NOFOLLOW — without O_NOFOLLOW an attacker who wins the
     # race on this predictable path turns the read into an arbitrary-file read
-    # whose contents become the container's reported stderr.
-    var fd = sys_open(path, 131072, 0);
+    # whose contents become the container's reported stderr. There is no O_EXCL
+    # here, so this flag is the only guard — and until 3.12.6 it was the x86_64
+    # literal, which aarch64 reads as O_LARGEFILE and follows the link.
+    var fd = sys_open(path, kv_o_nofollow(), 0);
     if (fd < 0) { return buf; }
     var total = 0;
     var rgo = 1;

@@ -303,8 +303,22 @@ fn is_safe_argument(s) {
 }
 
 # ---- secure file I/O -----------------------------------------------------
-# O_WRONLY=1, O_CREAT=0x40, O_TRUNC=0x200, O_EXCL=0x80, O_NOFOLLOW=0x20000
+# O_WRONLY=1, O_CREAT=0x40, O_TRUNC=0x200, O_EXCL=0x80 — the same on x86_64 and
+# aarch64 Linux. O_NOFOLLOW is not (0x20000 vs 0x8000): use kv_o_nofollow().
 # Mode 0600 = 384.
+
+# O_NOFOLLOW for this target. Linux takes the stdlib's per-arch constant: the
+# x86_64 value, 0x20000, is O_LARGEFILE on aarch64, so the literal kavach used
+# before 3.12.6 silently dropped the flag there. agnos defines no O_* names; its
+# file_open bridge (lib/io.cyr) takes the x86_64 value and maps it to AO_NOFOLLOW.
+fn kv_o_nofollow(): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 131072;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    return O_NOFOLLOW;
+    #endif
+}
 
 # Human-readable name for a stdlib IoError variant — for the structured
 # log/error line emitted on a failed external write (ADR-005 audit trail).
@@ -324,7 +338,7 @@ fn io_error_name(e) {
 # opens O_WRONLY|O_CREAT|O_TRUNC without the O_EXCL|O_NOFOLLOW hardening
 # (ADR-005 §C4). Returns Ok(len) or Err(IoError).
 fn file_write_secure_r(path, buf, len): Result {
-    var flags = 1 + 64 + 512 + 128 + 131072;
+    var flags = 1 + 64 + 512 + 128 + kv_o_nofollow();
     var fo_t, fo_v = file_open_r(path, flags, 384);
     if (is_err_result(fo_t) == 1) { return Err(fo_v); }
     var fd = result_unwrap(fo_t, fo_v);
@@ -350,20 +364,21 @@ fn file_write_secure(path, buf, len) {
 # write and chmod would re-open a TOCTOU window — using fchmod on the
 # same fd closes it.
 #
-# Raw `syscall(91, ...)` because the stdlib doesn't ship a sys_fchmod
-# wrapper at cc 5.10.34. SYS_FCHMOD = 91 on x86_64 Linux. Only used here;
-# folded back into sys_fchmod when the wrapper lands upstream.
+# 3.12.6: `sys_fchmod` replaces a raw `syscall(91, ...)`. 91 is fchmod only on
+# x86_64 — aarch64 runs capset — so off x86 the requested mode was silently
+# never applied. A failed fchmod now fails the write instead of being ignored.
+# agnos has no fchmod (91 there is gpu_blit_bb) and does not model POSIX modes
+# (its stdlib sys_chmod is a success no-op), so no chmod is issued there.
 fn file_write_secure_modal(path, buf, len, mode) {
-    var flags = 1 + 64 + 512 + 128 + 131072;
+    var flags = 1 + 64 + 512 + 128 + kv_o_nofollow();
     var fd = sys_open(path, flags, 384);
     if (fd < 0) { return 0 - 1; }
     var n = sys_write(fd, buf, len);
     if (n < 0) { sys_close(fd); return 0 - 1; }
     if (n != len) { sys_close(fd); return 0 - 1; }
-    # SAFETY: SYS_FCHMOD = 91 on x86_64 Linux; fd is owned by this fn
-    # (just opened above), mode is the caller-supplied octal value, the
-    # third arg is the standard syscall(...) trailing zero.
-    syscall(91, fd, mode, 0);
+    #ifndef CYRIUS_TARGET_AGNOS
+    if (sys_fchmod(fd, mode) < 0) { sys_close(fd); return 0 - 1; }
+    #endif
     sys_close(fd);
     return n;
 }
@@ -520,8 +535,9 @@ fn kv_sleep_ms(ms): i64 {
     return 0;
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
-    # 35 = nanosleep on x86_64 Linux. Spelled numerically because the stdlib
-    # exposes no constant for it and kavach must not depend on one appearing.
+    # 35 = nanosleep on x86_64 Linux. On aarch64 it is correct only because
+    # cyrius translates this raw number (since 6.6.5; before, it ran unlinkat).
+    # The stdlib now has sys_nanosleep, which would not depend on that.
     var ts[16];
     store64(&ts, ms / 1000);
     store64(&ts + 8, (ms % 1000) * 1000000);
@@ -10071,7 +10087,7 @@ fn _oci_run(runtime, bundle, container_id, out_buf, out_cap) {
         #     this write, and O_EXCL additionally refuses a pre-created file.
         # A refused open costs this run's stderr, never a wrong or attacker-
         # chosen one; the container still runs.
-        var efd = sys_open(err_path, 131265, 384);
+        var efd = sys_open(err_path, 1 + 64 + 128 + kv_o_nofollow(), 384);
         if (efd >= 0) {
             kv_dup2(efd, 2);
             sys_close(efd);
@@ -10113,10 +10129,12 @@ fn _oci_take_file(path) {
     if (path == 0) { return ""; }
     var buf = alloc(_OCI_ERR_MAX + 1);
     store8(buf, 0);
-    # O_RDONLY|O_NOFOLLOW (131072) — without O_NOFOLLOW an attacker who wins the
+    # O_RDONLY|O_NOFOLLOW — without O_NOFOLLOW an attacker who wins the
     # race on this predictable path turns the read into an arbitrary-file read
-    # whose contents become the container's reported stderr.
-    var fd = sys_open(path, 131072, 0);
+    # whose contents become the container's reported stderr. There is no O_EXCL
+    # here, so this flag is the only guard — and until 3.12.6 it was the x86_64
+    # literal, which aarch64 reads as O_LARGEFILE and follows the link.
+    var fd = sys_open(path, kv_o_nofollow(), 0);
     if (fd < 0) { return buf; }
     var total = 0;
     var rgo = 1;

@@ -1,22 +1,26 @@
-# `file_write_secure_modal` and `kv_sleep_ms` pass raw x86 syscall numbers and flags that aarch64 Linux executes as something else
+# `file_write_secure_modal` and `kv_sleep_ms` pass raw x86 syscall numbers and flags that aarch64 Linux executes as something else — RESOLVED
 
-**Status:** open — filed for later repair; no fix attempted. Filed from the cyrius 6.6.2 ecosystem-sweep
-close-out (2026-09-12), kavach **3.12.5** at cyrius pin 6.6.2; every behaviour below was traced under
-`qemu-aarch64 -strace` with a cyrius 6.6.3 aarch64 build.
+**Status:** ✅ **RESOLVED in kavach 3.12.6** (cyrius pin 6.6.6). Each fix was checked on aarch64 by
+cross-building with `cyrius build --aarch64` and running under `qemu-aarch64 -strace`.
 
-**Update 2026-09-24 — kavach 3.12.6 on cyrius 6.6.6, re-measured under `qemu-aarch64 -strace`:**
+- **Defect 1 (requested mode never applied).** `sys_fchmod(fd, mode)` replaces `syscall(91, …)`.
+  Its result is now checked, so a failed chmod fails the write. aarch64 issues `fchmod(3,0644) = 0`,
+  and the file lands at 0644 (it stayed 0600 before). agnos has no fchmod — 91 there is
+  `gpu_blit_bb` — so no chmod is issued on that target.
+- **Defect 2 (`O_NOFOLLOW` dropped).** `kv_o_nofollow()` returns the stdlib's per-arch `O_NOFOLLOW`
+  on Linux, and `131072` on agnos, where the `file_open` bridge maps it to `AO_NOFOLLOW`. The x86
+  literal was at **four** sites, not only the one filed here: both secure writes in `src/util.cyr`,
+  and both OCI scratch-file opens in `src/backend_oci.cyr`. At `_oci_take_file` the flag is the only
+  guard (there is no `O_EXCL`). Under the old build, aarch64 read a planted symlink's target through
+  the link; it now gets `ELOOP`.
+- **Defect 3 (no sleep).** Fixed by the pin, with no kavach change: cyrius 6.6.5 translates raw x86
+  `35` to aarch64 `nanosleep`.
+- **Tests.** `credential_inject_files` now asserts the resulting mode, and
+  `oci_take_file_refuses_a_symlink` is new. Each fails against a mutant of its fix.
 
-- **Defect 3 (`kv_sleep_ms`) is fixed by the pin.** cyrius 6.6.5 translates raw x86 `35` to aarch64
-  `nanosleep` (the call now sleeps its full 250 ms), with no kavach change.
-- **Defects 1 and 2 are unchanged.** `syscall(91)` still runs `capset` (asked for 0644, the file
-  stays 0600), and `131072` still opens `O_LARGEFILE`.
-- cyrius now supplies what the proposed fix below asks for: `sys_fchmod` with a per-arch
-  `SYS_FCHMOD` (x86_64 91, aarch64 52), a per-arch `O_NOFOLLOW` (x86_64 `0x20000`, aarch64
-  `0x8000`), and `SYS_NANOSLEEP`. Proposed-fix items 2 and 3 are superseded by those names.
-- 6.6.6's aarch64 build warns at `src/util.cyr:359`: "raw syscall 91 is x86_64 `fchmod`; on
-  ELF-aarch64 that number is `capset`. Use SYS_FCHMOD".
-- What is left is kavach's to do: `sys_fchmod(fd, mode)` with its result checked, and
-  `O_NOFOLLOW` in place of `131072` in `file_write_secure_r` and `file_write_secure_modal`.
+Originally filed from the cyrius 6.6.2 ecosystem-sweep close-out (2026-09-12), kavach 3.12.5 at
+cyrius pin 6.6.2. Every behaviour below was traced under `qemu-aarch64 -strace` with a cyrius 6.6.3
+aarch64 build.
 
 **Severity:** Medium. Nothing here is exploitable at the final path component, and every wrong syscall fails
 rather than corrupting anything. But two of the three defects sit in the **credential-write path**

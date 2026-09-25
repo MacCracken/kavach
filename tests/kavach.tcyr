@@ -758,6 +758,12 @@ fn test_credential_inject_files() {
     vec_push(injections, file_injection_new(path1, "payload-1", 420));
     var n = credential_inject_files(injections);
     assert_eq(n, 1, "one file written");
+    # And the mode really is 0644. Until 3.12.6 the fchmod was a raw x86
+    # `syscall(91)`, which aarch64 runs as capset: the file stayed 0600, and this
+    # test, which only checked n and the content, could not see it.
+    var st = alloc(256);
+    assert_eq(sys_stat(path1, st), 0, "stat after inject");
+    assert_eq(load32(st + STAT_MODE) & 4095, 420, "requested mode 0644 applied");
 
     # Verify content
     var buf[64];
@@ -3159,6 +3165,27 @@ fn test_oci_scratch_open_is_exclusive_and_truncating() {
     return 0;
 }
 
+fn test_oci_take_file_refuses_a_symlink() {
+    test_group("oci_take_file_refuses_a_symlink");
+    # O_NOFOLLOW is the ONLY guard on this read — there is no O_EXCL — so a symlink
+    # planted at the scratch path must read as "", never as the target's contents.
+    # Until 3.12.6 the flag was the x86_64 literal 0x20000, which aarch64 reads as
+    # O_LARGEFILE, so there the read followed the link.
+    var target = "/tmp/kavach-t-oci-nofollow-target";
+    var link = "/tmp/kavach-t-oci-nofollow-link";
+    sys_unlink(link);
+    sys_unlink(target);
+    file_write_all(target, "TARGET-CONTENTS", 15);
+    assert_eq(sys_symlink(target, link), 0, "symlink planted at the scratch path");
+    assert_eq(strlen(_oci_take_file(link)), 0, "a symlink is refused, not followed");
+    # Control: the same read of the real file succeeds, so the refusal above is
+    # the flag at work, not a read that fails for every path.
+    assert_eq(streq(_oci_take_file(target), "TARGET-CONTENTS"), 1, "a regular file is read");
+    sys_unlink(link);
+    sys_unlink(target);
+    return 0;
+}
+
 fn test_oci_err_path_is_uid_scoped() {
     test_group("oci_err_path_is_uid_scoped");
     var p = _oci_err_path("abc123");
@@ -3944,6 +3971,7 @@ fn main() {
     test_oci_diag_trims_trailing_newlines();
     test_oci_state_root_rejects_a_hostile_dir();
     test_oci_scratch_open_is_exclusive_and_truncating();
+    test_oci_take_file_refuses_a_symlink();
     test_oci_err_path_is_uid_scoped();
     test_landlock_handled_access_covers_the_abi();
     test_landlock_allowed_access_grants_within_the_path();
