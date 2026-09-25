@@ -47,6 +47,12 @@ enum LandlockConst {
     LANDLOCK_ACCESS_FS_MAKE_SYM = 4096;
     LANDLOCK_ACCESS_FS_REFER = 8192;
     LANDLOCK_ACCESS_FS_TRUNCATE = 16384;
+    # ABI v5: ioctl on a character or block device opened under the ruleset.
+    LANDLOCK_ACCESS_FS_IOCTL_DEV = 32768;
+    # ABI v6 scopes: a process may reach an abstract unix socket, or signal a
+    # process, only inside its own landlock domain.
+    LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET = 1;
+    LANDLOCK_SCOPE_SIGNAL = 2;
     LANDLOCK_RULE_PATH_BENEATH = 1;
     # Flag to `landlock_create_ruleset` that asks for the ABI version instead of
     # creating a ruleset. Returns the version as a positive integer.
@@ -83,12 +89,14 @@ fn security_landlock_abi_version(): i64 {
 
 # Every right this kernel will accept in `handled_access_fs`.
 #
-# Masking down by ABI rather than up: the v1 set is the floor, and the two later
-# rights are added only where the kernel knows them.
+# Masking down by ABI rather than up: the v1 set is the floor, and the later
+# rights are added only where the kernel knows them. IOCTL_DEV (v5) is handled
+# since 3.13.2; before, no kavach ruleset restricted ioctl on a device file.
 fn _landlock_handled_access(abi): i64 {
     var mask = _landlock_rights_v1();
     if (abi >= 2) { mask = mask | LANDLOCK_ACCESS_FS_REFER; }
     if (abi >= 3) { mask = mask | LANDLOCK_ACCESS_FS_TRUNCATE; }
+    if (abi >= 5) { mask = mask | LANDLOCK_ACCESS_FS_IOCTL_DEV; }
     return mask;
 }
 
@@ -111,6 +119,11 @@ fn _landlock_allow_read_only(): i64 {
 # full control of its own writable area — create, delete, truncate, and (on ABI
 # v2+) rename across two of its own allowed directories. Outside those paths all
 # of it is now denied, which is the actual fix.
+#
+# IOCTL_DEV (ABI v5, since 3.13.2) is a read-write right only, as WRITE_FILE is:
+# an ioctl on a device drives it. A read-only rule leaves a device readable and
+# its ioctls refused, and descriptors opened before the ruleset, the payload's
+# stdio among them, are not affected.
 fn _landlock_allow_read_write(abi): i64 {
     var mask = _landlock_allow_read_only() | LANDLOCK_ACCESS_FS_WRITE_FILE
     | LANDLOCK_ACCESS_FS_REMOVE_DIR | LANDLOCK_ACCESS_FS_REMOVE_FILE
@@ -120,22 +133,24 @@ fn _landlock_allow_read_write(abi): i64 {
     | LANDLOCK_ACCESS_FS_MAKE_SYM;
     if (abi >= 2) { mask = mask | LANDLOCK_ACCESS_FS_REFER; }
     if (abi >= 3) { mask = mask | LANDLOCK_ACCESS_FS_TRUNCATE; }
+    if (abi >= 5) { mask = mask | LANDLOCK_ACCESS_FS_IOCTL_DEV; }
     return mask;
 }
 
 # The rights a rule naming a file, not a directory, can hold: the kernel's
-# ACCESS_FILE, less IOCTL_DEV. `landlock_add_rule` refuses any other right on a
-# non-directory with EINVAL. Measured one right at a time on 7.2.6 (ABI 10):
-# EXECUTE, WRITE_FILE, READ_FILE and TRUNCATE are taken on a file, and READ_DIR,
-# the REMOVE_* and MAKE_* rights and REFER are refused. IOCTL_DEV (ABI v5) is a
-# file right too, but kavach does not handle it, and a rule may grant only
-# handled rights: the kernel refuses it on kavach's rulesets.
+# ACCESS_FILE. `landlock_add_rule` refuses any other right on a non-directory
+# with EINVAL. Measured one right at a time on 7.2.6 (ABI 10): EXECUTE,
+# WRITE_FILE, READ_FILE, TRUNCATE and IOCTL_DEV are taken on a file, and
+# READ_DIR, the REMOVE_* and MAKE_* rights and REFER are refused.
 #
-# Masked with a rule's rights, this takes TRUNCATE only where the rule had it,
-# which `_landlock_allow_read_write` gives from ABI v3.
+# Masked with a rule's rights, this keeps TRUNCATE (ABI v3) and IOCTL_DEV (ABI
+# v5) only where the rule had them, which `_landlock_allow_read_write` gives. A
+# rule may grant only rights the ruleset handles, so neither can reach a kernel
+# older than its ABI.
 fn _landlock_file_rights(): i64 {
     return LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_WRITE_FILE
-    | LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_TRUNCATE;
+    | LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_TRUNCATE
+    | LANDLOCK_ACCESS_FS_IOCTL_DEV;
 }
 
 # Filesystem access levels
@@ -167,7 +182,18 @@ fn security_fs_rule_read_write(path): i64 { return security_fs_rule_new(path, FS
 # rules: vec of fs_rule pointers, count: number of rules
 # Returns Result: Ok(0) on success, Err on failure.
 fn security_apply_landlock(rules, count): i64 {
-    if (count == 0) { return Ok(0); }
+    return security_apply_landlock_scoped(rules, count, 0);
+}
+
+# The same, with landlock scopes (ABI v6, applied since 3.13.2). `scopes` is a
+# mask of LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET and LANDLOCK_SCOPE_SIGNAL: the
+# process may then connect to an abstract unix socket, or signal a process,
+# only inside its own landlock domain. A ruleset of scopes alone handles no
+# filesystem right, so `count == 0` with a scope still installs one. A kernel
+# older than ABI v6 cannot express a scope, and the scopes are left out there,
+# as a kernel without landlock leaves out the whole ruleset.
+fn security_apply_landlock_scoped(rules, count, scopes): i64 {
+    if (count <= 0 && scopes == 0) { return Ok(0); }
 
     #ifdef CYRIUS_TARGET_AGNOS
     # AGNOS has no Landlock (a Linux LSM/MAC primitive). FS confinement on AGNOS
@@ -187,17 +213,29 @@ fn security_apply_landlock(rules, count): i64 {
     # the entire security surface.
     var abi = security_landlock_abi_version();
     if (abi == 0) { return Ok(0); }
-    var handled_access = _landlock_handled_access(abi);
+    var handled_access = 0;
+    if (count > 0) { handled_access = _landlock_handled_access(abi); }
+    var scoped = 0;
+    if (abi >= 6) {
+        scoped = scopes & (LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET | LANDLOCK_SCOPE_SIGNAL);
+    }
+    if (handled_access == 0 && scoped == 0) { return Ok(0); }
 
-    # LandlockRulesetAttr: { handled_access_fs: u64 } = 8 bytes.
-    # Function-local `var X[N]` is N BYTES (cyrius 6.3.13 moved these to
-    # the guard-paged thread stack), so this must be [8] to hold the u64
-    # store64 below — `var attr[1]` was a 1-byte local taking an 8-byte
-    # write, a latent stack smash that 6.3.13+ turns into a hard fault.
-    var attr[8];
+    # SAFETY: LandlockRulesetAttr is { handled_access_fs: u64,
+    # handled_access_net: u64 (ABI v4), scoped: u64 (ABI v6) }, 24 bytes, and
+    # `attr` is 24 bytes. Function-local `var X[N]` is N BYTES (cyrius 6.3.13
+    # moved these to the guard-paged thread stack), so every store64 below lands
+    # inside it. With no scope only the first 8 bytes are passed, the struct
+    # every landlock kernel knows; an older kernel refuses a longer one whose
+    # tail it cannot read as zero.
+    var attr[24];
     store64(&attr, handled_access);
+    store64(&attr + 8, 0);
+    store64(&attr + 16, scoped);
+    var attr_size = 8;
+    if (scoped != 0) { attr_size = 24; }
 
-    var ruleset_fd = syscall(SYS_LANDLOCK_CREATE_RULESET, &attr, 8, 0);
+    var ruleset_fd = syscall(SYS_LANDLOCK_CREATE_RULESET, &attr, attr_size, 0);
     if (ruleset_fd < 0) {
         var errno = 0 - ruleset_fd;
         if (errno == ENOSYS) { return Ok(0); }
@@ -210,9 +248,11 @@ fn security_apply_landlock(rules, count): i64 {
     # for a ruleset with **no** path-beneath rules — total filesystem denial,
     # which `policy_landlock_deny_all` expresses as a non-zero count over an
     # empty list — must create and enforce the ruleset without indexing past
-    # the end of it. `count == 0` above still means "no landlock at all", which
-    # is a different request and stays different.
+    # the end of it. `count == 0` with no scope still means "no landlock at
+    # all", which is a different request and stays different; with a scope it
+    # is a ruleset handling no filesystem right, and the walk adds nothing.
     var walk = count;
+    if (walk < 0) { walk = 0; }
     if (rules == 0) { walk = 0; }
     else { if (vec_len(rules) < walk) { walk = vec_len(rules); } }
 

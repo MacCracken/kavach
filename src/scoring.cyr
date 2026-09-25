@@ -37,11 +37,13 @@ fn score_backend(backend, policy) {
     if (SandboxPolicy_memory_limit_mb(policy) > 0) { score = score + 2; }
     elif (SandboxPolicy_cpu_limit_tenths(policy) > 0) { score = score + 2; }
 
-    # Landlock TCP ports (ABI v4): +3 once if either list is non-empty
-    if (SandboxPolicy_network_tcp_bind_len(policy) > 0) { score = score + 3; }
-    elif (SandboxPolicy_network_tcp_connect_len(policy) > 0) { score = score + 3; }
+    # Landlock TCP ports (ABI v4) are not scored (3.13.2). The policy carries
+    # only `network_tcp_bind_len` and `network_tcp_connect_len`, counts with no
+    # port list behind them and no setter, so no rule can be built from them,
+    # and through 3.13.1 they added 3 for a restriction nothing applied.
 
-    # Landlock scoping (ABI v6)
+    # Landlock scoping (ABI v6), applied since 3.13.2 by `_spawn_apply_landlock`
+    # where the kernel has ABI v6.
     if (SandboxPolicy_landlock_abstract_unix(policy) == 1) { score = score + 2; }
     if (SandboxPolicy_landlock_signal(policy) == 1) { score = score + 2; }
 

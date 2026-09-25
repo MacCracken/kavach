@@ -7,6 +7,256 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+The roadmap's 3.13.2 items: what kavach accepted, scored or documented and did not apply, each
+measured before its change. The gVisor, OCI and SY-agnos backends now report their runtime's run;
+an unset `config_stdin` is an empty stdin; landlock scopes and `IOCTL_DEV` are applied; the WASM
+backend runs wasmtime under the policy's seccomp and scopes; TCP port counts are no longer
+scored. Three defects found on the way are fixed with them: the capture hung on a payload that
+filled its buffer, a result's stderr changed when the next exec ran, and a payload outlived a
+kavach killed mid-capture. Every behaviour change is marked ⚠.
+
+### Fixed — the gVisor, OCI and SY-agnos backends did not report their runtime's run
+
+gVisor and SY-agnos ran `runsc` and `docker`/`podman` through `kv_exec_capture`, the stdlib's
+`exec_capture` with a pinned exec, which sends the runtime's stderr to `/dev/null` and returns a
+byte count that `backend_capture_finish` reports as exit 0. The config's deadline never reached
+the run (the stdlib's own is opt-in and kavach never set it), and the runtime inherited kavach's
+stdin. OCI has had its own capture with the exit status and stderr since 3.9.2, but no deadline
+and no stdin either.
+
+Measured before the change, each backend driven with a stand-in runtime (a script that prints to
+stdout and stderr, copies its stdin and exits 7): gVisor and SY-agnos reported exit 0 and an empty
+stderr, all three passed the runtime kavach's stdin instead of the config's, and a stand-in that
+slept 5 s under a 300 ms deadline ran the full 5 s and reported `timed_out = 0`.
+
+- **One capture for the three.** `backend_run_capture` runs the runtime as the process backend
+  runs a payload (`confine_capture_input_env_wd`, unconfined): its stdout, its own stderr, its
+  exit status, the config's deadline, and the config's stdin as its stdin.
+  `backend_run_finish` builds the result from it. After the change all three report exit 7, the
+  stand-in's stderr and the config's stdin, and the slow stand-in is killed at the deadline:
+  `timed_out = 1`, exit 137.
+- **The container is removed after every run, the deadline's included.** gVisor and OCI already
+  ran `delete --force` after each run. Killing the docker or podman client leaves its container
+  running, so SY-agnos now names its container (`--name`, from `oci_container_id`) and runs
+  `rm --force` on that name after each run, a harmless failure when `--rm` has already removed it.
+- **SY-agnos passes `-i`**, without which docker and podman do not attach the container's stdin,
+  so it read nothing whatever the config held.
+- **OCI's stderr is a pipe, not a temp file.** 3.9.2 sent it to a file so that a runtime
+  writing past a pipe buffer could not block; the shared capture drains both pipes, and reads
+  stderr past its 64 KiB cap into a sink (below). runc's own log stays in its own file (`--log`),
+  so its diagnostics still do not reach the gate. The stderr file and `_oci_take_stderr` are gone.
+- Each backend's exec now calls `_gvisor_exec_with`, `_oci_exec_with` or `_sy_agnos_exec_with`
+  with the runtime it found, which is how the tests drive the whole path with a stand-in.
+- ⚠ **gVisor and SY-agnos report the runtime's exit status**, where they reported 0 for any run:
+  the container's, when it ran, and the runtime's own otherwise (docker and podman use 125 to 127).
+- ⚠ **The config's deadline bounds the run: 30 s unless the config says otherwise**
+  (`config_new`'s `timeout_ms`), as it has on the process backend since 3.11.4. A longer run is
+  killed and reported as timed out. For SY-agnos that includes a first `docker run` that has to
+  pull the image: pull it beforehand, or raise `config_timeout_ms` (0 is no deadline).
+- ⚠ **Their stderr is in the result, and the gate scans it.** That includes `runsc`'s and
+  docker's own diagnostics, which OCI keeps apart with runc's `--log`. Separating them needs the
+  runtimes to try it on, which the development machine does not have, so a runtime error can now
+  read as "externalization blocked" where it read as an empty success. The roadmap carries it.
+
+### Changed — an unset `config_stdin` is an empty stdin ⚠
+
+Since 3.11.8 a config with no stdin handed the payload kavach's own, kept for interactive
+payloads, so a payload could read, and consume, whatever the host process had there. Measured
+before the change, with kavach's stdin holding a marker: `/bin/cat` with no `config_stdin`
+printed it on the process backend's unconfined capture, under landlock and under seccomp alike.
+
+- ⚠ **An unset `config_stdin` is an immediate EOF** on the process, WASM, gVisor, OCI and SY-agnos
+  backends. A payload that must read kavach's stdin, a terminal say, now says so:
+  `config_stdin_inherit(c, 1)`. Bytes set with `config_stdin` take precedence over it.
+- `_config_payload_stdin` is the one resolver every one of those backends uses.
+- `SandboxConfig` grows to 128 bytes: `stdin_inherit` is appended, so no field moves.
+- The SGX, SEV, TDX and Firecracker launchers still shell out through `kv_exec_capture` and still
+  inherit kavach's stdin; each takes the shared capture in the arc that rebuilds it.
+
+### Fixed — landlock scopes were scored and never applied ⚠
+
+`policy_strict()` sets `landlock_abstract_unix` and `landlock_signal`, and `score_backend` adds 2
+for each, but nothing applied either. Measured before the change: a `policy_strict()` payload ran
+`/bin/kill -0 <kavach's pid>` and exited 0, and a policy with only the signal scope took the
+unconfined capture.
+
+- The scopes (landlock ABI v6) go into the payload's ruleset: `security_apply_landlock_scoped`
+  takes them next to the rules, and `_spawn_apply_landlock` passes the policy's. A policy with
+  scopes and no rules gets a ruleset of scopes alone, which handles no filesystem right.
+  `policy_wants_confinement` answers 1 for a scope, so such a policy takes the confined capture.
+- The ruleset attribute grows to its 24-byte form only when there is a scope; with none it stays
+  the 8 bytes every landlock kernel knows. A kernel older than ABI v6 cannot express a scope, and
+  the scopes are left out there, as a kernel without landlock leaves out the whole ruleset.
+- After the change, on kernel 7.2.6 (ABI 10): the same `kill -0` exits 1 under `policy_strict()`
+  and under the signal scope alone. From a child, the signal scope refuses `kill` of its parent
+  with `EPERM` and the abstract-unix scope refuses a connect to the parent's abstract socket with
+  `EPERM`, each leaving the other alone.
+- ⚠ **A payload under a scope can no longer signal a process outside its landlock domain**,
+  kavach included, **or connect to an abstract unix socket one created.**
+
+### Fixed — `IOCTL_DEV` was never handled ⚠
+
+kavach handled the filesystem rights up to landlock ABI v3, so no ruleset restricted `ioctl` on a
+device file. Measured before the change: under one read-only rule on `/dev`, `TCGETS` on
+`/dev/null` reached the device (`ENOTTY`).
+
+- `IOCTL_DEV` (ABI v5) is handled from v5, and granted by read-write rules only, on a directory
+  and on a file (`_landlock_file_rights` takes it). An `ioctl` drives a device, as a write does.
+- After the change the same `TCGETS` fails with `EACCES` under a read-only rule on `/dev` or on
+  `/dev/null`, and reaches the device under a read-write one.
+- ⚠ **A payload can no longer `ioctl` a device it opened under a read-only rule.** Landlock
+  checks this right when the device is opened, so descriptors opened before the ruleset, the
+  payload's stdio among them, are not affected.
+
+### Fixed — the WASM backend ran wasmtime outside the policy's seccomp and scopes ⚠
+
+`score_backend` adds 5 for `seccomp_enabled` on every backend, and since 3.13.1 the WASM backend
+confined wasmtime only for a policy with landlock rules. Measured before the change with a probe
+that prints wasmtime's own `/proc/<pid>/status` (`tests/wasm_status_probe.wat`): under
+`policy_basic()` wasmtime ran with `Seccomp: 0`, and under a policy with only the signal scope
+with `NoNewPrivs: 0`, unconfined.
+
+- A policy asking for any child-side confinement (`policy_wants_confinement`: seccomp, landlock
+  rules or a scope) confines wasmtime. With seccomp it loads kavach's exec filter
+  (`_wasm_seccomp_info`; a filter that cannot be built fails the exec closed). wasmtime 49 runs
+  under it: after the change the probe shows `Seccomp: 2`, and `NoNewPrivs: 1` under the scope.
+  `_wasm_host_policy`, the ruleset for a policy with rules, carries the policy's scopes.
+- WASI is still the guest's syscall boundary; the filter holds wasmtime to its deny list.
+- ⚠ **`config_new()`'s default policy is `policy_basic()`, so every default-config WASM exec now
+  runs wasmtime under the filter.** A host that cannot load seccomp (qemu-user) refuses the run
+  with 125 (`SPAWN_EXIT_SECCOMP`), as the process backend already does there.
+
+### Changed — TCP port counts are no longer scored ⚠
+
+The policy's `network_tcp_bind_len` and `network_tcp_connect_len` are counts with no port list
+behind them and no setter, so nothing builds a landlock network rule (ABI v4) from them, and
+either added 3 to the score. They no longer do: `policy_minimal()` on the PROCESS backend with a
+bind count of 2 scored 58 and scores 55. The fields stay, read by the merge. ⚠ A policy with
+either count scores 3 lower. Applying port rules needs a list and a setter; the roadmap carries it.
+
+### Fixed — a payload that filled a capture buffer hung the capture
+
+Found while moving OCI onto the process backend's capture. A full buffer only stopped the drain
+loop's reads. The payload then blocked writing to that pipe and never closed the other, and the
+loop waited for an EOF that could not come. Measured before the change: `/bin/cat` of a 2 MB file
+through `sandbox_exec` on the PROCESS backend ran into its 3000 ms deadline (3540 ms, exit 137,
+`timed_out = 1`, the first 1 MiB captured) and hung with no deadline. Called directly, the
+capture ran a script writing 200 KB to stderr before `echo done-stdout; exit 3` into its 4000 ms
+deadline, exit 137 and no stdout, and hung with none. It is the capture of the process and WASM
+backends, and now of the three above.
+
+- **A full stdout is closed**, so the payload's next write fails: SIGPIPE, exit 141, as under the
+  stdlib's `exec_capture` and 3.9.2's OCI capture. The same `cat` returns in 4 ms from the
+  capture and 546 ms from `sandbox_exec`, whose gate then scans the 1 MiB, with exit 141.
+- **A full stderr is read on into a sink**, so diagnostics never stop a payload. The script
+  returns in 48 ms with exit 3, `done-stdout`, and its first 64 KiB of stderr.
+- ⚠ **A payload that writes more stdout than the buffer holds (1 MiB on each of these backends)
+  is cut off by SIGPIPE at the cap**, where it hung, or with a deadline was killed there and
+  reported as timed out.
+
+### Fixed — a result's stderr changed when the next exec ran
+
+`confine_last_stderr()` is one static buffer, rewritten by every capture, and the process and WASM
+backends stored that pointer in their results. Measured before the change: after a second
+`sandbox_exec`, the first result's stderr read the second's error. The process, WASM, gVisor, OCI
+and SY-agnos backends now store a copy (`backend_set_capture_stderr`).
+
+### Fixed — a capture's payload outlived kavach ⚠
+
+The stdlib's `exec_capture` sets a parent-death signal in its child, so gVisor's and SY-agnos's
+runtimes died with kavach; the process backend's capture set none, and those two lost it when
+they moved onto it. Measured before the change: a process running the capture of a shell that
+recorded its pid and then ran `sleep 30`, SIGKILLed, left the `sleep` running. The capture's child
+now sets `PR_SET_PDEATHSIG` to SIGKILL before `execve` (`_spawn_die_with_parent`), and exits if
+its parent is already gone; after the change the same `sleep` is gone. ⚠ **A payload no longer
+outlives the kavach process that captures it.** `sandbox_spawn` and persistent guests, which
+hand the caller a handle to a process meant to run on, are unchanged.
+
+### Tests
+
+Nine new tests and twelve changed, 1104 → **1222** assertions on x86-64 and 1046 → **1150** on
+aarch64 under qemu. Built against 3.13.1's `src/`, with the new names stood in by 3.13.1's
+behaviour (an unset stdin inherits, no scope reaches a ruleset, no filter reaches wasmtime, the
+old gVisor, OCI and SY-agnos exec bodies behind the new `_*_exec_with` seam), **63** assertions
+fail. Three of those are the OCI tests that now read stderr from the shared capture, which
+3.13.1's `_oci_run` did not fill, and one is the struct size; the other 59 fail on the
+behaviours above.
+
+- `capture_ends_a_full_stream`: `head` of 300 KB into a 64 KiB buffer ends with SIGPIPE (141)
+  and 65535 bytes, not at the 20 s deadline; a shell writing 200 KB of stderr, then
+  `done-stdout` and `exit 3`, finishes with both and its first 64 KiB of stderr.
+- `capture_payload_dies_with_kavach`: a helper process runs a capture of a shell that records its
+  pid and `exec`s `sleep 30`, and is SIGKILLed; the `sleep` must be gone within 2 s.
+- `results_keep_their_own_stderr`: two `ls` of missing paths through `sandbox_exec`, unconfined
+  and under landlock, and two modules wasmtime cannot parse on the WASM backend: the first
+  result's stderr names its own path and not the second's.
+- `payload_stdin_is_empty_unless_asked`: the resolver (no config, unset, inherit, set wins), then
+  `/bin/cat` with kavach's stdin swapped for a pipe holding a marker, unconfined, under landlock
+  and, where the host loads a filter, under seccomp: EOF with no config stdin, the marker with
+  `config_stdin_inherit`.
+- `landlock_scopes_are_applied`: which scopes a policy asks for; from a child, `kill` of the
+  parent and a connect to its abstract socket, with no scope, each scope, and (ABI ≥ 6) each
+  refused by its own scope only; `/bin/kill -0 <kavach>` under a scope-only policy and
+  `policy_strict()` on the PROCESS backend.
+- `landlock_confines_device_ioctls`: the masks, then (ABI ≥ 5) `TCGETS` on `/dev/null` under a
+  read-only and a read-write rule, on `/dev` and on `/dev/null` itself.
+- `score_does_not_count_tcp_ports`: a bind count and a connect count leave the score as it was.
+- `shell_out_backends_report_the_run`: gVisor, OCI and SY-agnos, each under a stand-in runtime
+  that records its arguments: exit 7, stdout, stderr and the config's stdin; with no config stdin
+  and a marker on kavach's, EOF; a 5 s stand-in under a 300 ms deadline killed (137,
+  `timed_out`); and the runtime's removal of the container after every run, by name for
+  SY-agnos, which runs with `-i`.
+- `wasm_runs_under_the_policys_confinement`: `tests/wasm_status_probe.wat`, carried as 274
+  hand-assembled bytes, prints wasmtime's `/proc/self/status`: `Seccomp: 0` and
+  `NoNewPrivs: 0` unconfined, `Seccomp: 2` under `policy_basic()` (125 where the host cannot load
+  a filter), `NoNewPrivs: 1` under a scope alone; `_wasm_host_policy` keeps the scopes.
+- Changed: `config_stdin` (the struct is 128 bytes, `stdin_inherit` defaults to 0),
+  `landlock_handled_access_covers_the_abi` (v4 adds no filesystem right, v5 adds `IOCTL_DEV`, a
+  newer ABI clamps to v5), `policy_wants_confinement` (a scope alone), the OCI run tests (the
+  config argument and the capture's stderr; the large-stderr run is 200 KB under a 20 s deadline),
+  `oci_stale_runtime_log_is_cleared` and `oci_log_path_is_uid_scoped` (the stderr file's two
+  tests, on the log file, the scratch file left), and `wasm_default_memory`, which checks the
+  ceiling under `policy_minimal()` where the host cannot load a filter.
+
+36 mutants of the change, each reverting one piece, all caught: the capture's two full-stream
+rules (3 and 6 assertions); the stderr copy in each of the four places it is made (2 to 6); the
+stdin resolver's two rules and the process backend reading the raw field (3 to 7); each of the
+three `IOCTL_DEV` changes (2 to 17: a right granted and no longer handled makes the kernel refuse
+the rule); the scopes dropped from the ruleset, the attribute kept at 8 bytes, filesystem rights
+handled for a scope-only ruleset, the child passing no scopes and the routing ignoring them (2 to
+8); the port score (2); each of the WASM changes (1 or 2); each of the runtime capture's settings
+and result fields (3 to 9); each backend passing no config or building its result the old way (4
+or 5); SY-agnos's `-i` and removal (1 each); OCI's exit status and log unlink (4 and 1); and the
+parent-death guard (1).
+
+### Verified
+
+- The suite: 1222 of 1222 on x86-64 (kernel 7.2.6, landlock ABI 10, wasmtime 49), and 1150 of
+  1150 on aarch64 under qemu-aarch64 11.1.1, where seccomp and landlock are unavailable and their
+  assertions take the refusal branches.
+- `cyrius fmt --check` over `src/` and `tests/`, `cyrius lint` (0 warnings in 47 files),
+  `cyrius vet src/main.cyr`, `scripts/check-symbols.py`, `cyrius distlib --all` with
+  `scripts/check-bundles.py` (both bundles compile with only their sidecar's stdlib), the CI
+  security scan, the fuzz harness, and the `--agnos` and `--aarch64` builds of `src/main.cyr`
+  (no raw-number warning).
+- The `duplicate fn` warning sets of `src/main.cyr` and the suite are the same as 3.13.1's.
+  `src/main.cyr`'s static data grows by 4144 bytes, the stderr sink.
+
+### Performance
+
+`scripts/bench-ab.py`'s method against the 3.13.1 tag: 7 interleaved rounds per side, pinned to
+one CPU.
+
+- **24 of the 29 benchmarks show no measured change**, the exec paths among them:
+  `process_exec_echo` 2.668 → 2.695 ms, `process_exec_confined` 2.676 → 2.703 ms and
+  `process_exec_large_output` 127.2 → 128.3 ms, each with overlapping ranges. The empty stdin
+  pipe an unset `config_stdin` now costs, and the parent-death `prctl`, do not show.
+- **Scoring is faster**, the port branches gone: `score_backend_process_strict` 16 → 15 ns and
+  `score_all_backends_strict` 160 → 144 ns (−10.0%), ranges separate.
+- **Three benchmarks on code this work did not change moved apart**: `policy_strict_create`
+  45 → 51 ns, `http_allowlist_hit` 70 → 76 ns and `http_allowlist_miss` 80 → 81 ns. Their
+  sources are as in 3.13.1; what moved them is not measured here.
+
 ### Docs — the roadmap after 3.13.1
 
 - Shipped work removed from `docs/development/roadmap.md`. The open fixes found in 3.13.1 and

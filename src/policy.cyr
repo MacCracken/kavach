@@ -162,11 +162,14 @@ fn policy_landlock_is_deny_all(p) {
 # The routing predicate for `process_exec`: a policy answering 1 must not reach
 # a plain `exec_capture`, because that path has no seam between `fork` and
 # `execve` in which to install a filter. Answering on the policy rather than on
-# the rootfs is the whole of the 3.11.3 fix.
+# the rootfs is the whole of the 3.11.3 fix. A landlock scope asks for a ruleset
+# as a rule does (3.13.2).
 fn policy_wants_confinement(p) {
     if (p == 0) { return 0; }
     if (SandboxPolicy_seccomp_enabled(p) == 1) { return 1; }
     if (SandboxPolicy_landlock_rules_len(p) > 0) { return 1; }
+    if (SandboxPolicy_landlock_abstract_unix(p) == 1) { return 1; }
+    if (SandboxPolicy_landlock_signal(p) == 1) { return 1; }
     return 0;
 }
 

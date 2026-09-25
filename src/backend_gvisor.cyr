@@ -11,7 +11,12 @@ fn _gvisor_runsc_path() {
     return 0;
 }
 
-fn _gvisor_run(runsc, bundle, container_id, network, out_buf, out_cap) {
+# `runsc run` in the foreground, through `backend_run_capture` (3.13.2): the
+# container's stdout into `out_buf`, runsc's exit status (the container's, when
+# it ran), its stderr, the config's deadline and the config's stdin, which runsc
+# hands the container (the bundle sets no terminal). A deadline kills runsc;
+# `_gvisor_delete` then stops the container.
+fn _gvisor_run(runsc, bundle, container_id, network, cfg, out_buf, out_cap) {
     var args = vec_new();
     vec_push(args, runsc);
     vec_push(args, "--network");
@@ -20,7 +25,7 @@ fn _gvisor_run(runsc, bundle, container_id, network, out_buf, out_cap) {
     vec_push(args, "--bundle");
     vec_push(args, bundle);
     vec_push(args, container_id);
-    return kv_exec_capture(args, out_buf, out_cap);
+    return backend_run_capture(args, cfg, out_buf, out_cap);
 }
 
 fn _gvisor_delete(runsc, container_id) {
@@ -50,25 +55,33 @@ fn gvisor_exec(sandbox, command) {
     if (vec_len(violations) > 0) {
         return backend_guard_result(violations);
     }
+    return _gvisor_exec_with(runsc, sandbox, command, start_ns);
+}
 
+# The run itself, under the runsc at `runsc`: bundle, run, delete, cleanup.
+fn _gvisor_exec_with(runsc, sandbox, command, start_ns) {
     var container_id = oci_container_id("kavach-gvisor");
     var bundle = oci_prepare_bundle(container_id, sandbox, command);
     if (bundle == 0) {
         return backend_error_result("failed to prepare OCI bundle");
     }
 
-    var policy = SandboxConfig_policy(Sandbox_config(sandbox));
+    var cfg = Sandbox_config(sandbox);
+    var policy = SandboxConfig_policy(cfg);
     var network = oci_network_mode(policy);
 
     var out_cap = 1048576;
     var out_buf = alloc(out_cap);
-    var n = _gvisor_run(runsc, bundle, container_id, network, out_buf, out_cap);
+    var n = _gvisor_run(runsc, bundle, container_id, network, cfg, out_buf, out_cap);
     var end_ns = mono_now_ns();
+    # ⚠ Through 3.13.1 this was `backend_capture_finish` over `kv_exec_capture`:
+    # exit 0 for any container that ran (measured with a stand-in runsc exiting
+    # 7), its stderr sent to /dev/null, no deadline and kavach's own stdin.
+    var r = backend_run_finish(out_buf, n, out_cap, "runsc run failed", start_ns, end_ns);
 
     _gvisor_delete(runsc, container_id);
     oci_cleanup_bundle(bundle);
-
-    return backend_capture_finish(out_buf, n, out_cap, "runsc run failed", start_ns, end_ns);
+    return r;
 }
 
 fn gvisor_health(sandbox) {

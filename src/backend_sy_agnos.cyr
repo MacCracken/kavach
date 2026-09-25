@@ -130,6 +130,20 @@ fn _sy_agnos_append_int_flag(args, flag, value, suffix) {
 
 # ---- Exec ----------------------------------------------------------------
 
+# `<runtime> rm --force <name>` after every run, as gVisor and OCI delete
+# theirs: a deadline kills the client, and killing the client does not stop the
+# container. For a container `--rm` already removed it is a harmless failure.
+fn _sy_agnos_remove(runtime, name) {
+    var args = vec_new();
+    vec_push(args, runtime);
+    vec_push(args, "rm");
+    vec_push(args, "--force");
+    vec_push(args, name);
+    var sink[32];
+    kv_exec_capture(args, &sink, 32);
+    return 0;
+}
+
 fn sy_agnos_exec(sandbox, command) {
     var start_ns = mono_now_ns();
     var runtime = _sy_agnos_runtime();
@@ -143,14 +157,29 @@ fn sy_agnos_exec(sandbox, command) {
     if (vec_len(violations) > 0) {
         return backend_guard_result(violations);
     }
+    return _sy_agnos_exec_with(runtime, sandbox, command, start_ns);
+}
 
+# Run `command` in the image under the container runtime `runtime`, through
+# `backend_run_capture` (3.13.2): the container's stdout, the runtime's exit
+# status (the container's, when it ran; docker and podman use 125 to 127 for
+# their own failures), its stderr, the config's deadline and the config's stdin
+# (`-i` attaches it). ⚠ Through 3.13.1 this was `kv_exec_capture`: exit 0 for any
+# container that ran, stderr sent to /dev/null, no deadline, and no `-i`, so the
+# container's stdin was empty whatever the config held.
+fn _sy_agnos_exec_with(runtime, sandbox, command, start_ns) {
     var config = Sandbox_config(sandbox);
     var policy = SandboxConfig_policy(config);
+    # Named, so `_sy_agnos_remove` can find it.
+    var name = oci_container_id("kavach-sy");
 
     var args = vec_new();
     vec_push(args, runtime);
     vec_push(args, "run");
     vec_push(args, "--rm");
+    vec_push(args, "-i");
+    vec_push(args, "--name");
+    vec_push(args, name);
 
     vec_push(args, "--network");
     if (SandboxPolicy_network_enabled(policy) == 1) {
@@ -188,10 +217,11 @@ fn sy_agnos_exec(sandbox, command) {
 
     var out_cap = 1048576;
     var out_buf = alloc(out_cap);
-    var n = kv_exec_capture(args, out_buf, out_cap);
+    var n = backend_run_capture(args, config, out_buf, out_cap);
     var end_ns = mono_now_ns();
-
-    return backend_capture_finish(out_buf, n, out_cap, "sy-agnos container run failed", start_ns, end_ns);
+    var r = backend_run_finish(out_buf, n, out_cap, "sy-agnos container run failed", start_ns, end_ns);
+    _sy_agnos_remove(runtime, name);
+    return r;
 }
 
 fn sy_agnos_health(sandbox) {

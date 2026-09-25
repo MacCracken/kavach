@@ -1167,6 +1167,12 @@ enum LandlockConst {
     LANDLOCK_ACCESS_FS_MAKE_SYM = 4096;
     LANDLOCK_ACCESS_FS_REFER = 8192;
     LANDLOCK_ACCESS_FS_TRUNCATE = 16384;
+    # ABI v5: ioctl on a character or block device opened under the ruleset.
+    LANDLOCK_ACCESS_FS_IOCTL_DEV = 32768;
+    # ABI v6 scopes: a process may reach an abstract unix socket, or signal a
+    # process, only inside its own landlock domain.
+    LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET = 1;
+    LANDLOCK_SCOPE_SIGNAL = 2;
     LANDLOCK_RULE_PATH_BENEATH = 1;
     # Flag to `landlock_create_ruleset` that asks for the ABI version instead of
     # creating a ruleset. Returns the version as a positive integer.
@@ -1203,12 +1209,14 @@ fn security_landlock_abi_version(): i64 {
 
 # Every right this kernel will accept in `handled_access_fs`.
 #
-# Masking down by ABI rather than up: the v1 set is the floor, and the two later
-# rights are added only where the kernel knows them.
+# Masking down by ABI rather than up: the v1 set is the floor, and the later
+# rights are added only where the kernel knows them. IOCTL_DEV (v5) is handled
+# since 3.13.2; before, no kavach ruleset restricted ioctl on a device file.
 fn _landlock_handled_access(abi): i64 {
     var mask = _landlock_rights_v1();
     if (abi >= 2) { mask = mask | LANDLOCK_ACCESS_FS_REFER; }
     if (abi >= 3) { mask = mask | LANDLOCK_ACCESS_FS_TRUNCATE; }
+    if (abi >= 5) { mask = mask | LANDLOCK_ACCESS_FS_IOCTL_DEV; }
     return mask;
 }
 
@@ -1231,6 +1239,11 @@ fn _landlock_allow_read_only(): i64 {
 # full control of its own writable area — create, delete, truncate, and (on ABI
 # v2+) rename across two of its own allowed directories. Outside those paths all
 # of it is now denied, which is the actual fix.
+#
+# IOCTL_DEV (ABI v5, since 3.13.2) is a read-write right only, as WRITE_FILE is:
+# an ioctl on a device drives it. A read-only rule leaves a device readable and
+# its ioctls refused, and descriptors opened before the ruleset, the payload's
+# stdio among them, are not affected.
 fn _landlock_allow_read_write(abi): i64 {
     var mask = _landlock_allow_read_only() | LANDLOCK_ACCESS_FS_WRITE_FILE
     | LANDLOCK_ACCESS_FS_REMOVE_DIR | LANDLOCK_ACCESS_FS_REMOVE_FILE
@@ -1240,22 +1253,24 @@ fn _landlock_allow_read_write(abi): i64 {
     | LANDLOCK_ACCESS_FS_MAKE_SYM;
     if (abi >= 2) { mask = mask | LANDLOCK_ACCESS_FS_REFER; }
     if (abi >= 3) { mask = mask | LANDLOCK_ACCESS_FS_TRUNCATE; }
+    if (abi >= 5) { mask = mask | LANDLOCK_ACCESS_FS_IOCTL_DEV; }
     return mask;
 }
 
 # The rights a rule naming a file, not a directory, can hold: the kernel's
-# ACCESS_FILE, less IOCTL_DEV. `landlock_add_rule` refuses any other right on a
-# non-directory with EINVAL. Measured one right at a time on 7.2.6 (ABI 10):
-# EXECUTE, WRITE_FILE, READ_FILE and TRUNCATE are taken on a file, and READ_DIR,
-# the REMOVE_* and MAKE_* rights and REFER are refused. IOCTL_DEV (ABI v5) is a
-# file right too, but kavach does not handle it, and a rule may grant only
-# handled rights: the kernel refuses it on kavach's rulesets.
+# ACCESS_FILE. `landlock_add_rule` refuses any other right on a non-directory
+# with EINVAL. Measured one right at a time on 7.2.6 (ABI 10): EXECUTE,
+# WRITE_FILE, READ_FILE, TRUNCATE and IOCTL_DEV are taken on a file, and
+# READ_DIR, the REMOVE_* and MAKE_* rights and REFER are refused.
 #
-# Masked with a rule's rights, this takes TRUNCATE only where the rule had it,
-# which `_landlock_allow_read_write` gives from ABI v3.
+# Masked with a rule's rights, this keeps TRUNCATE (ABI v3) and IOCTL_DEV (ABI
+# v5) only where the rule had them, which `_landlock_allow_read_write` gives. A
+# rule may grant only rights the ruleset handles, so neither can reach a kernel
+# older than its ABI.
 fn _landlock_file_rights(): i64 {
     return LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_WRITE_FILE
-    | LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_TRUNCATE;
+    | LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_TRUNCATE
+    | LANDLOCK_ACCESS_FS_IOCTL_DEV;
 }
 
 # Filesystem access levels
@@ -1287,7 +1302,18 @@ fn security_fs_rule_read_write(path): i64 { return security_fs_rule_new(path, FS
 # rules: vec of fs_rule pointers, count: number of rules
 # Returns Result: Ok(0) on success, Err on failure.
 fn security_apply_landlock(rules, count): i64 {
-    if (count == 0) { return Ok(0); }
+    return security_apply_landlock_scoped(rules, count, 0);
+}
+
+# The same, with landlock scopes (ABI v6, applied since 3.13.2). `scopes` is a
+# mask of LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET and LANDLOCK_SCOPE_SIGNAL: the
+# process may then connect to an abstract unix socket, or signal a process,
+# only inside its own landlock domain. A ruleset of scopes alone handles no
+# filesystem right, so `count == 0` with a scope still installs one. A kernel
+# older than ABI v6 cannot express a scope, and the scopes are left out there,
+# as a kernel without landlock leaves out the whole ruleset.
+fn security_apply_landlock_scoped(rules, count, scopes): i64 {
+    if (count <= 0 && scopes == 0) { return Ok(0); }
 
     #ifdef CYRIUS_TARGET_AGNOS
     # AGNOS has no Landlock (a Linux LSM/MAC primitive). FS confinement on AGNOS
@@ -1307,17 +1333,29 @@ fn security_apply_landlock(rules, count): i64 {
     # the entire security surface.
     var abi = security_landlock_abi_version();
     if (abi == 0) { return Ok(0); }
-    var handled_access = _landlock_handled_access(abi);
+    var handled_access = 0;
+    if (count > 0) { handled_access = _landlock_handled_access(abi); }
+    var scoped = 0;
+    if (abi >= 6) {
+        scoped = scopes & (LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET | LANDLOCK_SCOPE_SIGNAL);
+    }
+    if (handled_access == 0 && scoped == 0) { return Ok(0); }
 
-    # LandlockRulesetAttr: { handled_access_fs: u64 } = 8 bytes.
-    # Function-local `var X[N]` is N BYTES (cyrius 6.3.13 moved these to
-    # the guard-paged thread stack), so this must be [8] to hold the u64
-    # store64 below — `var attr[1]` was a 1-byte local taking an 8-byte
-    # write, a latent stack smash that 6.3.13+ turns into a hard fault.
-    var attr[8];
+    # SAFETY: LandlockRulesetAttr is { handled_access_fs: u64,
+    # handled_access_net: u64 (ABI v4), scoped: u64 (ABI v6) }, 24 bytes, and
+    # `attr` is 24 bytes. Function-local `var X[N]` is N BYTES (cyrius 6.3.13
+    # moved these to the guard-paged thread stack), so every store64 below lands
+    # inside it. With no scope only the first 8 bytes are passed, the struct
+    # every landlock kernel knows; an older kernel refuses a longer one whose
+    # tail it cannot read as zero.
+    var attr[24];
     store64(&attr, handled_access);
+    store64(&attr + 8, 0);
+    store64(&attr + 16, scoped);
+    var attr_size = 8;
+    if (scoped != 0) { attr_size = 24; }
 
-    var ruleset_fd = syscall(SYS_LANDLOCK_CREATE_RULESET, &attr, 8, 0);
+    var ruleset_fd = syscall(SYS_LANDLOCK_CREATE_RULESET, &attr, attr_size, 0);
     if (ruleset_fd < 0) {
         var errno = 0 - ruleset_fd;
         if (errno == ENOSYS) { return Ok(0); }
@@ -1330,9 +1368,11 @@ fn security_apply_landlock(rules, count): i64 {
     # for a ruleset with **no** path-beneath rules — total filesystem denial,
     # which `policy_landlock_deny_all` expresses as a non-zero count over an
     # empty list — must create and enforce the ruleset without indexing past
-    # the end of it. `count == 0` above still means "no landlock at all", which
-    # is a different request and stays different.
+    # the end of it. `count == 0` with no scope still means "no landlock at
+    # all", which is a different request and stays different; with a scope it
+    # is a ruleset handling no filesystem right, and the walk adds nothing.
     var walk = count;
+    if (walk < 0) { walk = 0; }
     if (rules == 0) { walk = 0; }
     else { if (vec_len(rules) < walk) { walk = vec_len(rules); } }
 
@@ -2268,6 +2308,52 @@ fn backend_capture_finish(out_buf, n, out_cap, fail_msg, start_ns, end_ns) {
     return r;
 }
 
+# Set `r`'s stderr to a copy of the last capture's, with its length.
+#
+# `confine_last_stderr()` is one static buffer that the next capture overwrites.
+# Through 3.13.1 the process and WASM backends stored that pointer in their
+# results, so every result shared one stderr and an earlier result's changed to
+# a later exec's (measured: after a second `sandbox_exec`, the first result's
+# stderr read the second's error, through the same pointer).
+fn backend_set_capture_stderr(r) {
+    var n = confine_last_stderr_len();
+    var p = alloc(n + 1);
+    memcpy(p, confine_last_stderr(), n);
+    store8(p + n, 0);
+    exec_result_set_stderr_n(r, p, n);
+    return r;
+}
+
+# Run a backend's runtime (runsc, runc or crun, docker or podman) the way the
+# process backend runs a payload (3.13.2): its stdout into `out_buf`, its own
+# stderr, exit status and the config's deadline, with the payload's stdin as the
+# runtime's (`_config_payload_stdin`). Returns the byte count, or -1; the rest
+# of the run is `confine_last_*`, which `backend_run_finish` reads.
+#
+# The runtime runs unconfined, as it did: it is the boundary, not the payload,
+# and its environment is empty. Through 3.13.1 gVisor and SY-agnos ran through
+# `kv_exec_capture`, which sends stderr to /dev/null, reports no exit status
+# and has no deadline kavach sets, and hands the runtime kavach's own stdin.
+fn backend_run_capture(args, cfg, out_buf, out_cap) {
+    var tmo = 0;
+    if (cfg != 0) { tmo = SandboxConfig_timeout_ms(cfg); }
+    return confine_capture_input_env_wd(args, 0, 0, 0, 0, out_buf, out_cap, 0, tmo, 0,
+      _config_payload_stdin(cfg), _config_payload_stdin_len(cfg), 0, 0);
+}
+
+# The ExecResult for a `backend_run_capture` run: `backend_capture_finish`'s,
+# with the runtime's exit status, its stderr and whether the deadline killed it.
+# A failed capture (`n < 0`) keeps `backend_capture_finish`'s (1, `fail_msg`).
+fn backend_run_finish(out_buf, n, out_cap, fail_msg, start_ns, end_ns) {
+    var r = backend_capture_finish(out_buf, n, out_cap, fail_msg, start_ns, end_ns);
+    if (r != 0 && n >= 0) {
+        ExecResult_set_exit_code(r, confine_last_exit());
+        ExecResult_set_timed_out(r, confine_last_timed_out());
+        backend_set_capture_stderr(r);
+    }
+    return r;
+}
+
 # --- policy.cyr ---
 
 # kavach — SandboxPolicy
@@ -2434,11 +2520,14 @@ fn policy_landlock_is_deny_all(p) {
 # The routing predicate for `process_exec`: a policy answering 1 must not reach
 # a plain `exec_capture`, because that path has no seam between `fork` and
 # `execve` in which to install a filter. Answering on the policy rather than on
-# the rootfs is the whole of the 3.11.3 fix.
+# the rootfs is the whole of the 3.11.3 fix. A landlock scope asks for a ruleset
+# as a rule does (3.13.2).
 fn policy_wants_confinement(p) {
     if (p == 0) { return 0; }
     if (SandboxPolicy_seccomp_enabled(p) == 1) { return 1; }
     if (SandboxPolicy_landlock_rules_len(p) > 0) { return 1; }
+    if (SandboxPolicy_landlock_abstract_unix(p) == 1) { return 1; }
+    if (SandboxPolicy_landlock_signal(p) == 1) { return 1; }
     return 0;
 }
 
@@ -2557,11 +2646,13 @@ fn score_backend(backend, policy) {
     if (SandboxPolicy_memory_limit_mb(policy) > 0) { score = score + 2; }
     elif (SandboxPolicy_cpu_limit_tenths(policy) > 0) { score = score + 2; }
 
-    # Landlock TCP ports (ABI v4): +3 once if either list is non-empty
-    if (SandboxPolicy_network_tcp_bind_len(policy) > 0) { score = score + 3; }
-    elif (SandboxPolicy_network_tcp_connect_len(policy) > 0) { score = score + 3; }
+    # Landlock TCP ports (ABI v4) are not scored (3.13.2). The policy carries
+    # only `network_tcp_bind_len` and `network_tcp_connect_len`, counts with no
+    # port list behind them and no setter, so no rule can be built from them,
+    # and through 3.13.1 they added 3 for a restriction nothing applied.
 
-    # Landlock scoping (ABI v6)
+    # Landlock scoping (ABI v6), applied since 3.13.2 by `_spawn_apply_landlock`
+    # where the kernel has ABI v6.
     if (SandboxPolicy_landlock_abstract_unix(policy) == 1) { score = score + 2; }
     if (SandboxPolicy_landlock_signal(policy) == 1) { score = score + 2; }
 
@@ -2775,11 +2866,13 @@ struct SandboxConfig {
     stdin_len;
     fuel;
     env;
+    stdin_inherit;
 }
 
-# 120: `env` appended, so no existing field offset moves — the same discipline
-# `fuel` followed at 112, `stdin`/`stdin_len` at 104 and `require_ns` at 88.
-var SANDBOX_CONFIG_SIZE = 120;
+# 128: `stdin_inherit` appended (3.13.2), so no existing field offset moves; the
+# same discipline `env` followed at 120, `fuel` at 112, `stdin`/`stdin_len` at
+# 104 and `require_ns` at 88.
+var SANDBOX_CONFIG_SIZE = 128;
 
 # Defaults match Rust's SandboxConfig::default():
 #   backend=Process, policy=basic(), timeout_ms=30000, inner_backend=-1 (none)
@@ -2798,18 +2891,30 @@ fn config_new() {
 # callers may chain if they wish.
 fn config_backend(c, b)        { SandboxConfig_set_backend(c, b); return c; }
 fn config_policy(c, p)         { SandboxConfig_set_policy(c, p); return c; }
+
+# The payload's wall-clock deadline, in ms: 30000 from `config_new`, 0 for
+# none. At the deadline the payload is killed and the result reports
+# `timed_out`. Enforced by the process backend (since 3.11.4), the WASM backend,
+# and the gVisor, OCI and SY-agnos backends on their runtime's run (since
+# 3.13.2). The SGX, SEV, TDX and Firecracker launchers do not take it yet.
 fn config_timeout_ms(c, ms)    { SandboxConfig_set_timeout_ms(c, ms); return c; }
 
-# Bytes to hand the payload on stdin (3.11.8). `ptr = 0` means "inherit this
-# process's stdin", which is what every backend did before this existed; a
-# non-zero `ptr` with `len = 0` is an empty stdin, an immediate EOF.
+# Bytes to hand the payload on stdin (3.11.8). With none (`ptr = 0`, the
+# default), the payload gets an empty stdin, an immediate EOF, unless the
+# config opts in to kavach's own with `config_stdin_inherit`. A non-zero `ptr`
+# with `len = 0` is an empty stdin too.
 #
-# Honoured by the process backend (since 3.13.1) and the WASM backend (since
-# 3.11.8). ⚠ Through 3.13.0 the process backend passed it to neither of its
-# captures, so a payload read kavach's own stdin in its place. The backends that
-# shell out through `kv_exec_capture` (gVisor, OCI, SGX, SEV, TDX, Firecracker,
-# SY-agnos) still do not take it. A persistent guest has its own channel,
-# `persistent_send`.
+# ⚠ **Through 3.13.1 an unset stdin inherited kavach's own**, so a payload could
+# read, and consume, whatever the host process had there. 3.11.8 kept that
+# default for interactive payloads; they now say so with
+# `config_stdin_inherit`.
+#
+# Honoured by the process backend (since 3.13.1), the WASM backend (since
+# 3.11.8), and the gVisor, OCI and SY-agnos backends (since 3.13.2). ⚠ Through
+# 3.13.0 the process backend passed it to neither of its captures, so a payload
+# read kavach's own stdin in its place. The SGX, SEV, TDX and Firecracker
+# launchers, which shell out through `kv_exec_capture`, do not take it yet; a
+# persistent guest has its own channel, `persistent_send`.
 #
 # ⚠ The buffer is NOT copied — it must outlive the `sandbox_exec` that consumes
 # it. And it is capped by pipe capacity: see `confine_capture_input`, which does
@@ -2819,6 +2924,29 @@ fn config_stdin(c, ptr, len)   {
     SandboxConfig_set_stdin(c, ptr);
     SandboxConfig_set_stdin_len(c, len);
     return c;
+}
+
+# Hand the payload kavach's own stdin when the config names no bytes (`on` 1),
+# the default through 3.13.1. For a payload that has to read the terminal
+# kavach runs in; anything on kavach's stdin reaches the payload, which can
+# also consume it. Bytes set with `config_stdin` take precedence.
+fn config_stdin_inherit(c, on) { SandboxConfig_set_stdin_inherit(c, on); return c; }
+
+# The stdin a backend hands the payload, as a capture's `input`: the config's
+# bytes; with none, 0 (inherit kavach's) if the config opts in, and otherwise ""
+# (an empty stdin). Its length is `_config_payload_stdin_len`.
+fn _config_payload_stdin(c) {
+    if (c == 0) { return ""; }
+    var p = SandboxConfig_stdin(c);
+    if (p != 0) { return p; }
+    if (SandboxConfig_stdin_inherit(c) == 1) { return 0; }
+    return "";
+}
+
+fn _config_payload_stdin_len(c) {
+    if (c == 0) { return 0; }
+    if (SandboxConfig_stdin(c) == 0) { return 0; }
+    return SandboxConfig_stdin_len(c);
 }
 
 # An explicit WASM instruction budget, in wasmtime `--fuel` units.
@@ -4260,6 +4388,29 @@ fn _spawn_enter_workdir(workdir) {
     #endif
 }
 
+# The capture's payload dies with kavach (3.13.2): PR_SET_PDEATHSIG (1) with
+# SIGKILL (9), set in the child before `execve`, which keeps it for a binary
+# that is not set-id. Through 3.13.1 a payload outlived a kavach killed
+# mid-capture (measured: its `sleep` still running after kavach's SIGKILL), and
+# gVisor and SY-agnos had the stdlib capture's guard until they moved onto this
+# one. `getppid` against `ppid`, read before the fork, catches a parent that
+# died before the `prctl`, when the signal would never come.
+#
+# Only for the capture, where kavach waits on the payload. `sandbox_spawn` and
+# persistent guests hand the caller a handle to a process meant to run on.
+fn _spawn_die_with_parent(ppid) {
+    # ⛔ LINUX ONLY: `SYS_PRCTL` is not in the agnos syscall enum, and the one
+    # caller, the capture, is compiled out there.
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0 - 1;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    syscall(SYS_PRCTL, 1, 9, 0, 0, 0);
+    if (sys_getppid() != ppid) { sys_exit(1); }
+    return 0;
+    #endif
+}
+
 # Close every descriptor from `from` up to SPAWN_MAX_FD. Errors are expected
 # and ignored — most of the range is simply not open. The one fd spared is the
 # pinned binary the child is about to exec (kv_exec_pin, util.cyr). It is a
@@ -4302,14 +4453,33 @@ fn _spawn_cgroup_join(cgroup_path) {
 # permitted them. Any other policy holds at least `count` rules, and the first
 # `count` are applied. Unlike the code it replaced, this makes no list after
 # `fork` for a count with no list.
+#
+# The policy's scopes go into the same ruleset (3.13.2): `landlock_abstract_unix`
+# and `landlock_signal`, which `policy_strict()` sets, confine the payload's
+# abstract unix sockets and signals to its own landlock domain. Through 3.13.1
+# they were stored and scored and applied by nothing; a `policy_strict()`
+# payload could signal kavach itself. A policy with scopes and no rules gets a
+# ruleset of scopes alone.
 fn _spawn_apply_landlock(policy) {
     if (policy == 0) { return 0; }
     var count = SandboxPolicy_landlock_rules_len(policy);
-    if (count <= 0) { return 0; }
+    if (count < 0) { count = 0; }
+    var scopes = _spawn_landlock_scopes(policy);
+    if (count == 0 && scopes == 0) { return 0; }
     var rules = SandboxPolicy_landlock_rules(policy);
     if (policy_landlock_is_deny_all(policy) == 1) { rules = 0; }
-    if (is_ok(security_apply_landlock(rules, count)) == 0) { return 0 - 1; }
+    if (is_ok(security_apply_landlock_scoped(rules, count, scopes)) == 0) { return 0 - 1; }
     return 0;
+}
+
+# The landlock scopes `policy` asks for, as the kernel's mask.
+fn _spawn_landlock_scopes(policy) {
+    var scopes = 0;
+    if (SandboxPolicy_landlock_abstract_unix(policy) == 1) {
+        scopes = scopes | LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET;
+    }
+    if (SandboxPolicy_landlock_signal(policy) == 1) { scopes = scopes | LANDLOCK_SCOPE_SIGNAL; }
+    return scopes;
 }
 
 # Redirect stdio for the detached child: stdin from /dev/null, stdout+stderr to
@@ -4608,6 +4778,8 @@ fn confine_capture_input_env_wd(args, policy, rootfs, cgroup_path, seccomp_info,
     # reports the mapped id, not the one the map must be written against.
     var uid = sys_getuid();
     var gid = kv_getgid();
+    # For `_spawn_die_with_parent`, read before the fork.
+    var ppid = sys_getpid();
 
     var pipefd[16];
     sys_pipe(&pipefd);
@@ -4652,6 +4824,7 @@ fn confine_capture_input_env_wd(args, policy, rootfs, cgroup_path, seccomp_info,
         return 0 - 1;
     }
     if (pid == 0) {
+        _spawn_die_with_parent(ppid);
         _kv_exec_keep_fd = pin;
         sys_close(rfd);
         sys_close(erfd);
@@ -4720,22 +4893,37 @@ fn confine_capture_input_env_wd(args, policy, rootfs, cgroup_path, seccomp_info,
     var idle = 0;
     while (odone == 0 || edone == 0) {
         var moved = 0;
+        # **A full buffer ends a stream without blocking the payload** (3.13.2).
+        # Until then a full buffer only stopped the reads. The payload then
+        # blocked writing to that pipe, never closed the other one, and the loop
+        # waited for an EOF that could not come: measured, a `/bin/cat` of 2 MB
+        # and a shell writing 200 KB of stderr before exiting 3 each hung until
+        # the deadline, then reported `timed_out` and exit 137, and hung for good
+        # with no deadline. A full stdout is closed, so the payload's next write
+        # fails (SIGPIPE, exit 141), as it does under `exec_capture`. A full
+        # stderr is read on into a sink, so diagnostics never stop a payload.
         if (odone == 0) {
             var n = sys_read(rfd, buf + total, buflen - 1 - total);
             if (n == 0) { odone = 1; }
             if (n > 0) {
                 total = total + n;
                 moved = 1;
-                if (total >= buflen - 1) { odone = 1; }
+                if (total >= buflen - 1) {
+                    odone = 1;
+                    sys_close(rfd);
+                    rfd = 0 - 1;
+                }
             }
         }
         if (edone == 0) {
-            var m = sys_read(erfd, &_confine_err_buf + etotal, CONFINE_ERR_MAX - 1 - etotal);
+            var room = CONFINE_ERR_MAX - 1 - etotal;
+            var m = 0;
+            if (room > 0) { m = sys_read(erfd, &_confine_err_buf + etotal, room); }
+            else { m = sys_read(erfd, &_confine_err_sink, CONFINE_ERR_SINK); }
             if (m == 0) { edone = 1; }
             if (m > 0) {
-                etotal = etotal + m;
+                if (room > 0) { etotal = etotal + m; }
                 moved = 1;
-                if (etotal >= CONFINE_ERR_MAX - 1) { edone = 1; }
             }
         }
         if (moved == 0) {
@@ -4771,7 +4959,7 @@ fn confine_capture_input_env_wd(args, policy, rootfs, cgroup_path, seccomp_info,
             }
         }
     }
-    sys_close(rfd);
+    if (rfd >= 0) { sys_close(rfd); }
     sys_close(erfd);
     store8(&_confine_err_buf + etotal, 0);
     _confine_err_len = etotal;
@@ -4820,6 +5008,11 @@ var CONFINE_POLL_RAMP = 8;
 var CONFINE_ERR_MAX = 65536;
 var _confine_err_buf[65536];
 var _confine_err_len = 0;
+
+# Where stderr past `CONFINE_ERR_MAX` is read and dropped (3.13.2): 4096 bytes,
+# as 512 slots, since a top-level `var x[N]` is N*8 bytes.
+var CONFINE_ERR_SINK = 4096;
+var _confine_err_sink[512];
 
 # The payload's stderr from the most recent `confine_capture`, NUL-terminated.
 #
@@ -5012,9 +5205,10 @@ fn process_exec(sandbox, command) {
     if (cfg != 0) { tmo = SandboxConfig_timeout_ms(cfg); }
 
     # The payload's process setup, for both captures below: its stdin (3.11.8),
-    # its environment (3.12.0) and its working directory (3.12.2). Each is 0
-    # when unset, which is what these calls passed before: inherit this
-    # process's stdin, an empty environment, this process's working directory.
+    # its environment (3.12.0) and its working directory (3.12.2). Unset, the
+    # environment is empty and the working directory is kavach's; the stdin is
+    # empty unless the config opts in to kavach's own (`_config_payload_stdin`,
+    # 3.13.2; through 3.13.1 an unset stdin inherited it).
     #
     # ⚠ **Through 3.13.0 neither capture received `stdin`**, so `config_stdin`
     # never reached a process payload: it read kavach's own stdin instead
@@ -5024,13 +5218,11 @@ fn process_exec(sandbox, command) {
     # environment and no working directory, so under a policy asking for no
     # confinement `config_env` and `config_workdir` were dropped too, though
     # 3.12.0 and 3.12.2 both said the process backend honours them.
-    var pexec_in = 0;
-    var pexec_in_len = 0;
+    var pexec_in = _config_payload_stdin(cfg);
+    var pexec_in_len = _config_payload_stdin_len(cfg);
     var pexec_env = 0;
     var pexec_wd = 0;
     if (cfg != 0) {
-        pexec_in = SandboxConfig_stdin(cfg);
-        pexec_in_len = SandboxConfig_stdin_len(cfg);
         pexec_env = SandboxConfig_env(cfg);
         pexec_wd = SandboxConfig_workdir(cfg);
     }
@@ -5088,8 +5280,9 @@ fn process_exec(sandbox, command) {
         if (rr != 0) {
             ExecResult_set_exit_code(rr, confine_last_exit());
             ExecResult_set_timed_out(rr, confine_last_timed_out());
-            # 3.11.5: the payload's own stderr, where this field was "".
-            ExecResult_set_stderr(rr, confine_last_stderr());
+            # 3.11.5: the payload's own stderr, where this field was "". A copy
+            # since 3.13.2: the capture's buffer is reused by the next exec.
+            backend_set_capture_stderr(rr);
         }
         return rr;
     }
@@ -5109,7 +5302,7 @@ fn process_exec(sandbox, command) {
     if (pr != 0) {
         ExecResult_set_exit_code(pr, confine_last_exit());
         ExecResult_set_timed_out(pr, confine_last_timed_out());
-        ExecResult_set_stderr(pr, confine_last_stderr());
+        backend_set_capture_stderr(pr);
     }
     return pr;
 }

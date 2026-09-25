@@ -173,6 +173,29 @@ fn _spawn_enter_workdir(workdir) {
     #endif
 }
 
+# The capture's payload dies with kavach (3.13.2): PR_SET_PDEATHSIG (1) with
+# SIGKILL (9), set in the child before `execve`, which keeps it for a binary
+# that is not set-id. Through 3.13.1 a payload outlived a kavach killed
+# mid-capture (measured: its `sleep` still running after kavach's SIGKILL), and
+# gVisor and SY-agnos had the stdlib capture's guard until they moved onto this
+# one. `getppid` against `ppid`, read before the fork, catches a parent that
+# died before the `prctl`, when the signal would never come.
+#
+# Only for the capture, where kavach waits on the payload. `sandbox_spawn` and
+# persistent guests hand the caller a handle to a process meant to run on.
+fn _spawn_die_with_parent(ppid) {
+    # ⛔ LINUX ONLY: `SYS_PRCTL` is not in the agnos syscall enum, and the one
+    # caller, the capture, is compiled out there.
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0 - 1;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    syscall(SYS_PRCTL, 1, 9, 0, 0, 0);
+    if (sys_getppid() != ppid) { sys_exit(1); }
+    return 0;
+    #endif
+}
+
 # Close every descriptor from `from` up to SPAWN_MAX_FD. Errors are expected
 # and ignored — most of the range is simply not open. The one fd spared is the
 # pinned binary the child is about to exec (kv_exec_pin, util.cyr). It is a
@@ -215,14 +238,33 @@ fn _spawn_cgroup_join(cgroup_path) {
 # permitted them. Any other policy holds at least `count` rules, and the first
 # `count` are applied. Unlike the code it replaced, this makes no list after
 # `fork` for a count with no list.
+#
+# The policy's scopes go into the same ruleset (3.13.2): `landlock_abstract_unix`
+# and `landlock_signal`, which `policy_strict()` sets, confine the payload's
+# abstract unix sockets and signals to its own landlock domain. Through 3.13.1
+# they were stored and scored and applied by nothing; a `policy_strict()`
+# payload could signal kavach itself. A policy with scopes and no rules gets a
+# ruleset of scopes alone.
 fn _spawn_apply_landlock(policy) {
     if (policy == 0) { return 0; }
     var count = SandboxPolicy_landlock_rules_len(policy);
-    if (count <= 0) { return 0; }
+    if (count < 0) { count = 0; }
+    var scopes = _spawn_landlock_scopes(policy);
+    if (count == 0 && scopes == 0) { return 0; }
     var rules = SandboxPolicy_landlock_rules(policy);
     if (policy_landlock_is_deny_all(policy) == 1) { rules = 0; }
-    if (is_ok(security_apply_landlock(rules, count)) == 0) { return 0 - 1; }
+    if (is_ok(security_apply_landlock_scoped(rules, count, scopes)) == 0) { return 0 - 1; }
     return 0;
+}
+
+# The landlock scopes `policy` asks for, as the kernel's mask.
+fn _spawn_landlock_scopes(policy) {
+    var scopes = 0;
+    if (SandboxPolicy_landlock_abstract_unix(policy) == 1) {
+        scopes = scopes | LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET;
+    }
+    if (SandboxPolicy_landlock_signal(policy) == 1) { scopes = scopes | LANDLOCK_SCOPE_SIGNAL; }
+    return scopes;
 }
 
 # Redirect stdio for the detached child: stdin from /dev/null, stdout+stderr to
@@ -521,6 +563,8 @@ fn confine_capture_input_env_wd(args, policy, rootfs, cgroup_path, seccomp_info,
     # reports the mapped id, not the one the map must be written against.
     var uid = sys_getuid();
     var gid = kv_getgid();
+    # For `_spawn_die_with_parent`, read before the fork.
+    var ppid = sys_getpid();
 
     var pipefd[16];
     sys_pipe(&pipefd);
@@ -565,6 +609,7 @@ fn confine_capture_input_env_wd(args, policy, rootfs, cgroup_path, seccomp_info,
         return 0 - 1;
     }
     if (pid == 0) {
+        _spawn_die_with_parent(ppid);
         _kv_exec_keep_fd = pin;
         sys_close(rfd);
         sys_close(erfd);
@@ -633,22 +678,37 @@ fn confine_capture_input_env_wd(args, policy, rootfs, cgroup_path, seccomp_info,
     var idle = 0;
     while (odone == 0 || edone == 0) {
         var moved = 0;
+        # **A full buffer ends a stream without blocking the payload** (3.13.2).
+        # Until then a full buffer only stopped the reads. The payload then
+        # blocked writing to that pipe, never closed the other one, and the loop
+        # waited for an EOF that could not come: measured, a `/bin/cat` of 2 MB
+        # and a shell writing 200 KB of stderr before exiting 3 each hung until
+        # the deadline, then reported `timed_out` and exit 137, and hung for good
+        # with no deadline. A full stdout is closed, so the payload's next write
+        # fails (SIGPIPE, exit 141), as it does under `exec_capture`. A full
+        # stderr is read on into a sink, so diagnostics never stop a payload.
         if (odone == 0) {
             var n = sys_read(rfd, buf + total, buflen - 1 - total);
             if (n == 0) { odone = 1; }
             if (n > 0) {
                 total = total + n;
                 moved = 1;
-                if (total >= buflen - 1) { odone = 1; }
+                if (total >= buflen - 1) {
+                    odone = 1;
+                    sys_close(rfd);
+                    rfd = 0 - 1;
+                }
             }
         }
         if (edone == 0) {
-            var m = sys_read(erfd, &_confine_err_buf + etotal, CONFINE_ERR_MAX - 1 - etotal);
+            var room = CONFINE_ERR_MAX - 1 - etotal;
+            var m = 0;
+            if (room > 0) { m = sys_read(erfd, &_confine_err_buf + etotal, room); }
+            else { m = sys_read(erfd, &_confine_err_sink, CONFINE_ERR_SINK); }
             if (m == 0) { edone = 1; }
             if (m > 0) {
-                etotal = etotal + m;
+                if (room > 0) { etotal = etotal + m; }
                 moved = 1;
-                if (etotal >= CONFINE_ERR_MAX - 1) { edone = 1; }
             }
         }
         if (moved == 0) {
@@ -684,7 +744,7 @@ fn confine_capture_input_env_wd(args, policy, rootfs, cgroup_path, seccomp_info,
             }
         }
     }
-    sys_close(rfd);
+    if (rfd >= 0) { sys_close(rfd); }
     sys_close(erfd);
     store8(&_confine_err_buf + etotal, 0);
     _confine_err_len = etotal;
@@ -733,6 +793,11 @@ var CONFINE_POLL_RAMP = 8;
 var CONFINE_ERR_MAX = 65536;
 var _confine_err_buf[65536];
 var _confine_err_len = 0;
+
+# Where stderr past `CONFINE_ERR_MAX` is read and dropped (3.13.2): 4096 bytes,
+# as 512 slots, since a top-level `var x[N]` is N*8 bytes.
+var CONFINE_ERR_SINK = 4096;
+var _confine_err_sink[512];
 
 # The payload's stderr from the most recent `confine_capture`, NUL-terminated.
 #

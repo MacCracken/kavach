@@ -111,7 +111,7 @@ policy_strict() ─► SandboxPolicy{ seccomp_enabled=1, seccomp_profile="strict
                                   landlock_abstract_unix=1, landlock_signal=1 }
 ```
 
-The `memory_limit_mb` / `cpu_limit_tenths` / `max_pids` fields are honored by `src/cgroup.cyr` (v3.2.0+). `seccomp_enabled` and the Landlock filesystem rules are applied in the exec child on the process backend and `sandbox_spawn` (by `confine_child`) and for persistent guests (by their own sequence in `persistent.cyr`): seccomp since v3.9.0 (on the process backend without a rootfs, since v3.11.3), with the architecture check since v3.12.8 ([ADR-007](../adr/007-syscall-numbers-across-architectures.md)), and the full Landlock right set since v3.11.1. A rule names a directory, allowing everything beneath it, or a file, allowing that file alone with the rights a file can hold (v3.13.1; through v3.13.0 a rule naming a file failed every exec, exit 124). On the WASM backend the Landlock filesystem rules are the guest's preopens: each rule's directory at its own path, nothing for a deny-all policy, and not the workdir. wasmtime's `--dir` is read-write, so landlock on the wasmtime process, which holds the rules and the paths wasmtime needs to run, keeps a read-only rule read-only (v3.13.1; through v3.13.0 that backend preopened the workdir, read-write, whatever the rules said). The OCI-family backends leave syscall filtering to their runtime. The Landlock network and scope fields are not enforced yet.
+The `memory_limit_mb` / `cpu_limit_tenths` / `max_pids` fields are honored by `src/cgroup.cyr` (v3.2.0+). `seccomp_enabled` and the Landlock filesystem rules are applied in the exec child on the process backend and `sandbox_spawn` (by `confine_child`) and for persistent guests (by their own sequence in `persistent.cyr`): seccomp since v3.9.0 (on the process backend without a rootfs, since v3.11.3), with the architecture check since v3.12.8 ([ADR-007](../adr/007-syscall-numbers-across-architectures.md)), and the full Landlock right set since v3.11.1. A rule names a directory, allowing everything beneath it, or a file, allowing that file alone with the rights a file can hold (v3.13.1; through v3.13.0 a rule naming a file failed every exec, exit 124). On the WASM backend the Landlock filesystem rules are the guest's preopens: each rule's directory at its own path, nothing for a deny-all policy, and not the workdir. wasmtime's `--dir` is read-write, so landlock on the wasmtime process, which holds the rules and the paths wasmtime needs to run, keeps a read-only rule read-only (v3.13.1; through v3.13.0 that backend preopened the workdir, read-write, whatever the rules said). Since v3.13.2 read-write rules alone grant `IOCTL_DEV` (landlock ABI v5), so a device opened under a read-only rule takes no `ioctl`; before, no ruleset restricted device ioctls. The landlock scopes, `landlock_abstract_unix` and `landlock_signal`, go into the same ruleset on every one of those paths where the kernel has ABI v6 (v3.13.2; through v3.13.1 they were scored and applied nowhere), and a policy with scopes alone takes the confined path. The WASM backend confines the wasmtime process for any policy asking for confinement: landlock, the scopes, and kavach's exec seccomp filter (v3.13.2; through v3.13.1 landlock rules only). The OCI-family backends leave syscall filtering to their runtime. The TCP port fields (`network_tcp_bind_len`, `network_tcp_connect_len`) are counts with no port list, applied nowhere and, since v3.13.2, not scored.
 
 The attestation fields (v3.13.0) are set with `policy_attest_allow` (a measurement: MRENCLAVE for SGX, MRTD for TDX), `policy_attest_root` (the root CA, DER) and `policy_attest_allow_debug`. One allowed measurement makes the policy require attestation: `sandbox_exec` then runs only on the SGX or TDX backend and verifies the guest's quote before releasing output, and `sandbox_spawn`, persistent guests and `composite_exec` refuse the policy. `merge_policies` keeps the requirement, intersecting two allowlists.
 
@@ -173,21 +173,23 @@ Policy modifiers (additive, clamped to [0, 100]). The score reflects what the
 sandbox *claims* to enforce; runtime enforcement is per-feature: cgroups v2
 since v3.2.0, and seccomp (v3.9.0) and Landlock filesystem rules (v3.11.1) in
 the exec child on the process backend, `sandbox_spawn` and persistent guests.
-The WASM backend enforces the filesystem rules too (v3.13.1).
-Rechecked against the source at v3.12.9. The score counts what the policy
-asks for, so the three "claim only" rows still add points for controls nothing
-applies; the roadmap tracks either applying them or no longer scoring them:
+The WASM backend enforces the filesystem rules too (v3.13.1), and seccomp and
+the scopes on the wasmtime process (v3.13.2).
+Rechecked against the source at v3.13.2. The score counts what the policy asks
+for. Through v3.13.1 three rows added points for controls nothing applied; the
+scopes are applied now, and the port counts are no longer scored. Where a row
+still depends on the backend or the config, it says so:
 
 | Modifier | +Score | Enforced at runtime today? |
 |----------|-------:|----------------------------|
-| seccomp enabled | +5 | **Yes** on the process backend, `sandbox_spawn` and persistent guests (v3.9.0; the rootfs-less process path since v3.11.3; architecture-checked since v3.12.8); OCI-family backends leave it to their runtime |
+| seccomp enabled | +5 | **Yes** on the process backend, `sandbox_spawn` and persistent guests (v3.9.0; the rootfs-less process path since v3.11.3; architecture-checked since v3.12.8), and on the wasmtime process (v3.13.2); OCI-family backends leave it to their runtime |
 | landlock rules present | +3 | **Yes** on the same paths (v3.11.1). On the WASM backend too (v3.13.1): the rules are the guest's preopens, and landlock on the wasmtime process keeps a read-only rule read-only. Through v3.13.0 WASM ignored them, preopening the workdir read-write, and still scored them |
 | network disabled | +5 | microVM / OCI: yes. Process: yes with a rootfs, or with `config_require_namespaces(cfg, 1)` (v3.11.5), as a network namespace that is refused, not skipped, where the host denies one (and on aarch64 until cyrius names `unshare`, ADR-007); otherwise claim only |
 | read-only rootfs | +3 | Backend-dependent (OCI/gVisor/microVM yes) |
 | memory OR cpu limit set | +2 | **Yes** (v3.2.0 via cgroups v2 on process backend) |
-| TCP bind/connect port allowlist | +3 | No — claim only. The policy fields exist; no Landlock network rule (ABI v4) is applied |
-| landlock scope: abstract unix socket | +2 | No — claim only; no Landlock scope (ABI v6) is applied |
-| landlock scope: signal | +2 | No — claim only; no Landlock scope (ABI v6) is applied |
+| TCP bind/connect port allowlist | 0 | No. The fields are counts with no port list and no setter, so no Landlock network rule (ABI v4) is built from them. Not scored since v3.13.2; through v3.13.1 they added 3 |
+| landlock scope: abstract unix socket | +2 | **Yes** (v3.13.2) where the kernel has landlock ABI v6: on the process backend, `sandbox_spawn`, persistent guests and the wasmtime process. Through v3.13.1 claim only |
+| landlock scope: signal | +2 | **Yes** on the same paths (v3.13.2). Through v3.13.1 claim only: a `policy_strict()` payload could signal kavach |
 
 ---
 

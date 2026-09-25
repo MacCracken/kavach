@@ -158,11 +158,13 @@ struct SandboxConfig {
     stdin_len;
     fuel;
     env;
+    stdin_inherit;
 }
 
-# 120: `env` appended, so no existing field offset moves — the same discipline
-# `fuel` followed at 112, `stdin`/`stdin_len` at 104 and `require_ns` at 88.
-var SANDBOX_CONFIG_SIZE = 120;
+# 128: `stdin_inherit` appended (3.13.2), so no existing field offset moves; the
+# same discipline `env` followed at 120, `fuel` at 112, `stdin`/`stdin_len` at
+# 104 and `require_ns` at 88.
+var SANDBOX_CONFIG_SIZE = 128;
 
 # Defaults match Rust's SandboxConfig::default():
 #   backend=Process, policy=basic(), timeout_ms=30000, inner_backend=-1 (none)
@@ -181,18 +183,30 @@ fn config_new() {
 # callers may chain if they wish.
 fn config_backend(c, b)        { SandboxConfig_set_backend(c, b); return c; }
 fn config_policy(c, p)         { SandboxConfig_set_policy(c, p); return c; }
+
+# The payload's wall-clock deadline, in ms: 30000 from `config_new`, 0 for
+# none. At the deadline the payload is killed and the result reports
+# `timed_out`. Enforced by the process backend (since 3.11.4), the WASM backend,
+# and the gVisor, OCI and SY-agnos backends on their runtime's run (since
+# 3.13.2). The SGX, SEV, TDX and Firecracker launchers do not take it yet.
 fn config_timeout_ms(c, ms)    { SandboxConfig_set_timeout_ms(c, ms); return c; }
 
-# Bytes to hand the payload on stdin (3.11.8). `ptr = 0` means "inherit this
-# process's stdin", which is what every backend did before this existed; a
-# non-zero `ptr` with `len = 0` is an empty stdin, an immediate EOF.
+# Bytes to hand the payload on stdin (3.11.8). With none (`ptr = 0`, the
+# default), the payload gets an empty stdin, an immediate EOF, unless the
+# config opts in to kavach's own with `config_stdin_inherit`. A non-zero `ptr`
+# with `len = 0` is an empty stdin too.
 #
-# Honoured by the process backend (since 3.13.1) and the WASM backend (since
-# 3.11.8). ⚠ Through 3.13.0 the process backend passed it to neither of its
-# captures, so a payload read kavach's own stdin in its place. The backends that
-# shell out through `kv_exec_capture` (gVisor, OCI, SGX, SEV, TDX, Firecracker,
-# SY-agnos) still do not take it. A persistent guest has its own channel,
-# `persistent_send`.
+# ⚠ **Through 3.13.1 an unset stdin inherited kavach's own**, so a payload could
+# read, and consume, whatever the host process had there. 3.11.8 kept that
+# default for interactive payloads; they now say so with
+# `config_stdin_inherit`.
+#
+# Honoured by the process backend (since 3.13.1), the WASM backend (since
+# 3.11.8), and the gVisor, OCI and SY-agnos backends (since 3.13.2). ⚠ Through
+# 3.13.0 the process backend passed it to neither of its captures, so a payload
+# read kavach's own stdin in its place. The SGX, SEV, TDX and Firecracker
+# launchers, which shell out through `kv_exec_capture`, do not take it yet; a
+# persistent guest has its own channel, `persistent_send`.
 #
 # ⚠ The buffer is NOT copied — it must outlive the `sandbox_exec` that consumes
 # it. And it is capped by pipe capacity: see `confine_capture_input`, which does
@@ -202,6 +216,29 @@ fn config_stdin(c, ptr, len)   {
     SandboxConfig_set_stdin(c, ptr);
     SandboxConfig_set_stdin_len(c, len);
     return c;
+}
+
+# Hand the payload kavach's own stdin when the config names no bytes (`on` 1),
+# the default through 3.13.1. For a payload that has to read the terminal
+# kavach runs in; anything on kavach's stdin reaches the payload, which can
+# also consume it. Bytes set with `config_stdin` take precedence.
+fn config_stdin_inherit(c, on) { SandboxConfig_set_stdin_inherit(c, on); return c; }
+
+# The stdin a backend hands the payload, as a capture's `input`: the config's
+# bytes; with none, 0 (inherit kavach's) if the config opts in, and otherwise ""
+# (an empty stdin). Its length is `_config_payload_stdin_len`.
+fn _config_payload_stdin(c) {
+    if (c == 0) { return ""; }
+    var p = SandboxConfig_stdin(c);
+    if (p != 0) { return p; }
+    if (SandboxConfig_stdin_inherit(c) == 1) { return 0; }
+    return "";
+}
+
+fn _config_payload_stdin_len(c) {
+    if (c == 0) { return 0; }
+    if (SandboxConfig_stdin(c) == 0) { return 0; }
+    return SandboxConfig_stdin_len(c);
 }
 
 # An explicit WASM instruction budget, in wasmtime `--fuel` units.

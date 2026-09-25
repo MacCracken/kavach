@@ -274,3 +274,49 @@ fn backend_capture_finish(out_buf, n, out_cap, fail_msg, start_ns, end_ns) {
     ExecResult_set_timed_out(r, 0);
     return r;
 }
+
+# Set `r`'s stderr to a copy of the last capture's, with its length.
+#
+# `confine_last_stderr()` is one static buffer that the next capture overwrites.
+# Through 3.13.1 the process and WASM backends stored that pointer in their
+# results, so every result shared one stderr and an earlier result's changed to
+# a later exec's (measured: after a second `sandbox_exec`, the first result's
+# stderr read the second's error, through the same pointer).
+fn backend_set_capture_stderr(r) {
+    var n = confine_last_stderr_len();
+    var p = alloc(n + 1);
+    memcpy(p, confine_last_stderr(), n);
+    store8(p + n, 0);
+    exec_result_set_stderr_n(r, p, n);
+    return r;
+}
+
+# Run a backend's runtime (runsc, runc or crun, docker or podman) the way the
+# process backend runs a payload (3.13.2): its stdout into `out_buf`, its own
+# stderr, exit status and the config's deadline, with the payload's stdin as the
+# runtime's (`_config_payload_stdin`). Returns the byte count, or -1; the rest
+# of the run is `confine_last_*`, which `backend_run_finish` reads.
+#
+# The runtime runs unconfined, as it did: it is the boundary, not the payload,
+# and its environment is empty. Through 3.13.1 gVisor and SY-agnos ran through
+# `kv_exec_capture`, which sends stderr to /dev/null, reports no exit status
+# and has no deadline kavach sets, and hands the runtime kavach's own stdin.
+fn backend_run_capture(args, cfg, out_buf, out_cap) {
+    var tmo = 0;
+    if (cfg != 0) { tmo = SandboxConfig_timeout_ms(cfg); }
+    return confine_capture_input_env_wd(args, 0, 0, 0, 0, out_buf, out_cap, 0, tmo, 0,
+      _config_payload_stdin(cfg), _config_payload_stdin_len(cfg), 0, 0);
+}
+
+# The ExecResult for a `backend_run_capture` run: `backend_capture_finish`'s,
+# with the runtime's exit status, its stderr and whether the deadline killed it.
+# A failed capture (`n < 0`) keeps `backend_capture_finish`'s (1, `fail_msg`).
+fn backend_run_finish(out_buf, n, out_cap, fail_msg, start_ns, end_ns) {
+    var r = backend_capture_finish(out_buf, n, out_cap, fail_msg, start_ns, end_ns);
+    if (r != 0 && n >= 0) {
+        ExecResult_set_exit_code(r, confine_last_exit());
+        ExecResult_set_timed_out(r, confine_last_timed_out());
+        backend_set_capture_stderr(r);
+    }
+    return r;
+}

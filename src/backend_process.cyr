@@ -67,9 +67,10 @@ fn process_exec(sandbox, command) {
     if (cfg != 0) { tmo = SandboxConfig_timeout_ms(cfg); }
 
     # The payload's process setup, for both captures below: its stdin (3.11.8),
-    # its environment (3.12.0) and its working directory (3.12.2). Each is 0
-    # when unset, which is what these calls passed before: inherit this
-    # process's stdin, an empty environment, this process's working directory.
+    # its environment (3.12.0) and its working directory (3.12.2). Unset, the
+    # environment is empty and the working directory is kavach's; the stdin is
+    # empty unless the config opts in to kavach's own (`_config_payload_stdin`,
+    # 3.13.2; through 3.13.1 an unset stdin inherited it).
     #
     # ⚠ **Through 3.13.0 neither capture received `stdin`**, so `config_stdin`
     # never reached a process payload: it read kavach's own stdin instead
@@ -79,13 +80,11 @@ fn process_exec(sandbox, command) {
     # environment and no working directory, so under a policy asking for no
     # confinement `config_env` and `config_workdir` were dropped too, though
     # 3.12.0 and 3.12.2 both said the process backend honours them.
-    var pexec_in = 0;
-    var pexec_in_len = 0;
+    var pexec_in = _config_payload_stdin(cfg);
+    var pexec_in_len = _config_payload_stdin_len(cfg);
     var pexec_env = 0;
     var pexec_wd = 0;
     if (cfg != 0) {
-        pexec_in = SandboxConfig_stdin(cfg);
-        pexec_in_len = SandboxConfig_stdin_len(cfg);
         pexec_env = SandboxConfig_env(cfg);
         pexec_wd = SandboxConfig_workdir(cfg);
     }
@@ -143,8 +142,9 @@ fn process_exec(sandbox, command) {
         if (rr != 0) {
             ExecResult_set_exit_code(rr, confine_last_exit());
             ExecResult_set_timed_out(rr, confine_last_timed_out());
-            # 3.11.5: the payload's own stderr, where this field was "".
-            ExecResult_set_stderr(rr, confine_last_stderr());
+            # 3.11.5: the payload's own stderr, where this field was "". A copy
+            # since 3.13.2: the capture's buffer is reused by the next exec.
+            backend_set_capture_stderr(rr);
         }
         return rr;
     }
@@ -164,7 +164,7 @@ fn process_exec(sandbox, command) {
     if (pr != 0) {
         ExecResult_set_exit_code(pr, confine_last_exit());
         ExecResult_set_timed_out(pr, confine_last_timed_out());
-        ExecResult_set_stderr(pr, confine_last_stderr());
+        backend_set_capture_stderr(pr);
     }
     return pr;
 }

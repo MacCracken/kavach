@@ -18,37 +18,22 @@ work in 3.20) can be pulled forward; items with one say what it is.
 
 ### 3.13.2 — score honesty and exec parity (next)
 
-Each item is something kavach accepts, scores or documents and does not apply. None needs special
-hardware.
+Done in the tree and described in the CHANGELOG's [Unreleased] section; this section goes when
+3.13.2 is cut. Each item was something kavach accepted, scored or documented and did not apply.
 
-- [ ] **The shell-out backends' capture.** gVisor and SY-agnos run their runtime through
-  `kv_exec_capture`, the stdlib's `exec_capture` with a pinned exec. It sends stderr to
-  `/dev/null`, `backend_capture_finish` reports exit 0 for any byte count, and neither
-  `config_timeout_ms` nor `config_stdin` reaches the run: the stdlib's own deadline is opt-in, and
-  kavach never sets it. OCI has had its own capture with the real exit status and stderr since
-  3.9.2, but takes no deadline and no stdin either. Give the three the process backend's capture
-  (`confine_capture_input_env_wd` with `do_confine = 0`): the runtime's exit status, its stderr,
-  the config's deadline, and the config's stdin as the runtime's stdin. SGX, TDX, SEV and
-  Firecracker take the same change in the arcs that rebuild their launchers, below.
-- [ ] **What an unset `config_stdin` means.** Since 3.11.8 it hands the payload kavach's own stdin,
-  kept for interactive payloads, so a payload can read, and consume, whatever the host process has
-  there (CHANGELOG 3.13.1). Decide whether a sandbox inherits it at all. If not, an unset stdin
-  becomes an empty one, a behaviour change to mark.
-- [ ] **`IOCTL_DEV` (landlock ABI v5).** kavach handles rights up to ABI v3 only, so no kavach
-  ruleset restricts ioctl on a device file. Handle it from v5 in `_landlock_handled_access`, and
-  grant it through `_landlock_file_rights` and the access masks where a rule should allow it
-  (CHANGELOG 3.13.1, the file-rule entry).
-- [ ] **Seccomp on the WASM backend: apply it to wasmtime, or stop scoring it there.**
-  `score_backend` adds 5 for `seccomp_enabled` on every backend, and the WASM backend applies no
-  filter; since 3.13.1 it confines wasmtime with landlock only. WASI is the guest's syscall
-  boundary, so a filter on wasmtime is defence in depth, and it would have to admit what
-  wasmtime's JIT needs.
-- [ ] **Landlock network rules and scopes: apply them, or stop scoring them.** The policy's TCP
-  bind and connect port allowlist (ABI v4) and its abstract-unix and signal scopes (ABI v6) add
-  3 + 2 + 2 to the strength score, and nothing applies them. The port fields are bare counts
-  (`network_tcp_bind_len`, `network_tcp_connect_len`) with no list behind them and no setter,
-  read only by the score and the merge: the shape the filesystem rules had before 3.11.3.
-  Applying them means a list and a setter, as `policy_landlock_add` gave the filesystem rules.
+- [x] **The shell-out backends' capture.** gVisor, OCI and SY-agnos run their runtime through
+  `backend_run_capture`, the process backend's capture: the runtime's exit status, its stderr,
+  the config's deadline, and the config's stdin as the runtime's. SY-agnos names its container
+  and removes it after every run. SGX, TDX, SEV and Firecracker take the same change in the arcs
+  that rebuild their launchers, below.
+- [x] **What an unset `config_stdin` means:** an empty stdin. `config_stdin_inherit` opts in to
+  kavach's own.
+- [x] **`IOCTL_DEV` (landlock ABI v5):** handled from v5, and granted by read-write rules only.
+- [x] **Seccomp on the WASM backend:** applied to wasmtime, and the policy's scopes with it.
+- [x] **Landlock network rules and scopes:** the scopes (ABI v6) are applied; the TCP port counts
+  are no longer scored. Port rules need a list and a setter, unpinned below.
+- [x] Found on the way: the capture hung on a payload that filled its buffer, a result's stderr
+  changed when the next exec ran, and a payload outlived a kavach killed mid-capture.
 
 ### Later in 3.13.x
 
@@ -75,6 +60,10 @@ hardware.
 - [ ] **The TDX RTMRs.** The allowlist pins MRTD, which is the TD's firmware; the kernel and its
   command line are measured into the RTMRs, which nothing checks yet. A nonce passed on the
   kernel command line would change a measurement on every exec.
+- [ ] **The runtime's own diagnostics on gVisor and SY-agnos.** Since 3.13.2 their stderr reaches
+  the result, and so the gate, with `runsc`'s or docker's own messages in it, so a runtime error
+  can read as "externalization blocked". OCI keeps runc's apart with `--log`. Finding the
+  equivalent needs `runsc` and docker to try it on; the development machine has neither.
 - [ ] **Intel's collateral: TCB level, QE identity, revocation.** sigil verifies the signatures
   and the chain to the root, not these. Without them, a genuine platform with an out-of-date or
   revoked TCB passes, and the quoting enclave's identity and version go unchecked.
@@ -155,6 +144,9 @@ release, with the payload's exit status brought out of the guest as 3.14 and 3.1
 
 ## Beyond 3.x — unpinned
 
+- Landlock TCP port rules (ABI v4): a port list and a setter behind `network_tcp_bind_len` and
+  `network_tcp_connect_len`, as `policy_landlock_add` gave the filesystem rules, scored again
+  once applied. Through 3.13.1 the bare counts added 3 to the score; 3.13.2 stopped that.
 - The rest of [Foreign Platform Containers](#foreign-platform-containers): Windows and macOS
   guests, display through aethersafta, audio through dhvani, clipboard, USB and GPU passthrough,
   phylax boundary scanning, libro audit, templates.

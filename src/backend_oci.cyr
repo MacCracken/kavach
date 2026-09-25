@@ -42,7 +42,7 @@ fn _oci_state_root() {
     # VALIDATE, do not assume. The name is fully predictable — "kavach-runc-"
     # plus the victim's uid — and it lives in a world-writable directory, so on
     # a shared host another user can create it (or symlink it) FIRST and then
-    # own runc's entire state directory plus both scratch files. `sys_mkdir`
+    # own runc's entire state directory plus its log file. `sys_mkdir`
     # returning EEXIST tells us nothing about what is there.
     #
     # Three properties, all required: it must be a real DIRECTORY (not a
@@ -94,14 +94,15 @@ fn _oci_dir_is_ours(path) {
 #     once before (see `_oci_state_root` above). That was worked around by
 #     passing `--root`; the general case still needs the message.
 #
-# stdout comes back over a PIPE (it is the container's output and must stream),
-# stderr into a TEMP FILE. The asymmetry is deliberate: draining two pipes from
-# one thread deadlocks the moment either fills — a child that writes 64 KiB to
-# stderr before its first stdout byte blocks forever against a parent reading
-# stdout. A regular file never blocks the writer, so this needs no concurrent
-# drain, no poll/epoll, and no arch-conditional event-struct layout.
-var _OCI_ERR_MAX = 8192;
+# 3.9.2 gave this backend its own fork, with stdout over a pipe and stderr into
+# a temp file under the state root. Since 3.13.2 it runs through
+# `backend_run_capture`, the process backend's capture: stdout and stderr are
+# two pipes drained together, so neither blocks the runtime, and the run gets
+# the config's deadline and stdin, which it had not.
 var _oci_last_exit = 0;
+
+# How much of runc's log `_oci_take_file` reads back.
+var _OCI_ERR_MAX = 8192;
 
 # Exit status of the most recent `_oci_run`, decoded from waitpid: the exit code
 # when the child exited normally, `128 + signal` when it was killed — the same
@@ -110,8 +111,8 @@ var _oci_last_exit = 0;
 #[must_use]
 fn oci_last_exit() { return _oci_last_exit; }
 
-# stderr scratch path for one run, under the same uid-scoped state root as
-# runc's own state (0700), so a multi-user host cannot cross-read it.
+# Scratch path for one run, under the same uid-scoped state root as runc's own
+# state (0700), so a multi-user host cannot cross-read it.
 #[must_use]
 fn _oci_scratch_path(mid, container_id) {
     var base = _oci_state_root();
@@ -127,9 +128,6 @@ fn _oci_scratch_path(mid, container_id) {
     return p;
 }
 
-#[must_use]
-fn _oci_err_path(container_id) { return _oci_scratch_path("/err-", container_id); }
-
 # Where runc writes its OWN structured log, kept apart from the container's
 # stderr by the global `--log` flag.
 #
@@ -144,7 +142,12 @@ fn _oci_err_path(container_id) { return _oci_scratch_path("/err-", container_id)
 #[must_use]
 fn _oci_log_path(container_id) { return _oci_scratch_path("/log-", container_id); }
 
-fn _oci_run(runtime, bundle, container_id, out_buf, out_cap) {
+# Run `<runtime> --root <state> --log <log> run --bundle <bundle> <id>` through
+# `backend_run_capture` with the config `cfg` (0 for none). Returns the stdout
+# byte count, or -1; `oci_last_exit()` is the runtime's exit status (the
+# container's, when it ran) and `confine_last_stderr()` its stderr. A deadline
+# kills the runtime; `_oci_delete` then stops the container.
+fn _oci_run(runtime, bundle, container_id, cfg, out_buf, out_cap) {
     # ⛔ LINUX ONLY — forks a child that execs an OCI runtime (runc/crun). Neither the fork nor
     # the runtime exists on agnos.
     # ⚠ -1 rather than an empty-but-successful capture, so "the container produced no output"
@@ -154,6 +157,8 @@ fn _oci_run(runtime, bundle, container_id, out_buf, out_cap) {
     #endif
     var state_root = _oci_state_root();
     if (state_root == 0) { _oci_last_exit = 1; return 0 - 1; }
+    var log_path = _oci_log_path(container_id);
+    if (log_path == 0) { _oci_last_exit = 1; return 0 - 1; }
     var args = vec_new();
     vec_push(args, runtime);
     vec_push(args, "--root");
@@ -162,103 +167,26 @@ fn _oci_run(runtime, bundle, container_id, out_buf, out_cap) {
     # structured log to its own file instead of onto the container's stderr —
     # see _oci_log_path for why that separation is load-bearing.
     vec_push(args, "--log");
-    vec_push(args, _oci_log_path(container_id));
+    vec_push(args, log_path);
     vec_push(args, "run");
     vec_push(args, "--bundle");
     vec_push(args, bundle);
     vec_push(args, container_id);
 
-    var argc = vec_len(args);
-    var argv = alloc((argc + 1) * 8);
-    var i = 0;
-    while (i < argc) {
-        store64(argv + i * 8, vec_get(args, i));
-        i = i + 1;
-    }
-    store64(argv + argc * 8, 0);
-    # Empty environment, as everywhere else in kavach — the caller's env is
-    # never leaked into a sandbox. `--root` above is what removes this path's
-    # dependency on XDG_RUNTIME_DIR.
-    var envp = alloc(8);
-    store64(envp, 0);
-
-    var err_path = _oci_err_path(container_id);
-    if (err_path == 0) { _oci_last_exit = 1; return 0 - 1; }
-    # Clear both scratch paths in the PARENT, before the fork.
-    #
-    # O_EXCL alone is not enough and is actively worse on its own: it makes the
-    # child's open FAIL on a leftover file, so the child's stderr goes to the
-    # inherited fd 2 and `_oci_take_file` then returns purely the stale contents.
-    # Unlink-then-create-exclusive is the correct pair — it also removes a
-    # symlink an attacker planted (unlink removes the LINK, not its target), and
-    # the state-root validation above is what makes doing so safe: nobody else
-    # can be racing us inside a 0700 directory we own.
-    kv_unlink(err_path);
-    var log_path_pre = _oci_log_path(container_id);
-    if (log_path_pre != 0) { kv_unlink(log_path_pre); }
-    var pipefd[16];
-    if (sys_pipe(&pipefd) < 0) { _oci_last_exit = 1; return 0 - 1; }
-    var rfd = load32(&pipefd);
-    var wfd = load32(&pipefd + 4);
-
-    # The runtime was found by path (_oci_runtime_path); pin it before fork so
-    # the child execs the binary that was found (ADR-005 §H4).
-    var pin = kv_exec_pin(vec_get(args, 0));
-    var pid = kv_fork();
-    if (pid < 0) {
-        sys_close(rfd);
-        sys_close(wfd);
-        if (pin >= 0) { sys_close(pin); }
-        _oci_last_exit = 1;
-        return 0 - 1;
-    }
-    if (pid == 0) {
-        sys_close(rfd);
-        kv_dup2(wfd, 1);
-        sys_close(wfd);
-        # O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW, 0600 — NOT the SPAWN_LOG_FLAGS
-        # used before, which are O_APPEND and follow symlinks:
-        #   * O_APPEND meant a leftover file made this run's stderr the
-        #     CONCATENATION of a previous run's and this one's.
-        #   * following a symlink let another user on a shared host redirect
-        #     this write, and O_EXCL additionally refuses a pre-created file.
-        # A refused open costs this run's stderr, never a wrong or attacker-
-        # chosen one; the container still runs.
-        var efd = file_open(err_path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 384);
-        if (efd >= 0) {
-            kv_dup2(efd, 2);
-            sys_close(efd);
-        }
-        kv_exec_child(pin, vec_get(args, 0), argv, envp);
-        # execve failed. 127 is the shell's "command not found" and reaches the
-        # caller instead of being swallowed into a success.
-        sys_exit(127);
-    }
-
-    if (pin >= 0) { sys_close(pin); }
-    sys_close(wfd);
-    var total = 0;
-    var rgo = 1;
-    while (rgo == 1) {
-        var n = sys_read(rfd, out_buf + total, out_cap - total);
-        if (n <= 0) { rgo = 0; }
-        else {
-            total = total + n;
-            if (total >= out_cap) { rgo = 0; }
-        }
-    }
-    # Closed BEFORE waitpid: a child that outruns `out_cap` would otherwise
-    # block on a full pipe forever and hang the wait. It gets EPIPE instead.
-    sys_close(rfd);
-
-    var stbuf[4];
-    store32(&stbuf, 0);
-    kv_waitpid(pid, &stbuf, 0);
-    var status = load32(&stbuf);
-    var sig = status & 127;
-    if (sig == 0) { _oci_last_exit = (status >> 8) & 255; }
-    else { _oci_last_exit = 128 + sig; }
-    return total;
+    # Clear the log path in the PARENT, before the run: a leftover log would
+    # read as this run's runtime failure. Unlinking also removes a symlink
+    # planted there (the link, not its target); the state-root validation above
+    # is what makes that safe, since nobody else can be racing us inside a 0700
+    # directory we own.
+    kv_unlink(log_path);
+    # The runtime was found by path (_oci_runtime_path); the capture pins it
+    # before fork, so the child execs the binary that was found (ADR-005 §H4).
+    # Its environment is empty, as everywhere else in kavach — `--root` above is
+    # what removes this path's dependency on XDG_RUNTIME_DIR.
+    var n = backend_run_capture(args, cfg, out_buf, out_cap);
+    if (n < 0) { _oci_last_exit = 1; }
+    else { _oci_last_exit = confine_last_exit(); }
+    return n;
 }
 
 # Read back (and remove) one of the run's scratch files. Returns a cstr — "" when
@@ -291,9 +219,6 @@ fn _oci_take_file(path) {
     kv_unlink(path);
     return buf;
 }
-
-# The container's stderr for this run.
-fn _oci_take_stderr(container_id) { return _oci_take_file(_oci_err_path(container_id)); }
 
 # runc's own diagnostics for this run. Non-empty means the RUNTIME failed, not
 # the payload — runc logs nothing here for a container that merely exits
@@ -336,7 +261,11 @@ fn oci_exec(sandbox, command) {
     if (vec_len(violations) > 0) {
         return backend_guard_result(violations);
     }
+    return _oci_exec_with(runtime, sandbox, command, start_ns);
+}
 
+# The run itself, under the runtime at `runtime`: bundle, run, delete, cleanup.
+fn _oci_exec_with(runtime, sandbox, command, start_ns) {
     var container_id = oci_container_id("kavach-oci");
     var bundle = oci_prepare_bundle(container_id, sandbox, command);
     if (bundle == 0) {
@@ -345,9 +274,8 @@ fn oci_exec(sandbox, command) {
 
     var out_cap = 1048576;
     var out_buf = alloc(out_cap);
-    var n = _oci_run(runtime, bundle, container_id, out_buf, out_cap);
+    var n = _oci_run(runtime, bundle, container_id, Sandbox_config(sandbox), out_buf, out_cap);
     var end_ns = mono_now_ns();
-    var errtext = _oci_take_stderr(container_id);
     var runclog = _oci_take_log(container_id);
 
     _oci_delete(runtime, container_id);
@@ -370,21 +298,11 @@ fn oci_exec(sandbox, command) {
         return backend_error_result(_oci_diag("OCI runtime run failed: ", runclog));
     }
 
-    var r = backend_capture_finish(out_buf, n, out_cap, "OCI runtime run failed", start_ns, end_ns);
-    if (r == 0) { return r; }
-    # Surface the payload's REAL outcome. `backend_capture_finish` derives
-    # exit_code from the byte count alone, which is not an outcome — reporting 0
-    # for a container that never ran is exactly how the missing-rootfs bug looked
-    # healthy for so long. Only override on the success path: when n < 0 the
-    # capture itself failed and its own (1, fail_msg) pair is the truth.
-    if (n >= 0) {
-        ExecResult_set_exit_code(r, _oci_last_exit);
-        # The container's own stderr, which DOES belong to the payload and so
-        # DOES get scanned. Before 3.9.2 it went to /dev/null, meaning anything a
-        # container wrote to stderr bypassed the externalization gate entirely.
-        if (strlen(errtext) > 0) { ExecResult_set_stderr(r, errtext); }
-    }
-    return r;
+    # The payload's REAL outcome: its exit status, whether the deadline killed
+    # it, and its stderr, which DOES belong to the payload and so DOES get
+    # scanned (before 3.9.2 it went to /dev/null and bypassed the gate). When
+    # n < 0 the capture itself failed and its own (1, fail_msg) pair is the truth.
+    return backend_run_finish(out_buf, n, out_cap, "OCI runtime run failed", start_ns, end_ns);
 }
 
 # "<prefix><detail>" with the detail trimmed of trailing newlines, as a fresh

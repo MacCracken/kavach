@@ -150,6 +150,9 @@ fn _wasm_append_preopens(args, sandbox) {
 # rule naming a file could be applied, this named their directories.
 fn _wasm_host_policy(policy, wasmtime, module) {
     var host = policy_new();
+    # The policy's landlock scopes (3.13.2) hold wasmtime too.
+    SandboxPolicy_set_landlock_abstract_unix(host, SandboxPolicy_landlock_abstract_unix(policy));
+    SandboxPolicy_set_landlock_signal(host, SandboxPolicy_landlock_signal(policy));
     policy_landlock_add(host, wasmtime, FS_READ_ONLY);
     policy_landlock_add(host, "/usr", FS_READ_ONLY);
     if (kavach_path_exists("/lib") == 1) { policy_landlock_add(host, "/lib", FS_READ_ONLY); }
@@ -165,6 +168,23 @@ fn _wasm_host_policy(policy, wasmtime, module) {
         i = i + 1;
     }
     return host;
+}
+
+# The seccomp filter wasmtime runs under: kavach's exec filter when the policy
+# enables seccomp, as a process payload gets it; 0 when it does not; -1 when
+# the filter cannot be built, which fails the exec closed.
+#
+# Through 3.13.1 the WASM backend applied no filter, while `score_backend` added
+# 5 for `seccomp_enabled` on every backend. WASI stays the guest's syscall
+# boundary; this holds wasmtime itself to the filter's deny list. Measured
+# before it was wired: wasmtime runs under the exec filter, its guest reading a
+# preopened directory.
+fn _wasm_seccomp_info(policy) {
+    if (policy == 0) { return 0; }
+    if (SandboxPolicy_seccomp_enabled(policy) != 1) { return 0; }
+    var st, sv = security_create_exec_seccomp_filter();
+    if (is_ok(st) == 0) { return 0 - 1; }
+    return result_unwrap(st, sv);
 }
 
 # Append resource-limit flags from policy.
@@ -267,8 +287,13 @@ fn wasm_exec(sandbox, command) {
     var policy = SandboxConfig_policy(cfg);
     var timeout = SandboxConfig_timeout_ms(cfg);
 
-    # A policy with landlock confines wasmtime itself (`_wasm_host_policy`).
+    # A policy with landlock confines wasmtime itself (`_wasm_host_policy`), and
+    # one with seccomp runs it under the exec filter (`_wasm_seccomp_info`).
     var confined = _wasm_policy_has_landlock(policy);
+    var sec = _wasm_seccomp_info(policy);
+    if (sec < 0) {
+        return backend_error_result("seccomp requested but the filter could not be built");
+    }
     var run_policy = policy;
     if (confined == 1) { run_policy = _wasm_host_policy(policy, wasmtime, wasm_path); }
 
@@ -314,20 +339,24 @@ fn wasm_exec(sandbox, command) {
     #
     # `do_confine`: wasmtime's own WASI sandbox is the boundary for the guest:
     # no preopen means no filesystem, and fuel and the memory ceiling bound it.
-    # A policy with landlock also confines the wasmtime process: `confine_child`
-    # sets NO_NEW_PRIVS, closes inherited descriptors and applies the ruleset
-    # from `_wasm_host_policy`, which lets wasmtime read its module. No
-    # namespaces, cgroup or seccomp: those arguments are 0. A policy without
-    # landlock leaves wasmtime unconfined, as every policy did through 3.13.0.
-    var n = confine_capture_input(args, run_policy, 0, 0, 0, out_buf, out_cap, 0,
-      timeout, confined, SandboxConfig_stdin(cfg), SandboxConfig_stdin_len(cfg));
+    # A policy asking for child-side confinement (`policy_wants_confinement`)
+    # also confines the wasmtime process: `confine_child` sets NO_NEW_PRIVS,
+    # closes inherited descriptors, applies the ruleset (`_wasm_host_policy`'s
+    # when the policy has rules, which lets wasmtime read its module; otherwise
+    # one of the policy's scopes alone) and loads the exec filter when the
+    # policy enables seccomp. No namespaces and no cgroup: those arguments are
+    # 0. Through 3.13.0 no policy confined wasmtime, and through 3.13.1 only
+    # landlock rules did: seccomp and the scopes were not applied (3.13.2).
+    var do_confine = policy_wants_confinement(policy);
+    var n = confine_capture_input(args, run_policy, 0, 0, sec, out_buf, out_cap, 0,
+      timeout, do_confine, _config_payload_stdin(cfg), _config_payload_stdin_len(cfg));
     var end_ns = mono_now_ns();
 
     var r = backend_capture_finish(out_buf, n, out_cap, "wasmtime run failed", start_ns, end_ns);
     if (r != 0) {
         ExecResult_set_exit_code(r, confine_last_exit());
         ExecResult_set_timed_out(r, confine_last_timed_out());
-        ExecResult_set_stderr(r, confine_last_stderr());
+        backend_set_capture_stderr(r);
     }
     return r;
 }

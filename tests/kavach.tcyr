@@ -1931,8 +1931,9 @@ fn test_wasm_availability_is_probed() {
 fn test_config_stdin() {
     test_group("config_stdin");
     var cfg = config_new();
-    assert_eq(SandboxConfig_stdin(cfg), 0, "a fresh config inherits this process's stdin");
+    assert_eq(SandboxConfig_stdin(cfg), 0, "a fresh config holds no stdin");
     assert_eq(SandboxConfig_stdin_len(cfg), 0, "with no length");
+    assert_eq(SandboxConfig_stdin_inherit(cfg), 0, "and does not opt in to kavach's own");
 
     var payload = "{\"parameters\":{\"name\":\"world\"}}";
     config_stdin(cfg, payload, strlen(payload));
@@ -1950,7 +1951,11 @@ fn test_config_stdin() {
       "stdin still reads its own value, at its old offset");
     assert_eq(SandboxConfig_fuel(cfg), 0, "and fuel defaults to 0 — derive from timeout");
     assert_eq(SandboxConfig_env(cfg), 0, "and env defaults to 0 — empty envp, as before");
-    assert_eq(SANDBOX_CONFIG_SIZE, 120, "and the struct is 120 bytes");
+    # `stdin_inherit` took it to 128 in 3.13.2.
+    config_stdin_inherit(cfg, 1);
+    assert_eq(SandboxConfig_stdin(cfg), payload, "stdin reads past stdin_inherit's append");
+    assert_eq(SandboxConfig_env(cfg), 0, "and so does env");
+    assert_eq(SANDBOX_CONFIG_SIZE, 128, "and the struct is 128 bytes");
     return 0;
 }
 
@@ -2421,12 +2426,20 @@ fn test_wasm_default_memory_ceiling() {
     kavach_init();
     if (_wasm_binary_path() == 0) { return 0; }
 
+    # The default config's policy is policy_basic, which since 3.13.2 also runs
+    # wasmtime under seccomp. A host that cannot load a filter (qemu-user)
+    # refuses that with 125 before the ceiling is reached, so there the ceiling
+    # is checked under policy_minimal, which names no memory limit either.
+    var pol = policy_basic();
+    if (_t_host_loads_seccomp() == 0) { pol = policy_minimal(); }
+
     # End to end: a module declaring 128 MiB must be REFUSED under the default,
     # where before it instantiated freely.
     var path = "/tmp/kavach-test-mem128.wasm";
     assert_eq(_write_mem128_wasm(path), 42, "the 128 MiB module is written");
     var cfg = config_new();
     config_backend(cfg, KavachBackend.WASM);
+    config_policy(cfg, pol);
     config_timeout_ms(cfg, 5000);
     var sb = alloc(SANDBOX_SIZE);
     Sandbox_set_config(sb, cfg);
@@ -2441,6 +2454,7 @@ fn test_wasm_default_memory_ceiling() {
     assert_eq(_write_nop_wasm(nop), 36, "the nop module is written");
     var cfg2 = config_new();
     config_backend(cfg2, KavachBackend.WASM);
+    config_policy(cfg2, pol);
     config_timeout_ms(cfg2, 5000);
     var sb2 = alloc(SANDBOX_SIZE);
     Sandbox_set_config(sb2, cfg2);
@@ -4139,7 +4153,7 @@ fn test_oci_run_reports_nonzero_exit() {
     var stub = _t_write_stub("/tmp/kavach-t-oci-exit7",
       "#!/bin/sh\necho hello-stdout\necho boom-stderr >&2\nexit 7\n");
     var buf = alloc(65536);
-    var n = _oci_run(stub, "/tmp/nonexistent-bundle", "kavach-t-exit7", buf, 65536);
+    var n = _oci_run(stub, "/tmp/nonexistent-bundle", "kavach-t-exit7", 0, buf, 65536);
     assert(n > 0, "stdout was captured");
     store8(buf + n, 0);
     assert_eq(strstr(buf, "hello-stdout") >= 0, 1, "stdout content is the payload's");
@@ -4147,8 +4161,7 @@ fn test_oci_run_reports_nonzero_exit() {
     assert_eq(oci_last_exit(), 7, "the payload's real exit code");
     # stderr is captured too — before 3.9.2 it went to /dev/null, which is how
     # runc's own "permission denied" became a silent empty success.
-    var err = _oci_take_stderr("kavach-t-exit7");
-    assert_eq(strstr(err, "boom-stderr") >= 0, 1, "stderr content is preserved");
+    assert_eq(strstr(confine_last_stderr(), "boom-stderr") >= 0, 1, "stderr content is preserved");
     sys_unlink(stub);
     return 0;
 }
@@ -4157,11 +4170,10 @@ fn test_oci_run_reports_zero_only_on_success() {
     test_group("oci_run_reports_zero_only_on_success");
     var stub = _t_write_stub("/tmp/kavach-t-oci-ok", "#!/bin/sh\necho fine\nexit 0\n");
     var buf = alloc(4096);
-    var n = _oci_run(stub, "/tmp/nonexistent-bundle", "kavach-t-ok", buf, 4096);
+    var n = _oci_run(stub, "/tmp/nonexistent-bundle", "kavach-t-ok", 0, buf, 4096);
     assert(n > 0, "stdout captured");
     assert_eq(oci_last_exit(), 0, "a genuine success still reports 0");
-    var err = _oci_take_stderr("kavach-t-ok");
-    assert_eq(strlen(err), 0, "and no stderr");
+    assert_eq(confine_last_stderr_len(), 0, "and no stderr");
     sys_unlink(stub);
     return 0;
 }
@@ -4169,7 +4181,7 @@ fn test_oci_run_reports_zero_only_on_success() {
 fn test_oci_run_missing_runtime_binary() {
     test_group("oci_run_missing_runtime_binary");
     var buf = alloc(4096);
-    var n = _oci_run("/definitely/not/a/runtime", "/tmp/b", "kavach-t-missing", buf, 4096);
+    var n = _oci_run("/definitely/not/a/runtime", "/tmp/b", "kavach-t-missing", 0, buf, 4096);
     assert_eq(n, 0, "no output from a binary that never executed");
     # execve failed in the child -> 127, the shell's command-not-found code.
     assert_eq(oci_last_exit(), 127, "a failed execve is 127, not 0");
@@ -4183,33 +4195,35 @@ fn test_oci_run_signalled_child() {
     # code would mean different things on the two backends.
     var stub = _t_write_stub("/tmp/kavach-t-oci-sig", "#!/bin/sh\nkill -9 $$\n");
     var buf = alloc(4096);
-    _oci_run(stub, "/tmp/b", "kavach-t-sig", buf, 4096);
+    _oci_run(stub, "/tmp/b", "kavach-t-sig", 0, buf, 4096);
     assert_eq(oci_last_exit(), 137, "SIGKILL -> 128 + 9");
-    _oci_take_stderr("kavach-t-sig");
     sys_unlink(stub);
     return 0;
 }
 
 fn test_oci_run_large_stderr_does_not_deadlock() {
     test_group("oci_run_large_stderr_does_not_deadlock");
-    # The reason stderr goes to a FILE and not a second pipe. A child writing
-    # well past a pipe buffer to stderr BEFORE its first stdout byte would block
-    # forever against a single-threaded parent draining stdout. This test hangs
-    # rather than fails if that regresses, which is the honest signal.
+    # A child writing ~200 KiB to stderr BEFORE its first stdout byte: past a
+    # pipe buffer and past the 64 KiB stderr cap. 3.9.2 sent stderr to a file
+    # for this reason; since 3.13.2 it is the shared capture's second pipe, read
+    # on into a sink once full. The deadline turns a regression into a failure
+    # (timed out, exit 137) instead of a hung suite.
     var _bigerr_body_sb = str_builder_new();
     str_builder_add_cstr(_bigerr_body_sb, "#!/bin/sh\ni=0\n");
-    str_builder_add_cstr(_bigerr_body_sb, "while [ $i -lt 2000 ]; do ");
+    str_builder_add_cstr(_bigerr_body_sb, "while [ $i -lt 5000 ]; do ");
     str_builder_add_cstr(_bigerr_body_sb, "echo 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx' >&2; i=$((i+1)); done\n");
     str_builder_add_cstr(_bigerr_body_sb, "echo done-stdout\nexit 3\n");
     var bigerr_body = str_data(str_builder_build(_bigerr_body_sb));
     var stub = _t_write_stub("/tmp/kavach-t-oci-bigerr", bigerr_body);
+    var c = config_timeout_ms(config_new(), 20000);
     var buf = alloc(65536);
-    var n = _oci_run(stub, "/tmp/b", "kavach-t-bigerr", buf, 65536);
+    var n = _oci_run(stub, "/tmp/b", "kavach-t-bigerr", c, buf, 65536);
+    if (n < 0) { n = 0; }
     store8(buf + n, 0);
-    assert_eq(strstr(buf, "done-stdout") >= 0, 1, "stdout still arrives after ~82 KiB of stderr");
+    assert_eq(confine_last_timed_out(), 0, "the run finished on its own, not at the deadline");
+    assert_eq(strstr(buf, "done-stdout") >= 0, 1, "stdout still arrives after ~200 KiB of stderr");
     assert_eq(oci_last_exit(), 3, "and the exit code survives");
-    var err = _oci_take_stderr("kavach-t-bigerr");
-    assert(strlen(err) > 4096, "stderr was captured (truncated to the 8 KiB cap)");
+    assert_eq(confine_last_stderr_len(), CONFINE_ERR_MAX - 1, "stderr was captured, up to its cap");
     sys_unlink(stub);
     return 0;
 }
@@ -4223,8 +4237,8 @@ fn test_oci_runtime_log_is_separate_from_container_stderr() {
     var stub = _t_write_stub("/tmp/kavach-t-oci-split",
       "#!/bin/sh\necho payload-stderr >&2\necho runtime-log > \"$4\"\nexit 0\n");
     var buf = alloc(4096);
-    _oci_run(stub, "/tmp/b", "kavach-t-split", buf, 4096);
-    var err = _oci_take_stderr("kavach-t-split");
+    _oci_run(stub, "/tmp/b", "kavach-t-split", 0, buf, 4096);
+    var err = str_cstr(str_from(confine_last_stderr()));
     var log = _oci_take_log("kavach-t-split");
     assert_eq(strstr(err, "payload-stderr") >= 0, 1, "container stderr holds the payload's output");
     assert_eq(strstr(err, "runtime-log") >= 0, 0, "and NOT the runtime's log");
@@ -4342,23 +4356,23 @@ fn _oci_t_rmdir(p) {
     return 0;
 }
 
-fn test_oci_scratch_open_is_exclusive_and_truncating() {
-    test_group("oci_scratch_open_is_exclusive_and_truncating");
-    # The child opens err_path with O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW. It used
-    # to use SPAWN_LOG_FLAGS, which are O_APPEND and follow symlinks — so a
-    # leftover file made a run's stderr the CONCATENATION of the previous run's
-    # and this one's.
+fn test_oci_stale_runtime_log_is_cleared() {
+    test_group("oci_stale_runtime_log_is_cleared");
+    # `_oci_run` unlinks the log path before the run. A leftover log would
+    # otherwise read as THIS run's runtime failure, and `oci_exec` reports a
+    # non-empty log as one. (The same scratch-file rule covered the stderr file
+    # through 3.13.1, when stderr went to one.)
     var stub = _t_write_stub("/tmp/kavach-t-oci-excl", "#!/bin/sh\necho second >&2\nexit 0\n");
     var idp = "kavach-t-excl";
-    var path = _oci_err_path(idp);
+    var path = _oci_log_path(idp);
     assert(path != 0, "scratch path built");
     if (path == 0) { return 0; }
     # Pre-seed the file as a previous run would have left it.
     file_write_all(path, "STALE-FROM-A-PREVIOUS-RUN\n", 26);
     var buf = alloc(4096);
-    _oci_run(stub, "/tmp/b", idp, buf, 4096);
-    var err = _oci_take_stderr(idp);
-    assert_eq(strstr(err, "STALE-FROM-A-PREVIOUS-RUN") >= 0, 0, "a leftover file never leaks into this run");
+    _oci_run(stub, "/tmp/b", idp, 0, buf, 4096);
+    var log = _oci_take_log(idp);
+    assert_eq(strstr(log, "STALE-FROM-A-PREVIOUS-RUN") >= 0, 0, "a leftover log never leaks into this run");
     sys_unlink(stub);
     return 0;
 }
@@ -4485,9 +4499,9 @@ fn test_oci_take_file_refuses_a_symlink() {
     return 0;
 }
 
-fn test_oci_err_path_is_uid_scoped() {
-    test_group("oci_err_path_is_uid_scoped");
-    var p = _oci_err_path("abc123");
+fn test_oci_log_path_is_uid_scoped() {
+    test_group("oci_log_path_is_uid_scoped");
+    var p = _oci_log_path("abc123");
     # 0 means the state root was refused. Stop here rather than hand strstr a
     # null: on aarch64 through 3.12.7 every state root was refused (struct stat
     # read at x86-64 offsets), and this test's strstr(0, ...) took the suite
@@ -4498,7 +4512,7 @@ fn test_oci_err_path_is_uid_scoped() {
     assert_eq(strstr(p, "abc123") >= 0, 1, "and names the container");
     # Distinct containers must not share a scratch file, or two concurrent runs
     # would read each other's diagnostics.
-    assert_eq(streq(p, _oci_err_path("def456")), 0, "distinct per container");
+    assert_eq(streq(p, _oci_log_path("def456")), 0, "distinct per container");
     return 0;
 }
 
@@ -4546,9 +4560,17 @@ fn test_landlock_handled_access_covers_the_abi() {
 
     var v3 = _landlock_handled_access(3);
     assert_eq(v3 & LANDLOCK_ACCESS_FS_TRUNCATE, LANDLOCK_ACCESS_FS_TRUNCATE, "v3 adds TRUNCATE");
+    assert_eq(v3 & LANDLOCK_ACCESS_FS_IOCTL_DEV, 0, "v3 does NOT name IOCTL_DEV");
+    # v4 adds network rights, which are not filesystem rights.
+    assert_eq(_landlock_handled_access(4), v3, "v4 adds no filesystem right");
+
+    # 3.13.2: IOCTL_DEV, the one filesystem right ABI v5 added. Unhandled, it was
+    # permitted on every device file whatever the policy said.
+    var v5 = _landlock_handled_access(5);
+    assert_eq(v5, v3 | LANDLOCK_ACCESS_FS_IOCTL_DEV, "v5 adds IOCTL_DEV and nothing else");
 
     # A newer kernel is masked DOWN to what this code knows, never up.
-    assert_eq(_landlock_handled_access(9), v3, "an unknown newer ABI is clamped to the known set");
+    assert_eq(_landlock_handled_access(9), v5, "an unknown newer ABI is clamped to the known set");
 }
 
 fn test_landlock_allowed_access_grants_within_the_path() {
@@ -4766,6 +4788,14 @@ fn test_policy_wants_confinement() {
     policy_landlock_add(p, "/tmp", FS_READ_ONLY);
     assert_eq(policy_wants_confinement(p), 1,
       "a landlock rule alone requires it, with no seccomp");
+
+    # 3.13.2: a landlock scope asks for a ruleset as a rule does.
+    var su = policy_minimal();
+    SandboxPolicy_set_landlock_abstract_unix(su, 1);
+    assert_eq(policy_wants_confinement(su), 1, "an abstract-unix scope alone requires it");
+    var sg = policy_minimal();
+    SandboxPolicy_set_landlock_signal(sg, 1);
+    assert_eq(policy_wants_confinement(sg), 1, "and so does a signal scope alone");
     return 0;
 }
 
@@ -5493,8 +5523,8 @@ fn test_stdout_and_stderr_both_large_do_not_deadlock() {
     # **Small stdout, huge stderr** — that is the shape that deadlocks a
     # drain-stdout-to-EOF-first loop: the parent waits for a stdout EOF that
     # never comes, because the payload is blocked writing to a stderr pipe
-    # nobody is reading. Flooding stdout instead proves nothing, since the
-    # capture stops at its own buffer cap and moves on.
+    # nobody is reading. A stream past its buffer is
+    # `test_capture_ends_a_full_stream`'s case.
     #
     # The runtime guard blocks a bare `sh`, so the payload is a script run by
     # its own absolute path.
@@ -5960,6 +5990,605 @@ fn test_attest_other_paths_refuse() {
     return 0;
 }
 
+# ================================================================
+# 3.13.2: the capture's full streams, the payload's stdin, landlock ABI v5
+# and v6, and the shell-out backends
+# ================================================================
+
+# ---- a full buffer ends a stream without blocking the payload ------------
+#
+# Through 3.13.1 a full buffer only stopped the drain's reads. The payload then
+# blocked writing to that pipe and never closed the other, so the capture waited
+# for an EOF that could not come: measured, 2 MB of stdout and 200 KB of stderr
+# each hung until the deadline and read as a timeout, exit 137, and hung for
+# good without one. The deadlines here turn that into a failure, not a hang.
+fn test_capture_ends_a_full_stream() {
+    test_group("capture_ends_a_full_stream");
+    var buf = alloc(65536);
+
+    # stdout past the buffer: the pipe is closed and the payload's next write
+    # fails, SIGPIPE, as under `exec_capture`.
+    var oargs = vec_new();
+    vec_push(oargs, "/usr/bin/head");
+    vec_push(oargs, "-c");
+    vec_push(oargs, "300000");
+    vec_push(oargs, "/dev/zero");
+    var t0 = mono_now_ns();
+    var n = confine_capture_input(oargs, 0, 0, 0, 0, buf, 65536, 0, 20000, 0, "", 0);
+    var ms = (mono_now_ns() - t0) / 1000000;
+    assert_eq(confine_last_timed_out(), 0, "stdout past the buffer ends the run, not the deadline");
+    assert_eq(n, 65535, "the buffer keeps the first 64 KiB, less the terminator");
+    assert_eq(confine_last_exit(), 141, "and the payload's next write fails: SIGPIPE, 128 + 13");
+    assert(ms < 10000, "well inside the deadline");
+
+    # stderr past its cap: read on into a sink, so the payload runs to its end.
+    var eargs = vec_new();
+    vec_push(eargs, "/bin/sh");
+    vec_push(eargs, "-c");
+    vec_push(eargs, "i=0; while [ $i -lt 5000 ]; do echo xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx >&2; i=$((i+1)); done; echo done-stdout; exit 3");
+    var m = confine_capture_input(eargs, 0, 0, 0, 0, buf, 65536, 0, 20000, 0, "", 0);
+    if (m < 0) { m = 0; }
+    store8(buf + m, 0);
+    assert_eq(confine_last_timed_out(), 0, "200 KB of stderr ends the run on its own, not at the deadline");
+    assert_eq(cstr_contains(buf, "done-stdout"), 1, "the payload writes on past its stderr's cap");
+    assert_eq(confine_last_exit(), 3, "and exits as it chose to");
+    assert_eq(confine_last_stderr_len(), CONFINE_ERR_MAX - 1, "its stderr is kept up to the cap");
+    return 0;
+}
+
+# ---- the capture's payload dies with kavach (3.13.2) ----------------------
+#
+# Through 3.13.1 a payload outlived a kavach killed mid-capture (measured: its
+# `sleep` still running after kavach's SIGKILL). The stdlib's `exec_capture`
+# sets a parent-death signal; gVisor and SY-agnos lost it when they moved onto
+# this capture, which now sets it too.
+
+# 1 while `pid` runs, 0 once it is gone or a zombie.
+fn _t_pid_running(pid) {
+    var path = str_cstr(str_cat(str_cat(str_from("/proc/"), str_from_int(pid)), str_from("/status")));
+    var buf = alloc(4096);
+    var fd = file_open(path, O_RDONLY, 0);
+    if (fd < 0) { return 0; }
+    var n = sys_read(fd, buf, 4095);
+    sys_close(fd);
+    if (n < 0) { n = 0; }
+    store8(buf + n, 0);
+    if (cstr_contains(buf, "State:\tZ") == 1) { return 0; }
+    return 1;
+}
+
+fn test_capture_payload_dies_with_kavach() {
+    test_group("capture_payload_dies_with_kavach");
+    var pidfile = _t_unique_tmp_path("/tmp/kavach-t-pdeath-");
+    var helper = kv_fork();
+    if (helper == 0) {
+        var args = vec_new();
+        vec_push(args, "/bin/sh");
+        vec_push(args, "-c");
+        var script = str_cat(str_from("echo $$ > "), str_from(pidfile));
+        script = str_cat(script, str_from("; exec /bin/sleep 30"));
+        vec_push(args, str_cstr(script));
+        var hbuf = alloc(64);
+        confine_capture_input_env_wd(args, 0, 0, 0, 0, hbuf, 64, 0, 0, 0, "", 0, 0, 0);
+        sys_exit(0);
+    }
+    var pid = 0;
+    var tries = 0;
+    while (pid == 0 && tries < 500) {
+        var fd = file_open(pidfile, O_RDONLY, 0);
+        if (fd >= 0) {
+            var b[32];
+            var n = sys_read(fd, &b, 31);
+            sys_close(fd);
+            if (n > 1) {
+                store8(&b + n, 0);
+                pid = atoi(&b);
+            }
+        }
+        if (pid == 0) { kv_sleep_ms(10); }
+        tries = tries + 1;
+    }
+    assert(pid > 0, "the payload started and recorded its pid");
+    sys_kill(helper, 9);
+    var st[8];
+    store64(&st, 0);
+    kv_waitpid(helper, &st, 0);
+    if (pid <= 0) { return 0; }
+    var waited = 0;
+    while (_t_pid_running(pid) == 1 && waited < 2000) {
+        kv_sleep_ms(20);
+        waited = waited + 20;
+    }
+    var running = _t_pid_running(pid);
+    assert_eq(running, 0, "the payload does not outlive the process capturing it");
+    if (running == 1) { sys_kill(pid, 9); }
+    sys_unlink(pidfile);
+    return 0;
+}
+
+# ---- a result keeps its own stderr ---------------------------------------
+#
+# `confine_last_stderr()` is one static buffer that every capture rewrites.
+# Through 3.13.1 the process and WASM backends stored that pointer in their
+# results, so an earlier result's stderr changed to a later exec's (measured).
+fn test_results_keep_their_own_stderr() {
+    test_group("results_keep_their_own_stderr");
+    kavach_init();
+    var round = 0;
+    while (round < 2) {
+        var p = policy_minimal();
+        var which = "unconfined";
+        if (round == 1) {
+            p = _t_ll_add_runtime(policy_minimal());
+            which = "confined";
+        }
+        var r1 = _t_pio_run(p, "/bin/ls /nonexistent-kavach-FIRST", 0, 0, 0);
+        var r2 = _t_pio_run(p, "/bin/ls /nonexistent-kavach-SECOND", 0, 0, 0);
+        assert(r1 != 0 && r2 != 0, _t_pio_msg(which, "both execs return a result"));
+        if (r1 != 0 && r2 != 0) {
+            assert_eq(cstr_contains(ExecResult_stderr(r1), "FIRST"), 1,
+              _t_pio_msg(which, "the first result's stderr is its own"));
+            assert_eq(cstr_contains(ExecResult_stderr(r1), "SECOND"), 0,
+              _t_pio_msg(which, "...and stays its own after a second exec"));
+            assert_eq(cstr_contains(ExecResult_stderr(r2), "SECOND"), 1,
+              _t_pio_msg(which, "the second result's is its own"));
+        }
+        round = round + 1;
+    }
+
+    # The WASM backend, where wasmtime names a module it cannot parse.
+    if (_wasm_binary_path() == 0) { return 0; }
+    var j1 = _t_unique_tmp_path("/tmp/kavach-t-wasm-junk-FIRST-");
+    var j2 = _t_unique_tmp_path("/tmp/kavach-t-wasm-junk-SECOND-");
+    file_write_all(j1, "not a module", 12);
+    file_write_all(j2, "not a module", 12);
+    var w1 = wasm_exec(_t_wa_sandbox(policy_minimal(), 0), j1);
+    var w2 = wasm_exec(_t_wa_sandbox(policy_minimal(), 0), j2);
+    assert_eq(cstr_contains(ExecResult_stderr(w1), "junk-FIRST"), 1, "wasm: the first result's stderr is its own");
+    assert_eq(cstr_contains(ExecResult_stderr(w1), "junk-SECOND"), 0,
+      "wasm: ...and stays its own after a second exec");
+    assert_eq(cstr_contains(ExecResult_stderr(w2), "junk-SECOND"), 1, "wasm: the second result's is its own");
+    sys_unlink(j1);
+    sys_unlink(j2);
+    return 0;
+}
+
+# ---- the payload's stdin is empty unless the config says otherwise --------
+#
+# Through 3.13.1 a config with no stdin handed the payload kavach's own
+# (measured: `/bin/cat` printed what kavach had been given). Since 3.13.2 it is
+# empty, and `config_stdin_inherit` opts back in.
+
+# Replace this process's stdin with a pipe holding `marker` and then EOF, and
+# return the descriptor `_t_host_stdin_restore` puts back.
+fn _t_host_stdin(marker) {
+    var saved = syscall(SYS_DUP, 0);
+    var p[16];
+    sys_pipe(&p);
+    var rfd = load32(&p);
+    var wfd = load32(&p + 4);
+    sys_write(wfd, marker, strlen(marker));
+    sys_close(wfd);
+    kv_dup2(rfd, 0);
+    sys_close(rfd);
+    return saved;
+}
+
+fn _t_host_stdin_restore(saved) {
+    if (saved < 0) {
+        sys_close(0);
+        return 0;
+    }
+    kv_dup2(saved, 0);
+    sys_close(saved);
+    return 0;
+}
+
+# `cmd` on the PROCESS backend under `policy`, with no config stdin and, when
+# `inherit` is 1, `config_stdin_inherit`.
+fn _t_si_run(policy, cmd, inherit) {
+    var c = config_new();
+    SandboxConfig_set_backend(c, KavachBackend.PROCESS);
+    SandboxConfig_set_policy(c, policy);
+    config_timeout_ms(c, 5000);
+    if (inherit == 1) { config_stdin_inherit(c, 1); }
+    var s = sandbox_create(c);
+    if (s == 0) { return 0; }
+    sandbox_transition(s, SandboxState.RUNNING);
+    var r = sandbox_exec(s, cmd);
+    sandbox_destroy(s);
+    return r;
+}
+
+fn test_payload_stdin_is_empty_unless_asked() {
+    test_group("payload_stdin_is_empty_unless_asked");
+    kavach_init();
+    # The resolver every backend that honours the config's stdin goes through.
+    # 0 means inherit; anything else is sent, then closed.
+    var e0 = _config_payload_stdin(0);
+    assert(e0 != 0, "no config: a stdin to send, not 0 (inherit)");
+    if (e0 != 0) { assert_eq(strlen(e0), 0, "...and an empty one"); }
+    var c = config_new();
+    var e1 = _config_payload_stdin(c);
+    assert(e1 != 0, "an unset stdin: a stdin to send, not 0 (inherit)");
+    if (e1 != 0) { assert_eq(strlen(e1), 0, "...and an empty one"); }
+    config_stdin_inherit(c, 1);
+    assert_eq(_config_payload_stdin(c), 0, "config_stdin_inherit asks for kavach's own");
+    config_stdin(c, "X", 1);
+    var e2 = _config_payload_stdin(c);
+    assert(e2 != 0, "a set stdin wins over inherit");
+    if (e2 != 0) { assert_eq(streq(e2, "X"), 1, "...and is the config's"); }
+    assert_eq(_config_payload_stdin_len(c), 1, "...with its length");
+
+    var rounds = 2;
+    if (_t_host_loads_seccomp() == 1) { rounds = 3; }
+    var round = 0;
+    while (round < rounds) {
+        var p = policy_minimal();
+        var which = "unconfined";
+        if (round == 1) {
+            p = _t_ll_add_runtime(policy_minimal());
+            which = "confined by landlock";
+        }
+        if (round == 2) {
+            p = policy_basic();
+            which = "confined by seccomp";
+        }
+        var saved = _t_host_stdin("KAVACH-HOST-STDIN\n");
+        var r = _t_si_run(p, "/bin/cat", 0);
+        _t_host_stdin_restore(saved);
+        var empty = 0;
+        if (r != 0) {
+            if (ExecResult_exit_code(r) == 0 && ExecResult_timed_out(r) == 0) {
+                if (strlen(ExecResult_stdout(r)) == 0) { empty = 1; }
+            }
+        }
+        assert_eq(empty, 1, _t_pio_msg(which, "an unset stdin is EOF, not kavach's own"));
+
+        var saved2 = _t_host_stdin("KAVACH-HOST-STDIN\n");
+        var r2 = _t_si_run(p, "/bin/cat", 1);
+        _t_host_stdin_restore(saved2);
+        assert_eq(_t_pio_saw(r2, "KAVACH-HOST-STDIN"), 1,
+          _t_pio_msg(which, "config_stdin_inherit hands the payload kavach's stdin"));
+        round = round + 1;
+    }
+    return 0;
+}
+
+# ---- landlock scopes (ABI v6) are applied (3.13.2) -----------------------
+#
+# Through 3.13.1 `landlock_abstract_unix` and `landlock_signal` were stored and
+# scored, and applied nowhere: a `policy_strict()` payload could signal kavach
+# (measured: `/bin/kill -0 <kavach>` exited 0).
+
+# The exit code of a child that applies `scopes` and returns the errno of
+# `kill(<this process>, 0)`: 0 when it may, 100 when the scopes were refused.
+fn _t_signal_parent_under(scopes) {
+    var parent = sys_getpid();
+    var pid = kv_fork();
+    if (pid == 0) {
+        if (is_ok(security_apply_landlock_scoped(0, 0, scopes)) == 0) { sys_exit(100); }
+        sys_exit(0 - sys_kill(parent, 0));
+    }
+    var st[8];
+    store64(&st, 0);
+    kv_waitpid(pid, &st, 0);
+    return (load32(&st) >> 8) & 255;
+}
+
+# The same for connecting to an abstract unix socket this process listens on.
+fn _t_connect_parent_under(scopes) {
+    var sa[32];
+    store8(&sa, 1);                          # sun_family = AF_UNIX
+    store8(&sa + 1, 0);
+    store8(&sa + 2, 0);                      # a leading NUL: the abstract namespace
+    memcpy(&sa + 3, rand_hex_id(), 16);
+    var salen = 19;
+    var ls = sys_socket(1, 1, 0);            # AF_UNIX, SOCK_STREAM
+    if (ls < 0) { return 200; }
+    if (sys_bind(ls, &sa, salen) < 0 || sys_listen(ls, 4) < 0) {
+        sys_close(ls);
+        return 201;
+    }
+    var pid = kv_fork();
+    if (pid == 0) {
+        if (is_ok(security_apply_landlock_scoped(0, 0, scopes)) == 0) { sys_exit(100); }
+        var cs = sys_socket(1, 1, 0);
+        sys_exit(0 - sys_connect(cs, &sa, salen));
+    }
+    var st[8];
+    store64(&st, 0);
+    kv_waitpid(pid, &st, 0);
+    sys_close(ls);
+    return (load32(&st) >> 8) & 255;
+}
+
+# The exit code of `cmd` on the PROCESS backend under `policy`, or -1.
+fn _t_scope_run(policy, cmd) {
+    var c = config_new();
+    SandboxConfig_set_backend(c, KavachBackend.PROCESS);
+    SandboxConfig_set_policy(c, policy);
+    config_timeout_ms(c, 5000);
+    var s = sandbox_create(c);
+    if (s == 0) { return 0 - 1; }
+    sandbox_transition(s, SandboxState.RUNNING);
+    var r = process_exec(s, cmd);
+    sandbox_destroy(s);
+    if (r == 0) { return 0 - 1; }
+    return ExecResult_exit_code(r);
+}
+
+fn test_landlock_scopes_are_applied() {
+    test_group("landlock_scopes_are_applied");
+    kavach_init();
+    assert_eq(_spawn_landlock_scopes(policy_minimal()), 0, "a minimal policy asks for no scope");
+    assert_eq(_spawn_landlock_scopes(policy_strict()),
+      LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET | LANDLOCK_SCOPE_SIGNAL, "policy_strict asks for both");
+
+    # With no scope a child reaches this process both ways.
+    assert_eq(_t_signal_parent_under(0), 0, "with no scope a child may signal this process");
+    assert_eq(_t_connect_parent_under(0), 0, "...and connect to its abstract socket");
+    if (security_landlock_abi_version() < 6) { return 0; }
+    assert_eq(_t_signal_parent_under(LANDLOCK_SCOPE_SIGNAL), EPERM,
+      "the signal scope refuses the signal");
+    assert_eq(_t_connect_parent_under(LANDLOCK_SCOPE_SIGNAL), 0, "...and leaves the socket alone");
+    assert_eq(_t_connect_parent_under(LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET), EPERM,
+      "the abstract-unix scope refuses the connect");
+    assert_eq(_t_signal_parent_under(LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET), 0,
+      "...and leaves the signal alone");
+
+    # Through a policy, as a consumer reaches it. A scope-only policy took the
+    # unconfined capture through 3.13.1.
+    if (file_exists("/bin/kill") == 0) { return 0; }
+    var cmd = str_cstr(str_cat(str_from("/bin/kill -0 "), str_from_int(sys_getpid())));
+    assert_eq(_t_scope_run(policy_minimal(), cmd), 0, "an unscoped payload may signal kavach");
+    var sg = policy_minimal();
+    SandboxPolicy_set_landlock_signal(sg, 1);
+    assert_eq(_t_scope_run(sg, cmd), 1, "a payload under the signal scope may not");
+    if (_t_host_loads_seccomp() == 1) {
+        assert_eq(_t_scope_run(policy_strict(), cmd), 1, "nor may a policy_strict payload");
+    }
+    return 0;
+}
+
+# ---- landlock IOCTL_DEV (ABI v5) is handled (3.13.2) ---------------------
+#
+# A child under one rule opens /dev/null read-only and asks it TCGETS, which
+# /dev/null answers ENOTTY when the ioctl reaches it, and landlock EACCES when
+# it does not. Through 3.13.1 IOCTL_DEV was not handled, so every ruleset let
+# every device ioctl through (measured: ENOTTY under a read-only rule).
+var _T_TCGETS = 21505;                       # asm-generic, as on x86_64 and aarch64
+var _T_ENOTTY = 25;                          # asm-generic errno, as on both
+
+fn _t_ioctl_under(path, access) {
+    var pid = kv_fork();
+    if (pid == 0) {
+        var rules = vec_new();
+        vec_push(rules, security_fs_rule_new(path, access));
+        if (is_ok(security_apply_landlock(rules, 1)) == 0) { sys_exit(100); }
+        var fd = file_open("/dev/null", O_RDONLY, 0);
+        if (fd < 0) { sys_exit(101); }
+        var t[64];
+        sys_exit(0 - sys_ioctl(fd, _T_TCGETS, &t));
+    }
+    var st[8];
+    store64(&st, 0);
+    kv_waitpid(pid, &st, 0);
+    return (load32(&st) >> 8) & 255;
+}
+
+fn test_landlock_confines_device_ioctls() {
+    test_group("landlock_confines_device_ioctls");
+    assert_eq(_landlock_allow_read_only() & LANDLOCK_ACCESS_FS_IOCTL_DEV, 0,
+      "read-only never grants a device ioctl");
+    assert_eq(_landlock_allow_read_write(5) & LANDLOCK_ACCESS_FS_IOCTL_DEV,
+      LANDLOCK_ACCESS_FS_IOCTL_DEV, "read-write grants it from ABI v5");
+    assert_eq(_landlock_allow_read_write(4) & LANDLOCK_ACCESS_FS_IOCTL_DEV, 0,
+      "...and not before, where the kernel would refuse it");
+    assert_eq(_landlock_file_rights() & LANDLOCK_ACCESS_FS_IOCTL_DEV, LANDLOCK_ACCESS_FS_IOCTL_DEV,
+      "a rule naming a device file can hold it");
+    if (security_landlock_abi_version() < 5) { return 0; }
+    assert_eq(_t_ioctl_under("/dev", FS_READ_ONLY), EACCES, "a read-only /dev refuses a device ioctl");
+    assert_eq(_t_ioctl_under("/dev", FS_READ_WRITE), _T_ENOTTY,
+      "a read-write /dev lets it reach the device");
+    assert_eq(_t_ioctl_under("/dev/null", FS_READ_ONLY), EACCES,
+      "a read-only rule naming the device refuses it too");
+    assert_eq(_t_ioctl_under("/dev/null", FS_READ_WRITE), _T_ENOTTY,
+      "...and a read-write one lets it through");
+    return 0;
+}
+
+# ---- TCP port counts are not scored (3.13.2) ------------------------------
+#
+# The policy carries `network_tcp_bind_len` and `network_tcp_connect_len`,
+# counts with no port list and no setter, so nothing applies them. Through
+# 3.13.1 either added 3 to the score.
+fn test_score_does_not_count_tcp_ports() {
+    test_group("score_does_not_count_tcp_ports");
+    var base = score_backend(KavachBackend.PROCESS, policy_minimal());
+    var b = policy_minimal();
+    SandboxPolicy_set_network_tcp_bind_len(b, 2);
+    assert_eq(score_backend(KavachBackend.PROCESS, b), base, "a bind-port count adds nothing");
+    var c = policy_minimal();
+    SandboxPolicy_set_network_tcp_connect_len(c, 3);
+    assert_eq(score_backend(KavachBackend.PROCESS, c), base, "nor does a connect-port count");
+    return 0;
+}
+
+# ---- the shell-out backends report their runtime's run (3.13.2) ----------
+#
+# Through 3.13.1 gVisor and SY-agnos ran their runtime through
+# `kv_exec_capture`: exit 0 for any run (measured with a stand-in runsc exiting
+# 7), stderr sent to /dev/null, no deadline, and kavach's own stdin. OCI had a
+# capture of its own, with the exit status and stderr but no deadline and no
+# stdin. All three take the process backend's capture now; these drive each
+# with a stand-in runtime.
+
+# A stand-in container runtime at `path` that appends its arguments to `rec`.
+# Its `run` prints `stub-stdout`, `stub-stderr` on stderr and its stdin, and
+# exits 7, or with `slow` sleeps for 5 s; anything else (delete, rm) exits 0.
+fn _t_rt_stub(path, rec, slow) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "#!/bin/sh\necho \"$*\" >> ");
+    str_builder_add_cstr(sb, rec);
+    str_builder_add_cstr(sb, "\ncase \" $* \" in\n  *\" run \"*) ;;\n  *) exit 0 ;;\nesac\n");
+    if (slow == 1) { str_builder_add_cstr(sb, "exec /bin/sleep 5\n"); }
+    else { str_builder_add_cstr(sb, "echo stub-stdout\necho stub-stderr >&2\n/bin/cat\nexit 7\n"); }
+    return _t_write_stub(path, str_data(str_builder_build(sb)));
+}
+
+# `cmd` on backend `b` under the stand-in runtime `stub`, with config `cfg`.
+fn _t_rt_exec(b, stub, cfg, cmd) {
+    var sb = alloc(SANDBOX_SIZE);
+    Sandbox_set_config(sb, cfg);
+    var t0 = mono_now_ns();
+    if (b == KavachBackend.GVISOR) { return _gvisor_exec_with(stub, sb, cmd, t0); }
+    if (b == KavachBackend.OCI) { return _oci_exec_with(stub, sb, cmd, t0); }
+    return _sy_agnos_exec_with(stub, sb, cmd, t0);
+}
+
+# The token after `prefix` in `s`, up to a space or newline, or "".
+fn _t_token_after(s, prefix) {
+    var at = strstr(s, prefix);
+    if (at < 0) { return ""; }
+    var start = s + at + strlen(prefix);
+    var n = 0;
+    while (load8(start + n) != 0 && load8(start + n) != 32 && load8(start + n) != 10) {
+        n = n + 1;
+    }
+    var out = alloc(n + 1);
+    memcpy(out, start, n);
+    store8(out + n, 0);
+    return out;
+}
+
+fn test_shell_out_backends_report_the_run() {
+    test_group("shell_out_backends_report_the_run");
+    kavach_init();
+    var i = 0;
+    while (i < 3) {
+        var b = KavachBackend.GVISOR;
+        if (i == 1) { b = KavachBackend.OCI; }
+        if (i == 2) { b = KavachBackend.SY_AGNOS; }
+        var which = os_backend_name(b);
+        var rec = _t_unique_tmp_path("/tmp/kavach-t-rt-rec-");
+        var stub = _t_rt_stub(_t_unique_tmp_path("/tmp/kavach-t-rt-"), rec, 0);
+        var slow = _t_rt_stub(_t_unique_tmp_path("/tmp/kavach-t-rt-slow-"), rec, 1);
+
+        var c = config_timeout_ms(config_new(), 10000);
+        config_stdin(c, "KAVACH-RT-STDIN\n", 16);
+        var r = _t_rt_exec(b, stub, c, "echo hi");
+        assert(r != 0, _t_pio_msg(which, "a run returns a result"));
+        if (r != 0) {
+            assert_eq(ExecResult_exit_code(r), 7, _t_pio_msg(which, "the runtime's exit status, not 0"));
+            assert_eq(cstr_contains(ExecResult_stdout(r), "stub-stdout"), 1, _t_pio_msg(which, "its stdout"));
+            assert_eq(cstr_contains(ExecResult_stderr(r), "stub-stderr"), 1,
+              _t_pio_msg(which, "its stderr, not \"\""));
+            assert_eq(cstr_contains(ExecResult_stdout(r), "KAVACH-RT-STDIN"), 1,
+              _t_pio_msg(which, "the config's stdin reaches the runtime"));
+            assert_eq(ExecResult_timed_out(r), 0, _t_pio_msg(which, "inside its deadline"));
+        }
+
+        var saved = _t_host_stdin("KAVACH-RT-HOST-STDIN\n");
+        var r2 = _t_rt_exec(b, stub, config_timeout_ms(config_new(), 10000), "echo hi");
+        _t_host_stdin_restore(saved);
+        assert(r2 != 0, _t_pio_msg(which, "a run with no stdin returns a result"));
+        if (r2 != 0) {
+            assert_eq(cstr_contains(ExecResult_stdout(r2), "KAVACH-RT-HOST-STDIN"), 0,
+              _t_pio_msg(which, "an unset stdin is empty, not kavach's own"));
+            assert_eq(ExecResult_exit_code(r2), 7, _t_pio_msg(which, "...and the run completes"));
+        }
+
+        var r3 = _t_rt_exec(b, slow, config_timeout_ms(config_new(), 300), "echo hi");
+        assert(r3 != 0, _t_pio_msg(which, "a slow run returns a result"));
+        if (r3 != 0) {
+            assert_eq(ExecResult_timed_out(r3), 1, _t_pio_msg(which, "the config's deadline kills the runtime"));
+            assert_eq(ExecResult_exit_code(r3), 137, _t_pio_msg(which, "...with SIGKILL, 128 + 9"));
+            assert(ExecResult_duration_ms(r3) < 4000, _t_pio_msg(which, "...before its 5 s sleep ends"));
+        }
+
+        # Every run is followed by the runtime's own removal of the container.
+        var log = _oci_take_file(rec);
+        if (b == KavachBackend.GVISOR) {
+            assert_eq(cstr_contains(log, "delete --force kavach-gvisor-"), 1,
+              _t_pio_msg(which, "runsc deletes the container after the run"));
+        }
+        if (b == KavachBackend.OCI) {
+            assert_eq(cstr_contains(log, "delete --force kavach-oci-"), 1,
+              _t_pio_msg(which, "the runtime deletes the container after the run"));
+        }
+        if (b == KavachBackend.SY_AGNOS) {
+            var name = _t_token_after(log, "run --rm -i --name ");
+            assert(strlen(name) > 0, _t_pio_msg(which, "the container runs named, with -i for its stdin"));
+            var rm = str_cstr(str_cat(str_from("rm --force "), str_from(name)));
+            assert_eq(cstr_contains(log, rm), 1, _t_pio_msg(which, "...and is removed by that name"));
+        }
+        sys_unlink(stub);
+        sys_unlink(slow);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ---- wasmtime runs under the policy's confinement (3.13.2) ----------------
+#
+# The probe in tests/wasm_status_probe.wat, 274 bytes: it prints `status` from
+# its first preopen, which under `--dir /proc/self` is wasmtime's own
+# /proc/<pid>/status. Its `Seccomp:` and `NoNewPrivs:` lines are the kernel's
+# account of how wasmtime runs. Through 3.13.1 only landlock rules confined
+# wasmtime: a policy's seccomp and scopes were not applied to it.
+var WASM_STATUS_PROBE_LEN = 274;
+var WASM_STATUS_PROBE_HEX = "0061736d0100000001190360097f7f7f7f7f7e7e7f7f017f60047f7f7f7f017f60000002670316776173695f736e617073686f745f707265766965773109706174685f6f70656e000016776173695f736e617073686f745f70726576696577310766645f72656164000116776173695f736e617073686f745f70726576696577310866645f77726974650001030201020503010001071302066d656d6f72790200065f737461727400030a58015601017f410341014110410641004202420041004120100041004704400f0b4120280200210041304180083602004134418020360200200041304101413810011a41344138280200360200410141304101413810021a0b0b0c010041100b06737461747573";
+
+fn test_wasm_runs_under_the_policys_confinement() {
+    test_group("wasm_runs_under_the_policys_confinement");
+    kavach_init();
+    assert_eq(_wasm_seccomp_info(policy_minimal()), 0, "no seccomp asked for, no filter");
+    assert(_wasm_seccomp_info(policy_basic()) > 0, "seccomp asked for: kavach's exec filter");
+    if (_wasm_binary_path() == 0) { return 0; }
+    var module = _t_unique_tmp_path("/tmp/kavach-t-wasm-status-");
+    file_write_all(module, hex_decode(WASM_STATUS_PROBE_HEX, 2 * WASM_STATUS_PROBE_LEN),
+      WASM_STATUS_PROBE_LEN);
+
+    # Nothing asked for: wasmtime runs as it always did, and the probe works.
+    var r0 = wasm_exec(_t_wa_sandbox(policy_minimal(), "/proc/self"), module);
+    assert_eq(ExecResult_exit_code(r0), 0, "an unconfined probe runs");
+    assert_eq(cstr_contains(ExecResult_stdout(r0), "Seccomp:\t0"), 1, "...with no filter");
+    assert_eq(cstr_contains(ExecResult_stdout(r0), "NoNewPrivs:\t0"), 1, "...and no NO_NEW_PRIVS");
+
+    # policy_basic asks for seccomp and nothing else.
+    var r1 = wasm_exec(_t_wa_sandbox(policy_basic(), "/proc/self"), module);
+    if (_t_host_loads_seccomp() == 1) {
+        assert_eq(ExecResult_exit_code(r1), 0, "a seccomp policy's probe runs");
+        assert_eq(cstr_contains(ExecResult_stdout(r1), "Seccomp:\t2"), 1,
+          "...with wasmtime under the filter");
+    }
+    if (_t_host_loads_seccomp() == 0) {
+        assert_eq(ExecResult_exit_code(r1), SPAWN_EXIT_SECCOMP,
+          "a host that cannot load the filter refuses the run");
+    }
+
+    # With landlock rules wasmtime runs under `_wasm_host_policy`'s ruleset,
+    # which carries the policy's scopes.
+    var hp = policy_minimal();
+    policy_landlock_add(hp, "/tmp", FS_READ_ONLY);
+    SandboxPolicy_set_landlock_abstract_unix(hp, 1);
+    SandboxPolicy_set_landlock_signal(hp, 1);
+    assert_eq(_spawn_landlock_scopes(_wasm_host_policy(hp, _wasm_binary_path(), module)),
+      LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET | LANDLOCK_SCOPE_SIGNAL,
+      "the host ruleset keeps the policy's scopes");
+
+    # A scope alone confines wasmtime too; NO_NEW_PRIVS is the part in view.
+    var sp = policy_minimal();
+    SandboxPolicy_set_landlock_signal(sp, 1);
+    var r2 = wasm_exec(_t_wa_sandbox(sp, "/proc/self"), module);
+    assert_eq(ExecResult_exit_code(r2), 0, "a scoped probe runs");
+    assert_eq(cstr_contains(ExecResult_stdout(r2), "NoNewPrivs:\t1"), 1,
+      "...with wasmtime confined");
+    sys_unlink(module);
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_backend_parse();
@@ -6160,13 +6789,13 @@ fn main() {
     test_oci_runtime_log_is_separate_from_container_stderr();
     test_oci_diag_trims_trailing_newlines();
     test_oci_state_root_rejects_a_hostile_dir();
-    test_oci_scratch_open_is_exclusive_and_truncating();
+    test_oci_stale_runtime_log_is_cleared();
     test_oci_take_file_refuses_a_symlink();
     test_exec_pin_classifies_paths();
     test_exec_pin_survives_a_binary_swap();
     test_exec_pin_survives_a_script_swap();
     test_exec_capture_pinned_captures_stdout();
-    test_oci_err_path_is_uid_scoped();
+    test_oci_log_path_is_uid_scoped();
     test_landlock_handled_access_covers_the_abi();
     test_landlock_allowed_access_grants_within_the_path();
     test_landlock_abi_version_is_sane();
@@ -6200,6 +6829,15 @@ fn main() {
     test_attestation_result_fits_its_allocation();
     test_attest_gate_decides_the_exec();
     test_attest_other_paths_refuse();
+    test_capture_ends_a_full_stream();
+    test_capture_payload_dies_with_kavach();
+    test_results_keep_their_own_stderr();
+    test_payload_stdin_is_empty_unless_asked();
+    test_landlock_scopes_are_applied();
+    test_landlock_confines_device_ioctls();
+    test_score_does_not_count_tcp_ports();
+    test_shell_out_backends_report_the_run();
+    test_wasm_runs_under_the_policys_confinement();
     return assert_summary();
 }
 
