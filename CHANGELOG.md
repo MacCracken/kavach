@@ -9,9 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [3.12.6] — 2026-09-24
 
-Toolchain and dependency refresh, a lean manifest, fixes for raw x86 syscall values that aarch64
-ran as other calls, and a fix for a `[lib.confine]` bundle that had not compiled since 3.12.4. No
-breaking API change; `kv_o_nofollow()` is new.
+Toolchain and dependency refresh; an audit-log append that is all or nothing; fixes for raw x86
+syscall values that aarch64 ran as other calls, and for opens that used the Linux argument order on
+agnos; a `[lib.confine]` bundle that had not compiled since 3.12.4; and a lean manifest. No API
+change.
 
 ### Changed — cyrius pin 6.6.2 → **6.6.6**
 
@@ -29,7 +30,8 @@ SIGXFSZ ignored:
 | complete records in the log | 2 | 2 |
 
 The old chain claimed three records while the log held two complete ones plus a 1,685-byte torn tail.
-The new chain matches the log. The torn bytes are still left at the tail (tracked in the roadmap).
+The new chain matches the log. The bytes that did land were still left at the tail; `_audit_append`
+(below) removes them too.
 
 No kavach source needed migrating: the `duplicate fn` set is the same 149 names before and after,
 0 undefined, and nothing trips 6.6.6's new refusals. The binary grew 3,187,480 → 3,199,336 B.
@@ -62,6 +64,70 @@ samay and ai-hwaccel both pin cyrius 6.6.6 and their stdlib sidecars are unchang
 them only through `src/samay_bridge.cyr`, which is not in `[lib]`. The samay integration suite is
 12/12.
 
+### Fixed — a refused audit record no longer leaves its torn bytes in the log
+
+The pin move alone stops the chain head from advancing over a short write (above), but the bytes
+that did land stayed at the tail of the log. The next record was appended onto that partial line,
+so the merged line parsed as neither record: a refused record took the next good one down with it.
+
+`audit_chain_record` now appends through `_audit_append` (`src/audit.cyr`) instead of the stdlib's
+`file_append_locked`:
+
+- **Whole or not at all.** Under `LOCK_EX` it reads the pre-append length (`lseek(SEEK_END)`),
+  writes the record, and on a short write `ftruncate`s back to that length before unlocking. A
+  refused record leaves the log byte-for-byte as it was.
+- **One `write`, not a full-write loop.** A regular file writes short only at a size limit, a full
+  disk or quota, or a fatal signal, and a retry completes the record in none of them. Under
+  `RLIMIT_FSIZE` a retry is harmful: it starts at the limit, the kernel answers that write with
+  SIGXFSZ, and the default action kills the process before any rollback runs. That is what happens
+  with the pin move alone when SIGXFSZ is not ignored, and to this fix if built with a loop.
+- **0600 from the start.** The `open(2)` creates the log at 0600, so the create-at-0644-then-`chmod`
+  window is gone. A log that already exists is still tightened to 0600, now by `fchmod` on the open
+  fd rather than `chmod` on the path. This supersedes the audit-log clause of ADR-005 §C4, which
+  now carries a note.
+- **No lock, no append.** The rollback is only safe under the lock, so a failed `flock` refuses the
+  record rather than writing it unlocked. EINTR is retried.
+- Every call is a stdlib wrapper (`file_open`, `sys_fchmod`, `file_lock`, `xlseek`, `file_write`,
+  `sys_ftruncate`) with named `O_*` flags, so nothing is a raw x86 number. `sys_fchmod` is compiled
+  out on agnos, which has none.
+
+Measured with the repro above (eight 2 KB records on x86_64), then a second run with no
+limit appending to the same log. Every log was checked with an out-of-tree HMAC-chain verifier:
+
+| | pin move alone | with `_audit_append` |
+|---|---|---|
+| `ulimit -f 4`, SIGXFSZ ignored: accepted / refused, `chain_len` | 1 / 7, 2 | 1 / 7, 2 |
+| the log after that run | 4,096 B: 2 lines + a 1,685-byte torn tail | **2,411 B: 2 lines, no tail** |
+| after the second run, lines that verify | 9 of 11 (its genesis is inside the torn line, which breaks the next record's link) | **11 of 11** |
+| `ulimit -f 4`, SIGXFSZ at its default action | killed (exit 153), torn tail left | **exit 0**, 1 / 7, log intact |
+| full disk (12 KiB tmpfs, ENOSPC) | 12,288 B with a 977-byte torn tail | **11,311 B, no tail**, 6 of 6 verify |
+
+The same repro on aarch64, under `qemu-aarch64 -strace`, issues these calls: `openat(…,
+O_WRONLY|O_APPEND|O_CREAT,0600)`, `fchmod(3,0600)`, `flock`, `lseek(3,0,SEEK_END)`, and, for each
+of the 7 refusals, a 1,685-byte short `write` followed by `ftruncate(3,2411) = 0`. It exits 0 with
+the log intact.
+
+**Not covered.** Three cases still leave the partial record at the tail: a process killed during
+the `write` itself; agnos, where `sys_ftruncate` is `-ENOSYS`; and a log marked append-only
+(`chattr +a`), where `ftruncate` is `EPERM`. The last two print "a torn record could not be removed
+from the log". The roadmap tracks the fix for all three, which is to start the next record on a
+fresh line.
+
+`file_restrict_mode` (`src/util.cyr`) no longer has a caller in kavach or in any consumer checked
+out alongside it. It stays exported, so the bundle surface does not change.
+
+**Tests:**
+
+- `test_audit_refused_append_leaves_no_torn_tail`. A forked child caps its own `RLIMIT_FSIZE` at
+  4 KiB and records 2 KB payloads past it, with SIGXFSZ at its default action. The stdlib has no
+  rlimit wrapper, so the child calls `prlimit64` by the kernel's own number per arch: x86_64 302,
+  aarch64 261. Neither is an ESYSXLAT row. The parent then checks three things: the child
+  survived, every record in the log is a whole line of its own, and a new chain appended afterwards
+  stays whole. The test fails against the pin-move-only `audit.cyr`, against this fix built with a
+  full-write loop, and against this fix with the truncate removed.
+- `test_audit_log_mode_0600`. A fresh log is 0600, and a log widened to 0644 is tightened back on
+  the next append. The test fails with the `fchmod` removed.
+
 ### Fixed — raw x86 syscall values misbehaved on aarch64
 
 kavach hardcoded two x86_64-only values, and aarch64 Linux executed them as something else. Each
@@ -79,10 +145,9 @@ fix was checked by cross-building with `cyrius build --aarch64` and running unde
   failed chmod fails the write instead of being ignored. The 6.6.6 aarch64 build had flagged the old
   line: "raw syscall 91 is x86_64 `fchmod`; on ELF-aarch64 that number is `capset`". agnos has no
   fchmod (91 there is `gpu_blit_bb`) and no POSIX modes, so no chmod is issued on that target.
-- **O_NOFOLLOW.** A new `kv_o_nofollow()` returns the stdlib's per-arch `O_NOFOLLOW` (x86_64
-  `0x20000`, aarch64 `0x8000`). On agnos it returns the x86 value, which the `file_open` bridge maps
-  to `AO_NOFOLLOW`. It replaces the literal at all four sites: both secure writes in `src/util.cyr`
-  and both OCI scratch-file opens in `src/backend_oci.cyr`. The filed issue named only one.
+- **O_NOFOLLOW.** The literal was at four sites: both secure writes in `src/util.cyr`, and both
+  OCI scratch-file opens in `src/backend_oci.cyr`. The filed issue named only one. All four now
+  use the stdlib's `O_*` names: `O_NOFOLLOW` is `0x20000` on x86_64 and `0x8000` on aarch64.
   `_oci_take_file` has no `O_EXCL`, so this flag is its only defence against a planted symlink.
 - **nanosleep** needed no kavach change: cyrius 6.6.5 translates raw x86 `35`.
 - **Tests.** `credential_inject_files` claimed to check the mode but only checked the content; it
@@ -94,6 +159,28 @@ The whole suite, cross-built and run under qemu-user, fails the same 19 assertio
 9 fork/exec groups (`process_real_exec`, `oci_run_*`) on both 3.12.5 and 3.12.6, and both runs
 crash at the same point. That is pre-existing, and it is not yet known whether qemu-user or kavach's
 aarch64 exec path is at fault (roadmap). The groups this fix touches pass there.
+
+### Fixed — agnos: opens used the Linux `sys_open` argument order
+
+On agnos `sys_open` takes `(name, namelen, AO_flags)`, not `(path, O_flags, mode)`, so a raw
+Linux-shaped call passes its flags as the name length. Nine such calls were compiled for agnos
+outside any agnos guard:
+
+- credential file injection (`file_write_secure_modal`);
+- the MAC file helpers `mac_read_file` and `mac_write_file`;
+- `audit_read_proc_events`;
+- the three opens in `_spawn_redirect_stdio`;
+- the two OCI scratch-file opens. `_oci_take_file` still runs on agnos after `_oci_run` refuses.
+
+All nine now go through the stdlib's `file_open`, as `file_write_secure_r` and `_audit_append`
+already did. On Linux `file_open` is plain `sys_open`; on agnos it supplies the name length and
+maps `O_*` to `AO_*`. The two raw `sys_open` calls left (`persistent.cyr`, `security.cyr`) sit
+inside `#ifndef CYRIUS_TARGET_AGNOS` blocks. The open flags are the stdlib's `O_*` names at every
+site: per arch on Linux, and from `lib/io.cyr` on agnos, whose values `file_open` translates.
+
+Checked by the `--agnos` build (0 undefined, 0 errors). On Linux the call is unchanged, and the
+x86_64 and aarch64 results above are the same after this change. It has not been run on agnos,
+because no agnos runtime was available.
 
 ### Fixed — `dist/kavach-confine.cyr` did not compile on the toolchain it shipped for
 
@@ -128,13 +215,6 @@ consumer running the full M1 flow (`kavach_init` → … → `sandbox_destroy`):
 The section also said a consumer's sigil resolves from kavach's `[deps.sigil]`. It comes from the
 consumer's own toolchain snapshot.
 
-### Fixed — a comment promising a stdlib wrapper that is not coming
-
-`src/audit.cyr` said a `file_append_locked_mode` wrapper was "scheduled for Cyrius stdlib 4.4.0".
-No such wrapper exists in 6.6.6, and the stdlib has not used that version scheme for a long time.
-The comment now says the best-effort chmod is the hardening path, and states the 6.6.6
-short-write guarantee the `< 0` check relies on.
-
 ### Changed — `cyrius.cyml` is configuration only
 
 12,819 → 3,135 bytes; 143 comment lines → 0. Everything the comments said already lives elsewhere:
@@ -166,15 +246,16 @@ Local build, and a copy of the tree resolved from git tags as CI does:
 
 - `deps --verify` 75/0; fmt 0 drift; lint 0. The fmt and lint gates were checked against
   deliberately bad files to prove they still fire.
-- `vet` clean; plain, `CYRIUS_DCE=1`, `--agnos` and `--aarch64` builds clean (the aarch64 build
-  with no raw-syscall warnings); `check --with-deps src/lib.cyr` clean; `distlib --all --check`
-  fresh.
-- Tests **718/718**, samay **12/12**, fuzz ok.
+- `vet` clean; plain, `CYRIUS_DCE=1`, `--agnos` and `--aarch64` builds clean, with 0 undefined,
+  the same 149 `duplicate fn` names, and no raw-syscall warning in the aarch64 build;
+  `check --with-deps src/lib.cyr` clean; `distlib --all --check` fresh, and both `.deps` sidecars
+  unchanged by the fixes. Binary 3,199,392 B (`CYRIUS_DCE=1`).
+- Tests **730/730** (713 before this release), samay **12/12**, fuzz ok.
 - Both bundles rebuilt into consumer projects on cyrius 6.6.6: a confine-only one (thoth's shape),
   and one using a real `[deps.kavach]` that runs `kavach_init` → … → `sandbox_destroy`.
 
 In the tag-resolved copy, `test_confine_capture_workdir`'s control assertion ("not /tmp") fails
-because that copy lives under `/tmp`. Run from a directory outside `/tmp`, it passes 718/718.
+because that copy lives under `/tmp`. Run from a directory outside `/tmp`, it passes 730/730.
 
 ### Performance
 
@@ -195,8 +276,8 @@ non-overlapping ranges; the other 15 are within noise.
 | `ct_streq_64` | 195 ns | 172 ns | −11.8% |
 | `code_scan_large_naive` | 6.00 ms | 5.64 ms | −5.9% |
 
-⚠ **The regressions are toolchain-side; kavach's source is unchanged.** The same 3.12.6 tree was
-built on 6.6.4, 6.6.5 and 6.6.6:
+⚠ **The regressions are toolchain-side**: none of this release's source changes touch those paths.
+The same kavach tree was built on 6.6.4, 6.6.5 and 6.6.6:
 
 - The `secrets_*` rows rise at each step (`secrets_redact` 6.43 → 6.69 → 7.07 µs).
 - `http_allowlist_hit` and `process_exec_large_output` step up at 6.6.5.
@@ -204,8 +285,16 @@ built on 6.6.4, 6.6.5 and 6.6.6:
 6.6.5 pads every call made inside an expression to 16-byte stack alignment. That is an ABI
 correctness fix, and a plausible cost for call-dense scan loops; it is not root-caused further here.
 
-The 3.12.6 row predates the aarch64 fix above. No benchmark exercises the functions it changed
-(`file_write_secure*`, `_oci_take_file`), and on x86_64 the flag values are unchanged.
+**The all-or-nothing append costs the same as the call it replaces.** It adds one `lseek`, and `fchmod(fd)` replaces `chmod(path)`, which
+also drops a path walk.
+
+| | `file_append_locked` | `_audit_append` |
+|---|---|---|
+| focused A/B: 20,000 records to tmpfs, 7 interleaved CPU-pinned runs, median (range) | 11,645 ns (11,378–11,763) | 11,525 ns (11,189–11,620) |
+| `audit_chain_record_to_tmpfs`: 5 interleaved pinned runs of `kavach.bcyr`, median | 11.31 µs | 11.42 µs (ranges overlap) |
+
+The 3.12.6 CSV row was recorded on the final code: `audit_chain_record_to_tmpfs` 11.61 µs. CSV rows
+are single runs, so the comparisons above use interleaved medians.
 
 ## [3.12.5] — 2026-09-10
 

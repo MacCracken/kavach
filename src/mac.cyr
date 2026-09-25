@@ -52,7 +52,7 @@ enum AppArmorState {
 # ================================================================
 
 fn mac_read_file(path): i64 {
-    var fd = sys_open(path, O_RDONLY, 0);
+    var fd = file_open(path, O_RDONLY, 0);
     if (fd < 0) {
         return kavach_err_io(0 - fd, path);
     }
@@ -77,7 +77,7 @@ fn mac_read_file(path): i64 {
 # ================================================================
 
 fn mac_write_file(path, data, data_len): i64 {
-    var fd = sys_open(path, O_WRONLY, 0);
+    var fd = file_open(path, O_WRONLY, 0);
     if (fd < 0) {
         var errno = 0 - fd;
         if (errno == EPERM) { return kavach_err_permission_denied(path); }

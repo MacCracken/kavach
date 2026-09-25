@@ -153,6 +153,77 @@ fn _entry_to_jsonl(entry) {
     return buf;
 }
 
+# ---- Log append ----------------------------------------------------------
+
+# Append one serialized record to the log at `path`, all or nothing. Returns
+# `len`, or a negative errno with the log byte-for-byte as it was — unless the
+# cut-back itself fails (see SAFETY below), which is reported on stderr.
+#
+# ⛔ WHY NOT THE STDLIB'S file_append_locked. Since cyrius 6.6.6 it refuses a
+# short write instead of calling it success, so the chain head no longer
+# advances over a torn record — but the bytes that did land stay at the tail.
+# The next record is appended straight onto that partial line, and the merged
+# line parses as neither: the refused record takes the next good one with it.
+# Measured on 3.12.6 (2 KB records, RLIMIT_FSIZE 4 KiB): a 1,685-byte torn
+# tail, and the next process's genesis record lost inside it. So kavach does
+# its own append:
+#   * the open creates the file at 0600, closing the create-at-0644-then-chmod
+#     window (ADR-005 §C4);
+#   * the pre-append length is read under LOCK_EX, and a short write is cut
+#     back to it before the lock is released.
+#
+# ⚠ ONE write, NOT a full-write loop. A regular file writes short only at a
+# size limit, a full disk or quota, or a fatal signal, and a retry finishes the
+# record in none of them. Under RLIMIT_FSIZE the retry is worse than useless:
+# it starts AT the limit, which is the write the kernel answers with SIGXFSZ,
+# and the default action kills the process before any rollback runs (measured:
+# exit 153, torn tail left). A write that stops short of the limit raises
+# nothing.
+fn _audit_append(path, line, len) {
+    var fd = file_open(path, O_WRONLY | O_CREAT | O_APPEND, 384);   # 0600
+    if (fd < 0) { return fd; }
+    #ifndef CYRIUS_TARGET_AGNOS
+    # Best effort, as the per-append chmod it replaces was: a log an older
+    # kavach created at 0644, or someone else created, still ends up 0600.
+    # fchmod, so the mode lands on the file this fd writes rather than on
+    # whatever the path names by now. agnos has no fchmod.
+    sys_fchmod(fd, 384);
+    #endif
+    # The rollback is only safe under the lock: no lock, no append.
+    var lk = file_lock(fd);
+    while (lk == 0 - 4) { lk = file_lock(fd); }   # EINTR: a signal handler ran
+    if (lk < 0) {
+        file_close(fd);
+        return lk;
+    }
+    # The pre-append length, and the append offset on agnos (its kernel does
+    # not honour O_APPEND yet). Negative on a pipe or tty: nothing to cut back.
+    var base = xlseek(fd, 0, 2);
+    var n = file_write(fd, line, len);
+    if (n != len) {
+        if (n > 0) {
+            var cut = 0 - 1;
+            # SAFETY: LOCK_EX has been held on this fd since `base` was read,
+            # and every writer of an audit log appends through this function,
+            # so the file grew by exactly our `n` bytes; truncating to `base`
+            # removes the torn record and nothing else. Shrinking a file is
+            # never refused by RLIMIT_FSIZE or ENOSPC, so the conditions that
+            # cause a short write cannot also block its repair. The cut does
+            # fail, and says so below, on agnos (sys_ftruncate is -ENOSYS)
+            # and on a file marked append-only (chattr +a).
+            if (base >= 0) { cut = sys_ftruncate(fd, base); }
+            if (cut < 0) {
+                kavach_err_print(KAVACH_ERR_IO_ERROR,
+                  "audit chain: a torn record could not be removed from the log");
+            }
+        }
+        if (n >= 0) { n = 0 - 5; }   # short write: -EIO
+    }
+    file_unlock(fd);
+    file_close(fd);
+    return n;
+}
+
 # Open (or create) an audit chain at log_path with the given HMAC key.
 # If the path exists, the file is left in place and the chain resumes from
 # wherever the caller last recorded — file-based reload/verify is a TODO.
@@ -194,17 +265,13 @@ fn audit_chain_record(chain, event_type, payload) {
     AuditEntry_set_prev_hmac(entry, prev);
 
     var line = _entry_to_jsonl(entry);
-    # file_append_locked creates the file at 0644 on first write; tighten
-    # to 0600 immediately afterward. The stdlib has no mode-taking append,
-    # so this best-effort chmod is the hardening path — see ADR-005 §C4.
-    # Since cyrius 6.6.6 a short write returns a negative errno rather than
-    # the prefix count, so the `< 0` test also refuses a torn record and the
-    # chain head never advances over one.
-    if (file_append_locked(AuditChain_log_path(chain), line, strlen(line)) < 0) {
+    # All or nothing (see _audit_append): a refused record leaves the log as it
+    # was and the chain head where it was, so the next record starts on a line
+    # of its own.
+    if (_audit_append(AuditChain_log_path(chain), line, strlen(line)) < 0) {
         kavach_err_print(KAVACH_ERR_IO_ERROR, "audit chain write failed");
         return 0;
     }
-    file_restrict_mode(AuditChain_log_path(chain));
 
     AuditChain_set_last_hmac(chain, hmac_hex);
     AuditChain_set_next_serial(chain, serial + 1);

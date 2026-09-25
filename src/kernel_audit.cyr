@@ -635,7 +635,7 @@ fn audit_read_proc_events(proc_path): i64 {
         return Ok(vec_new());
     }
 
-    var fd = sys_open(proc_path, O_RDONLY, 0);
+    var fd = file_open(proc_path, O_RDONLY, 0);
     if (fd < 0) {
         return kavach_err_io(0 - fd, proc_path);
     }

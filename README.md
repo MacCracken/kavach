@@ -12,15 +12,17 @@ classification, credential proxy, HMAC-SHA256 audit chain — all in pure Cyrius
 
 ## Status
 
-**v3.12.6 — toolchain + dependency refresh.** Cyrius pin `6.6.2` → `6.6.6`,
-which closes a torn-write hole in the HMAC audit chain: a short append is now
-refused instead of logged as written. Deps: sigil `3.12.18` (what the 6.6.6
-snapshot delivers), ai-hwaccel `2.4.0`, samay `1.1.5`. On aarch64,
-credential files now get their requested mode and `O_NOFOLLOW` is really set.
-Before, a raw x86 fchmod ran as `capset` and the x86 flag value read as
-`O_LARGEFILE`. Verified under `qemu-aarch64 -strace`. Also fixes a
-`dist/kavach-confine.cyr` that had not compiled since 3.12.4. **718**
-assertions green; see the [CHANGELOG](CHANGELOG.md) for the benchmark deltas.
+**v3.12.6 — toolchain + dependency refresh.** Cyrius pin `6.6.2` → `6.6.6`.
+The HMAC audit chain's append is now all or nothing: a short write is refused
+and rolled back, so a torn record can no longer be logged as written or corrupt
+the next one. Deps: sigil `3.12.18` (what the 6.6.6 snapshot delivers),
+ai-hwaccel `2.4.0`, samay `1.1.5`. On aarch64, credential files now get their
+requested mode and `O_NOFOLLOW` is really set. Before, a raw x86 fchmod ran as
+`capset` and the x86 flag value read as `O_LARGEFILE`; this was verified under
+`qemu-aarch64 -strace`. On agnos, file opens now use its own argument order.
+Also fixes a `dist/kavach-confine.cyr` that had not compiled since 3.12.4.
+**730** assertions green; see the [CHANGELOG](CHANGELOG.md) for the benchmark
+deltas.
 
 **v3.11.14 — a declared stdlib module that arrives transitively is never
 included.** Cyrius pin `6.5.21` → `6.5.27`; sigil `3.12.9`, samay `1.0.1` and
@@ -202,7 +204,7 @@ cyrius deps
 cyrius build src/main.cyr build/kavach
 ./build/kavach
 
-# Run the test suite (718 assertions).
+# Run the test suite (730 assertions).
 cyrius test tests/kavach.tcyr
 
 # Run the bench harness (25 benches).

@@ -266,7 +266,7 @@ fn bench_sandbox_full_lifecycle() {
     return 0;
 }
 
-# Note: audit chain bench touches disk (file_append_locked) — timing
+# Note: audit chain bench touches disk (_audit_append) — timing
 # will be dominated by fs I/O. Reported for completeness only.
 var _bench_chain = 0;
 

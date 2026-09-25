@@ -990,6 +990,169 @@ fn test_audit_chain_close_zeroes_key() {
     return 0;
 }
 
+# A fresh /tmp path no other run or test can be holding.
+fn _t_unique_tmp_path(prefix) {
+    var rid = rand_hex_id();
+    var path = alloc(strlen(prefix) + 17);
+    memcpy(path, prefix, strlen(prefix));
+    memcpy(path + strlen(prefix), rid, 16);
+    store8(path + strlen(prefix) + 16, 0);
+    return path;
+}
+
+# ADR-005 §C4: the audit log ends up owner-only whether the append created it or
+# found it. The open creates a fresh log at 0600; a log that already exists
+# wider is tightened by fchmod on the fd the record is written through.
+fn test_audit_log_mode_0600() {
+    test_group("audit_log_mode_0600");
+    sha256_global_init();
+    var path = _t_unique_tmp_path("/tmp/kavach-mode-");
+    var st[144];
+
+    audit_chain_open(path, "mode-key", 8);
+    assert_eq(xstat(path, &st), 0, "fresh log exists");
+    assert_eq(load32(&st + STAT_MODE) & 511, 384, "fresh log is 0600");
+
+    sys_chmod(path, 420);                    # 0644: widened after the fact
+    audit_chain_open(path, "mode-key", 8);   # appends a genesis to it
+    assert_eq(xstat(path, &st), 0, "log still exists");
+    assert_eq(load32(&st + STAT_MODE) & 511, 384, "a 0644 log is tightened to 0600");
+    kv_unlink(path);
+    return 0;
+}
+
+# Cap this process's file size (RLIMIT_FSIZE, resource 1). The stdlib has no
+# rlimit wrapper, so prlimit64 goes by number — the KERNEL's own, per arch,
+# because neither is an ESYSXLAT row: x86_64 302, aarch64 261 (as an x86
+# number 261 is futimesat, which aarch64 lacks, so no row can ever claim it).
+# -1 anywhere else: the caller reports the rollback as not exercisable.
+fn _t_set_fsize_limit(bytes) {
+    var rl[16];
+    store64(&rl, bytes);        # rlim_cur
+    store64(&rl + 8, bytes);    # rlim_max
+    #ifdef CYRIUS_TARGET_LINUX
+    #ifdef CYRIUS_ARCH_X86
+    # SAFETY: prlimit64(0 = this process, RLIMIT_FSIZE, &rl, no old-limit out);
+    # rl is a 16-byte {rlim_cur, rlim_max} on this frame and is only read.
+    return syscall(302, 0, 1, &rl, 0);
+    #endif
+    #ifdef CYRIUS_ARCH_AARCH64
+    # SAFETY: as the x86_64 arm, in aarch64 numbering.
+    return syscall(261, 0, 1, &rl, 0);
+    #endif
+    #endif
+    return 0 - 1;
+}
+
+# 1 when every record in the log at `path` is a complete line of its own, 0
+# otherwise; the line count goes to `lines_out`. `{"serial":` cannot occur
+# inside a record (event_type and payload are JSON-escaped), so it counts
+# records whole or torn, and it equals the newline count only when none is
+# torn or merged into another.
+fn _t_audit_log_whole_lines(path, lines_out) {
+    store64(lines_out, 0);
+    var n = 0;
+    var buf = file_read_whole(path, &n);
+    if (buf == 0) { return 0; }
+    var lines = 0;
+    var starts = 0;
+    var i = 0;
+    while (i < n) {
+        var c = load8(buf + i);
+        if (c == 10) { lines = lines + 1; }
+        if (c == 123) {
+            if (i + 10 <= n) {
+                if (memeq(buf + i, "{\"serial\":", 10) == 1) { starts = starts + 1; }
+            }
+        }
+        i = i + 1;
+    }
+    store64(lines_out, lines);
+    if (n > 0) {
+        if (load8(buf + n - 1) != 10) { return 0; }
+    }
+    if (starts != lines) { return 0; }
+    return 1;
+}
+
+# Child half of the torn-tail test. Exits 10 + the chain length it ended with;
+# 3 when no file-size limit could be set; 4 when the limit refused nothing (so
+# nothing was tested). SIGXFSZ keeps its default action on purpose.
+fn _t_torn_tail_child(path) {
+    # Each refusal prints to stderr. If the runner's stderr is a regular file,
+    # the limit applies to it too, and a diagnostic written past 4 KiB would
+    # SIGXFSZ this child for reasons unrelated to the audit log.
+    var nul = file_open("/dev/null", O_WRONLY, 0);
+    if (nul >= 0) {
+        kv_dup2(nul, 1);
+        kv_dup2(nul, 2);
+    }
+    if (_t_set_fsize_limit(4096) < 0) { syscall(SYS_EXIT_GROUP, 3); }
+    var payload = alloc(2001);
+    memset(payload, 97, 2000);
+    store8(payload + 2000, 0);
+    var c = audit_chain_open(path, "torn-key", 8);
+    var refused = 0;
+    var i = 0;
+    while (i < 4) {
+        if (audit_chain_record(c, "big", payload) == 0) { refused = refused + 1; }
+        i = i + 1;
+    }
+    if (refused == 0) { syscall(SYS_EXIT_GROUP, 4); }
+    syscall(SYS_EXIT_GROUP, 10 + audit_chain_len(c));
+    return 0;
+}
+
+# A record the log cannot take whole must leave the log exactly as it was.
+# 3.12.6 refused the record but left the bytes that landed at the tail; the
+# next append merged into them, and the good record stopped parsing. The child
+# caps its file size at 4 KiB and records 2 KB payloads past it. It keeps
+# SIGXFSZ at the default action, so an append that retried a short write
+# (the retry starts at the limit) would kill it, and so would leaving the torn
+# bytes in place (the next write starts there); both fail here too.
+fn test_audit_refused_append_leaves_no_torn_tail() {
+    test_group("audit_refused_append_no_torn_tail");
+    sha256_global_init();
+    var path = _t_unique_tmp_path("/tmp/kavach-torn-");
+
+    var pid = kv_fork();
+    if (pid == 0) { _t_torn_tail_child(path); }
+    assert(pid > 0, "fork");
+    if (pid < 0) { return 0; }
+    var st[8];
+    store64(&st, 0);
+    kv_waitpid(pid, &st, 0);
+    var status = load32(&st);
+    var sig = status & 127;
+    var code = (status >> 8) & 255;
+    if (sig == 0) {
+        if (code == 3) {
+            assert_eq(1, 1, "no file-size limit on this target — rollback not exercisable");
+            kv_unlink(path);
+            return 0;
+        }
+    }
+    assert_eq(sig, 0, "child not killed by a signal (SIGXFSZ: a write began at the limit)");
+
+    var lines = 0;
+    assert_eq(_t_audit_log_whole_lines(path, &lines), 1, "no torn record left in the log");
+    if (sig == 0) {
+        assert(code != 4, "the 4 KiB limit refused at least one record");
+        assert(code > 10, "genesis landed under the limit");
+        assert_eq(lines, code - 10, "one line per record the chain accepted");
+    }
+
+    # The harm the torn tail did: the NEXT writer merged into it. A new chain
+    # on the same log must land on lines of its own.
+    var before = lines;
+    var c = audit_chain_open(path, "torn-key", 8);
+    audit_chain_record(c, "after", "small");
+    assert_eq(_t_audit_log_whole_lines(path, &lines), 1, "the next writer's records stay whole");
+    assert_eq(lines, before + 2, "genesis + one record appended after the refusals");
+    kv_unlink(path);
+    return 0;
+}
+
 fn test_uuid_v4_distinct() {
     test_group("uuid_v4");
     # Four random u64s must all differ (collision probability ~ 2^-62).
@@ -3919,6 +4082,8 @@ fn main() {
     test_redact_evidence();
     test_audit_payload_escaped();
     test_audit_chain_close_zeroes_key();
+    test_audit_log_mode_0600();
+    test_audit_refused_append_leaves_no_torn_tail();
     test_uuid_v4_distinct();
     test_warn_verdict_redacts_stdout();
     test_warn_verdict_redact_disabled();

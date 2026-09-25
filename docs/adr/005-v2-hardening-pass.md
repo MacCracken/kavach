@@ -35,6 +35,16 @@ scope.
 | **H5** | Key material lifetime (CWE-316) | CVE-2019-1559 class | `audit_chain_close(chain)` exposed; calls sigil `zeroize_key(key, len)` (barrier-protected) and clears the struct's pointer. Callers that release their chain before process exit should invoke this. |
 | **M1** (partial) | Integer overflow (CWE-190) | n/a | `util.cyr::checked_add` + `checked_mul` available. `oci_json_escape` hard-caps input at 1 MiB before multiplying by 6 (the new worst-case expansion factor). Other call sites scheduled for v3.0 sweep. |
 
+> **Superseded in part — C4's audit-log clause, v3.12.6.** The audit log
+> no longer goes through `file_append_locked` plus a best-effort `chmod` of the
+> path, and the stdlib `file_append_locked_mode` the row waits for is not
+> needed. `src/audit.cyr`'s `_audit_append` creates the file at 0600 in the
+> `open(2)` itself, so the 0644 window between create and chmod is gone. A log
+> that already exists is tightened with `fchmod` on the open fd. Under the lock,
+> a short write is cut back to the pre-append length, so a refused record leaves
+> no bytes behind. Quarantine and bundle files are unchanged. See CHANGELOG
+> 3.12.6.
+
 ### Deferred (documented, not fixed)
 
 | ID | Reason |

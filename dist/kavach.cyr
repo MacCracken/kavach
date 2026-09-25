@@ -303,22 +303,11 @@ fn is_safe_argument(s) {
 }
 
 # ---- secure file I/O -----------------------------------------------------
-# O_WRONLY=1, O_CREAT=0x40, O_TRUNC=0x200, O_EXCL=0x80 — the same on x86_64 and
-# aarch64 Linux. O_NOFOLLOW is not (0x20000 vs 0x8000): use kv_o_nofollow().
-# Mode 0600 = 384.
-
-# O_NOFOLLOW for this target. Linux takes the stdlib's per-arch constant: the
-# x86_64 value, 0x20000, is O_LARGEFILE on aarch64, so the literal kavach used
-# before 3.12.6 silently dropped the flag there. agnos defines no O_* names; its
-# file_open bridge (lib/io.cyr) takes the x86_64 value and maps it to AO_NOFOLLOW.
-fn kv_o_nofollow(): i64 {
-    #ifdef CYRIUS_TARGET_AGNOS
-    return 131072;
-    #endif
-    #ifndef CYRIUS_TARGET_AGNOS
-    return O_NOFOLLOW;
-    #endif
-}
+# Open flags are the stdlib's O_* names, never literals: they differ by target —
+# O_NOFOLLOW is 0x20000 on x86_64 but 0x8000 on aarch64, where 0x20000 is
+# O_LARGEFILE. agnos gets the x86_64 values from lib/io.cyr, which file_open
+# maps to its AO_* bits. Opens go through file_open, not sys_open: agnos's
+# sys_open is (name, namelen, flags). Mode 0600 = 384.
 
 # Human-readable name for a stdlib IoError variant — for the structured
 # log/error line emitted on a failed external write (ADR-005 audit trail).
@@ -338,7 +327,7 @@ fn io_error_name(e) {
 # opens O_WRONLY|O_CREAT|O_TRUNC without the O_EXCL|O_NOFOLLOW hardening
 # (ADR-005 §C4). Returns Ok(len) or Err(IoError).
 fn file_write_secure_r(path, buf, len): Result {
-    var flags = 1 + 64 + 512 + 128 + kv_o_nofollow();
+    var flags = O_WRONLY | O_CREAT | O_TRUNC | O_EXCL | O_NOFOLLOW;
     var fo_t, fo_v = file_open_r(path, flags, 384);
     if (is_err_result(fo_t) == 1) { return Err(fo_v); }
     var fd = result_unwrap(fo_t, fo_v);
@@ -368,10 +357,12 @@ fn file_write_secure(path, buf, len) {
 # x86_64 — aarch64 runs capset — so off x86 the requested mode was silently
 # never applied. A failed fchmod now fails the write instead of being ignored.
 # agnos has no fchmod (91 there is gpu_blit_bb) and does not model POSIX modes
-# (its stdlib sys_chmod is a success no-op), so no chmod is issued there.
+# (its stdlib sys_chmod is a success no-op), so no chmod is issued there. The
+# open went through raw sys_open until 3.12.6, which on agnos passed the flags
+# as the name length.
 fn file_write_secure_modal(path, buf, len, mode) {
-    var flags = 1 + 64 + 512 + 128 + kv_o_nofollow();
-    var fd = sys_open(path, flags, 384);
+    var flags = O_WRONLY | O_CREAT | O_TRUNC | O_EXCL | O_NOFOLLOW;
+    var fd = file_open(path, flags, 384);
     if (fd < 0) { return 0 - 1; }
     var n = sys_write(fd, buf, len);
     if (n < 0) { sys_close(fd); return 0 - 1; }
@@ -1748,7 +1739,7 @@ enum AppArmorState {
 # ================================================================
 
 fn mac_read_file(path): i64 {
-    var fd = sys_open(path, O_RDONLY, 0);
+    var fd = file_open(path, O_RDONLY, 0);
     if (fd < 0) {
         return kavach_err_io(0 - fd, path);
     }
@@ -1773,7 +1764,7 @@ fn mac_read_file(path): i64 {
 # ================================================================
 
 fn mac_write_file(path, data, data_len): i64 {
-    var fd = sys_open(path, O_WRONLY, 0);
+    var fd = file_open(path, O_WRONLY, 0);
     if (fd < 0) {
         var errno = 0 - fd;
         if (errno == EPERM) { return kavach_err_permission_denied(path); }
@@ -2862,7 +2853,7 @@ fn audit_read_proc_events(proc_path): i64 {
         return Ok(vec_new());
     }
 
-    var fd = sys_open(proc_path, O_RDONLY, 0);
+    var fd = file_open(proc_path, O_RDONLY, 0);
     if (fd < 0) {
         return kavach_err_io(0 - fd, proc_path);
     }
@@ -6957,6 +6948,77 @@ fn _entry_to_jsonl(entry) {
     return buf;
 }
 
+# ---- Log append ----------------------------------------------------------
+
+# Append one serialized record to the log at `path`, all or nothing. Returns
+# `len`, or a negative errno with the log byte-for-byte as it was — unless the
+# cut-back itself fails (see SAFETY below), which is reported on stderr.
+#
+# ⛔ WHY NOT THE STDLIB'S file_append_locked. Since cyrius 6.6.6 it refuses a
+# short write instead of calling it success, so the chain head no longer
+# advances over a torn record — but the bytes that did land stay at the tail.
+# The next record is appended straight onto that partial line, and the merged
+# line parses as neither: the refused record takes the next good one with it.
+# Measured on 3.12.6 (2 KB records, RLIMIT_FSIZE 4 KiB): a 1,685-byte torn
+# tail, and the next process's genesis record lost inside it. So kavach does
+# its own append:
+#   * the open creates the file at 0600, closing the create-at-0644-then-chmod
+#     window (ADR-005 §C4);
+#   * the pre-append length is read under LOCK_EX, and a short write is cut
+#     back to it before the lock is released.
+#
+# ⚠ ONE write, NOT a full-write loop. A regular file writes short only at a
+# size limit, a full disk or quota, or a fatal signal, and a retry finishes the
+# record in none of them. Under RLIMIT_FSIZE the retry is worse than useless:
+# it starts AT the limit, which is the write the kernel answers with SIGXFSZ,
+# and the default action kills the process before any rollback runs (measured:
+# exit 153, torn tail left). A write that stops short of the limit raises
+# nothing.
+fn _audit_append(path, line, len) {
+    var fd = file_open(path, O_WRONLY | O_CREAT | O_APPEND, 384);   # 0600
+    if (fd < 0) { return fd; }
+    #ifndef CYRIUS_TARGET_AGNOS
+    # Best effort, as the per-append chmod it replaces was: a log an older
+    # kavach created at 0644, or someone else created, still ends up 0600.
+    # fchmod, so the mode lands on the file this fd writes rather than on
+    # whatever the path names by now. agnos has no fchmod.
+    sys_fchmod(fd, 384);
+    #endif
+    # The rollback is only safe under the lock: no lock, no append.
+    var lk = file_lock(fd);
+    while (lk == 0 - 4) { lk = file_lock(fd); }   # EINTR: a signal handler ran
+    if (lk < 0) {
+        file_close(fd);
+        return lk;
+    }
+    # The pre-append length, and the append offset on agnos (its kernel does
+    # not honour O_APPEND yet). Negative on a pipe or tty: nothing to cut back.
+    var base = xlseek(fd, 0, 2);
+    var n = file_write(fd, line, len);
+    if (n != len) {
+        if (n > 0) {
+            var cut = 0 - 1;
+            # SAFETY: LOCK_EX has been held on this fd since `base` was read,
+            # and every writer of an audit log appends through this function,
+            # so the file grew by exactly our `n` bytes; truncating to `base`
+            # removes the torn record and nothing else. Shrinking a file is
+            # never refused by RLIMIT_FSIZE or ENOSPC, so the conditions that
+            # cause a short write cannot also block its repair. The cut does
+            # fail, and says so below, on agnos (sys_ftruncate is -ENOSYS)
+            # and on a file marked append-only (chattr +a).
+            if (base >= 0) { cut = sys_ftruncate(fd, base); }
+            if (cut < 0) {
+                kavach_err_print(KAVACH_ERR_IO_ERROR,
+                  "audit chain: a torn record could not be removed from the log");
+            }
+        }
+        if (n >= 0) { n = 0 - 5; }   # short write: -EIO
+    }
+    file_unlock(fd);
+    file_close(fd);
+    return n;
+}
+
 # Open (or create) an audit chain at log_path with the given HMAC key.
 # If the path exists, the file is left in place and the chain resumes from
 # wherever the caller last recorded — file-based reload/verify is a TODO.
@@ -6998,17 +7060,13 @@ fn audit_chain_record(chain, event_type, payload) {
     AuditEntry_set_prev_hmac(entry, prev);
 
     var line = _entry_to_jsonl(entry);
-    # file_append_locked creates the file at 0644 on first write; tighten
-    # to 0600 immediately afterward. The stdlib has no mode-taking append,
-    # so this best-effort chmod is the hardening path — see ADR-005 §C4.
-    # Since cyrius 6.6.6 a short write returns a negative errno rather than
-    # the prefix count, so the `< 0` test also refuses a torn record and the
-    # chain head never advances over one.
-    if (file_append_locked(AuditChain_log_path(chain), line, strlen(line)) < 0) {
+    # All or nothing (see _audit_append): a refused record leaves the log as it
+    # was and the chain head where it was, so the next record starts on a line
+    # of its own.
+    if (_audit_append(AuditChain_log_path(chain), line, strlen(line)) < 0) {
         kavach_err_print(KAVACH_ERR_IO_ERROR, "audit chain write failed");
         return 0;
     }
-    file_restrict_mode(AuditChain_log_path(chain));
 
     AuditChain_set_last_hmac(chain, hmac_hex);
     AuditChain_set_next_serial(chain, serial + 1);
@@ -8460,17 +8518,17 @@ fn _spawn_cgroup_join(cgroup_path) {
 # Redirect stdio for the detached child: stdin from /dev/null, stdout+stderr to
 # `log_path` (or /dev/null when none was given). Returns 0 / -1.
 fn _spawn_redirect_stdio(log_path) {
-    var devnull = sys_open("/dev/null", 0, 0);          # O_RDONLY
+    var devnull = file_open("/dev/null", O_RDONLY, 0);
     if (devnull < 0) { return 0 - 1; }
     kv_dup2(devnull, 0);
     sys_close(devnull);
 
     var out = 0 - 1;
     if (log_path != 0) {
-        out = sys_open(log_path, SPAWN_LOG_FLAGS, SPAWN_LOG_MODE);
+        out = file_open(log_path, SPAWN_LOG_FLAGS, SPAWN_LOG_MODE);
     }
     if (out < 0) {
-        out = sys_open("/dev/null", 1, 0);              # O_WRONLY
+        out = file_open("/dev/null", O_WRONLY, 0);
         if (out < 0) { return 0 - 1; }
     }
     kv_dup2(out, 1);
@@ -10087,7 +10145,7 @@ fn _oci_run(runtime, bundle, container_id, out_buf, out_cap) {
         #     this write, and O_EXCL additionally refuses a pre-created file.
         # A refused open costs this run's stderr, never a wrong or attacker-
         # chosen one; the container still runs.
-        var efd = sys_open(err_path, 1 + 64 + 128 + kv_o_nofollow(), 384);
+        var efd = file_open(err_path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 384);
         if (efd >= 0) {
             kv_dup2(efd, 2);
             sys_close(efd);
@@ -10133,8 +10191,10 @@ fn _oci_take_file(path) {
     # race on this predictable path turns the read into an arbitrary-file read
     # whose contents become the container's reported stderr. There is no O_EXCL
     # here, so this flag is the only guard — and until 3.12.6 it was the x86_64
-    # literal, which aarch64 reads as O_LARGEFILE and follows the link.
-    var fd = sys_open(path, kv_o_nofollow(), 0);
+    # literal, which aarch64 reads as O_LARGEFILE and follows the link. file_open,
+    # not sys_open: this runs on agnos too (after _oci_run refuses), where
+    # sys_open is (name, namelen, flags).
+    var fd = file_open(path, O_RDONLY | O_NOFOLLOW, 0);
     if (fd < 0) { return buf; }
     var total = 0;
     var rgo = 1;

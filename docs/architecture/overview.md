@@ -140,7 +140,7 @@ sandbox_exec(sb, "echo hi")
   │     ThreatAssessment{ intent, classification, escalation, stages }
   └─ audit_chain_record(chain, "exec_complete", verdict_name)
         HMAC-SHA256 signs: serial:event_type:payload:ts:prev_hmac
-        appends JSONL line with file_append_locked
+        appends the JSONL line whole or not at all (_audit_append)
 ```
 
 ---
@@ -183,7 +183,7 @@ upstream-blocked on cyrius syscall wrappers — see the roadmap):
 **HMAC-SHA256 audit chain** (`src/audit.cyr`)
 - Every exec records `exec_begin` + `exec_complete` entries.
 - Each entry: `HMAC(key, "serial:event_type:payload:timestamp:prev_hmac")`.
-- File format: JSONL, appended with `file_append_locked` (file-locked writes). Since cc 6.6.6 a short write is returned as an error, so a torn record is refused and never advances the chain head (v3.12.6).
+- File format: JSONL, one record per line, appended by `_audit_append` rather than the stdlib's `file_append_locked`. The `open(2)` creates the log at 0600. Under `LOCK_EX` it records the pre-append length, makes one `write`, and on a short write `ftruncate`s back to that length before unlocking. A refused record therefore leaves the log byte-for-byte as it was and never advances the chain head. The residual cases (a kill mid-`write`, agnos, `chattr +a`) are tracked in the roadmap.
 - Tamper detection: `audit_entry_verify(entry, key, key_len)` recomputes HMAC; chain verification walks serials + `prev_hmac` linkage.
 - Crypto via [sigil](https://github.com/MacCracken/sigil) 3.12.18 (the toolchain snapshot's; see External dependencies). Constant-time compare is now the stdlib `ct` module (`ct_eq_bytes_lens`) — sigil retired its own `ct_eq` in the 3.x line.
 

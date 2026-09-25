@@ -7,9 +7,9 @@ cross-building with `cyrius build --aarch64` and running under `qemu-aarch64 -st
   Its result is now checked, so a failed chmod fails the write. aarch64 issues `fchmod(3,0644) = 0`,
   and the file lands at 0644 (it stayed 0600 before). agnos has no fchmod — 91 there is
   `gpu_blit_bb` — so no chmod is issued on that target.
-- **Defect 2 (`O_NOFOLLOW` dropped).** `kv_o_nofollow()` returns the stdlib's per-arch `O_NOFOLLOW`
-  on Linux, and `131072` on agnos, where the `file_open` bridge maps it to `AO_NOFOLLOW`. The x86
-  literal was at **four** sites, not only the one filed here: both secure writes in `src/util.cyr`,
+- **Defect 2 (`O_NOFOLLOW` dropped).** Every site now uses the stdlib's `O_*` names: `O_NOFOLLOW`
+  is per arch on Linux, and on agnos `lib/io.cyr` supplies the value that `file_open` maps to
+  `AO_NOFOLLOW`. The x86 literal was at **four** sites, not only the one filed here: both secure writes in `src/util.cyr`,
   and both OCI scratch-file opens in `src/backend_oci.cyr`. At `_oci_take_file` the flag is the only
   guard (there is no `O_EXCL`). Under the old build, aarch64 read a planted symlink's target through
   the link; it now gets `ELOOP`.
