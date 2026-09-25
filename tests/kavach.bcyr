@@ -335,6 +335,37 @@ fn bench_attest_tdx_quote_p384() {
     return 0;
 }
 
+# ---- merge_policies -------------------------------------------------------
+# Once per `composite_exec`. With landlock rules on either side the merge builds
+# a fresh list of them; with none it allocates only the policy.
+
+var _bench_merge_plain = 0;
+var _bench_merge_rules_a = 0;
+var _bench_merge_rules_b = 0;
+
+fn _setup_merge() {
+    if (_bench_merge_plain != 0) { return 0; }
+    _bench_merge_plain = policy_basic();
+    _bench_merge_rules_a = policy_basic();
+    policy_landlock_add(_bench_merge_rules_a, "/usr", FS_READ_ONLY);
+    policy_landlock_add(_bench_merge_rules_a, "/lib", FS_READ_ONLY);
+    policy_landlock_add(_bench_merge_rules_a, "/lib64", FS_READ_ONLY);
+    policy_landlock_add(_bench_merge_rules_a, "/tmp", FS_READ_ONLY);
+    _bench_merge_rules_b = policy_strict();
+    policy_landlock_add(_bench_merge_rules_b, "/etc", FS_READ_ONLY);
+    return 0;
+}
+
+fn bench_merge_policies_plain() {
+    merge_policies(_bench_merge_plain, _strict_policy);
+    return 0;
+}
+
+fn bench_merge_policies_landlock() {
+    merge_policies(_bench_merge_rules_a, _bench_merge_rules_b);
+    return 0;
+}
+
 # ---- 3.2.0 modules -------------------------------------------------------
 
 fn bench_cgroup_wrap_argv() {
@@ -509,6 +540,17 @@ fn main() {
     var b27 = bench_new("attest_tdx_quote_p384");
     bench_run(b27, &bench_attest_tdx_quote_p384, 20);
     vec_push(benches, b27);
+
+    # merge_policies, without landlock rules and with them. Last, so their
+    # allocations come after every other bench has run.
+    _setup_merge();
+    var b28 = bench_new("merge_policies_plain");
+    bench_run_batch(b28, &bench_merge_policies_plain, 5000, 50);
+    vec_push(benches, b28);
+
+    var b29 = bench_new("merge_policies_landlock");
+    bench_run_batch(b29, &bench_merge_policies_landlock, 5000, 50);
+    vec_push(benches, b29);
 
     bench_report_all(benches);
     return 0;

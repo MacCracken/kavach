@@ -3,15 +3,15 @@
 #
 # Merges an outer backend (runtime boundary) with an inner policy layer.
 # The outer's exec dispatches as usual; the caller's policy is merged
-# with the inner's policy before the call, always taking the stricter
-# side per field.
+# with the inner's policy before the call, taking the stricter side per
+# field. The landlock rules are the exception: they are a union.
 #
 # Merge rules:
 #   seccomp_enabled        OR  of the two sides
 #   seccomp_profile        "strict" wins over "basic" wins over None
 #   network_enabled        AND (both must allow)
 #   read_only_rootfs       OR  (either enforces)
-#   landlock rules         additive (concat)
+#   landlock rules         union, in a fresh list; deny-all if either is
 #   landlock_abstract_unix OR
 #   landlock_signal        OR
 #   memory_limit_mb        min (stricter is smaller; 0 = unset)
@@ -72,9 +72,7 @@ fn merge_policies(base, overlay) {
       _or_bool(SandboxPolicy_read_only_rootfs(base),
         SandboxPolicy_read_only_rootfs(overlay)));
 
-    SandboxPolicy_set_landlock_rules_len(out,
-      SandboxPolicy_landlock_rules_len(base)
-      + SandboxPolicy_landlock_rules_len(overlay));
+    _merge_landlock(out, base, overlay);
 
     SandboxPolicy_set_landlock_abstract_unix(out,
       _or_bool(SandboxPolicy_landlock_abstract_unix(base),
@@ -101,6 +99,61 @@ fn merge_policies(base, overlay) {
         SandboxPolicy_network_tcp_connect_len(overlay)));
     _merge_attestation(out, base, overlay);
     return out;
+}
+
+# Landlock. The merged list holds both inputs' rules, so a path either side's
+# rules allow stays allowed: landlock names allowed paths, not denied ones, and
+# each layer may need paths of its own. A side with no rules adds none. The
+# rules go into a fresh list, because sharing an input's would let a later
+# `policy_landlock_add` on either policy change the other. Each input
+# contributes the rules it applies, its first `landlock_rules_len`, the bound
+# `security_apply_landlock` walks to.
+#
+# A deny-all input makes the merge deny-all. Its count exceeds its list, which
+# is how `policy_landlock_deny_all` asks for a ruleset naming no path: that side
+# has said the payload needs no path, and the other side's rules would hand it
+# some. This holds when the deny-all input also names rules, though alone such a
+# policy applies them.
+#
+# From 3.11.3, when `confine_child` began applying the list, through 3.13.0, the
+# counts were summed and no list was carried. A count over no list is deny-all,
+# so any merge with a rule on either side denied the payload every path,
+# `/bin/cat` included.
+fn _merge_landlock(out, base, overlay) {
+    if (_landlock_denies_all(base) == 1 || _landlock_denies_all(overlay) == 1) {
+        return policy_landlock_deny_all(out);
+    }
+    var a = SandboxPolicy_landlock_rules_len(base);
+    var b = SandboxPolicy_landlock_rules_len(overlay);
+    if (a <= 0 && b <= 0) { return 0; }
+    var list = vec_new();
+    _landlock_append(list, base, a);
+    _landlock_append(list, overlay, b);
+    SandboxPolicy_set_landlock_rules(out, list);
+    SandboxPolicy_set_landlock_rules_len(out, vec_len(list));
+    return 0;
+}
+
+# Whether `p` asks for more landlock rules than its list holds: the deny-all
+# sentinel. A count with no list at all is the same request.
+fn _landlock_denies_all(p) {
+    var rules = SandboxPolicy_landlock_rules(p);
+    var have = 0;
+    if (rules != 0) { have = vec_len(rules); }
+    if (SandboxPolicy_landlock_rules_len(p) > have) { return 1; }
+    return 0;
+}
+
+# Append the first `n` of `p`'s rules to `list`. `p` is not deny-all, so its
+# list holds at least `n`.
+fn _landlock_append(list, p, n) {
+    var from = SandboxPolicy_landlock_rules(p);
+    var i = 0;
+    while (i < n) {
+        vec_push(list, vec_get(from, i));
+        i = i + 1;
+    }
+    return 0;
 }
 
 fn _attest_same_root(a, b) {

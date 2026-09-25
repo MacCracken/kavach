@@ -7,6 +7,96 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — `merge_policies` denied every path when either side had a landlock rule
+
+`merge_policies` set `landlock_rules_len` to the sum of the two inputs' counts and never merged
+their `landlock_rules` lists. A count over no list is the deny-all sentinel
+(`policy_landlock_deny_all`), so `confine_child` installed a ruleset with no path rules and the
+payload could open nothing, not even its own binary. The composite guide documents the rule as a
+union ("Additive — both sets allowed"). The merge has failed closed this way since 3.11.3, when
+`confine_child` began applying the rule list; before that, no landlock ruleset was applied at all.
+
+Measured on 3.13.0. Policy `a` allows `/tmp`, `/usr`, `/lib` and `/lib64`; policy `b` allows
+`/etc`; all read-only. `merge_policies(a, b)` gave `landlock_rules_len` 5 and `landlock_rules` 0.
+Through `sandbox_exec` on the PROCESS backend, `/bin/cat` of a file in `/tmp` exited 0 with the
+file's contents under `a`, and 127 with no output under the merge. With the fix it exits 0 with
+the contents under the merge as well.
+
+- **Union, as documented.** The merge copies both inputs' `security_fs_rule` entries into a fresh
+  list, and its count is that list's length. Neither input's list is shared, so a later
+  `policy_landlock_add` on the merge or on an input changes only that policy. Each input
+  contributes the rules `confine_child` applies for it, its first `landlock_rules_len`. The union
+  was checked against three sources, which agree: the guide's table, `composite.cyr`'s header
+  ("additive (concat)"), and the Rust original, whose comment gives the reason: landlock names
+  allowed paths, and the inner layer may need paths of its own.
+- **A deny-all input keeps the merge deny-all**, as an empty list with a count of one. That side
+  has said the payload needs no path, and a union would let the other side's rules hand it some: a
+  payload that reads everything it needs from stdin, the case `policy_landlock_deny_all` exists
+  for, would gain whatever the other policy allows. This is the stricter reading, the one
+  `network_enabled` (AND) and the attestation merge take. It holds when the deny-all input also
+  names rules, although on its own such a policy applies them. Deny-all is recognised the way
+  `policy_landlock_deny_all` writes it, a count above the list's length.
+- ⚠ **A composite exec whose policies name landlock rules now runs its payload.** On a kernel
+  with landlock, from 3.11.3 through 3.13.0, the merge enforced deny-all and the payload's own
+  binary could not be opened. It now gets the union of both policies' paths: the documented
+  behaviour, and wider than what those releases enforced.
+- `docs/guides/composite-backends.md`: the landlock rows (the list's union and deny-all), with the
+  reasons. `composite.cyr`'s header no longer says the merge always takes the stricter side.
+
+### Tests
+
+Three tests, all of which fail against 3.13.0's merge (checked by restoring it: 18 assertions
+fail across the three).
+
+- `composite_merge_carries_landlock_rules`: the merged list holds both inputs' rules, each with
+  its access, and the count is its length. The list is fresh: an add on the merge reaches neither
+  input, and an add on an input does not reach the merge. A side with no rules adds none; with
+  neither, there is no list. A count set below the list contributes only the rules it applies.
+- `composite_merge_allows_either_sides_paths`: `/bin/cat` reads a path only the base allows and
+  one only the overlay allows, under the merged policy through `sandbox_exec` and through
+  `composite_exec`. Where landlock is present, a path neither allows stays shut, and the base
+  alone cannot read the overlay's path.
+- `composite_merge_deny_all_wins`: deny-all merged with rules (in either order), with a side that
+  has no landlock, or with another deny-all gives an empty list and a count of one. So does a
+  deny-all input that names rules, and a count with no list. A rule added to the deny-all input
+  afterwards does not reach the merge. Where landlock is present, a merge with deny-all reads
+  nothing, directly and through `composite_exec`. The control, the same rules merged with a plain
+  policy, reads the probe.
+
+  Against 3.13.0 this test fails on its structural assertions and on the control. Its two denials
+  pass there, because that merge denied every path whatever its inputs.
+
+Five mutants of the fix, each failing the suite at the assertions written for it: reusing the
+base's list (5 assertions), letting the other side's rules through a deny-all (7), ignoring the
+count bound (1), dropping landlock from the merge (19), and recognising deny-all by effect, a
+count over an empty list, rather than by the sentinel (1).
+
+### Verified
+
+- x86-64: the suite, 971 → **1004**. fmt `--check` with no drift across the tree, lint with 0
+  warnings, vet, `check-symbols.py`, the security scan, and fuzz (500). `cyrius distlib --all`
+  changes only `dist/kavach.cyr` (`composite.cyr` is not in `[lib.confine]`), and its diff is the
+  source's; `check-bundles.py` passes. The `duplicate fn` set is unchanged (130 names, all in
+  `lib/`).
+- aarch64: cross-built, and the suite 942 → **971** under qemu-aarch64 11.1.1. qemu-user reports
+  landlock ABI 0, so the four assertions that need enforcement skip there, as the existing
+  landlock tests' do. The agnos build links.
+
+### Performance
+
+Two new benchmarks, recorded last in the harness so their allocations follow every other bench:
+`merge_policies_plain` (no landlock rules, the common case) **197 ns** (191–211) and
+`merge_policies_landlock` (four rules and one) **343 ns** (331–363), from one pinned run.
+Carrying the rules costs about 150 ns per `composite_exec`, whose exec takes 2.7 ms.
+
+The two are only in this tree, so `scripts/bench-ab.py HEAD .` (5 interleaved rounds per side,
+pinned) compares the other 27. **26 show no measured change**; their ranges overlap, the exec
+path included (`process_exec_confined` 2.704 → 2.703 ms).
+
+- ⚠ **`http_path_extract` has separate ranges, 101 → 87 ns (−13.9%), on a function this change
+  does not touch.** 3.12.9's A/B saw the same benchmark move with its function unchanged. Code
+  placement is the likely cause, as there; it was not isolated.
+
 ## [3.13.0] — 2026-09-25
 
 TEE attestation I. kavach now verifies SGX and TDX quotes, and a `SandboxPolicy` can require

@@ -25,13 +25,31 @@ Single-layer isolation is usually enough. Reach for composites when:
 | `seccomp_profile` | `"strict"` wins | Stricter profile always |
 | `network_enabled` | AND | Both must allow (fail closed) |
 | `read_only_rootfs` | OR | Either side requires = required |
-| `landlock_rules_len` | SUM | Additive — both sets allowed |
+| `landlock_rules` (with `landlock_rules_len`) | union, in a fresh list; the count is the list's length | Additive — both sets allowed. Landlock names allowed paths, and each layer may need its own |
+| landlock deny-all (`policy_landlock_deny_all`) | deny-all if either side is | That side has said the payload needs no path; the other side's rules would hand it some |
 | `memory_limit_mb` | min (non-zero) | Smaller = tighter |
 | `cpu_limit_tenths` | min (non-zero) | Smaller = tighter |
 | `max_pids` | min (non-zero) | Smaller = tighter |
 | `landlock_abstract_unix` | OR | Either enables = enabled |
 | `landlock_signal` | OR | Either enables = enabled |
 | attestation (`attest_*`, v3.13.0) | required if either requires it; allowlists intersected; debug allowed only if both allow it | A guest must satisfy both. Two different roots, or allowlists with nothing in common, admit no guest: the merge keeps the requirement and every attestation fails |
+
+The landlock rules are the one field merged toward the looser side. The merged
+list holds both inputs' rules, so a path either side's rules allow stays
+allowed. A side with no rules adds none: merging a policy that has no rules
+with one that has some confines the payload to the second policy's rules. Each
+input contributes the rules it applies, its first `landlock_rules_len`.
+Neither input's list is shared, so adding a rule to the merged policy, or to
+an input afterwards, changes only that policy.
+
+A deny-all input is the exception. `policy_landlock_deny_all` asks for a
+ruleset naming no path by leaving the count above the rule list, and a merge
+with such a policy is deny-all whatever the other side allows. That includes a
+deny-all policy that also names rules, although on its own it applies them.
+
+Through v3.13.0 the merge summed the two counts and carried no list, and a
+count with no list is deny-all: a merge with a rule on either side denied the
+payload every path, so that `/bin/cat` could not even start (exit 127).
 
 ## Example
 

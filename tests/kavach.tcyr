@@ -4532,6 +4532,250 @@ fn test_landlock_denies_a_path_outside_its_rules() {
     return 0;
 }
 
+# --- merge_policies and the landlock rules ---------------------------------
+#
+# Through 3.13.0 `merge_policies` summed the two counts and carried no list. A
+# count over no list is deny-all, so a merge with a rule on either side denied
+# the payload every path: `/bin/cat` read a file under the base policy and
+# exited 127, unable to load, under its merge with a one-rule overlay. The
+# composite guide documents a union.
+
+# The length of `p`'s landlock list, 0 when it carries none. `vec_len` of a null
+# list faults, and the old merge carried none.
+fn _t_ll_len(p) {
+    var rules = policy_landlock_rules(p);
+    if (rules == 0) { return 0; }
+    return vec_len(rules);
+}
+
+# Whether `p`'s landlock list holds a rule for `path` with `access`.
+fn _t_ll_has(p, path, access) {
+    var rules = policy_landlock_rules(p);
+    if (rules == 0) { return 0; }
+    var i = 0;
+    while (i < vec_len(rules)) {
+        var r = vec_get(rules, i);
+        if (streq(security_fs_rule_path(r), path) == 1 && security_fs_rule_access(r) == access) {
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Whether `p` is deny-all in the form `policy_landlock_deny_all` gives a policy
+# with no rules: an empty list and a count of one.
+fn _t_ll_deny_all_form(p) {
+    if (_t_ll_len(p) != 0) { return 0; }
+    if (SandboxPolicy_landlock_rules_len(p) != 1) { return 0; }
+    return 1;
+}
+
+# `<root>/<name>`, or with `file` 1 the probe inside it.
+fn _t_merge_path(root, name, file) {
+    var s = str_cat(str_from(root), str_from("/"));
+    s = str_cat(s, str_from(name));
+    if (file == 1) { s = str_cat(s, str_from("/probe.txt")); }
+    return str_cstr(s);
+}
+
+# Create (`make` 1) or remove the probe directory `<root>/<name>` and its file.
+fn _t_merge_probe(root, name, make) {
+    var dir = _t_merge_path(root, name, 0);
+    var file = _t_merge_path(root, name, 1);
+    if (make == 0) {
+        kv_unlink(file);
+        return kv_rmdir(dir);
+    }
+    kv_mkdir(dir, 493);                                    # 0755
+    var body = "MERGE-PROBE-CONTENT\n";
+    return file_write_all(file, body, strlen(body));
+}
+
+# A fresh root holding three probe directories: `base` and `overlay`, for the
+# two inputs' rules, and `neither`.
+fn _t_merge_probes() {
+    var root = _t_unique_tmp_path("/tmp/kavach-t-merge-");
+    kv_mkdir(root, 493);                                   # 0755
+    _t_merge_probe(root, "base", 1);
+    _t_merge_probe(root, "overlay", 1);
+    _t_merge_probe(root, "neither", 1);
+    return root;
+}
+
+fn _t_merge_probes_remove(root) {
+    _t_merge_probe(root, "base", 0);
+    _t_merge_probe(root, "overlay", 0);
+    _t_merge_probe(root, "neither", 0);
+    return kv_rmdir(root);
+}
+
+# A policy allowing what `/bin/cat` needs to load: `/usr`, and `/bin`, `/lib`
+# and `/lib64` where they exist. A rule on a missing path fails the exec closed.
+fn _t_merge_runtime() {
+    var p = policy_minimal();
+    policy_landlock_add(p, "/usr", FS_READ_ONLY);
+    if (file_exists("/bin") == 1) { policy_landlock_add(p, "/bin", FS_READ_ONLY); }
+    if (file_exists("/lib") == 1) { policy_landlock_add(p, "/lib", FS_READ_ONLY); }
+    if (file_exists("/lib64") == 1) { policy_landlock_add(p, "/lib64", FS_READ_ONLY); }
+    return p;
+}
+
+# Whether `/bin/cat <root>/<name>/probe.txt` on the PROCESS backend prints the
+# probe. With `inner` 0 it runs under `policy` through `sandbox_exec`;
+# otherwise `composite_exec` merges `policy`, the sandbox's own, with `inner`.
+fn _t_merge_reads(policy, inner, root, name) {
+    var c = config_new();
+    SandboxConfig_set_backend(c, KavachBackend.PROCESS);
+    SandboxConfig_set_policy(c, policy);
+    var s = sandbox_create(c);
+    if (s == 0) { return 0; }
+    sandbox_transition(s, SandboxState.RUNNING);
+    var cmd = str_cstr(str_cat(str_from("/bin/cat "), str_from(_t_merge_path(root, name, 1))));
+    var r = 0;
+    if (inner == 0) { r = sandbox_exec(s, cmd); }
+    else { r = composite_exec(KavachBackend.PROCESS, KavachBackend.PROCESS, s, cmd, inner); }
+    sandbox_destroy(s);
+    if (r == 0) { return 0; }
+    return str_contains_cstr(str_from(ExecResult_stdout(r)), "MERGE-PROBE-CONTENT");
+}
+
+fn test_composite_merge_carries_landlock_rules() {
+    test_group("composite_merge_carries_landlock_rules");
+    var a = policy_minimal();
+    policy_landlock_add(a, "/srv/base", FS_READ_ONLY);
+    policy_landlock_add(a, "/usr", FS_READ_ONLY);
+    var b = policy_minimal();
+    policy_landlock_add(b, "/srv/overlay", FS_READ_WRITE);
+
+    var m = merge_policies(a, b);
+    assert_eq(_t_ll_len(m), 3, "the merged list holds both inputs' rules");
+    assert_eq(SandboxPolicy_landlock_rules_len(m), 3, "...and the count is its length");
+    assert_eq(_t_ll_has(m, "/srv/base", FS_READ_ONLY), 1, "base's rules, each with its access");
+    assert_eq(_t_ll_has(m, "/usr", FS_READ_ONLY), 1, "...both of them");
+    assert_eq(_t_ll_has(m, "/srv/overlay", FS_READ_WRITE), 1, "overlay's rule, still read-write");
+
+    # A fresh list. Neither input changes, now or through a later add on the
+    # merge; and an add on an input does not reach the merge.
+    assert(policy_landlock_rules(m) != policy_landlock_rules(a), "not base's list");
+    assert(policy_landlock_rules(m) != policy_landlock_rules(b), "not overlay's list");
+    assert(_t_ll_len(a) == 2 && SandboxPolicy_landlock_rules_len(a) == 2
+      && _t_ll_len(b) == 1 && SandboxPolicy_landlock_rules_len(b) == 1, "neither input changed");
+    policy_landlock_add(m, "/var/tmp", FS_READ_ONLY);
+    assert_eq(_t_ll_len(a), 2, "a rule added to the merge does not reach base");
+    assert_eq(_t_ll_len(b), 1, "...nor overlay");
+    policy_landlock_add(a, "/opt", FS_READ_ONLY);
+    assert_eq(_t_ll_len(m), 4, "and one added to base does not reach the merge");
+
+    # A side with no landlock contributes nothing. With neither, the merge has
+    # no ruleset and no list, like a fresh policy.
+    var one = merge_policies(policy_strict(), b);
+    assert_eq(SandboxPolicy_landlock_rules_len(one), 1, "one side's rules alone carry over");
+    assert_eq(_t_ll_has(one, "/srv/overlay", FS_READ_WRITE), 1, "...intact");
+    var none = merge_policies(policy_basic(), policy_strict());
+    assert_eq(SandboxPolicy_landlock_rules_len(none), 0, "no rules on either side, no ruleset");
+    assert_eq(policy_landlock_rules(none), 0, "...and no list");
+
+    # An input contributes the rules it applies. `confine_child` walks the first
+    # `landlock_rules_len`, so a count set below the list leaves the rest out.
+    var low = policy_minimal();
+    policy_landlock_add(low, "/srv/applied", FS_READ_ONLY);
+    policy_landlock_add(low, "/srv/unapplied", FS_READ_ONLY);
+    SandboxPolicy_set_landlock_rules_len(low, 1);
+    var lm = merge_policies(low, b);
+    assert_eq(_t_ll_has(lm, "/srv/applied", FS_READ_ONLY), 1, "a lowered count keeps what it applies");
+    assert_eq(_t_ll_has(lm, "/srv/unapplied", FS_READ_ONLY), 0, "...and not the rule it does not");
+    return 0;
+}
+
+fn test_composite_merge_allows_either_sides_paths() {
+    test_group("composite_merge_allows_either_sides_paths");
+    var root = _t_merge_probes();
+    # Baseline, as in landlock_denies_a_path_outside_its_rules: if cat cannot
+    # read the probe unconfined, there is nothing to compare against.
+    if (_t_merge_reads(policy_minimal(), 0, root, "base") == 0) {
+        _t_merge_probes_remove(root);
+        return 0;
+    }
+    var base = _t_merge_runtime();
+    policy_landlock_add(base, _t_merge_path(root, "base", 0), FS_READ_ONLY);
+    var overlay = policy_minimal();
+    policy_landlock_add(overlay, _t_merge_path(root, "overlay", 0), FS_READ_ONLY);
+
+    var m = merge_policies(base, overlay);
+    assert_eq(_t_merge_reads(m, 0, root, "base"), 1,
+      "under the merge, cat reads a path only base allows");
+    assert_eq(_t_merge_reads(m, 0, root, "overlay"), 1, "...and a path only overlay allows");
+    assert_eq(_t_merge_reads(base, overlay, root, "base"), 1,
+      "composite_exec, merging the sandbox's policy with the inner one, reads base's path");
+    assert_eq(_t_merge_reads(base, overlay, root, "overlay"), 1, "...and the inner policy's");
+
+    # Still confined. With no landlock in the kernel nothing is enforced, so
+    # these assert only where it is present.
+    if (security_landlock_abi_version() > 0) {
+        assert_eq(_t_merge_reads(m, 0, root, "neither"), 0, "a path neither allows stays shut");
+        assert_eq(_t_merge_reads(base, 0, root, "overlay"), 0,
+          "and base alone cannot read overlay's path: the merge's read came from overlay's rule");
+    }
+    _t_merge_probes_remove(root);
+    return 0;
+}
+
+fn test_composite_merge_deny_all_wins() {
+    test_group("composite_merge_deny_all_wins");
+    # A count above the list is how `policy_landlock_deny_all` asks for a
+    # ruleset naming no path. The merge stays deny-all, in that same form,
+    # whatever the other side allows.
+    var a = policy_minimal();
+    policy_landlock_add(a, "/srv/a", FS_READ_ONLY);
+    policy_landlock_add(a, "/usr", FS_READ_ONLY);
+    var d = policy_minimal();
+    policy_landlock_deny_all(d);
+
+    var m = merge_policies(d, a);
+    assert_eq(_t_ll_deny_all_form(m), 1, "deny-all merged with rules is deny-all");
+    assert_eq(_t_ll_deny_all_form(merge_policies(a, d)), 1, "...in either order");
+    assert_eq(_t_ll_deny_all_form(merge_policies(d, policy_strict())), 1,
+      "...and with a side that has no landlock");
+    assert_eq(_t_ll_deny_all_form(merge_policies(d, d)), 1, "...or another deny-all");
+
+    # A deny-all side that also names rules still wins, though alone it applies
+    # them; so does a count set with no list behind it.
+    var dr = policy_minimal();
+    policy_landlock_add(dr, "/srv/dr", FS_READ_ONLY);
+    policy_landlock_deny_all(dr);
+    assert_eq(_t_ll_deny_all_form(merge_policies(a, dr)), 1,
+      "a deny-all side with rules of its own still makes the merge deny-all");
+    var bare = policy_minimal();
+    SandboxPolicy_set_landlock_rules_len(bare, 2);
+    assert_eq(_t_ll_deny_all_form(merge_policies(bare, a)), 1, "so does a count with no list");
+
+    # The merge's empty list is its own: a rule added to the deny-all input
+    # afterwards leaves the merge denying everything.
+    policy_landlock_add(d, "/srv/a", FS_READ_ONLY);
+    assert_eq(_t_ll_deny_all_form(m), 1, "a later add on the input does not reach the merge");
+
+    var root = _t_merge_probes();
+    if (_t_merge_reads(policy_minimal(), 0, root, "base") == 1) {
+        var allow = _t_merge_runtime();
+        policy_landlock_add(allow, _t_merge_path(root, "base", 0), FS_READ_ONLY);
+        var deny = policy_minimal();
+        policy_landlock_deny_all(deny);
+        # The control: the same rules merged with a side that is not deny-all
+        # read the probe, so a refusal below is the deny-all side's doing.
+        assert_eq(_t_merge_reads(merge_policies(policy_minimal(), allow), 0, root, "base"), 1,
+          "the rules merged with a plain policy read the probe");
+        if (security_landlock_abi_version() > 0) {
+            assert_eq(_t_merge_reads(merge_policies(deny, allow), 0, root, "base"), 0,
+              "merged with deny-all they read nothing");
+            assert_eq(_t_merge_reads(allow, deny, root, "base"), 0,
+              "...and nothing through composite_exec either");
+        }
+    }
+    _t_merge_probes_remove(root);
+    return 0;
+}
+
 # --- 3.11.4: the deadline and the exit code -------------------------------
 
 fn _t_tmo_run(cmd, ms, pol) {
@@ -5317,6 +5561,9 @@ fn main() {
     test_landlock_rules_are_expressible();
     test_seccomp_applies_without_a_rootfs();
     test_landlock_denies_a_path_outside_its_rules();
+    test_composite_merge_carries_landlock_rules();
+    test_composite_merge_allows_either_sides_paths();
+    test_composite_merge_deny_all_wins();
     test_timeout_ms_is_enforced();
     test_timeout_does_not_truncate_fast_payloads();
     test_process_backend_reports_the_real_exit_code();
