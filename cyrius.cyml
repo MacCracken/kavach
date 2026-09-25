@@ -5,39 +5,16 @@ description = "Sandbox execution framework — 10 backends, strength scoring (0-
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/kavach"
 language = "cyrius"
-cyrius = "6.6.2"
+cyrius = "6.6.6"
 
 [build]
 entry = "src/main.cyr"
 output = "build/kavach"
 
-# ── Library surface ──────────────────────────────────────────────
-# kavach is consumable at the source level as a single-file bundle,
-# `dist/kavach.cyr` (committed). `modules` lists the domain `src/*.cyr`
-# files, in dependency order, that `cyrius distlib` concatenates to
-# (re)build that bundle (and its `dist/kavach.deps` `stdlib` sidecar).
-# This is the standard first-party dist flow — same as sigil, patra,
-# and bhumi: `[lib].modules` here is the generator's single source of
-# truth; `src/lib.cyr` mirrors this order as the human-facing header.
-#
-# Regenerate with `cyrius distlib` after changing any [lib] module; CI
-# gates freshness (.github/workflows/ci.yml "Verify dist bundle fresh":
-# runs distlib, fails if dist/ differs). scripts/version-bump.sh also
-# re-runs distlib so the bundle header restamps the version.
-#
-# src/main.cyr is INTENTIONALLY excluded — it is the in-tree program
-# entry (its own `main()` + end-to-end demo + top-level
-# `syscall(SYS_EXIT)`); bundling it would inline a `main()` and a demo
-# into every consumer and duplicate the module bodies (same lesson
-# bhumi/agnosys learned). src/lib.cyr is also excluded: it is a pure
-# aggregation header (only `include` directives), so bundling it would
-# add unresolved `include "src/..."` lines to the flat bundle.
 [lib]
 modules = [
     "src/util.cyr",
     "src/error.cyr",
-    # Internalized agnosys (agnodrm) Linux security backends + sys_error/sys_util
-    # support + the agnos-only security syscall consts. Before their users.
     "src/sys_security_syscalls.cyr",
     "src/sys_error.cyr",
     "src/sys_util.cyr",
@@ -82,16 +59,6 @@ modules = [
     "src/sandbox_exec.cyr",
 ]
 
-# ── Dependencies ─────────────────────────────────────────────────
-# Cyrius-`stdlib` modules vendored into lib/ by `cyrius deps`. kavach
-# includes them transitively via the modules under src/; the list
-# here mirrors the union of imports across src/, tests/, fuzz/, and
-# benches/ so `cyrius deps` resolves the full set. lib/ is gitignored
-# (see .gitignore) — `cyrius deps` is the source of truth.
-#
-# ⛔ 2 SILENT HAZARDS — read "MANIFEST HAZARDS" below the array before
-#    editing ANY comment above it. (1) `[deps]` must start inside the
-#    first 4095 bytes. (2) Declaring a module here != it gets included.
 [deps]
 stdlib = [
     "alloc",
@@ -132,101 +99,12 @@ stdlib = [
     "vec",
 ]
 
-# ── MANIFEST HAZARDS (read before editing anything above) ────────
-#
-# ⛔ (1) `[deps]` MUST START WITHIN THE FIRST 4095 BYTES OF THIS FILE.
-# `cyrius build` does not call the dep resolver directly: `_auto_deps`
-# (cyrius `cbt/deps.cyr:1983`) does `alloc(4096)` + `file_read_all(manifest,
-# buf, 4095)` and scans ONLY that prefix for `[deps]` / `[deps.`. Past 4095
-# the marker is invisible, `_auto_deps` returns 0, `cmd_deps()` never runs,
-# and NOTHING is prepended — no warning, no error, no mention of the manifest.
-# A populated lib/ does not save you: `cyrius deps` still vendors the files by
-# hand (it reads 32767 bytes), so the modules sit on disk while the build dies
-# on undefined stdlib symbols in src/. That is exactly what happened while
-# writing this block: an explanatory comment ABOVE `[deps]` pushed the marker
-# from byte 3676 to 5288 and the tree stopped building with
-# `undefined variable 'IoNotFound'` — pointing at src/util.cyr, 4 KB from the
-# actual cause. Hence the split: the cheap marker above, this text below.
-# ⚠ Headroom is ~400 bytes. `.github/workflows/ci.yml` gates it ("Manifest
-# [deps] within the 4095-byte auto_deps window") — keep that gate.
-#
-# ⛔ (2) DECLARING A MODULE BELOW DOES NOT GUARANTEE ITS `include` (cc 6.5.26+).
-# `cyrius deps` copies each declared module into lib/ AND pushes one
-# `include "lib/<mod>.cyr"` for `compile()` to prepend — but the resolver's
-# de-dup guard runs BEFORE that push (cyrius `cbt/deps.cyr:521` vs `:582`). A
-# module first reached TRANSITIVELY, as some other module's `include`, is
-# marked seen, so its own top-level entry silently resolves to a no-op: the
-# file lands in lib/, `cyrius deps` reports success, cyrius.lock records it —
-# and no `include` is emitted. Every symbol in it is then an undefined
-# function, and nothing in the output names the module.
-#
-# That is live for `chrono`: cc 6.5.26 added `lib/async_macos.cyr` (which
-# includes `lib/chrono.cyr`) under `lib/async.cyr`, and `async` precedes
-# `chrono` in the alphabetical list above. So `src/util.cyr`,
-# `tests/kavach.fcyr` and `tests/samay_integration.tcyr` each carry an explicit
-# `include "lib/chrono.cyr"` — DO NOT DELETE THEM, and do not "fix" this by
-# reordering the array instead: reordering encodes an assumption about
-# upstream's include chains and un-fixes itself the next time a module grows
-# an include. Filed upstream at cyrius
-# docs/development/issues/2026-08-17-stdlib-transitive-pull-drops-top-level-include.md
-# (bisected: clean 6.5.21-6.5.25, broken 6.5.26+). See CHANGELOG 3.11.14.
-#
-# ⚠ On a pin move, treat a NEW `undefined function` on a `stdlib` symbol as
-# hazard (2), and a build where NOTHING resolves as hazard (1) — neither
-# symptom points at this file.
-
-# External first-party deps. Resolved into lib/sigil.cyr by `cyrius deps`
-# at the pinned tag — used by src/audit.cyr for HMAC-SHA256 of the
-# audit chain and src/util.cyr for ct_eq constant-time comparisons.
-#
-# Pinned at 3.12.9 — latest. Since sigil 3.6 the four opt-in stdlib
-# modules (ct, keccak, thread, thread_local) are NOT in the cyrius
-# auto-prepend union and the bundle does not carry them — each must be
-# declared in [deps] above so `cyrius deps` vendors it into lib/ (cyrius
-# then auto-includes the vendored module). Omitting one compiles its call
-# site to a `ud2` trap that SIGILLs (exit 132) the first time a crypto
-# path touches it (see sigil README §Usage); that was the 3.4.1 bug —
-# thread_local was absent from [deps]. thread_local MUST stay declared
-# (it precedes sigil in the auto-include order): sigil's crypto_scratch
-# exercises the TLS path, so without thread_local storage the binary
-# links clean but SIGILLs at first crypto use (latent through sigil
-# ≤3.7.12, surfaced by the 3.7.14 bump — see bote 2.7.6 / libro 2.7.4).
-# The pre-6.1 `bigint` `stdlib` module is RETIRED — sigil 3.x bundles its
-# own u256/u384 inline and kavach has no direct big-integer use, so the
-# old `bigint` [deps] entry was dropped at 3.4.2.
-# Validated by a clean build/test/bench run at this pin under cc 6.5.27.
-# Bump in lockstep with the cyrius pin and re-validate.
-#
-# sigil 3.12.8 NAMESPACED ITS ERROR CONSTRUCTORS (`err_*` → `sigil_err_*`).
-# kavach's src/sys_error.cyr carried the same bare `err_*` names — both trees
-# descend from the same agnosys sys_error.cyr — so every build logged 14
-# `duplicate fn` warnings and silently resolved them by source order. kavach
-# namespaced its own side to `kavach_err_*` at 3.11.13; the two families no
-# longer overlap. Do not reintroduce a bare `err_*` here.
 [deps.sigil]
 git = "https://github.com/MacCracken/sigil.git"
 path = "../sigil"
-tag = "3.12.16"
+tag = "3.12.18"
 modules = ["dist/sigil.cyr"]
 
-# ── Feature gating for the samay bridge ──────────────────────────
-# cyrius auto-includes every ACTIVE [deps.*] module into the compilation unit.
-# samay (72 KB) + its transitive ai-hwaccel (207 KB) were always-on, so every
-# kavach consumer linked ~279 KB of scheduler/accelerator symbols — for a bridge
-# kavach does not even ship: `src/samay_bridge.cyr` is excluded from
-# [lib].modules, and `dist/kavach.cyr` contains zero samay references.
-#
-# That cost was not theoretical: it pushed stiva's `tests/stiva.tcyr` past
-# cycc's identifier cap (261893/262144 — a hard compile error), and dragged in
-# ai-hwaccel's `backend_name`, which collided with ours (fixed in 3.8.2 by
-# renaming ours to `os_backend_name`).
-#
-# Both deps are now OPTIONAL behind the default-on `samay` feature. kavach's own
-# build/tests keep it, so tests/samay_integration.tcyr still compiles. CONSUMERS
-# are unaffected: transitive [features] tables are not parsed, so an optional dep
-# stays inactive downstream — no clone, no module copy, no auto-include. A
-# consumer that actually wants samay declares it directly (as stiva does for its
-# roadmap §H/§I work). Same lever libro uses for sigil-tpm and mehman for kavach.
 [features]
 default = ["scheduler"]
 scheduler = ["samay", "ai-hwaccel"]
@@ -234,40 +112,17 @@ scheduler = ["samay", "ai-hwaccel"]
 [deps.ai-hwaccel]
 git = "https://github.com/MacCracken/ai-hwaccel.git"
 path = "../ai-hwaccel"
-tag = "2.3.22"
+tag = "2.4.0"
 modules = ["dist/ai-hwaccel.cyr"]
 optional = true
 
 [deps.samay]
 git = "https://github.com/MacCracken/samay.git"
 path = "../samay"
-tag = "1.1.2"
+tag = "1.1.5"
 modules = ["dist/samay.cyr"]
 optional = true
 
-# No external agnosys (agnodrm) dep. kavach internalized the Linux security
-# backends it used (security/mac/kernel_audit + sys_error/sys_util +
-# sys_security_syscalls) as src modules — the security subsystems from the
-# agnosys → agnodrm decomposition (agnosys narrowed to the device model; its
-# security subsystems became agnodrm). The landlock/prctl syscall numbers come
-# from cyrius's lib/syscalls; kavach consumes only sigil's committed
-# dist/sigil.cyr bundle.
-
-# [lib.confine] — the LEAN CONFINED-EXEC profile (3.12.3).
-#
-# Published for consumers that want kavach's process confinement (namespaces, seccomp, Landlock, cgroups)
-# WITHOUT the rest of the framework — no exotic backends (firecracker/gvisor/SEV/SGX/TDX/WASM/OCI), no
-# externalization scanners, no credential proxy, no attestation, and no audit chain.
-#
-# Requested by thoth, whose `shell` / `edit` tools run unconfined today and whose own source says so
-# plainly ("a COARSE convenience pre-filter, NOT a sandbox"). thoth cannot take the full fold: at 11,648
-# lines it pushes thoth's expanded source past the cyrius preprocessor's 8 MB ceiling, and most of what it
-# carries duplicates seams thoth already consumes (its audit chain vs the vendored libro, its scanners vs
-# t-ron).
-#
-# This is the same arrangement sit's [lib.read] and sankoch's [lib.zlib] give their consumers, and the one
-# agnosai's [lib.guard] gave thoth at 2.0.7: ONE source of truth, so the consumer is not hand-extracting
-# files that go stale silently.
 [lib.confine]
 modules = [
     "src/util.cyr",

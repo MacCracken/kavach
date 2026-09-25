@@ -5,7 +5,6 @@ string
 fmt
 alloc
 vec
-tagged
 syscalls
 hashmap
 args

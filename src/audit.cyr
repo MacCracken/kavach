@@ -195,9 +195,11 @@ fn audit_chain_record(chain, event_type, payload) {
 
     var line = _entry_to_jsonl(entry);
     # file_append_locked creates the file at 0644 on first write; tighten
-    # to 0600 immediately afterward. (A wider `file_append_locked_mode`
-    # wrapper is scheduled for Cyrius stdlib 4.4.0; until then this
-    # best-effort chmod is the hardening path — see ADR-005 §C4.)
+    # to 0600 immediately afterward. The stdlib has no mode-taking append,
+    # so this best-effort chmod is the hardening path — see ADR-005 §C4.
+    # Since cyrius 6.6.6 a short write returns a negative errno rather than
+    # the prefix count, so the `< 0` test also refuses a torn record and the
+    # chain head never advances over one.
     if (file_append_locked(AuditChain_log_path(chain), line, strlen(line)) < 0) {
         kavach_err_print(KAVACH_ERR_IO_ERROR, "audit chain write failed");
         return 0;

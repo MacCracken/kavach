@@ -7,6 +7,171 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.12.6] — 2026-09-24
+
+Toolchain and dependency refresh, a lean manifest, and a fix for a `[lib.confine]` bundle that had
+not compiled since 3.12.4. No API change.
+
+### Changed — cyrius pin 6.6.2 → **6.6.6**
+
+The reason to take it: **the HMAC audit chain could log a torn record as written.** Before 6.6.6,
+`file_append_locked` made one `write(2)` and returned its count, so a short write appended a prefix
+of the record and returned a positive number; `audit_chain_record`'s `< 0` test read that as success
+and advanced the chain head over a line that does not parse. 6.6.6 loops until the record lands and
+returns a negative errno on a short write. Measured A/B, 2 KB records under `ulimit -f 4` with
+SIGXFSZ ignored:
+
+| | 3.12.5 on 6.6.2 | 3.12.6 on 6.6.6 |
+|---|---|---|
+| records accepted / refused | 2 / 6 | **1 / 7** |
+| `audit_chain_len` | 3 | **2** |
+| complete records in the log | 2 | 2 |
+
+The old chain claimed three records while the log held two complete ones plus a 1,685-byte torn tail.
+The new chain matches the log. The torn bytes are still left at the tail (tracked in the roadmap).
+
+No kavach source needed migrating: the `duplicate fn` set is the same 149 names before and after,
+0 undefined, and nothing trips 6.6.6's new refusals. The binary grew 3,187,480 → 3,199,336 B.
+
+### Changed — dependency pins
+
+| dep | from | to |
+|---|---|---|
+| `sigil` | 3.12.16 | **3.12.18** |
+| `ai-hwaccel` | 2.3.22 | **2.4.0** |
+| `samay` | 1.1.2 | **1.1.5** |
+| `bayan` (transitive, via samay) | 1.5.5 | **1.5.7** |
+
+⚠ **sigil is 3.12.18, not the latest tag (3.13.1), because kavach cannot consume 3.13.1 on this
+toolchain.** kavach declares `tls`; the stdlib's `tls_native.cyr` includes `lib/sigil.cyr`, so
+`cyrius deps` vendors sigil from the toolchain snapshot. Since cyrius 6.5.39 it will not let a
+`[deps.sigil]` artifact overwrite a stdlib leaf it has already copied (`warning: refusing to
+overwrite stdlib leaf 'sigil'`). The 6.6.6 snapshot carries 3.12.18, so a 3.13.1 pin would name a
+version the build never sees. Pinned to 3.12.18 so the manifest matches the build (`lib/sigil.cyr`
+is byte-identical to sigil's 3.12.18 `dist/sigil.cyr`). The same override was active under 6.6.2
+but went unnoticed because that snapshot carried exactly the pinned 3.12.16. sigil 3.13.x arrives
+with the cyrius release whose snapshot carries it. None of its breaking changes (ed25519/ECDSA
+verify strictness, quote parsers, keyring chains, `hash_file`) touch a kavach call site.
+
+sigil 3.12.18's `.deps` sidecar adds `sys` (for `sys_uname` / `uname_release`). `cyrius deps` now
+vendors `lib/sys.cyr` from it, so kavach's own `[deps].stdlib` is unchanged. The lock goes from 73
+to 75 hashed files (`sys.cyr`, plus 6.6.5's `alloc_cx.cyr` peer) and now records `cyrius 6.6.6`.
+
+samay and ai-hwaccel both pin cyrius 6.6.6 and their stdlib sidecars are unchanged. kavach reaches
+them only through `src/samay_bridge.cyr`, which is not in `[lib]`. The samay integration suite is
+12/12.
+
+### Fixed — `dist/kavach-confine.cyr` did not compile on the toolchain it shipped for
+
+The `[lib.confine]` bundle was last folded at 3.12.3. 3.12.4's value-form migration changed five
+of its modules (`util`, `sys_error`, `spawn`, `confine`, `backend_process`), but only
+`dist/kavach.cyr` was regenerated. `scripts/version-bump.sh` and the CI freshness gate both ran
+plain `cyrius distlib`, which folds `[lib]` only. So 3.12.4 and 3.12.5 shipped a confine bundle
+that still had the 1-argument `result_print_err(res)` over the deleted `payload()`.
+
+A consumer project that vendors only the confine sidecar's stdlib and includes the bundle (thoth's
+shape) fails with **10 compile errors** on cyrius 6.6.6 against the 3.12.5 bundle
+(`'result_unwrap' expects 2 arguments, got 1`, …). Against the 3.12.6 bundle it builds and runs.
+
+- Both bundles regenerated. The confine sidecar drops `tagged`, which value-form Results no longer
+  need; the full bundle's sidecar gains `sys`, by way of sigil.
+- `scripts/version-bump.sh` runs `cyrius distlib --all`, which folds the base and every `[lib.X]`
+  profile.
+- CI "Verify dist bundles fresh" runs `cyrius distlib --all` and fails on any change under `dist/`.
+  It checks `git status`, not `git diff`, so a new profile's never-committed bundle fails too.
+
+### Fixed — the README's consumer stdlib set no longer built
+
+The "Consume kavach as a library" section tells consumers which `[deps].stdlib` to declare
+(kavach's own list minus the test-only `args` / `assert` / `bench`). The copy it printed had fallen
+behind that list: it was missing `atomic`, `math` and `sakshi`. Checked on cyrius 6.6.6 with a
+consumer running the full M1 flow (`kavach_init` → … → `sandbox_destroy`):
+
+- With the documented set, cyrius refuses to emit a binary (`sakshi_span_*` undefined).
+- With the corrected set, through a real `[deps.kavach]` dependency, it builds with 0 undefined
+  and exits 0.
+
+The section also said a consumer's sigil resolves from kavach's `[deps.sigil]`. It comes from the
+consumer's own toolchain snapshot.
+
+### Fixed — a comment promising a stdlib wrapper that is not coming
+
+`src/audit.cyr` said a `file_append_locked_mode` wrapper was "scheduled for Cyrius stdlib 4.4.0".
+No such wrapper exists in 6.6.6, and the stdlib has not used that version scheme for a long time.
+The comment now says the best-effort chmod is the hardening path, and states the 6.6.6
+short-write guarantee the `< 0` check relies on.
+
+### Changed — `cyrius.cyml` is configuration only
+
+12,819 → 3,135 bytes; 143 comment lines → 0. Everything the comments said already lives elsewhere:
+
+- `[lib]` and the `src/main.cyr` / `src/lib.cyr` exclusions: ADR-006 §1–2.
+- The `[lib.confine]` rationale: this file at 3.12.3, and an ADR-006 addendum.
+- The opt-in stdlib modules and the sigil `err_*` history: CLAUDE.md pin-move hazards, and this
+  file at 3.4.1, 3.4.2 and 3.11.13.
+- The `scheduler` feature gating of samay / ai-hwaccel: `docs/architecture/overview.md` external
+  dependencies, and this file at 3.8.3.
+- The agnosys drop: overview, and this file at 3.5.0.
+- The chrono include and the 4095-byte window: this file at 3.11.14, and CLAUDE.md.
+
+### Removed — the CI "4095-byte `_auto_deps` window" gate
+
+Both manifest hazards that shaped the old file were **fixed upstream in cyrius 6.5.28**, and both
+were filed from kavach 3.11.14.
+
+- **The 4095-byte window.** `_auto_deps` now reads 65,535 bytes and fails loudly if a manifest is
+  longer (`cbt/deps.cyr` at 6.6.6). The gate was enforcing a limit the pinned toolchain no longer
+  has, so all it could still do was fail a valid manifest.
+- **A declared stdlib module losing its `include` when first reached transitively.** Verified: with
+  the explicit `include "lib/chrono.cyr"` removed from `src/util.cyr`, the 6.6.6 build resolves
+  with 0 undefined. The three explicit includes stay, as harmless redundancy.
+
+### Verified
+
+Local build, and a copy of the tree resolved from git tags as CI does:
+
+- `deps --verify` 75/0; fmt 0 drift; lint 0. The fmt and lint gates were checked against
+  deliberately bad files to prove they still fire.
+- `vet` clean; plain, `CYRIUS_DCE=1` and `--agnos` builds clean; `check --with-deps src/lib.cyr`
+  clean; `distlib --all --check` fresh.
+- Tests **713/713**, samay **12/12**, fuzz ok.
+
+In the tag-resolved copy, `test_confine_capture_workdir`'s control assertion ("not /tmp") fails
+because that copy lives under `/tmp`. Run from a directory outside `/tmp`, it passes 713/713.
+
+### Performance
+
+`bench-history.csv` gains a **3.12.5** row, recorded retroactively on 2026-09-24 at the unchanged
+3.12.5 tree on cyrius 6.6.2 (3.11.15 through 3.12.5 shipped without rows), and a **3.12.6** row.
+The table shows medians of 5 interleaved, CPU-pinned runs of each binary. Listed rows have
+non-overlapping ranges; the other 15 are within noise.
+
+| bench | 3.12.5 (6.6.2) | 3.12.6 (6.6.6) | Δ |
+|---|---|---|---|
+| `secrets_scan_clean_text` | 15.05 µs | 16.67 µs | +10.8% |
+| `secrets_scan_with_secrets` | 7.49 µs | 8.07 µs | +7.7% |
+| `secrets_redact` | 6.46 µs | 7.22 µs | +11.7% |
+| `http_path_extract` | 110 ns | 118 ns | +7.3% |
+| `http_allowlist_hit` | 68 ns | 73 ns | +7.4% |
+| `http_allowlist_miss` | 77 ns | 86 ns | +11.7% |
+| `process_exec_large_output` | 122.06 ms | 128.60 ms | +5.4% |
+| `ct_streq_64` | 195 ns | 172 ns | −11.8% |
+| `code_scan_large_naive` | 6.00 ms | 5.64 ms | −5.9% |
+
+⚠ **The regressions are toolchain-side; kavach's source is unchanged.** The same 3.12.6 tree was
+built on 6.6.4, 6.6.5 and 6.6.6:
+
+- The `secrets_*` rows rise at each step (`secrets_redact` 6.43 → 6.69 → 7.07 µs).
+- `http_allowlist_hit` and `process_exec_large_output` step up at 6.6.5.
+
+6.6.5 pads every call made inside an expression to 16-byte stack alignment. That is an ABI
+correctness fix, and a plausible cost for call-dense scan loops; it is not root-caused further here.
+
+### Not changed
+
+`docs/development/issues/2026-09-12-raw-x86-syscall-numbers-on-aarch64.md` stays open. 6.6.6's
+only new aarch64 syscall translation is `statfs`, and it translates no open-flag values.
+
 ## [3.12.5] — 2026-09-10
 
 ### Fixed — `audit_entry_new` mis-bound against agnostik

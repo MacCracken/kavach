@@ -96,8 +96,8 @@ needs — they live in sigil's/sandhi's own surfaces, not kavach's bundle.
 `crypto_scratch`, which backs the audit-chain HMAC), `sandhi_server_*`
 (credential proxy), and `TLS_BACKEND_LIBSSL` (sandhi's TLS). So a kavach
 consumer **must declare kavach's transitive stdlib** — exactly the pattern
-kavach itself follows for sigil (see this repo's `[deps].stdlib` comments
-listing the opt-in `ct`/`keccak`/`thread`/`thread_local`). Curating a
+kavach itself follows for sigil (the opt-in `ct`/`keccak`/`thread`/
+`thread_local`; see CLAUDE.md's pin-move hazards). Curating a
 minimal subset is fragile — the transitive needs cascade (declaring
 `sandhi` then demands `tls`, then `async`/`fdlopen`, …) — so **mirror
 kavach's `[deps].stdlib`** (the verified set is that list minus the
@@ -235,3 +235,33 @@ generic error constant into a consumer's global namespace.
   build time).
 - **No runtime change.** Purely additive packaging; the assertion suite
   and benchmarks are unchanged by construction.
+
+## Amendment — profiles, and the v3.12.6 contract (2026-09-24)
+
+**A second surface: `[lib.confine]` (v3.12.3).** Some consumers need
+kavach's process confinement (namespaces, seccomp, Landlock, cgroups, the
+runtime guard, the process backend) without the rest of the engine: no
+exotic backends, scanners, credential proxy, attestation or audit chain.
+thoth asked for it; the full fold pushes thoth's expanded source past the
+cyrius preprocessor's 8 MB ceiling and duplicates seams thoth already
+consumes (libro's audit chain, t-ron's scanners). The profile folds to
+`dist/kavach-confine.cyr` from one module list in `cyrius.cyml`, the same
+arrangement as sit's `[lib.read]` and sankoch's `[lib.zlib]`. `src/lib.cyr`
+mirrors only `[lib]`.
+
+**Generation covers every profile.** Plain `cyrius distlib` folds `[lib]`
+only, so the confine bundle kept its 3.12.3 content through 3.12.5, after
+the 6.6.0 value-form migration had changed five of its modules, and would
+not compile for a consumer. The generator is now `cyrius distlib --all`, in
+`scripts/version-bump.sh` and in the CI freshness gate, and the gate fails
+on any change under `dist/`. distlib also has a `--check` mode now, which
+reports STALE per bundle without writing.
+
+**§3's stdlib set, re-verified.** The minimal set listed in the README had
+fallen behind kavach's `[deps].stdlib`: without `sakshi` a consumer's build
+refuses to emit a binary. Corrected at v3.12.6 (`atomic`, `math` and
+`sakshi` added) and re-checked end to end on cyrius 6.6.6 through a real
+`[deps.kavach]` dependency. A consumer's **sigil** comes from its own
+toolchain snapshot: `tls` → `tls_native` includes `lib/sigil.cyr`, and
+`cyrius deps` (6.5.39+) will not let a `[deps.sigil]` artifact replace a
+stdlib leaf.

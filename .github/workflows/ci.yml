@@ -50,43 +50,6 @@ jobs:
             CYRIUS_VERSION="$CYRIUS_VERSION" sh
           echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
 
-      - name: Manifest [deps] within the 4095-byte auto_deps window
-        # ⛔ SILENT, AND IT COSTS A WHOLE BUILD. `cyrius build` reaches the dep
-        # resolver through `_auto_deps` (cyrius cbt/deps.cyr:1983), which does
-        # `alloc(4096)` + `file_read_all(manifest, buf, 4095)` and scans ONLY
-        # that prefix for `[deps]` / `[deps.`. Push the marker past 4095 — by
-        # adding a comment ABOVE it, which is the natural place to document the
-        # dep list — and `_auto_deps` returns 0, `cmd_deps()` never runs, and
-        # NOTHING is prepended into the compilation unit. There is no warning
-        # and no mention of the manifest: the build dies on undefined stdlib
-        # symbols in src/, pointing kilobytes away from the cause. A populated
-        # lib/ does not save it either — `cyrius deps` reads 32767 bytes and
-        # vendors the files, so they sit on disk unincluded.
-        #
-        # Hit for real at v3.11.14 (3676 -> 5288 bytes). Fail LOUD and early,
-        # naming the byte offset, so the next person spends a second on it
-        # rather than a bisect. See the MANIFEST HAZARDS block in cyrius.cyml.
-        run: |
-          off=$(python3 -c "
-          import sys
-          b=open('cyrius.cyml','rb').read()
-          c=[x for x in (b.find(b'[deps]'), b.find(b'[deps.')) if x>=0]
-          print(min(c) if c else -1)")
-          if [ "$off" -lt 0 ]; then
-            echo "FAIL: no [deps] / [deps.* ] section found in cyrius.cyml"
-            exit 1
-          fi
-          echo "  [deps] marker at byte $off (limit 4095, headroom $((4095-off)))"
-          if [ "$off" -ge 4095 ]; then
-            echo "FAIL: [deps] starts at byte $off, past the 4095-byte window"
-            echo "      cyrius build will silently prepend NOTHING."
-            echo "      Move commentary BELOW the [deps] array (see MANIFEST HAZARDS)."
-            exit 1
-          fi
-          if [ "$off" -ge 3800 ]; then
-            echo "::warning::[deps] at byte $off — under 300 bytes of headroom before the 4095 cliff"
-          fi
-
       - name: Resolve dependencies
         # Populates ./lib/ from cyrius.cyml [deps] stdlib + [deps.sigil]
         # at the pinned tag. ./lib/ is gitignored (see .gitignore).
@@ -167,22 +130,25 @@ jobs:
       - name: Verify ELF
         run: xxd -l 4 build/kavach | grep -q "7f45 4c46"
 
-      - name: Verify dist bundle fresh
+      - name: Verify dist bundles fresh
         # kavach is consumable as a source-level library: the committed
-        # single-file bundle `dist/kavach.cyr` + its `dist/kavach.deps`
-        # stdlib sidecar are what downstream (mehman's M1 host, …) import
-        # via `[deps.kavach] modules = ["dist/kavach.cyr"]`. `cyrius
-        # distlib` regenerates both from the `[lib]` modules in
-        # cyrius.cyml; regenerate here so the gate can't pass on a stale
-        # committed bundle. Same pattern as sigil / bhumi CI.
+        # bundles + their `.deps` stdlib sidecars are what downstream imports —
+        # `dist/kavach.cyr` from `[lib]` (mehman's M1 host, …) and
+        # `dist/kavach-confine.cyr` from `[lib.confine]` (thoth). `--all` folds
+        # the base AND every profile; plain `cyrius distlib` folds only `[lib]`,
+        # which is how the confine bundle shipped 3.12.3 content through 3.12.5
+        # without this gate noticing. `git status` (not `git diff`) so a new
+        # profile's never-committed bundle fails too. Same pattern as sigil /
+        # bhumi CI.
         run: |
-          cyrius distlib
-          if ! git diff --quiet dist/kavach.cyr dist/kavach.deps; then
-            echo "dist/kavach.cyr or dist/kavach.deps is stale — run \`cyrius distlib\` and commit"
-            git --no-pager diff --stat dist/kavach.cyr dist/kavach.deps
+          cyrius distlib --all
+          if [ -n "$(git status --porcelain dist/)" ]; then
+            echo "dist/ is stale — run \`cyrius distlib --all\` and commit"
+            git status --porcelain dist/
+            git --no-pager diff --stat dist/
             exit 1
           fi
-          echo "dist bundle is fresh"
+          echo "dist bundles are fresh"
 
       - name: Smoke test
         run: |

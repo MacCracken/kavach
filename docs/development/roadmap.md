@@ -2,7 +2,7 @@
 
 > **Principle**: Security correctness first, then backend breadth, then performance. Every sandbox gets a number.
 
-This roadmap is **future-facing only** — shipped work lives in [CHANGELOG.md](../../CHANGELOG.md). Current release: v3.11.14 (toolchain refresh + the dropped-`chrono`-include fix). Toolchain pin: cc `6.5.27`; sigil `3.12.9`, samay `1.0.1`, ai-hwaccel `2.3.16` (agnosys dropped at v3.5.0 — its security backends are internalized).
+This roadmap is **future-facing only** — shipped work lives in [CHANGELOG.md](../../CHANGELOG.md). Current release: v3.12.6 (toolchain + dependency refresh). Toolchain pin: cc `6.6.6`; sigil `3.12.18` (the snapshot's — see CLAUDE.md hazard 4), samay `1.1.5`, ai-hwaccel `2.4.0` (agnosys dropped at v3.5.0 — its security backends are internalized).
 
 ---
 
@@ -14,6 +14,8 @@ This roadmap is **future-facing only** — shipped work lives in [CHANGELOG.md](
 
 ### Tech debt
 
+- [ ] **aarch64: raw x86 syscall numbers and open flags in `src/util.cyr`.** `file_write_secure_modal` runs `capset` instead of `fchmod` and drops `O_NOFOLLOW`, and `kv_sleep_ms` runs `unlinkat` instead of `nanosleep`. See `docs/development/issues/2026-09-12-raw-x86-syscall-numbers-on-aarch64.md`. The 6.6.6 pin did not close it: its only new aarch64 translation is `statfs`, and cyrius translates no open-flag values.
+- [ ] **Audit chain: a refused append leaves its torn prefix in the log.** Since 6.6.6 a short write is refused and the chain head does not advance (v3.12.6), but the bytes that did land stay at the tail. The next successful record is then appended onto that partial line, so an unparseable line hides it. Truncate back to the pre-append length on failure, or start the next record on a fresh line.
 - [ ] **`cyrius fmt` clean.** Drain the v3.0-inherited fmt drift across `src/{audit,backend_sy_agnos,composite,credential,quarantine,scanning_gate,scanning_secrets}.cyr` and `tests/kavach.{tcyr,bcyr}`, then flip CI fmt from `::warning::` informational to hard-fail. **Local-toolchain caveat**: the pinned `6.0.43` fmt must be the running fmt — running a different patch locally and committing the result would write minor-version-sensitive drift.
 
 ### Recorded negatives (don't chase these)
@@ -297,126 +299,3 @@ The guest has autonomy within its borders. It has no authority beyond them.
 - **Network proxy** — kavach sets network policy, doesn't route traffic. Use nein
 - **Secret storage** — kavach injects secrets, doesn't store them. Use sigil
 - **Replacing the guest OS** — the foreign container runs their OS unmodified. kavach controls the boundary, not the interior
-
----
-
-## Moving the cyrius pin to 6.6.6
-
-**Current pin: `cyrius = "6.6.2"`** — four releases behind. Nothing must change first; this
-is a pin bump and a rebuild. But read the two ⛔ items below before treating it as routine.
-
-### ⭐ The reason to bump: the HMAC audit chain could silently write a torn line
-
-This is a **Linux-side** fix, not the Windows one, and it lands squarely on kavach's
-tamper-evidence guarantee.
-
-`audit_chain_record` (`src/audit.cyr`) writes each JSONL entry with the stdlib's
-`file_append_locked` and tests the result with `< 0`:
-
-```cyrius
-if (file_append_locked(AuditChain_log_path(chain), line, strlen(line)) < 0) {
-    kavach_err_print(KAVACH_ERR_IO_ERROR, "audit chain write failed");
-    return 0;
-}
-```
-
-Before 6.6.6, `file_append_locked` issued **one** `write` and returned its count. A short
-write appended a **prefix of the record** and returned a positive number — so a `< 0` test
-saw success, the torn line went into the log, and `AuditChain_set_last_hmac` advanced the
-chain over a line that no longer parses. For an append-only, tamper-evident HMAC chain that
-is the worst possible failure mode: the log is corrupt and the corruption is
-indistinguishable from tampering. 6.6.6 makes `file_append_locked` loop until the whole
-record lands, holding the lock across the loop so the record stays contiguous.
-**kavach's caller shape is exactly the one the fix names.**
-
-### ⛔ The open aarch64 syscall issue is NOT closed by this bump
-
-`docs/development/issues/2026-09-12-raw-x86-syscall-numbers-on-aarch64.md` stays open. Be
-explicit about this, because 6.6.6 *does* contain ESYSXLAT work and it is easy to assume it
-covers this:
-
-- 6.6.6 adds an ESYSXLAT row for **statfs only** (`137 → 43` on aarch64) and names
-  `SYS_STATFS` / `SYS_FSTATFS` in both Linux syscall peers. kavach has no `statfs` call
-  site — checked, zero matches in `src/`.
-- kavach's defects are syscall **35** and **91** (`src/util.cyr:359`'s `syscall(91, fd,
-  mode, 0)` runs `capset` on aarch64; the credential-injection mode is silently never
-  applied). 6.6.6 adds **no** row for either.
-- The third defect in that filing is an **open flag value**, not a number: `131072` is
-  `O_NOFOLLOW` on x86_64 and `O_LARGEFILE` on aarch64. cyrius does **not** translate open
-  flag values on any release, 6.6.6 included. The 6.6.6 PE flag decoder is a Windows
-  CreateFileW mapping and does nothing for aarch64 Linux.
-
-So the pin move is orthogonal to that issue. Do not let the bump's CHANGELOG close it.
-
-### O_APPEND / O_TRUNC — used, and Windows-safe by construction
-
-kavach opens with both flags outside the vendored `lib/`:
-
-- `src/confine.cyr:19` — `SPAWN_LOG_FLAGS = 1089` (`O_WRONLY|O_CREAT|O_APPEND`), used at
-  `src/confine.cyr:190` for the container's stderr log. The comment there is exactly the
-  invariant the Windows defect broke: *"a restarted container should extend its log, not
-  silently erase the evidence of why the previous attempt died."* On a pre-6.6.6 PE build it
-  would have erased it, from offset 0, with no error.
-- `src/util.cyr:321` / `:351` — `file_write_secure_r` / `file_write_secure_modal` open
-  `1 + 64 + 512 + 128 + 131072` (`O_WRONLY|O_CREAT|O_TRUNC|O_EXCL|O_NOFOLLOW`).
-- `src/backend_oci.cyr:212` — `131265`, deliberately *without* `O_APPEND` (the comment at
-  205–206 records why the earlier `O_APPEND` shape was wrong for that path).
-
-**Not exposed** — checked rather than assumed: CI is `ubuntu-latest` only, there is no
-`CYRIUS_TARGET_WIN` / `_TARGET_PE` branch anywhere in `src/`, no PE entry in `cyrius.cyml`,
-and the security model is Landlock / seccomp-BPF / namespaces, which are Linux mechanisms.
-The only conditional target is `CYRIUS_TARGET_AGNOS`.
-
-### What else was checked
-
-- **No shape the new refusals catch.** kavach declares 38 structs (`AuditChain`,
-  `SandboxPolicy`, `SpawnedProcess`, `bpf_insn`, …) and **not one** is a by-value fn
-  parameter, a fn return type, or a `var x: T = …` declaration — all are heap-offset layouts
-  behind raw pointers, so neither the struct-copy refusal nor the by-value deep-copy change
-  touches a line. The one `: Result` fn, `file_write_secure_r` (`src/util.cyr:319`), was
-  walked: every `return` is `Ok(…)` or `Err(…)`, so the new "a pair-return fn must return a
-  same-shaped pair" refusal is satisfied. No `async fn`, no `operator` fn, no SIMD-returning
-  fn, no fn mixing pair and scalar returns.
-- **Also clean:** no `var` inside a top-level block (zero top-level `{` / `if (` / `while (`
-  at column 0), no `lib/regression.cyr` consumer, no `vec_*` of kavach's own, no duplicate
-  top-level global, no symlink in `lib/` (6.6.6 makes `cyrius deps` **fail** rather than skip
-  when a `lib/*.cyr` cannot be hashed — nothing to clear here; `release.yml` already runs
-  `cyrius deps --verify`).
-- **A stale comment to fix while you are in there.** `src/audit.cyr` says *"A wider
-  `file_append_locked_mode` wrapper is scheduled for Cyrius stdlib 4.4.0"*. There is no such
-  wrapper in 6.6.6's `lib/io.cyr`, and "stdlib 4.4.0" is not a version the toolchain has used
-  for a long time. The hand-rolled `file_restrict_mode` after each append is still the
-  hardening path — the comment should say so rather than promise a wrapper that is not coming.
-
-### Other 6.6.6 changes worth knowing, with their actual relevance
-
-- `file_write_atomic` now **keeps an existing file's mode** (it used to reset to
-  `0644 & ~umask`), and the new `file_replace_atomic` writes **through** a symlink. kavach
-  uses neither today — every write goes through `file_write_secure*`, which is `O_EXCL` +
-  `O_NOFOLLOW` by design. ⚠ `file_replace_atomic`'s follow-the-symlink semantics are the
-  **opposite** of kavach's threat model (`src/quarantine.cyr:111` exists because
-  attacker-staged symlinks at the target paths are the attack). Do not adopt it in a
-  quarantine or credential path.
-- `cyrius build` now **exits 1** instead of 0 when its output rename fails. If any kavach
-  script treated a build as successful without checking for the artifact, it starts failing
-  correctly.
-
-### What it gains
-
-The `file_append_locked` fix above; 6.6.3's `#inline`-disarms-`#derive` fix; 6.6.4's ≥64 KB
-string-literal read-back fix (kavach's longest literal is 534 B in `src/oci_spec.cyr`, so not
-reachable today); 6.6.5's aggregate-layout fix, silently wrong since 5.8.17, and three
-corrected ENTRY stack bases; and 6.6.6's nine new refusals.
-
-### Verify after bumping
-
-`cyrius deps` → `cyrius deps --verify` → `cyrius build` → `cyrius build --agnos` →
-`cyrius test` → **regenerate `dist/kavach.cyr` and `dist/kavach-confine.cyr`**. Then the one
-targeted check this bump earns: append a burst of audit entries large enough to provoke a
-short write and run the chain verifier over the resulting log. That is the behaviour 6.6.6
-changed, and a passing suite that never writes a big record will not see it.
-
-⚠ The refreshed `lib/` carries the 6.6.6 `sigil.cyr`, whose shipped dist does not pass
-`cyrfmt --check`. Harmless here — kavach's format gate loops over
-`src/*.cyr tests/*.tcyr tests/*.bcyr tests/*.fcyr` and never walks `lib/`. Do not fix it in
-the fold; per the ecosystem rule the repair belongs in the sigil source repo.

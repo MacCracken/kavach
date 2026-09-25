@@ -12,35 +12,34 @@ cyrius build src/main.cyr build/kavach
 ./build/kavach                             # runs the end-to-end demo
 ```
 
-Cyrius toolchain `6.5.27` required (pinned in `cyrius.cyml`). The first-party
-tree is on the cc 6.5 line; the old 5.10.x sigil-NI asm-offset bisect is
-retired. The pin matches the installed `cycc`; if `cycc` later drifts ahead of
-the pin, skip local `cyrius fmt` writes to avoid minor-version drift.
+Cyrius toolchain `6.6.6` required (pinned in `cyrius.cyml`). The pin matches
+the installed `cycc`; if `cycc` later drifts ahead of the pin, skip local
+`cyrius fmt` writes to avoid minor-version drift.
 Dependencies are declared in [`cyrius.cyml`](../../cyrius.cyml):
 
-- **Cyrius stdlib** modules (alloc, args, assert, async, bayan, bench, chrono,
-  ct, dynlib, fdlopen, fmt, fnptr, freelist, fs, hashmap, hashmap_fast, io,
-  keccak, mmap, net, process, random, result, sandhi, slice, str, string,
-  syscalls, tagged, thread, thread_local, tls, vec). The 6.2 line folded the
-  standalone `json`/`base64` modules into `bayan` and retired `bigint`.
-  ⚠ **`chrono` is additionally hand-included** at the top of `src/util.cyr`
-  (and in `tests/kavach.fcyr` + `tests/samay_integration.tcyr`). Since cc
-  6.5.26 the resolver drops the top-level `include` for any declared module it
-  first reaches transitively, and chrono now arrives through
-  `async` → `async_macos`; declaring it in `[deps]` is no longer sufficient and
-  the build stops on undefined `clock_*` / `sleep_ms` without ever naming
-  chrono. Don't delete those includes — see v3.11.14 in the CHANGELOG.
-- **[sigil](https://github.com/MacCracken/sigil) 3.12.9** for SHA-256 and
+- **Cyrius stdlib** modules (alloc, args, assert, async, atomic, bayan, bench,
+  chrono, ct, dynlib, fdlopen, fmt, fnptr, freelist, fs, hashmap, hashmap_fast,
+  io, keccak, math, mmap, net, process, random, result, sakshi, sandhi, slice,
+  str, string, syscalls, tagged, thread, thread_local, tls, vec). `ct`, `keccak`,
+  `thread` and `thread_local` are opt-in modules sigil needs; leave one out and
+  the build is clean but the first crypto call SIGILLs. `chrono` is also
+  hand-included at the top of `src/util.cyr` (and in `tests/kavach.fcyr` +
+  `tests/samay_integration.tcyr`), a guard from a cc 6.5.26–6.5.27 resolver bug
+  that upstream fixed in 6.5.28 — see v3.11.14 and v3.12.6 in the CHANGELOG.
+- **[sigil](https://github.com/MacCracken/sigil) 3.12.18** for SHA-256 and
   HMAC-SHA256 (used by `src/audit.cyr`). Constant-time compare
-  (`src/util.cyr::ct_streq`) now uses the stdlib `ct` module's
-  `ct_eq_bytes_lens` — sigil retired its own `ct_eq` in the 3.x line. Latest
-  tag; the 5.10.x SIGILL bisect that capped sigil at 2.9.0 no longer applies
-  under cc 6.5.27. sigil 3.12.8 namespaced its error constructors `err_*` →
-  `sigil_err_*`; kavach's own moved to `kavach_err_*` at v3.11.13 so the two
-  no longer collide. The agnosys dependency was dropped at v3.5.0 — kavach
-  internalized the Linux security backends it used (Landlock/seccomp, MAC,
-  Linux-audit) as `src/` modules (the `agnosys → agnodrm` decomposition);
-  see [`cyrius.cyml`](../../cyrius.cyml).
+  (`src/util.cyr::ct_streq`) uses the stdlib `ct` module's `ct_eq_bytes_lens`.
+  sigil comes from the pinned toolchain's stdlib snapshot (`tls` pulls it in),
+  and `cyrius deps` will not let the `[deps.sigil]` artifact replace a stdlib
+  leaf, so the pin is kept equal to the snapshot's sigil; a newer sigil arrives
+  with a newer cyrius pin. The agnosys dependency was dropped at v3.5.0 —
+  kavach internalized the Linux security backends it used (Landlock/seccomp,
+  MAC, Linux-audit) as `src/` modules (the `agnosys → agnodrm` decomposition);
+  see v3.5.0 in the CHANGELOG.
+- **[samay](https://github.com/MacCracken/samay) 1.1.5** and
+  **[ai-hwaccel](https://github.com/MacCracken/ai-hwaccel) 2.4.0**, optional
+  behind the default-on `scheduler` feature, for the test-only scheduler bridge.
+  Consumers of kavach do not inherit them.
 
 `cyrius deps` populates `lib/` (gitignored) — that directory is reproducible
 from the manifest + lockfile, not committed.

@@ -12,6 +12,13 @@ classification, credential proxy, HMAC-SHA256 audit chain — all in pure Cyrius
 
 ## Status
 
+**v3.12.6 — toolchain + dependency refresh.** Cyrius pin `6.6.2` → `6.6.6`,
+which closes a torn-write hole in the HMAC audit chain: a short append is now
+refused instead of logged as written. Deps: sigil `3.12.18` (what the 6.6.6
+snapshot delivers), ai-hwaccel `2.4.0`, samay `1.1.5`. Also fixes a
+`dist/kavach-confine.cyr` that had not compiled since 3.12.4. **713**
+assertions green; see the [CHANGELOG](CHANGELOG.md) for the benchmark deltas.
+
 **v3.11.14 — a declared stdlib module that arrives transitively is never
 included.** Cyrius pin `6.5.21` → `6.5.27`; sigil `3.12.9`, samay `1.0.1` and
 ai-hwaccel `2.3.16` re-verified as already latest, so no dep moved. ⛔ **The pin
@@ -180,21 +187,19 @@ for what's intentionally deferred.
 ## Build
 
 ```sh
-# Requires Cyrius 6.5.27 (pinned in cyrius.cyml; the first-party tree is
-# on the cc 6.5 line — the old 5.10.x sigil-NI asm-offset bisect is
-# retired). The pin matches the installed cycc; if cycc later drifts ahead,
-# skip local fmt writes to avoid minor-version drift.
+# Requires Cyrius 6.6.6 (pinned in cyrius.cyml). The pin matches the
+# installed cycc; if cycc later drifts ahead, skip local fmt writes to
+# avoid minor-version drift.
 
-# 1. Resolve deps — populates lib/ (gitignored) with the cc 6.5.27
-#    stdlib snapshot + sigil 3.12.9 at the pinned tag (the agnosys
-#    dependency was dropped at 3.5.0; see cyrius.cyml).
+# 1. Resolve deps — populates lib/ (gitignored) with the cc 6.6.6
+#    stdlib snapshot, which is also where sigil 3.12.18 comes from.
 cyrius deps
 
 # 2. Build the binary.
 cyrius build src/main.cyr build/kavach
 ./build/kavach
 
-# Run the test suite (684 assertions).
+# Run the test suite (713 assertions).
 cyrius test tests/kavach.tcyr
 
 # Run the bench harness (25 benches).
@@ -202,14 +207,18 @@ cyrius bench tests/kavach.bcyr
 
 # Cleanliness gates. Run these individually — `cyrius audit` is the
 # TOOLCHAIN's own self-host audit, not a project gate.
-cyrius fmt <file>          # writes to stdout; diff against the file
+cyrius fmt <file> --check  # exit 1 on drift; without --check it rewrites in place
 cyrius lint src/main.cyr
 cyrius vet src/main.cyr
+
+# Regenerate the library bundles (dist/kavach.cyr + every [lib.X] profile).
+cyrius distlib --all
 ```
 
 Dependencies (declared in [`cyrius.cyml`](cyrius.cyml)):
-- **Cyrius stdlib** — `alloc, args, assert, async, bayan, bench, chrono, ct, dynlib, fdlopen, fmt, fnptr, freelist, fs, hashmap, hashmap_fast, io, keccak, mmap, net, process, random, result, sandhi, slice, str, string, syscalls, tagged, thread, thread_local, tls, vec` (resolved by `cyrius deps` into `lib/`, which is gitignored). The 6.2 line folded the standalone `json`/`base64` modules into `bayan` and retired `bigint` (sigil bundles its own `u256`/`u384`). ⚠ **`chrono` is additionally hand-included** at the top of `src/util.cyr` (and in `tests/kavach.fcyr` + `tests/samay_integration.tcyr`): since cc 6.5.26 the resolver drops the `include` for any declared module it first reaches transitively, and chrono now arrives via `async` → `async_macos`. Declaring it is not sufficient — don't remove those lines. See v3.11.14 in the [CHANGELOG](CHANGELOG.md).
-- **[sigil](https://github.com/MacCracken/sigil) 3.12.9** — SHA-256, HMAC-SHA256 (constant-time compare now via the stdlib `ct` module — sigil retired its own `ct_eq` in the 3.x line). Latest tag; the 5.10.x SIGILL bisect that capped it at 2.9.0 no longer applies under cc 6.5.27. sigil 3.12.8 namespaced its error constructors `err_*` → `sigil_err_*`; kavach's own moved to `kavach_err_*` at v3.11.13. The agnosys dependency was dropped at 3.5.0 — kavach internalized the Linux security backends it used (Landlock/seccomp, MAC, Linux-audit) as `src/` modules; see [`cyrius.cyml`](cyrius.cyml).
+- **Cyrius stdlib** — `alloc, args, assert, async, atomic, bayan, bench, chrono, ct, dynlib, fdlopen, fmt, fnptr, freelist, fs, hashmap, hashmap_fast, io, keccak, math, mmap, net, process, random, result, sakshi, sandhi, slice, str, string, syscalls, tagged, thread, thread_local, tls, vec` (resolved by `cyrius deps` into `lib/`, which is gitignored). `ct` / `keccak` / `thread` / `thread_local` are opt-in modules sigil needs; a missing one builds clean and SIGILLs at the first crypto call. `chrono` is also hand-included at the top of `src/util.cyr` (and in `tests/kavach.fcyr` + `tests/samay_integration.tcyr`), a guard from a cc 6.5.26–6.5.27 resolver bug that upstream fixed in 6.5.28 — see v3.11.14 and v3.12.6 in the [CHANGELOG](CHANGELOG.md).
+- **[sigil](https://github.com/MacCracken/sigil) 3.12.18** — SHA-256, HMAC-SHA256 (constant-time compare via the stdlib `ct` module). sigil comes from the pinned toolchain's stdlib snapshot (`tls` pulls it in), and `cyrius deps` will not let the `[deps.sigil]` artifact replace a stdlib leaf, so the pin is kept equal to the snapshot's sigil; a newer sigil arrives with a newer cyrius pin (v3.12.6). sigil 3.12.8 namespaced its error constructors `err_*` → `sigil_err_*`; kavach's own moved to `kavach_err_*` at v3.11.13. The agnosys dependency was dropped at 3.5.0 — kavach internalized the Linux security backends it used (Landlock/seccomp, MAC, Linux-audit) as `src/` modules; see v3.5.0 in the [CHANGELOG](CHANGELOG.md).
+- **[samay](https://github.com/MacCracken/samay) 1.1.5** + **[ai-hwaccel](https://github.com/MacCracken/ai-hwaccel) 2.4.0** — optional, behind the default-on `scheduler` feature, for the test-only scheduler bridge (`src/samay_bridge.cyr`, not in `[lib]`). Consumers of kavach do not inherit them.
 
 ## Consume kavach as a library (v3.6.0+)
 
@@ -222,33 +231,37 @@ consumer's `cyrius.cyml`:
 [deps.kavach]
 git     = "https://github.com/MacCracken/kavach.git"
 path    = "../kavach"          # local sibling checkout (optional)
-tag     = "3.6.0"
+tag     = "3.12.6"
 modules = ["dist/kavach.cyr"]
 
 # REQUIRED: kavach's transitive stdlib. `cyrius distlib` records only
 # kavach's *direct* leaves in dist/kavach.deps; the bundle also pulls sigil
-# (crypto: ct/keccak/thread/thread_local) and, via the credential proxy,
-# sandhi (→ tls, and async) + bayan + the dynlib/fdlopen/mmap load paths.
-# Per the Cyrius model the CONSUMER declares stdlib (distlib prints "stdlib
-# is supplied by the consumer's [deps] stdlib list"); a consumer that omits
-# these fails to LINK — undefined thread_local_* / sandhi_server_* /
-# async_* / fdlopen_* / TLS_BACKEND_LIBSSL. Curating a minimal subset is
-# fragile (the transitive needs cascade), so mirror kavach's own
-# [deps].stdlib. The verified-working set (kavach's [deps].stdlib minus the
-# test-only args/assert/bench) is:
+# (crypto: ct/keccak/thread/thread_local, tracing: sakshi) and, via the
+# credential proxy, sandhi (→ tls, and async) + bayan + the
+# dynlib/fdlopen/mmap load paths. Per the Cyrius model the CONSUMER declares
+# stdlib (distlib prints "stdlib is supplied by the consumer's [deps] stdlib
+# list"); a consumer that omits these fails to LINK — cyrius refuses to emit
+# a binary over undefined sakshi_span_* / thread_local_* / sandhi_server_* /
+# async_* / fdlopen_*. Curating a minimal subset is fragile (the transitive
+# needs cascade), so mirror kavach's own [deps].stdlib. The verified-working
+# set (kavach's [deps].stdlib minus the test-only args/assert/bench; checked
+# on cyrius 6.6.6 at v3.12.6) is:
 [deps]
 stdlib = [
-    "alloc", "async", "bayan", "chrono", "ct", "dynlib", "fdlopen", "fmt",
-    "fnptr", "freelist", "fs", "hashmap", "hashmap_fast", "io", "keccak",
-    "mmap", "net", "process", "random", "result", "sandhi", "slice", "str",
-    "string", "syscalls", "tagged", "thread", "thread_local", "tls", "vec",
+    "alloc", "async", "atomic", "bayan", "chrono", "ct", "dynlib", "fdlopen",
+    "fmt", "fnptr", "freelist", "fs", "hashmap", "hashmap_fast", "io",
+    "keccak", "math", "mmap", "net", "process", "random", "result", "sakshi",
+    "sandhi", "slice", "str", "string", "syscalls", "tagged", "thread",
+    "thread_local", "tls", "vec",
 ]
 ```
 
 Then `cyrius deps` materializes the bundle as the consumer's
-`lib/kavach.cyr` and vendors the stdlib above (the transitive **sigil**
-dep — and its own transitive sandhi/sakshi — resolve from kavach's
-`[deps.sigil]`). Source-include it and call the surface:
+`lib/kavach.cyr` and vendors the stdlib above plus `sys`, which arrives
+through `dist/kavach.deps`. **sigil** comes from the consumer's own toolchain
+snapshot: `tls` pulls `tls_native`, which includes `lib/sigil.cyr`, and
+`cyrius deps` keeps that copy over kavach's `[deps.sigil]` artifact.
+Source-include it and call the surface:
 
 ```cyrius
 include "lib/kavach.cyr"
@@ -267,9 +280,9 @@ fn app() {
 
 The bundle excludes the program surface (`main()`, the demo, the top-level
 `syscall(SYS_EXIT)`) that lives in `src/main.cyr`. Maintainers regenerate
-the bundle after any `[lib]` module change with **`cyrius distlib`** (the
-standard first-party dist flow, same as sigil/patra/bhumi); CI gates its
-freshness. See
+the bundles after any `[lib]` or `[lib.confine]` module change with
+**`cyrius distlib --all`** (the standard first-party dist flow, same as
+sigil/patra/bhumi); CI gates their freshness. See
 [ADR-006](docs/adr/006-library-surface-and-bundle-generation.md).
 
 **Known integration caveats** (kavach is a heavy security engine — see

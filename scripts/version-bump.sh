@@ -5,9 +5,9 @@
 #   1. VERSION              — single source of truth
 #   2. CHANGELOG.md         — inserts a dated section after [Unreleased]
 #   3. src/main.cyr         — the demo banner literal ("kavach vX.Y.Z — …")
-#   4. dist/kavach.cyr      — regenerated via `cyrius distlib` (its bundle
-#                             header stamps the version), if the toolchain
-#                             is on PATH
+#   4. dist/*.cyr           — regenerated via `cyrius distlib --all` (every
+#                             bundle header stamps the version), if the
+#                             toolchain is on PATH
 #
 # Notes:
 #   - cyrius.cyml reads the version via `version = "${file:VERSION}"`, so it
@@ -82,16 +82,18 @@ if [ -f "$ROOT/src/main.cyr" ]; then
     fi
 fi
 
-# 4. dist/ bundle — regenerate so the bundle header stamps $NEW. `cyrius
-#    distlib` reads [lib].modules from cyrius.cyml and rewrites
-#    dist/kavach.cyr + dist/kavach.deps. Best-effort: skip with a reminder
-#    if the toolchain isn't on PATH (the CI freshness gate is the backstop).
+# 4. dist/ bundles — regenerate so every bundle header stamps $NEW. `--all`
+#    folds [lib] (dist/kavach.cyr) AND every [lib.X] profile
+#    (dist/kavach-confine.cyr), each with its .deps sidecar. Plain `cyrius
+#    distlib` folds only [lib] — which is how dist/kavach-confine.cyr shipped
+#    at 3.12.3 content through 3.12.5. Best-effort: skip with a reminder if
+#    the toolchain isn't on PATH (the CI freshness gate is the backstop).
 if command -v cyrius >/dev/null 2>&1; then
-    ( cd "$ROOT" && cyrius distlib >/dev/null 2>&1 ) \
-        && echo "  Regenerated dist/kavach.cyr (cyrius distlib)" \
-        || echo "  WARN: 'cyrius distlib' failed — regenerate dist/ manually"
+    ( cd "$ROOT" && cyrius distlib --all >/dev/null 2>&1 ) \
+        && echo "  Regenerated dist/ bundles (cyrius distlib --all)" \
+        || echo "  WARN: 'cyrius distlib --all' failed — regenerate dist/ manually"
 else
-    echo "  SKIP: cyrius not on PATH — run 'cyrius distlib' to refresh dist/ before committing"
+    echo "  SKIP: cyrius not on PATH — run 'cyrius distlib --all' to refresh dist/ before committing"
 fi
 
 echo ""
