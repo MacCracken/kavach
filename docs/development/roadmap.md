@@ -5,26 +5,57 @@
 This roadmap is **future-facing only** — shipped work lives in [CHANGELOG.md](../../CHANGELOG.md). Current release: **v3.13.1**. Toolchain pin: cc `6.6.6`; sigil `3.12.18` (the snapshot's — see CLAUDE.md hazard 4), samay `1.1.5`, ai-hwaccel `2.4.0` (agnosys dropped at v3.5.0 — its security backends are internalized).
 
 **Every release below is pinned.** Each names what ships in it, in the order the principle sets. To
-move an item, edit this file; do not let it drift. Every release runs the CLAUDE.md development
-loop: tests and benchmarks for new code, a `bench-history.csv` row labeled with the version, a
-CHANGELOG entry with measured numbers, and a `doc-health.md` refresh for every doc touched. Items
-with no dependency (for example the scanner work in 3.20) can be pulled forward; items with one say
-what it is.
+move an item, edit this file; do not let it drift. **An arc also takes the open fixes in the code it
+reworks**: a backend's fixes ship in the release that rebuilds that backend, so no fix waits longer
+than its arc. Every release runs the CLAUDE.md development loop: tests and benchmarks for new code,
+a `bench-history.csv` row labeled with the version, a CHANGELOG entry with measured numbers, and a
+`doc-health.md` refresh for every doc touched. Items with no dependency (for example the scanner
+work in 3.20) can be pulled forward; items with one say what it is.
 
 ---
 
-## 3.13.x — TEE attestation I: SGX and TDX quote verification (ADR-004 §2)
+## 3.13.x — TEE attestation I, continued, and fixes (ADR-004 §2)
 
-3.13.0 shipped the verification, the measurement allowlist in `SandboxPolicy`, the gate in
-`sandbox_exec` that fails the exec on a mismatch, accept and reject tests from sigil's vectors,
-and the aarch64 support record (CHANGELOG 3.13.0). 3.13.1 was a fix release: landlock rules
-merged, denied and applied to files as documented, the WASM backend honouring them, and the
-process backend handing its payload the config's stdin (CHANGELOG 3.13.1). Open:
+### 3.13.2 — score honesty and exec parity (next)
+
+Each item is something kavach accepts, scores or documents and does not apply. None needs special
+hardware.
+
+- [ ] **The shell-out backends' capture.** gVisor and SY-agnos run their runtime through
+  `kv_exec_capture`, the stdlib's `exec_capture` with a pinned exec. It sends stderr to
+  `/dev/null`, `backend_capture_finish` reports exit 0 for any byte count, and neither
+  `config_timeout_ms` nor `config_stdin` reaches the run: the stdlib's own deadline is opt-in, and
+  kavach never sets it. OCI has had its own capture with the real exit status and stderr since
+  3.9.2, but takes no deadline and no stdin either. Give the three the process backend's capture
+  (`confine_capture_input_env_wd` with `do_confine = 0`): the runtime's exit status, its stderr,
+  the config's deadline, and the config's stdin as the runtime's stdin. SGX, TDX, SEV and
+  Firecracker take the same change in the arcs that rebuild their launchers, below.
+- [ ] **What an unset `config_stdin` means.** Since 3.11.8 it hands the payload kavach's own stdin,
+  kept for interactive payloads, so a payload can read, and consume, whatever the host process has
+  there (CHANGELOG 3.13.1). Decide whether a sandbox inherits it at all. If not, an unset stdin
+  becomes an empty one, a behaviour change to mark.
+- [ ] **`IOCTL_DEV` (landlock ABI v5).** kavach handles rights up to ABI v3 only, so no kavach
+  ruleset restricts ioctl on a device file. Handle it from v5 in `_landlock_handled_access`, and
+  grant it through `_landlock_file_rights` and the access masks where a rule should allow it
+  (CHANGELOG 3.13.1, the file-rule entry).
+- [ ] **Seccomp on the WASM backend: apply it to wasmtime, or stop scoring it there.**
+  `score_backend` adds 5 for `seccomp_enabled` on every backend, and the WASM backend applies no
+  filter; since 3.13.1 it confines wasmtime with landlock only. WASI is the guest's syscall
+  boundary, so a filter on wasmtime is defence in depth, and it would have to admit what
+  wasmtime's JIT needs.
+- [ ] **Landlock network rules and scopes: apply them, or stop scoring them.** The policy's TCP
+  bind and connect port allowlist (ABI v4) and its abstract-unix and signal scopes (ABI v6) add
+  3 + 2 + 2 to the strength score, and nothing applies them. The port fields are bare counts
+  (`network_tcp_bind_len`, `network_tcp_connect_len`) with no list behind them and no setter,
+  read only by the score and the merge: the shape the filesystem rules had before 3.11.3.
+  Applying them means a list and a setter, as `policy_landlock_add` gave the filesystem rules.
+
+### Later in 3.13.x
 
 - [ ] **Fetch the quote from the running guest: Gramine for SGX, the TD quote for TDX.** Needs
-  SGX or TDX hardware to verify on; the development machine is AMD. kavach's side of the hand-off is in place (`backend_attest_nonce`, `backend_attach_quote`),
-  and until the launchers use it they refuse a policy that requires attestation. What each
-  launcher lacks first:
+  SGX or TDX hardware to verify on; the development machine is AMD. kavach's side of the hand-off
+  is in place (`backend_attest_nonce`, `backend_attach_quote`), and until the launchers use it
+  they refuse a policy that requires attestation. What each launcher lacks first:
   - **SGX**: `backend_sgx.cyr` writes a manifest template and never renders it
     (`gramine-manifest`) or signs it (`gramine-sgx-sign`), so `gramine-sgx` has nothing to run.
     Then `sgx.remote_attestation = "dcap"`, and inside the enclave: write the nonce to
@@ -37,6 +68,10 @@ process backend handing its payload the config's stdin (CHANGELOG 3.13.1). Open:
     the check would route execs to a launch not shown to boot, so it waits for the firmware. The
     guest gets its quote through configfs-tsm and has to hand it out, over the serial console
     or vsock.
+  - **Takes along** the two launchers' capture, as in 3.13.2: stderr, the config's deadline and
+    stdin. The exit status to report is the payload's. For a TD it has to come out of the guest
+    with the quote, since QEMU's own status is not it; whether `gramine-sgx` passes the enclave's
+    through is to be checked on the hardware.
 - [ ] **The TDX RTMRs.** The allowlist pins MRTD, which is the TD's firmware; the kernel and its
   command line are measured into the RTMRs, which nothing checks yet. A nonce passed on the
   kernel command line would change a measurement on every exec.
@@ -48,6 +83,8 @@ process backend handing its payload the config's stdin (CHANGELOG 3.13.1). Open:
 
 - [ ] SEV-SNP report verification with the `snp_report_*` family (AMD ARK → ASK → VCEK).
 - [ ] SGX sealing against MRSIGNER + ISVSVN.
+- [ ] **Takes along** the SEV launcher's capture, as in 3.13.2, with the payload's exit status
+  brought out of the guest; QEMU's own status is not it.
 
 ## 3.15.x — Firecracker jailer
 
@@ -58,6 +95,8 @@ chroot, or proc/sys mounts.
 - [ ] Per-VM UID/GID drop, chroot into the VM root, and the proc/sys mounts.
 - [ ] vsock control-socket robustness: reconnect on `EAGAIN`, partial-frame retries.
 - [ ] Snapshot / restore over the API socket.
+- [ ] **Takes along** Firecracker's capture, as in 3.13.2, with the payload's exit status brought
+  out of the guest over the serial console or vsock; firecracker's own status is not it.
 
 ## 3.16.x — Agent Injection Defense L4, phase 1: schema and shadow mode
 
@@ -85,7 +124,8 @@ below. **Depends on** t-ron (L3) supplying the external-input-origin tag.
 
 The first step of [Foreign Platform Containers](#foreign-platform-containers): a VM backend behind
 the dispatch table, a Linux guest first, and an explicit filesystem-sharing policy (read-only by
-default, writes only with kavach approval).
+default, writes only with kavach approval). It is built on 3.13.2's capture from its first
+release, with the payload's exit status brought out of the guest as 3.14 and 3.15 do.
 
 ## 3.20.x — Scanner performance
 
@@ -97,36 +137,24 @@ default, writes only with kavach approval).
   `cstr_contains` fallback, so a drifted pattern list can only cost speed, never correctness. The
   existing scanner tests are the regression guard. Benchmark a large artifact before and after.
 - [ ] Re-measure the `secrets_*` rows, which lost 8–12% to the cyrius 6.6.5 / 6.6.6 codegen
-  (3.12.6), with the Aho-Corasick pass in, and profile the hot loops.
+  (3.12.6), with the Aho-Corasick pass in, and profile the hot loops. (3.13.1's A/B against
+  3.13.0 had them 4–5% faster on unchanged code, so settle it with an interleaved run.)
+
+## 4.0.0 — breaking: generic public names
+
+- [ ] **A prefix for the public names other first-party bundles also define.** Found by 3.12.9's
+  `scripts/check-symbols.py --tree ..`: `policy_new` (shakti); `finding_new`, `scan_result_new`
+  and `severity_name` (phylax); `which_exists` (nous); `audit_chain_len` (t-ron). Several enum
+  members are generic too (`KavachBackend`'s `PROCESS`, `WASM`, `OCI`, `NOOP`, …; `SandboxState`'s).
+  None of those repos is compiled next to kavach by any consumer today, and cyrius warns on a
+  duplicate `fn`, but a shared enum member would be silent (the 3.12.9 `STDIN` bug). A prefix
+  sweep breaks every consumer's call sites, hence a major version. **Decision first:** which names,
+  which prefix, and whether it moves ahead of 3.16 so the L4 surface is born prefixed.
 
 ---
 
 ## Beyond 3.x — unpinned
 
-- **Generic public names — a decision, then a breaking release.** Found by 3.12.9's
-  `scripts/check-symbols.py --tree ..`. kavach's public API still has names that other
-  first-party bundles also define: `policy_new` (shakti); `finding_new`, `scan_result_new` and
-  `severity_name` (phylax); `which_exists` (nous); `audit_chain_len` (t-ron). Several enum members
-  are also generic (`KavachBackend`'s `PROCESS`, `WASM`, `OCI`, `NOOP`, …; `SandboxState`'s).
-  None of those repos is compiled next to kavach by any consumer today, and cyrius warns on a
-  duplicate `fn`, but a shared enum member would be silent (the 3.12.9 `STDIN` bug). A prefix
-  sweep breaks every consumer's call sites, so it needs a version decision before it is pinned.
-- **Landlock network rules and scopes — apply them, or stop scoring them.** The policy fields
-  (TCP bind/connect port allowlist, ABI v4; abstract-unix and signal scopes, ABI v6) are stored
-  and add 3 + 2 + 2 to the strength score, but nothing applies them (`overview.md`'s modifier
-  table, rechecked at 3.12.9).
-- **Seccomp on the WASM backend — apply it to wasmtime, or stop scoring it there.** `score_backend`
-  adds 5 for `seccomp_enabled` on every backend, and the WASM backend applies no filter: since
-  3.13.1 it confines wasmtime with landlock only. WASI is the guest's syscall boundary, so a filter
-  on wasmtime would be defence in depth, and it would have to admit what wasmtime's JIT needs.
-- **`IOCTL_DEV` (landlock ABI v5).** kavach handles rights up to ABI v3, so ioctl on a device file
-  is not restricted by any kavach ruleset. Handling it means adding it to `_landlock_handled_access`
-  from v5 and to the file rights of a rule that should allow it (CHANGELOG 3.13.1, the file-rule
-  entry).
-- **`config_stdin` on the backends that shell out.** gVisor, OCI, SGX, SEV, TDX, Firecracker and
-  SY-agnos run through `kv_exec_capture`, which takes no stdin, so they ignore it. Related: an
-  unset `config_stdin` hands every payload kavach's own stdin, the 3.11.8 default kept for
-  interactive payloads; whether a sandbox should inherit it at all is open.
 - The rest of [Foreign Platform Containers](#foreign-platform-containers): Windows and macOS
   guests, display through aethersafta, audio through dhvani, clipboard, USB and GPU passthrough,
   phylax boundary scanning, libro audit, templates.
@@ -143,7 +171,8 @@ Each entry carries **what it means**, **who owns the upstream work**, and **trig
   `_spawn_enter_rootfs` returns -1 there, so an aarch64 sandbox gets no namespaces and no rootfs.
   kavach's x86-64 numbers for `unshare` (272) and `chroot` (161) run `kcmp` and `sethostname` on
   aarch64. The native numbers are not an option: cyrius renumbers 51 to `getsockname`, and a
-  native number under an aarch64 `#ifdef` is what ADR-007 and the cyrius guide rule out.
+  native number under an aarch64 `#ifdef` is what ADR-007 and the cyrius guide rule out. Still
+  blocked at the 6.6.6 pin: its stdlib names neither call.
 - **Who owns it.** Upstream: cyrius, filed as
   `cyrius/docs/development/issues/2026-09-25-kavach-unshare-chroot-unnamed-aarch64-chroot-unreachable.md`.
   It asks for `SYS_UNSHARE` and `SYS_CHROOT` in both Linux peers with `ESYSXLAT` rows `272→97` and
@@ -158,14 +187,12 @@ Each entry carries **what it means**, **who owns the upstream work**, and **trig
 - **Who owns it.** Upstream — the **stiva Cyrius port**, now live at **v3.0.0** (a synchronous single-node OCI runtime with a 19-verb `stiva` CLI: run/ps/stop/rm/inspect/images/…). What kavach's OCI backend needs, though, is stiva as a **runc-compatible OCI runtime** — the `stiva create/start/state/kill/delete` CLI over a bundle — which the port does **not** expose yet. The OCI state/bundle primitives (`parse_bundle` / `build_state` / `to_oci_status`) **are** ported (stiva `oci` module); the container lifecycle it drives (`start` = run the container) is the **stiva v3.0.x runtime-completion line** (blocking, over the ported sync core), with detached `run -d` specifically being stiva's v3.1 residue blocked on this issue's `sandbox_spawn`; a runc-compatible OCI-runtime CLI on top is not yet scoped in stiva's roadmap.
 - **Trigger condition.** stiva ships a stable OCI-runtime CLI (`stiva create/start/state/kill/delete` over a bundle — the runc drop-in) wrapping its v3.0.x lifecycle. Single-line addition to `_oci_runtime_path()` once it does. No upstream filing needed — stiva is a sibling repo, tracked in its own roadmap.
 
-
 ### Recorded negatives (don't chase these)
 
-- **No faster substring search in the stdlib** — `str_contains_cstr` is the same naive O(n·m) loop, so swapping `cstr_contains` for it buys clarity, not speed. The real fix (Aho-Corasick over the literal set) is already in for the code scanner and tracked above for data/phylax.
+- **No faster substring search in the stdlib** — `str_contains_cstr` is the same naive O(n·m) loop, so swapping `cstr_contains` for it buys clarity, not speed. The real fix (Aho-Corasick over the literal set) is already in for the code scanner and pinned for data/phylax in 3.20.
 - **No stdlib SHA-256** — kavach correctly stays on sigil for HMAC-SHA256.
 - **`overflow.cyr` operators panic** rather than returning the `-1` sentinel `alloc_checked` relies on — don't swap the existing size guards for them.
-- **Typed-`slice` sweep** — subscripting is read-only in cc 6.0.43 (no `_slice_idx_set_W`), dot-syntax isn't wired, and kavach's loops are already correctly bounded; adopt `slice` reads only opportunistically on untrusted-input paths (as done for `is_safe_text`/`is_safe_argument`), not as a blanket rewrite.
-
+- **Typed-`slice` sweep** — subscripting is read-only (no `_slice_idx_set_W`, still absent at the cc 6.6.6 pin), dot-syntax isn't wired, and kavach's loops are already correctly bounded; adopt `slice` reads only opportunistically on untrusted-input paths (as done for `is_safe_text`/`is_safe_argument`), not as a blanket rewrite.
 
 ---
 

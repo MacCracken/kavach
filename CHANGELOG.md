@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Docs — the roadmap after 3.13.1
+
+- Shipped work removed from `docs/development/roadmap.md`. The open fixes found in 3.13.1 and
+  before are pinned instead of left unpinned. **3.13.2**, next, gathers the ones that need no
+  special hardware: one capture for the gVisor, OCI and SY-agnos backends (the runtime's exit
+  status, its stderr, the config's deadline and stdin, none of which reach those runs today), a
+  decision on what an unset `config_stdin` means, `IOCTL_DEV`, seccomp on the WASM backend, and
+  the landlock network rules and scopes.
+- A backend's fixes now ride with the arc that rebuilds it: the SGX and TDX launchers in 3.13.x,
+  SEV in 3.14 and Firecracker in 3.15, and 3.19's VM backend is built on the same capture. The
+  generic public names are pinned as 4.0.0, a breaking release, with the decision it needs.
+- The claims that stay were rechecked against the source and the 6.6.6 stdlib: aarch64 namespaces
+  and rootfs are still blocked upstream, and the typed-`slice` negative still holds.
+
 ## [3.13.1] — 2026-09-25
 
 Landlock as documented, and a payload's stdin. A fix release: five defects, each measured before
