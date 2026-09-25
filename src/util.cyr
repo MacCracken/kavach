@@ -179,6 +179,138 @@ fn kv_execve(path, argv, envp): i64 {
     #endif
 }
 
+# ---- exec by pinned fd (ADR-005 §H4) --------------------------------------
+# A binary chosen by path — a runtime found with kavach_path_exists, or the
+# absolute program a command names — used to be exec'd by that path in the
+# child, so whatever sat at the path at exec time ran. kv_exec_pin opens the
+# binary in the PARENT, before fork, and the child execs that fd with
+# execveat(AT_EMPTY_PATH): what runs is the file that was open when kavach
+# committed to it.
+var KV_EXEC_BY_PATH = 0 - 1;   # pinning does not apply: exec by path
+var KV_EXEC_REFUSED = 0 - 2;   # an absolute path that could not be pinned: do not exec it
+# Set in the child only: the inherited-fd sweep in confine.cyr must spare it.
+var _kv_exec_keep_fd = 0 - 1;
+
+# Open `path` for exec by fd. Returns the fd, KV_EXEC_BY_PATH, or KV_EXEC_REFUSED.
+# By path: agnos (no execveat) and a relative path (the child's cwd decides it).
+# Refused, never downgraded to by-path: an absolute path that cannot be opened,
+# or is not a regular file with an execute bit — falling back to the path would
+# reopen the very window this closes. O_PATH (0x200000; the stdlib names none,
+# and x86_64 and aarch64 agree) needs no read permission, so exec-only binaries
+# pin too. O_CLOEXEC keeps the fd from outliving the exec; kv_exec_pinned
+# handles the one case that needs it to.
+fn kv_exec_pin(path) {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return KV_EXEC_BY_PATH;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    if (path == 0) { return KV_EXEC_REFUSED; }
+    if (load8(path) != 47) { return KV_EXEC_BY_PATH; }   # not '/'
+    var fd = file_open(path, 0x200000 | O_CLOEXEC, 0);
+    if (fd < 0) { return KV_EXEC_REFUSED; }
+    var st[144];
+    if (sys_fstat(fd, &st) < 0) {
+        sys_close(fd);
+        return KV_EXEC_REFUSED;
+    }
+    var mode = load32(&st + STAT_MODE);
+    # S_IFMT 0170000 / S_IFREG 0100000, and any of the 0111 execute bits.
+    if ((mode & 61440) != 32768) {
+        sys_close(fd);
+        return KV_EXEC_REFUSED;
+    }
+    if ((mode & 73) == 0) {
+        sys_close(fd);
+        return KV_EXEC_REFUSED;
+    }
+    return fd;
+    #endif
+}
+
+# Exec the pinned fd. In the CHILD, so only syscalls. Returns only on failure.
+# ENOENT on a valid fd means a #! script: the kernel hands the interpreter
+# /dev/fd/N, and a close-on-exec fd is gone by the time it opens that. A dup
+# has FD_CLOEXEC clear, so the retry lets the interpreter read the same file.
+fn kv_exec_pinned(fd, argv, envp): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0 - 1;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    var r = sys_execveat(fd, "", argv, envp, AT_EMPTY_PATH);
+    if (r == 0 - 2) {
+        var fd2 = syscall(SYS_DUP, fd);
+        if (fd2 >= 0) { r = sys_execveat(fd2, "", argv, envp, AT_EMPTY_PATH); }
+    }
+    return r;
+    #endif
+}
+
+# The one exec every kavach child makes: by pinned fd, by path, or — for a pin
+# that was refused — not at all. Returns only on failure; the caller exits 127.
+fn kv_exec_child(pin, path, argv, envp): i64 {
+    if (pin >= 0) { return kv_exec_pinned(pin, argv, envp); }
+    if (pin == KV_EXEC_BY_PATH) { return kv_execve(path, argv, envp); }
+    return 0 - 1;
+}
+
+# lib/process.cyr's exec_capture (cyrius 6.6.6) with the exec pinned: stdout
+# into `buf`, stderr to /dev/null, an empty environment, and the stdlib's own
+# parent-death guard, read deadline and reaping. The exec call is the only
+# difference; switch back if the stdlib grows an fd-exec variant. agnos keeps
+# the stdlib's: it has no fork, and its exec_capture is its own.
+fn kv_exec_capture(args, buf, buflen): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return exec_capture(args, buf, buflen);
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    var argc = vec_len(args);
+    if (argc < 1) { return 0 - 1; }
+    var cmd = vec_get(args, 0);
+    var argv = alloc((argc + 1) * 8);
+    var avi = 0;
+    while (avi < argc) {
+        store64(argv + avi * 8, vec_get(args, avi));
+        avi = avi + 1;
+    }
+    store64(argv + argc * 8, 0);
+    var envp = alloc(8);
+    store64(envp, 0);
+    var pin = kv_exec_pin(cmd);
+    var pipefd[16];
+    sys_pipe(&pipefd);
+    var rfd = load32(&pipefd);
+    var wfd = load32(&pipefd + 4);
+    var ppid = sys_getpid();
+    var pid = sys_fork();
+    if (pid < 0) {
+        sys_close(rfd);
+        sys_close(wfd);
+        if (pin >= 0) { sys_close(pin); }
+        return 0 - 1;
+    }
+    if (pid == 0) {
+        _proc_child_guard(ppid);
+        sys_close(rfd);
+        sys_dup2(wfd, 1);
+        sys_close(wfd);
+        var devnull = file_open("/dev/null", O_WRONLY, 0);
+        if (devnull >= 0) {
+            sys_dup2(devnull, 2);
+            sys_close(devnull);
+        }
+        kv_exec_child(pin, cmd, argv, envp);
+        sys_exit(127);
+    }
+    if (pin >= 0) { sys_close(pin); }
+    sys_close(wfd);
+    var total = _proc_read_pipe(rfd, buf, buflen, proc_timeout_ms());
+    sys_close(rfd);
+    var stbuf[4];
+    _proc_wait_deadline(pid, &stbuf, proc_timeout_ms());
+    return total;
+    #endif
+}
+
 fn kv_setsid(): i64 {
     #ifdef CYRIUS_TARGET_AGNOS
     return 0 - 1;

@@ -183,7 +183,7 @@ upstream-blocked on cyrius syscall wrappers — see the roadmap):
 **HMAC-SHA256 audit chain** (`src/audit.cyr`)
 - Every exec records `exec_begin` + `exec_complete` entries.
 - Each entry: `HMAC(key, "serial:event_type:payload:timestamp:prev_hmac")`.
-- File format: JSONL, one record per line, appended by `_audit_append` rather than the stdlib's `file_append_locked`. The `open(2)` creates the log at 0600. Under `LOCK_EX` it records the pre-append length, makes one `write`, and on a short write `ftruncate`s back to that length before unlocking. A refused record therefore leaves the log byte-for-byte as it was and never advances the chain head. The residual cases (a kill mid-`write`, agnos, `chattr +a`) are tracked in the roadmap.
+- File format: JSONL, one record per line, appended by `_audit_append` rather than the stdlib's `file_append_locked`. The `open(2)` creates the log at 0600. Under `LOCK_EX` it records the pre-append length, makes one `write`, and on a short write `ftruncate`s back to that length before unlocking. A refused record therefore leaves the log byte-for-byte as it was and never advances the chain head. Where the cut-back cannot run (a kill mid-`write`, agnos, `chattr +a`), the fragment stays, but the next record still starts on a line of its own: under the lock the append reads the log's last byte and puts a `\n` in front of the record when it is missing.
 - Tamper detection: `audit_entry_verify(entry, key, key_len)` recomputes HMAC; chain verification walks serials + `prev_hmac` linkage.
 - Crypto via [sigil](https://github.com/MacCracken/sigil) 3.12.18 (the toolchain snapshot's; see External dependencies). Constant-time compare is now the stdlib `ct` module (`ct_eq_bytes_lens`) — sigil retired its own `ct_eq` in the 3.x line.
 
@@ -274,21 +274,19 @@ Each backend is a plug into the dispatch table. To add `<name>`:
 
 ## Deferred surface (intentional)
 
-See [ADR-004](../adr/004-deferred-features.md) for rationale; [`development/roadmap.md`](../development/roadmap.md) carries the live v3.3 + Blocked queues with upstream-filing cross-links.
+See [ADR-004](../adr/004-deferred-features.md) for rationale; [`development/roadmap.md`](../development/roadmap.md) pins each open item to a release.
 
-What's still deferred at v3.4.0:
+What's still deferred at v3.12.7 (each row checked against the source; see the roadmap for the release each is pinned to):
 
 | Feature | Blocking dep | Trigger condition |
 |---------|--------------|-------------------|
-| **Landlock hooks** | A `sandbox_fork_exec(args, pre_exec_fn)` helper in kavach | **v3.5.0** — `sys_landlock_*` already in stdlib; we just need the post-fork hook point |
-| **Seccomp BPF filter install** | Upstream `sys_prctl` + `sys_seccomp` wrappers (filed: [cyrius issue](https://github.com/MacCracken/cyrius/blob/main/docs/development/issues/2026-05-10-kavach-sandbox-syscall-wrappers.md)) OR raw syscall in kavach | Either upstream wrappers ship OR kavach raw-syscalls them; needs the same fork-infra as Landlock |
-| **H4 binary-path TOCTOU** (ADR-005 §H4 residual) | Upstream `sys_execveat` wrapper (same filing) | Enhancement to a *closed* finding — H1-H3 already block dominant attack class |
-| **Firecracker jailer / vsock / snapshot** | Upstream `sys_setresuid` / `sys_setresgid` + robust unix-socket helpers (same filing) | Lower priority — microVM boundary already isolates without jailer |
-| **SGX / SEV / TDX attestation + sealing** | Upstream sigil attestation modules (filed: [sigil issue](https://github.com/MacCracken/sigil/blob/main/docs/development/issues/2026-05-10-kavach-sgx-sev-tdx-attestation-modules.md)) | sigil ships SGX/SEV/TDX quote-parser + cert-chain primitives |
-| **Stiva OCI backend** | stiva Cyrius port repo exists | Single-line addition to `_oci_runtime_path()` when stiva ships v1.0.0 |
-| **OCI backend cgroup integration** | None — populate `resources.linux.{memory,cpu,pids}` in `oci_spec.cyr` | **v3.3.0** (bundled with the fork-infra cut) |
+| **SGX / SEV-SNP / TDX attestation + sealing** | None upstream: sigil 3.12.18 ships `sgx_quote_verify_full`, `tdx_quote_verify_full` and the `snp_report_*` family | kavach-side work: fetch evidence per backend, verify, measurement allowlist, SGX sealing |
+| **Firecracker jailer / vsock / snapshot** | None upstream: the stdlib has `sys_setresuid` / `sys_setresgid` | kavach-side work; lower priority, since the microVM boundary already isolates |
+| **Stiva OCI backend** | stiva's runc-compatible OCI-runtime CLI | Single-line addition to `_oci_runtime_path()` once stiva ships it |
 | **async exec** | Cyrius async story still maturing | Synchronous fork+wait remains correct for sandbox-runtime semantics |
 | **Full regex in pattern matchers** | PCRE engine in Cyrius | hand-rolled literal-prefix + char-class matchers cover the v3.x surface |
+
+Shipped since the v3.4.0 version of this table: OCI spec resource limits (3.3.1), seccomp (3.9.0) and Landlock (3.11.1) in the exec child, and exec by pinned fd for the H4 TOCTOU (3.12.7).
 
 What was deferred in v3.0 but has since shipped: UUID v4 IDs, WARN-verdict secret redaction, OffenderTracker, sandbox integrity monitoring (all v3.0 closeout); `FileInjection.mode` honoring (v3.1.1); cgroups v2 + HTTP credential proxy (v3.2.0).
 

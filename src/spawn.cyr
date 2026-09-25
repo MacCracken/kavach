@@ -147,8 +147,13 @@ fn sandbox_spawn(sandbox, command, log_path) {
     if (cfg != 0) { spawn_wd = SandboxConfig_workdir(cfg); }
     var envp = kv_envp_from_vec(spawn_env);
 
+    # Pinned before fork (ADR-005 §H4); not with a rootfs, where the command
+    # must resolve inside it.
+    var pin = KV_EXEC_BY_PATH;
+    if (rootfs == 0) { pin = kv_exec_pin(vec_get(args, 0)); }
     var pid = kv_fork();
     if (pid < 0) {
+        if (pin >= 0) { sys_close(pin); }
         cgroup_teardown(cgroup_path);
         kavach_err_print(KAVACH_ERR_EXEC_FAILED, "fork failed");
         return 0;
@@ -163,6 +168,7 @@ fn sandbox_spawn(sandbox, command, log_path) {
         # rather than staring at one opaque number. 12x is chosen to sit below
         # 126/127, which the shell already reserves for "not executable" and
         # "not found".
+        _kv_exec_keep_fd = pin;
         kv_setsid();
         if (_spawn_redirect_stdio(log_path) != 0) { sys_exit(SPAWN_EXIT_STDIO); }
         # 1: sandbox_spawn's namespace contract is unchanged by 3.11.3 — it
@@ -172,11 +178,12 @@ fn sandbox_spawn(sandbox, command, log_path) {
         # parent (cfg is not touched after fork).
         confine_child_wd(policy, rootfs, cgroup_path, spawn_uid, spawn_gid, seccomp_info, 1,
           spawn_wd);
-        kv_execve(vec_get(args, 0), argv, envp);
+        kv_exec_child(pin, vec_get(args, 0), argv, envp);
         sys_exit(127);
     }
 
     # ── parent ──
+    if (pin >= 0) { sys_close(pin); }
     var sp = alloc(SPAWNED_PROCESS_SIZE);
     SpawnedProcess_set_pid(sp, pid);
     SpawnedProcess_set_alive(sp, 1);

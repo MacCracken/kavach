@@ -58,6 +58,23 @@ scope.
 | **L2** — Phylax false positives | Operational issue, not security. |
 | **L3** — Over-alloc in `json_escape` for clean ASCII | Perf, not security. |
 
+> **Resolved — H4, v3.12.7.** Every kavach child now execs by fd.
+> `kv_exec_pin` (`src/util.cyr`) opens the binary in the parent, before fork,
+> as an `O_PATH|O_CLOEXEC` fd, and checks that it is a regular file with an
+> execute bit. The child then runs `execveat(fd, "", argv, envp,
+> AT_EMPTY_PATH)` through `kv_exec_child`, so what runs is the file that was
+> open when kavach committed to it. This covers kavach's own four exec sites and
+> the nine runtime launches that went through the stdlib's `exec_capture`
+> (now `kv_exec_capture`). An absolute path that cannot be pinned is
+> **refused**, never downgraded to exec-by-path, because that would reopen the
+> window. Three cases exec by path: a relative path, which the child's cwd
+> decides; a child that enters a rootfs, where the path must resolve inside it;
+> and agnos, which has no `execveat`.
+>
+> One deliberate difference from the fix sketched above: no `O_NOFOLLOW`.
+> Many system binaries are symlinks (`/bin/sh` → `dash`), and the fd pins the
+> final file either way, which is what closes the swap. See CHANGELOG 3.12.7.
+
 ## Consequences
 
 **Positive**

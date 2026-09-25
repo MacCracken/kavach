@@ -1153,6 +1153,30 @@ fn test_audit_refused_append_leaves_no_torn_tail() {
     return 0;
 }
 
+# A fragment the rollback cannot remove — a writer killed inside its write,
+# agnos (no ftruncate), an append-only log — must not swallow the next record.
+# Plant one with no trailing newline, then append: the fragment keeps a line of
+# its own, byte for byte, and every record after it is whole.
+fn test_audit_append_starts_a_fresh_line_after_a_torn_tail() {
+    test_group("audit_append_fresh_line_after_torn_tail");
+    sha256_global_init();
+    var path = _t_unique_tmp_path("/tmp/kavach-frag-");
+    var frag = "{\"serial\":7,\"event_type\":\"torn";
+    file_write_all(path, frag, strlen(frag));
+
+    var c = audit_chain_open(path, "frag-key", 8);
+    assert(audit_chain_record(c, "after", "small") != 0, "the record is accepted");
+    var lines = 0;
+    assert_eq(_t_audit_log_whole_lines(path, &lines), 1, "every record after the fragment is whole");
+    assert_eq(lines, 3, "fragment, genesis and the record each on a line of their own");
+    var n = 0;
+    var buf = file_read_whole(path, &n);
+    assert_eq(memeq(buf, frag, strlen(frag)), 1, "the fragment is kept as it was");
+    assert_eq(load8(buf + strlen(frag)), 10, "and ends at the newline the append put in front of genesis");
+    kv_unlink(path);
+    return 0;
+}
+
 fn test_uuid_v4_distinct() {
     test_group("uuid_v4");
     # Four random u64s must all differ (collision probability ~ 2^-62).
@@ -3328,6 +3352,107 @@ fn test_oci_scratch_open_is_exclusive_and_truncating() {
     return 0;
 }
 
+# ── ADR-005 §H4: exec by pinned fd (3.12.7) ─────────────────────────────
+
+# fork, exec `path` through kv_exec_child with `pin`, return the exit code.
+fn _t_exec_status(pin, path) {
+    var argv[16];
+    store64(&argv, path);
+    store64(&argv + 8, 0);
+    var envp[8];
+    store64(&envp, 0);
+    var pid = kv_fork();
+    if (pid == 0) {
+        kv_exec_child(pin, path, &argv, &envp);
+        sys_exit(127);
+    }
+    var st[8];
+    store64(&st, 0);
+    kv_waitpid(pid, &st, 0);
+    return (load32(&st) >> 8) & 255;
+}
+
+# Copy `src` to `dst` at mode 0755 (a stand-in binary the test may swap).
+fn _t_copy_exec(src, dst) {
+    var n = 0;
+    var buf = file_read_whole(src, &n);
+    if (buf == 0) { return 0 - 1; }
+    if (file_write_all(dst, buf, n) != n) { return 0 - 1; }
+    sys_chmod(dst, 493);
+    return 0;
+}
+
+fn test_exec_pin_classifies_paths() {
+    test_group("exec_pin_classifies_paths");
+    assert_eq(kv_exec_pin("relative/prog"), KV_EXEC_BY_PATH, "a relative path is left to the child's cwd");
+    assert_eq(kv_exec_pin("/no/such/kavach/prog"), KV_EXEC_REFUSED, "a missing absolute path is refused, not downgraded");
+    assert_eq(kv_exec_pin("/tmp"), KV_EXEC_REFUSED, "a directory is refused");
+    var plain = _t_unique_tmp_path("/tmp/kavach-h4-plain-");
+    file_write_all(plain, "x", 1);
+    sys_chmod(plain, 420);
+    assert_eq(kv_exec_pin(plain), KV_EXEC_REFUSED, "a file with no execute bit is refused");
+    kv_unlink(plain);
+    var fd = kv_exec_pin("/bin/sh");
+    assert(fd >= 0, "an executable regular file pins");
+    if (fd >= 0) { sys_close(fd); }
+    return 0;
+}
+
+# The TOCTOU itself: pin a binary, swap another into its path, exec. The pinned
+# exec runs the ORIGINAL; the control exec by path runs the swapped-in file,
+# which proves the swap happened.
+fn test_exec_pin_survives_a_binary_swap() {
+    test_group("exec_pin_survives_a_binary_swap");
+    var path = _t_unique_tmp_path("/tmp/kavach-h4-bin-");
+    var next = _t_unique_tmp_path("/tmp/kavach-h4-next-");
+    assert_eq(_t_copy_exec("/bin/true", path), 0, "stand-in for the discovered binary (true)");
+    var pin = kv_exec_pin(path);
+    assert(pin >= 0, "pinned");
+    assert_eq(_t_copy_exec("/bin/false", next), 0, "replacement staged (false)");
+    assert_eq(sys_rename(next, path), 0, "replacement swapped into the path");
+    assert_eq(_t_exec_status(pin, path), 0, "the pinned exec runs the binary that was pinned");
+    assert_eq(_t_exec_status(KV_EXEC_BY_PATH, path), 1, "control: by path runs the swapped-in binary");
+    if (pin >= 0) { sys_close(pin); }
+    kv_unlink(path);
+    return 0;
+}
+
+# Same for a #! script, which takes the dup retry in kv_exec_pinned: the
+# interpreter must read the pinned file, not the one now at the path.
+fn test_exec_pin_survives_a_script_swap() {
+    test_group("exec_pin_survives_a_script_swap");
+    var path = _t_unique_tmp_path("/tmp/kavach-h4-sh-");
+    var next = _t_unique_tmp_path("/tmp/kavach-h4-shnext-");
+    file_write_all(path, "#!/bin/sh\nexit 3\n", 17);
+    sys_chmod(path, 493);
+    var pin = kv_exec_pin(path);
+    assert(pin >= 0, "script pinned");
+    file_write_all(next, "#!/bin/sh\nexit 4\n", 17);
+    sys_chmod(next, 493);
+    assert_eq(sys_rename(next, path), 0, "replacement script swapped in");
+    assert_eq(_t_exec_status(pin, path), 3, "the pinned script runs");
+    assert_eq(_t_exec_status(KV_EXEC_BY_PATH, path), 4, "control: by path runs the swapped-in script");
+    if (pin >= 0) { sys_close(pin); }
+    kv_unlink(path);
+    return 0;
+}
+
+# kv_exec_capture must still behave as the stdlib exec_capture it replaces.
+fn test_exec_capture_pinned_captures_stdout() {
+    test_group("exec_capture_pinned_captures_stdout");
+    var args = vec_new();
+    vec_push(args, "/bin/echo");
+    vec_push(args, "hello");
+    var buf = alloc(64);
+    var n = kv_exec_capture(args, buf, 64);
+    assert_eq(n, 6, "six bytes captured");
+    assert_eq(memeq(buf, "hello\n", 6), 1, "stdout captured");
+    var none = vec_new();
+    vec_push(none, "/no/such/kavach/prog");
+    assert_eq(kv_exec_capture(none, buf, 64), 0, "a refused pin runs nothing and captures nothing");
+    return 0;
+}
+
 fn test_oci_take_file_refuses_a_symlink() {
     test_group("oci_take_file_refuses_a_symlink");
     # O_NOFOLLOW is the ONLY guard on this read — there is no O_EXCL — so a symlink
@@ -4084,6 +4209,7 @@ fn main() {
     test_audit_chain_close_zeroes_key();
     test_audit_log_mode_0600();
     test_audit_refused_append_leaves_no_torn_tail();
+    test_audit_append_starts_a_fresh_line_after_a_torn_tail();
     test_uuid_v4_distinct();
     test_warn_verdict_redacts_stdout();
     test_warn_verdict_redact_disabled();
@@ -4137,6 +4263,10 @@ fn main() {
     test_oci_state_root_rejects_a_hostile_dir();
     test_oci_scratch_open_is_exclusive_and_truncating();
     test_oci_take_file_refuses_a_symlink();
+    test_exec_pin_classifies_paths();
+    test_exec_pin_survives_a_binary_swap();
+    test_exec_pin_survives_a_script_swap();
+    test_exec_capture_pinned_captures_stdout();
     test_oci_err_path_is_uid_scoped();
     test_landlock_handled_access_covers_the_abi();
     test_landlock_allowed_access_grants_within_the_path();

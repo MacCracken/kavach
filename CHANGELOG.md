@@ -7,6 +7,161 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.12.7] — 2026-09-24
+
+Closes the last open ADR-005 residual, H4, and keeps the audit log readable after a torn record.
+No API change; `kv_exec_pin`, `kv_exec_child` and `kv_exec_capture` are new.
+
+### Fixed — H4: a child execs the binary kavach pinned, not whatever is at the path (ADR-005 §H4)
+
+A binary chosen by path was exec'd by that path in the forked child. So a local attacker who could
+write to a directory on that path could swap the file between kavach committing to it and the
+exec. That applied to the runtimes found with `kavach_path_exists` (runc/crun, runsc, firecracker,
+qemu for SEV and TDX, gramine-sgx, wasmtime) and to the absolute program a command names. ADR-005
+recorded it as the one open residual, waiting on `execveat`. The stdlib now has `sys_execveat`, so
+it is closed here.
+
+- **Pinning.** `kv_exec_pin` (`src/util.cyr`) opens the binary in the parent, before fork, as an
+  `O_PATH|O_CLOEXEC` fd, and checks that it is a regular file with an execute bit. The child execs
+  that fd with `execveat(fd, "", argv, envp, AT_EMPTY_PATH)` through `kv_exec_child`.
+- **Refused, not downgraded.** An absolute path that cannot be pinned (missing, not a regular
+  file, no execute bit) is not exec'd at all, and the child exits 127 as a failed exec always did.
+  Falling back to the path would reopen the window.
+- **By path, deliberately**, in three cases:
+  - a relative path, which the child's working directory decides;
+  - a child that enters a rootfs, where the path must resolve inside it;
+  - agnos, which has no `execveat`.
+- **Scripts.** A `#!` file exec'd from a close-on-exec fd fails with `ENOENT`: the kernel hands
+  the interpreter `/dev/fd/N`, and the exec has already closed it. The child retries once through
+  a `dup` of the fd, which has close-on-exec clear, so the interpreter reads the pinned file.
+- **Coverage.**
+  - kavach's own four exec sites: the confined capture, `sandbox_spawn`, persistent guests, and
+    the OCI runtime run;
+  - the nine runtime launches that went through the stdlib's `exec_capture`. They now use
+    `kv_exec_capture`, a copy of the stdlib function (cyrius 6.6.6) that keeps its parent-death
+    guard, read deadline and reaping, and changes only the exec.
+- **The fd sweep.** The confinement sweep that closes inherited fds before exec spares the pinned
+  fd. That fd is close-on-exec, points at a file, and only exists when there is no rootfs, so it is
+  never the directory-outside-the-root that makes a chroot escapable.
+- **No `O_NOFOLLOW`**, unlike the fix ADR-005 sketched. Many system binaries are symlinks
+  (`/bin/sh` → `dash`), and the fd pins the final file either way.
+
+**Tests:**
+
+- `exec_pin_survives_a_binary_swap` pins a copy of `/bin/true`, renames a copy of `/bin/false`
+  over its path, and execs. The pinned exec exits 0. A control exec by path exits 1, which proves
+  the swap happened.
+- `exec_pin_survives_a_script_swap` does the same for a `#!` script (3 vs 4), and covers the dup
+  retry.
+- `exec_pin_classifies_paths` and `exec_capture_pinned_captures_stdout` cover the rest.
+
+Four mutants each fail:
+
+- exec by path in the pinned branch: both swap tests;
+- no script retry: 13 failures, including every OCI test with a script runtime;
+- a failed pin downgraded to by-path: the classification test;
+- a sweep that closes the pin: 14 failures.
+
+735 → **753** assertions.
+
+**Checked on aarch64** by cross-building with `cyrius build --aarch64` and running under
+`qemu-aarch64 -strace`. The trace shows the parent's `openat(…, O_RDONLY|O_CLOEXEC|O_PATH)`, the
+child's `execveat(3, "", …, AT_EMPTY_PATH)`, the `dup(3) = 4` retry for a script, and
+`execveat(4, …)`. The pinned script exits 3, while exec by path after the swap exits 4. `--agnos`
+builds clean.
+
+### Fixed — a torn fragment no longer swallows the next audit record
+
+`_audit_append` (3.12.6) cuts a short write back under the lock. Three cases still leave the partial
+record at the tail:
+
+- a writer killed inside its `write`;
+- agnos, where `sys_ftruncate` is `-ENOSYS`;
+- a log marked append-only (`chattr +a`), where `ftruncate` is `EPERM`.
+
+The next record was then appended straight onto the fragment, and the merged line parsed as
+neither.
+
+Under the lock, the append now reads the log's last byte. When it is not `\n`, the record goes out
+with one in front of it, in the same single write, so the existing cut-back removes both together.
+The fragment keeps a line of its own, as evidence, and every record after it is whole. Only a byte
+actually read decides, so a failed read adds nothing. The file offset is first put back at the end,
+because agnos writes at it. The log is now opened `O_RDWR` for the read.
+
+- **On aarch64**, under `qemu-aarch64 -strace`: a log planted with a 30-byte fragment gets
+  `lseek(3,29,SEEK_SET)`, a 1-byte `read`, then one 187-byte `write` (`\n` plus the 186-byte
+  genesis). The next append reads a `\n` and adds nothing. Both real records verify against the
+  chain HMAC; the fragment is the one line that does not.
+- **Cost:** two syscalls per append (`lseek` and a 1-byte `read`; the stdlib has no `pread`).
+  `audit_chain_record_to_tmpfs` went from 11.80 to 12.39 µs (+5.0%), medians of 5 interleaved,
+  CPU-pinned runs, with ranges just overlapping. No other row moved, and the binary size is
+  unchanged.
+- **Test:** `test_audit_append_starts_a_fresh_line_after_a_torn_tail` plants a fragment. It checks
+  that the fragment keeps its line byte for byte and that every record after it is whole, and it
+  fails with the guard removed. Prepending unconditionally fails three existing tests on the blank
+  lines it adds. 730 → **735** assertions.
+- `--agnos` builds clean. The agnos read path is compile-checked only.
+
+### Docs — the roadmap is a sequence of pinned releases
+
+The roadmap was checked item by item against `src/`, the 6.6.6 stdlib and sigil 3.12.18, then
+reorganized into pinned releases from 3.12.8 through 3.20.x.
+
+- **Removed as shipped** (their record is in this file): `sandbox_spawn` (3.9.0); seccomp (3.9.0)
+  and Landlock (3.11.1) in the exec child; OCI spec resource limits (3.3.1); the `[lib]` bundle
+  (3.6.0); and H4, in this release.
+- **3.12.8 — ABI repairs**, found while doing H4, all from reading the code against the cyrius
+  6.6.6 syscall tables:
+  - the seccomp filter never checks `seccomp_data.arch`, and its deny list is x86-64 numbers;
+  - rootfs entry calls x86-64 `chroot` (161) and namespace creation x86-64 `unshare` (272), with
+    no translation row for either on aarch64;
+  - `_oci_dir_is_ours` reads x86-64 `struct stat` offsets.
+- **3.12.9** is the P(-1) closeout.
+- **3.13–3.15** take the security items that were blocked on upstream until now: SGX / TDX
+  attestation, then SEV-SNP and SGX sealing, then the Firecracker jailer.
+- **3.16–3.18** are the three phases of the agent-injection-defense L4 gate.
+- **3.19** is the VM backend foundation, and **3.20** the scanner performance work.
+
+The stale v3.4.0 deferred-features table in `docs/architecture/overview.md` and the known-items
+list in `SECURITY.md` now match the source. ADR-005 records H4 as resolved.
+
+### Verified
+
+- fmt 0 drift; lint 0; `vet` clean; `check --with-deps src/lib.cyr` clean.
+- Builds: plain, `CYRIUS_DCE=1`, `--agnos` and `--aarch64`. All four have 0 undefined and the same
+  149 `duplicate fn` names; the aarch64 build has no raw-syscall warning. The DCE binary went from
+  3,199,392 to 3,203,520 B.
+- Tests **753/753**, samay **12/12**, fuzz ok.
+- `distlib --all --check` fresh; `deps --verify` 75/0.
+- Both bundles rebuilt into consumer projects on cyrius 6.6.6: a confine-only one, and one that
+  uses a real `[deps.kavach]`. Both build clean and run.
+
+### Performance
+
+`bench-history.csv` gains a **3.12.7** row. The comparison below is medians of 5 interleaved runs
+against a build of the 3.12.6 tag, pinned to one CPU.
+
+| bench | 3.12.6 | 3.12.7 | Δ |
+|---|---|---|---|
+| `process_exec_echo` | 2.86 ms | 2.85 ms | −0.4% (noise) |
+| `process_exec_confined` | 2.76 ms | 2.78 ms | +0.5% (noise) |
+| `audit_chain_record_to_tmpfs` | 11.67 µs | 12.42 µs | +6.4% (ranges overlap) |
+
+- **H4 costs nothing measurable.** It adds one `open` and one `fstat` per exec, against a fork
+  and exec of about 2.8 ms.
+- **The fresh-line guard** adds two syscalls per append: +6.4% pinned. Unpinned, it is +13.7%
+  with separate ranges (11.84 → 13.47 µs).
+- ⚠ **Unpinned, exec timings are bimodal for both builds** on this machine's CPU, where frequency
+  scaling is active. `process_exec_confined` spans 2.74–3.82 ms for 3.12.6 and 2.77–3.91 ms for
+  3.12.7, so an unpinned median moves with whichever mode the runs land in. The release row is a
+  single unpinned run, which is why its exec rows read +7% to +24% against the 3.12.6 row. The
+  pinned comparison above shows no change.
+- **Rows that moved with separate ranges, on paths this release does not touch:**
+  - the placement-sensitive rows 3.12.6 described: `ct_streq_64` +15.2%, `http_allowlist_hit`
+    −17.1%, `http_allowlist_miss` −19.6%, `http_path_extract` −3.1%;
+  - `code_scan_large_naive` −3.6% and `process_exec_large_output` −0.8%;
+  - `credential_env_vars_100` +4.3%, which has not been investigated.
+
 ## [3.12.6] — 2026-09-24
 
 Toolchain and dependency refresh; an audit-log append that is all or nothing; fixes for raw x86

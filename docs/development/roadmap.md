@@ -2,20 +2,159 @@
 
 > **Principle**: Security correctness first, then backend breadth, then performance. Every sandbox gets a number.
 
-This roadmap is **future-facing only** — shipped work lives in [CHANGELOG.md](../../CHANGELOG.md). Current release: v3.12.6 (toolchain + dependency refresh). Toolchain pin: cc `6.6.6`; sigil `3.12.18` (the snapshot's — see CLAUDE.md hazard 4), samay `1.1.5`, ai-hwaccel `2.4.0` (agnosys dropped at v3.5.0 — its security backends are internalized).
+This roadmap is **future-facing only** — shipped work lives in [CHANGELOG.md](../../CHANGELOG.md). Current release: **v3.12.7**. Toolchain pin: cc `6.6.6`; sigil `3.12.18` (the snapshot's — see CLAUDE.md hazard 4), samay `1.1.5`, ai-hwaccel `2.4.0` (agnosys dropped at v3.5.0 — its security backends are internalized).
+
+**Every release below is pinned.** Each names what ships in it, in the order the principle sets. To
+move an item, edit this file; do not let it drift. Every release runs the CLAUDE.md development
+loop: tests and benchmarks for new code, a `bench-history.csv` row labeled with the version, a
+CHANGELOG entry with measured numbers, and a `doc-health.md` refresh for every doc touched. Items
+with no dependency (for example the scanner work in 3.20) can be pulled forward; items with one say
+what it is.
 
 ---
 
-## Next
+## 3.12.8 — ABI repairs: seccomp, and the aarch64 x86-isms
 
-### 3.4.1 — extend Aho-Corasick to the data + phylax scanners
+These repairs come before any 3.13 feature work. 3.12.8 was to be the P(-1) closeout unless more
+repairs were needed before 3.13; these are those repairs, so the closeout moves to 3.12.9. Each
+was found at 3.12.7 by reading the code against the cyrius 6.6.6 syscall tables. The aarch64
+effects are inferred from those tables and have not yet been run on hardware.
 
-- [ ] **Data + phylax scanners → single Aho-Corasick pass.** The `src/aho_corasick.cyr` engine shipped in 3.4.0 is scanner-agnostic, but only the code scanner uses it. The compliance keyword groups in `_data_scan_*` (`scanning_data.cyr`) and the phylax checks in `backend_sy_agnos.cyr` still do per-pattern `cstr_contains`. Apply the same integration the code scanner uses: a cached automaton over each scanner's literal set, one pass over the lowered text into a hit table, group checks via a `_hit()` lookup with a `cstr_contains` fallback (so a drifted pattern list can only cost speed, never correctness). Behavior-preserving; the existing scanner tests are the regression guard. Lower volume than the code scanner, so lower urgency — but it closes out the audit's P2 finding across all three scanners. Benchmark on a large artifact to confirm the win before/after.
+- [ ] **The seccomp filter checks the architecture.** `security_create_exec_seccomp_filter` loads
+  only `seccomp_data.nr`, never `seccomp_data.arch`, and its deny list is x86-64 syscall numbers.
+  On aarch64 those numbers name other calls: x86-64 `ptrace` (101) is aarch64 `nanosleep`. So the
+  filter kills benign calls there and allows the real `ptrace`, `mount` and `unshare`. On x86-64,
+  a number-only filter is the pitfall seccomp(2) warns about, because the i386 (`int 0x80`) and
+  x32 syscall numbers differ; that has not been demonstrated here. Fix: load `arch`, KILL on
+  anything but the build's `AUDIT_ARCH_*` (and on the x32 bit on x86-64), and build the deny list
+  per architecture.
+- [ ] **Rootfs entry calls `chroot` by the right number.** `SYS_CHROOT_NR = 161` is x86-64
+  `chroot`, cyrius 6.6.6 has no translation row for it, and on aarch64 161 is `sethostname`.
+  Unprivileged, the call most likely fails and the child exits closed. As root it can succeed,
+  leaving the payload in the host's root filesystem. **The most severe item here.**
+- [ ] **Namespaces call `unshare` by the right number.** `SYS_UNSHARE = 272` is x86-64, with no
+  translation row; on aarch64, 272 is a different call. Namespace creation fails there — closed,
+  not open.
+- [ ] **`_oci_dir_is_ours` reads `st_mode` / `st_uid` at x86-64 `struct stat` offsets** (24 and
+  28); aarch64 has them at 16 and 24. Use the stdlib's `STAT_MODE` and a per-arch uid offset.
+- [ ] **Re-run the aarch64 suite.** Under qemu-user it fails 19 assertions in 9 fork/exec groups
+  and then segfaults, identically on 3.12.5 and 3.12.7. At least two groups trace to the items
+  above: exit 125 is `SPAWN_EXIT_SECCOMP`, and the OCI state-root check. Re-run after the fixes,
+  then confirm on real aarch64 hardware before claiming aarch64 exec support.
+- [ ] **Keep it from recurring.** Add an aarch64 cross-build and a qemu run of the confinement
+  tests to CI, so the next x86-only value fails a build instead of a release. File upstream: the
+  stdlib names neither `SYS_CHROOT` / `SYS_UNSHARE` nor `AUDIT_ARCH_*`, so kavach needs its own
+  per-arch table until it does.
 
-### Tech debt
+## 3.12.9 — P(-1) closeout
 
-- [ ] **aarch64: the fork/exec tests fail under qemu-user — undiagnosed.** Cross-built with `cyrius build --aarch64` and run under `qemu-aarch64`, the suite fails 19 assertions in 9 groups (`process_real_exec`, the `oci_run_*` set) and then segfaults, identically on 3.12.5/6.6.2 and 3.12.6/6.6.6. Not yet known whether qemu-user or kavach's aarch64 exec path is at fault; settle it on real aarch64 hardware before claiming aarch64 exec support.
-- [ ] **Audit chain: the torn records the rollback cannot reach.** A refused append is now cut back to its pre-append length under the lock (CHANGELOG 3.12.6). Three cases still leave the partial record at the tail: a process killed during the `write` itself; agnos, where `sys_ftruncate` is `-ENOSYS`; and a log marked append-only (`chattr +a`), where `ftruncate` is `EPERM`. The last two print "a torn record could not be removed from the log". In all three, the next record is appended onto the partial line. Fix: under the lock, if the log does not end in `\n`, start the record on a fresh line. That needs `O_RDWR` to read the last byte.
+The scaffold-hardening pass (CLAUDE.md, P(-1) steps 0–9), run to completion before feature work
+starts at 3.13.0.
+
+- [ ] Test and benchmark sweep; cleanliness (fmt, lint, vet); baseline benchmarks.
+- [ ] Audit (performance, memory, security, edge cases). Known items going in:
+  - `SpawnedProcess_pid` / `_set_pid` are defined in both `spawn.cyr` and `observability.cyr`,
+    a `duplicate fn` inside kavach itself;
+  - the remaining sigil overlaps (`syserr_*`, the `agnosys_*` helpers, `attestation_result_new`)
+    get the `<crate>_` prefix that ADR-006 describes;
+  - `file_restrict_mode` has had no caller since 3.12.6;
+  - `kv_sleep_ms` still passes the raw x86 number 35, correct only through cyrius's translation
+    row; use `sys_nanosleep`;
+  - agnos: sweep every `sys_*` call reachable there for the Linux argument order (3.12.6 fixed the
+    opens).
+- [ ] **Benchmark tooling.** `bench-history.sh` pins to one CPU: unpinned exec timings are bimodal
+  on the development host (3.12.7). A checked-in interleaved A/B script replaces the ad-hoc ones
+  used for 3.12.6 and 3.12.7.
+- [ ] **Documentation audit.** ADR-004 (several of its deferred features have shipped); guides and
+  examples against the current API; `doc-health.md`; the zugot recipe, still at 3.4.2.
+- [ ] Post-audit benchmarks against the 3.12.9 baseline.
+
+## 3.13.x — TEE attestation I: SGX and TDX quote verification (ADR-004 §6)
+
+**Unblocked:** sigil 3.12.18 ships `sgx_quote_parse`, `sgx_quote_verify_full`, `tdx_quote_parse`
+and `tdx_quote_verify_full`.
+
+- [ ] Fetch the quote from the running guest: Gramine for SGX, the TD quote for TDX.
+- [ ] Verify it with sigil against the vendor root, and report the result through
+  `src/attestation.cyr`, which today only stores the report's shape.
+- [ ] A measurement allowlist in `SandboxPolicy`; a mismatch fails the exec.
+- [ ] Accept and reject tests from sigil's test vectors.
+
+## 3.14.x — TEE attestation II: SEV-SNP, and SGX sealing
+
+- [ ] SEV-SNP report verification with the `snp_report_*` family (AMD ARK → ASK → VCEK).
+- [ ] SGX sealing against MRSIGNER + ISVSVN.
+
+## 3.15.x — Firecracker jailer
+
+**Unblocked:** the stdlib has `sys_setresuid` / `sys_setresgid`. Today `backend_firecracker.cyr`
+writes `config.json` and runs `firecracker --no-api --config-file`, with no per-VM UID/GID drop,
+chroot, or proc/sys mounts.
+
+- [ ] Per-VM UID/GID drop, chroot into the VM root, and the proc/sys mounts.
+- [ ] vsock control-socket robustness: reconnect on `EAGAIN`, partial-frame retries.
+- [ ] Snapshot / restore over the API socket.
+
+## 3.16.x — Agent Injection Defense L4, phase 1: schema and shadow mode
+
+Design reference: [Agent Injection Defense](#agent-injection-defense--irreversible-action-gating-post-closed-beta)
+below. **Depends on** t-ron (L3) supplying the external-input-origin tag.
+
+- [ ] The `irreversible` capability flag, with its default set.
+- [ ] The external-input-origin tag from t-ron as the gate input.
+- [ ] Shadow mode: log what would be blocked, enforce nothing.
+- [ ] **Decision:** the confirmation primitive (terminal-typed phrase, hardware key, or
+  out-of-band). 3.17 needs it.
+
+## 3.17.x — L4 phase 2: confirmation tokens and audit-only mode
+
+- [ ] Token scope: single use, bound to the action signature, time-limited (default ≤ 30 s).
+- [ ] A token the LLM cannot synthesize, per the 3.16 decision, with the agnoshi terminal flow.
+- [ ] Audit-only mode: annotate decisions, allow.
+
+## 3.18.x — L4 phase 3: enforce
+
+- [ ] Enforce mode, with per-deployment mode selection.
+- [ ] Hardware-key backend, optional, for higher-assurance deployments.
+
+## 3.19.x — VM backend foundation (QEMU/KVM)
+
+The first step of [Foreign Platform Containers](#foreign-platform-containers): a VM backend behind
+the dispatch table, a Linux guest first, and an explicit filesystem-sharing policy (read-only by
+default, writes only with kavach approval).
+
+## 3.20.x — Scanner performance
+
+- [ ] **Data + phylax scanners → single Aho-Corasick pass.** `src/aho_corasick.cyr` is
+  scanner-agnostic, but only the code scanner uses it. `_data_scan_*` (`scanning_data.cyr`, 30
+  `cstr_contains` calls) and the phylax checks in `backend_sy_agnos.cyr` (14) still scan once per
+  pattern. Apply the code scanner's integration: a cached automaton over each scanner's literal set,
+  one pass over the lowered text into a hit table, and group checks through a `_hit()` lookup with a
+  `cstr_contains` fallback, so a drifted pattern list can only cost speed, never correctness. The
+  existing scanner tests are the regression guard. Benchmark a large artifact before and after.
+- [ ] Re-measure the `secrets_*` rows, which lost 8–12% to the cyrius 6.6.5 / 6.6.6 codegen
+  (3.12.6), with the Aho-Corasick pass in, and profile the hot loops.
+
+---
+
+## Beyond 3.x — unpinned
+
+- The rest of [Foreign Platform Containers](#foreign-platform-containers): Windows and macOS
+  guests, display through aethersafta, audio through dhvani, clipboard, USB and GPU passthrough,
+  phylax boundary scanning, libro audit, templates.
+- [Advanced Isolation](#advanced-isolation), [Cross-Platform Backend Porting](#cross-platform-backend-porting),
+  [Polymorphic Defense Integration](#polymorphic-defense-integration) (waits on Cyrius Phase 13).
+
+### Blocked — awaiting upstream
+
+Each entry carries **what it means**, **who owns the upstream work**, and **trigger condition**.
+
+### Stiva OCI backend
+
+- **What it means.** Today `backend_oci.cyr::_oci_runtime_path()` returns the first of `runc` / `crun` found in PATH. ADR-004 §7 plans to prepend stiva when available, so the kavach OCI backend transparently uses stiva's hardened OCI runtime instead of upstream runc.
+- **Who owns it.** Upstream — the **stiva Cyrius port**, now live at **v3.0.0** (a synchronous single-node OCI runtime with a 19-verb `stiva` CLI: run/ps/stop/rm/inspect/images/…). What kavach's OCI backend needs, though, is stiva as a **runc-compatible OCI runtime** — the `stiva create/start/state/kill/delete` CLI over a bundle — which the port does **not** expose yet. The OCI state/bundle primitives (`parse_bundle` / `build_state` / `to_oci_status`) **are** ported (stiva `oci` module); the container lifecycle it drives (`start` = run the container) is the **stiva v3.0.x runtime-completion line** (blocking, over the ported sync core), with detached `run -d` specifically being stiva's v3.1 residue blocked on this issue's `sandbox_spawn`; a runc-compatible OCI-runtime CLI on top is not yet scoped in stiva's roadmap.
+- **Trigger condition.** stiva ships a stable OCI-runtime CLI (`stiva create/start/state/kill/delete` over a bundle — the runc drop-in) wrapping its v3.0.x lifecycle. Single-line addition to `_oci_runtime_path()` once it does. No upstream filing needed — stiva is a sibling repo, tracked in its own roadmap.
+
 
 ### Recorded negatives (don't chase these)
 
@@ -24,110 +163,12 @@ This roadmap is **future-facing only** — shipped work lives in [CHANGELOG.md](
 - **`overflow.cyr` operators panic** rather than returning the `-1` sentinel `alloc_checked` relies on — don't swap the existing size guards for them.
 - **Typed-`slice` sweep** — subscripting is read-only in cc 6.0.43 (no `_slice_idx_set_W`), dot-syntax isn't wired, and kavach's loops are already correctly bounded; adopt `slice` reads only opportunistically on untrusted-input paths (as done for `is_safe_text`/`is_safe_argument`), not as a blanket rewrite.
 
----
-
-## v3.5.0 — Landlock + fork-infra + OCI cgroups (feature cut)
-
-The next *capability* cut (vs the 3.3.x/3.4.x hardening + perf work). These group around a single shared piece of infrastructure — a `sandbox_fork_exec(args, pre_exec_fn)` helper — and were deferred through 3.3.0 → 3.4.0 as those slots went to the toolchain jump and the AC scanner. Re-target as the next feature minor.
-
-| Feature | What it adds | Where it lands |
-|---------|--------------|----------------|
-| **`sandbox_fork_exec(args, pre_exec_fn)`** | Custom fork+exec helper: `sys_fork()` → in child, run async-signal-safe `pre_exec_fn` callback (landlock install, cgroup re-join when exact accounting matters, future seccomp filter), then `sys_execve`. Replaces the shell-prepend trick with a tight, no-shell-dependency path. The shared infra for landlock + future seccomp. | New helper in `src/util.cyr` or new `src/fork_exec.cyr`. |
-| **Landlock hooks** | Filesystem and network sandboxing via the Linux Landlock LSM — ABI v4 (TCP port restrictions) + v6 (scoping). Adds the second hardening layer to `policy_strict()` alongside the existing process-scope guards. | New `src/landlock.cyr` (struct LandlockRuleset, builder fns) + post-fork hook in `src/backend_process.cyr`. Uses `sys_landlock_create_ruleset` / `sys_landlock_add_rule` / `sys_landlock_restrict_self` from stdlib `syscalls_x86_64_linux.cyr` L614-630 (and the aarch64 peer L665-675). Needs the fork-infra above to install the ruleset post-fork in the child. |
-| **OCI backend cgroup integration** | Populate `resources.linux.{memory,cpu,pids}` in the OCI runtime spec so `runc` / `crun` set up cgroups directly instead of relying on kavach-managed cgroupfs writes. Independent of the fork-infra; bundled here to keep the OCI-cgroup story coherent. | [`src/oci_spec.cyr`](../../src/oci_spec.cyr) — extend the JSON template. |
 
 ---
 
-## v3.8.0 — detached policy-threaded spawn (`sandbox_spawn`)
+# Design reference
 
-**Requested by the stiva Cyrius port (its v3.1 blocked residue — detached `run -d`) — the one kavach-side blocker for a
-properly-isolated `stiva run -d`.** stiva's synchronous `run` already gets full policy via
-`sandbox_exec`; a detached `run -d` has no policy-applying spawn today, so it can't ship without
-silently dropping isolation. `persistent_spawn` is raw fork+exec with **no** policy, and
-`SpawnedProcess` is an inert `{pid, backend, started_at}` record with no wait/kill — so this cut
-adds a **detached twin of `sandbox_exec`** plus the process handle's lifecycle ops. A full,
-code-grounded draft (4 files + tests + 5 design decisions) exists in the stiva port planning;
-summarized here.
-
-**Shares the v3.5.0 fork-infra.** The spawn child body (dup2 stdio → log fd, `close(3..)`,
-`PR_SET_NO_NEW_PRIVS`, and later landlock/seccomp) is exactly a `pre_exec_fn`, so build
-`process_spawn`'s child on `sandbox_fork_exec(args, pre_exec_fn)` (v3.5.0 above) in a **detached**
-flavor (no `waitpid`). Interim if the fork-infra isn't landed yet: hand-roll the fork/exec
-(mirroring `persistent_spawn`) and refactor onto `sandbox_fork_exec` when it arrives. When the
-Seccomp-hooks blocker (below) clears, the same shared `pre_exec_fn` hardens `exec` **and** `spawn`
-identically — no drift.
-
-| Item | What it adds | Where |
-|------|--------------|-------|
-| **spawn vtable slot** | `backend_register_spawn` + `backend_dispatch_spawn(sandbox, command, log_fd)` using the free `reserved` slot @24 of the 32-byte backend table; returns 0 for non-spawnable backends (noop/wasm) → caller falls back to `exec` (the existing `SpawnedProcess` doc contract). | [`src/backend_dispatch.cyr`](../../src/backend_dispatch.cyr) |
-| **`process_spawn(sandbox, command, log_fd)`** | The heart: same policy as `process_exec` (control-char guard + runtime guard + cgroup limits) but fork+exec's **detached** — child `dup2`s `log_fd`→1/2, `/dev/null`→0, `close(3..)` [CVE-2024-21626], `PR_SET_NO_NEW_PRIVS`, `execve`; parent returns a `SpawnedProcess`. Cgroup is torn down at **reap**, not after fork (the daemon lives in it). Register via `backend_register_spawn(Backend.PROCESS, …)`; oci/gvisor/firecracker get their own `*_spawn` later. | [`src/backend_process.cyr`](../../src/backend_process.cyr) |
-| **`sandbox_spawn(sandbox, command, log_fd)`** | Entry point / twin of `sandbox_exec`: verify `RUNNING` → `backend_dispatch_spawn` → live `SpawnedProcess` (0 → caller falls back to `exec`). No externalization gate at spawn time (a daemon's output is scanned as the log is read). | [`src/sandbox_exec.cyr`](../../src/sandbox_exec.cyr) |
-| **`SpawnedProcess` lifecycle** | Add a `cgroup` field (24→32 bytes) for reap-time teardown; add `spawned_wait` (block → `ExecResult`), `spawned_try_wait` (`WNOHANG` → exit code \| still-running sentinel), `spawned_kill(grace_ms)` (SIGTERM → poll ≤ grace → SIGKILL → reap). | [`src/observability.cyr`](../../src/observability.cyr) |
-
-**Design decisions (from the draft, open for sign-off):** (1) policy level = **parity with
-`sandbox_exec` today** (guard + cgroups; seccomp/landlock arrive together with the fork-infra +
-the Seccomp-hooks unblock, applied to both via the shared `pre_exec_fn`); (2) the spawn child adds
-`close(3..)` + NO_NEW_PRIVS — slightly **more** than exec's current child, justified because a
-daemon outlives the parent (candidate to backport to exec); (3) cgroup teardown at **reap** via
-the new struct field (alternative: hang it on the `Sandbox` and free it in `sandbox_destroy`);
-(4) stdio → a **caller-provided `log_fd`** (this is what lets stiva's `logs -f` work with no
-streaming machinery — the daemon writes its log directly).
-
-**Tests:** mostly no-priv/deterministic — `sandbox_spawn` on a not-RUNNING sandbox → 0; spawn
-`/bin/echo` with a temp `log_fd` → pid > 0, `spawned_wait` exit 0, the log file holds the output
-(proves dup2-to-log); guard-reject never forks; an fd-leak assertion for `close(3..)`. Gated
-rootful test: a `pids.max=1` policy caps a fork bomb and the cgroup dir is gone after reap.
-
-**Consumer payoff:** stiva `spawn_container` becomes ~10 lines (`build_sandbox` → `sandbox_spawn`
-→ `DaemonHandle{sp, sandbox}`), `DaemonHandle.wait/try_wait/kill` wrap `spawned_*`, and `run -d`
-stops printing "deferred to v3.1". **Do not ship a half-isolated interim over `persistent_spawn`**
-— it threads no policy and would be strictly less isolated than the sync `run`.
-
----
-
-## Open questions
-
-- [ ] **`[lib]` profile + `dist/kavach.cyr` bundle.** kavach is binary-only today and no consumer (SY / stiva / kiran / AgnosAI / hoosh / bote / aethersafta) embeds it at source level. Open the profile when the first consumer asks — adding a bundle pre-demand creates a maintenance commitment with no current consumer benefit.
-
----
-
-## Blocked — awaiting upstream
-
-Each row carries **what it means** (the concrete kavach-side surface that gates on it), **who owns the upstream work**, and **trigger condition** (what has to ship for kavach to unblock).
-
-> Upstream filings (P1, with severity-rationale sections inviting the maintainer to re-rate): one **cyrius** issue covers the six sandbox-runtime syscall wrappers (prctl / seccomp / setresuid / setresgid / execveat / fchmod) as a coordinated batch; one **sigil** issue covers the SGX/SEV/TDX quote-parser + cert-chain primitives. Re-run the unblock verify pass whenever the cyrius pin moves or sigil ships new surface — most recently the cc 6.0 / sigil 3.5.9 jump, against which the SGX/SEV/TDX verify should be re-checked.
-
-### Seccomp hooks
-
-- **What it means.** kavach calls `prctl(PR_SET_NO_NEW_PRIVS, 1, ...)` + `seccomp(SECCOMP_SET_MODE_FILTER, 0, &bpf_prog)` post-fork in the child between `fork()` and `execve()`. The BPF program filters syscalls per `SandboxPolicy.seccomp_profile` ("strict" / "basic" / off). Today `policy_strict()` stores the profile but the backend can't install it — the runtime guards in `scanning_runtime.cyr` are a poor substitute that scan the command string rather than block syscalls.
-- **Who owns it.** Upstream Cyrius — `sys_prctl(option, arg2, arg3, arg4, arg5)` and `sys_seccomp(op, flags, args)` wrappers in `syscalls_x86_64_linux.cyr` (and the aarch64 peer). Async-signal-safe semantics are critical because the call sites are post-fork. Filed upstream: [`cyrius/docs/development/issues/2026-05-10-kavach-sandbox-syscall-wrappers.md`](https://github.com/MacCracken/cyrius/blob/main/docs/development/issues/2026-05-10-kavach-sandbox-syscall-wrappers.md).
-- **Trigger condition.** Either (a) upstream lands the two wrappers, or (b) kavach adds raw `syscall(157, ...)` (SYS_PRCTL) and `syscall(317, ...)` (SYS_SECCOMP) in a `src/seccomp.cyr` module — same pattern we already use for SYS_FCHMOD in `file_write_secure_modal()`. Option (b) is do-able now if appetite exists; the only reason not to is that the BPF-program builder is non-trivial (~700 lines in the rust-old port).
-
-### Firecracker jailer / vsock / snapshot
-
-- **What it means.** Today `backend_firecracker.cyr` writes a `config.json` and spawns `firecracker --no-api --config-file`. The Firecracker jailer (drops to a per-VM UID/GID via `setresuid` / `setresgid`, chroots into the VM rootfs, mounts proc/sys) isn't wired; nor are vsock control-socket robustness (reconnect on EAGAIN, partial-frame retries) or snapshot/restore (`vmm.snapshot.create` / `vmm.snapshot.load` over the api socket).
-- **Who owns it.** Upstream Cyrius — `sys_setresuid` / `sys_setresgid` wrappers, plus more-robust unix-socket helpers in `net.cyr` (today's surface is fine for one-shot connect/send/recv but doesn't deal well with backpressure on the FC api socket). The setresuid/setresgid pair is part of the same coordinated cyrius filing as seccomp.
-- **Trigger condition.** Same pattern as seccomp — wait for upstream wrappers, or do raw `syscall(117, ...)` / `syscall(119, ...)` here. Lower priority than seccomp because Firecracker without the jailer is still useful (the microVM boundary is the primary isolation).
-
-### H4 binary-path TOCTOU (ADR-005 §H4 residual)
-
-- **What it means.** The hardening pass closed argument-smuggling via control chars in v3.0; the residual H4 finding is that between `which()` resolving the binary path and `execve()` opening it, an attacker who can write to a searched path could swap the binary. Closure requires `execveat(O_PATH | O_NOFOLLOW fd, ...)` with the path resolved into an fd once at `which()` time and held until exec.
-- **Who owns it.** Upstream Cyrius — `sys_execveat(dirfd, pathname, argv, envp, flags)` wrapper, plus possibly an fd-cache helper since the fd has to survive the fork boundary into the child's pre_exec. Part of the same coordinated cyrius filing.
-- **Trigger condition.** `sys_execveat` ships, OR kavach raw-syscalls SYS_EXECVEAT = 322 in `backend_process.cyr`. This is an enhancement to a *closed* finding — the H1-H3 fixes already prevent the dominant attack class.
-
-### SGX / SEV / TDX attestation + sealing
-
-- **What it means.** `backend_sgx.cyr` / `backend_sev.cyr` / `backend_tdx.cyr` build the runtime today (Gramine manifest for SGX; qemu + SEV-SNP or TDX guest object for the others), but **none fetch or verify the guest's attestation quote.** ADR-004 §6 calls for parsing the quote (SGX EAR / SEV-SNP VCEK chain / TDX TD-quote), validating the cert chain (Intel IAS or DCAP for SGX; AMD ARK→ASK→VCEK for SEV-SNP), checking measurements against an allowlist, and (SGX-only) sealing keys against MRSIGNER + ISVSVN. Today `src/attestation.cyr` stores the report shape (`SgxAttestationReport`) but the verifier doesn't exist.
-- **Who owns it.** Upstream sigil — needs `sgx.cyr` + `sev_snp.cyr` + `tdx.cyr` (quote parsers + verifiers composing against existing sha256/hmac/ct), plus ECDSA P-256 (P-384 for some TDX paths) and minimal X.509 cert-chain primitives. sigil has the crypto kernel but no TEE-specific quote-format surface. Filed upstream: [`sigil/docs/development/issues/2026-05-10-kavach-sgx-sev-tdx-attestation-modules.md`](https://github.com/MacCracken/sigil/blob/main/docs/development/issues/2026-05-10-kavach-sgx-sev-tdx-attestation-modules.md).
-- **Trigger condition.** sigil ships the TEE-attestation module set. Re-check against the current sigil 3.5.9 surface.
-
-### Stiva OCI backend
-
-- **What it means.** Today `backend_oci.cyr::_oci_runtime_path()` returns the first of `runc` / `crun` found in PATH. ADR-004 §7 plans to prepend stiva when available, so the kavach OCI backend transparently uses stiva's hardened OCI runtime instead of upstream runc.
-- **Who owns it.** Upstream — the **stiva Cyrius port**, now live at **v3.0.0** (a synchronous single-node OCI runtime with a 19-verb `stiva` CLI: run/ps/stop/rm/inspect/images/…). What kavach's OCI backend needs, though, is stiva as a **runc-compatible OCI runtime** — the `stiva create/start/state/kill/delete` CLI over a bundle — which the port does **not** expose yet. The OCI state/bundle primitives (`parse_bundle` / `build_state` / `to_oci_status`) **are** ported (stiva `oci` module); the container lifecycle it drives (`start` = run the container) is the **stiva v3.0.x runtime-completion line** (blocking, over the ported sync core), with detached `run -d` specifically being stiva's v3.1 residue blocked on this issue's `sandbox_spawn`; a runc-compatible OCI-runtime CLI on top is not yet scoped in stiva's roadmap.
-- **Trigger condition.** stiva ships a stable OCI-runtime CLI (`stiva create/start/state/kill/delete` over a bundle — the runc drop-in) wrapping its v3.0.x lifecycle. Single-line addition to `_oci_runtime_path()` once it does. No upstream filing needed — stiva is a sibling repo, tracked in its own roadmap.
-
----
+The sections below are the long-horizon design the pinned releases draw from.
 
 ## Agent Injection Defense — Irreversible-Action Gating (post-closed-beta)
 

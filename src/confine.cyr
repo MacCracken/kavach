@@ -156,11 +156,14 @@ fn _spawn_enter_workdir(workdir) {
 }
 
 # Close every descriptor from `from` up to SPAWN_MAX_FD. Errors are expected
-# and ignored — most of the range is simply not open.
+# and ignored — most of the range is simply not open. The one fd spared is the
+# pinned binary the child is about to exec (kv_exec_pin, util.cyr). It is a
+# close-on-exec fd to a FILE, and it only exists when there is no rootfs, so it
+# is never the directory-outside-the-root that makes a chroot escapable.
 fn _spawn_close_inherited(from) {
     var fd = from;
     while (fd < SPAWN_MAX_FD) {
-        sys_close(fd);
+        if (fd != _kv_exec_keep_fd) { sys_close(fd); }
         fd = fd + 1;
     }
     return 0;
@@ -515,13 +518,19 @@ fn confine_capture_input_env_wd(args, policy, rootfs, cgroup_path, seccomp_info,
         in_rfd = load32(&inpipe);
         in_wfd = load32(&inpipe + 4);
     }
+    # Pinned before fork, so the child execs the binary kavach committed to
+    # (ADR-005 §H4). Not with a rootfs: there the path must resolve inside it.
+    var pin = KV_EXEC_BY_PATH;
+    if (rootfs == 0) { pin = kv_exec_pin(vec_get(args, 0)); }
     var pid = kv_fork();
     if (pid < 0) {
         sys_close(rfd); sys_close(wfd); sys_close(erfd); sys_close(ewfd);
         if (in_rfd >= 0) { sys_close(in_rfd); sys_close(in_wfd); }
+        if (pin >= 0) { sys_close(pin); }
         return 0 - 1;
     }
     if (pid == 0) {
+        _kv_exec_keep_fd = pin;
         sys_close(rfd);
         sys_close(erfd);
         if (in_rfd >= 0) {
@@ -544,11 +553,12 @@ fn confine_capture_input_env_wd(args, policy, rootfs, cgroup_path, seccomp_info,
         }
         # After confinement, so the path resolves inside the rootfs when there is one.
         if (_spawn_enter_workdir(workdir) != 0) { sys_exit(SPAWN_EXIT_WORKDIR); }
-        kv_execve(vec_get(args, 0), argv, envp);
+        kv_exec_child(pin, vec_get(args, 0), argv, envp);
         # execve failed — 127 is the shell's "command not found", and it is
         # visible to the caller instead of being swallowed into a success.
         sys_exit(127);
     }
+    if (pin >= 0) { sys_close(pin); }
     sys_close(wfd);
     sys_close(ewfd);
 

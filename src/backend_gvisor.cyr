@@ -20,7 +20,7 @@ fn _gvisor_run(runsc, bundle, container_id, network, out_buf, out_cap) {
     vec_push(args, "--bundle");
     vec_push(args, bundle);
     vec_push(args, container_id);
-    return exec_capture(args, out_buf, out_cap);
+    return kv_exec_capture(args, out_buf, out_cap);
 }
 
 fn _gvisor_delete(runsc, container_id) {
@@ -30,7 +30,7 @@ fn _gvisor_delete(runsc, container_id) {
     vec_push(args, "--force");
     vec_push(args, container_id);
     var sink[32];
-    exec_capture(args, &sink, 32);
+    kv_exec_capture(args, &sink, 32);
     return 0;
 }
 

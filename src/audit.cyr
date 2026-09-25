@@ -179,8 +179,17 @@ fn _entry_to_jsonl(entry) {
 # and the default action kills the process before any rollback runs (measured:
 # exit 153, torn tail left). A write that stops short of the limit raises
 # nothing.
+#
+# A record also starts on a line of its own. The rollback cannot remove every
+# torn record: a writer killed inside its write, agnos (sys_ftruncate is
+# -ENOSYS) and an append-only log (chattr +a) all leave one at the tail, and a
+# record appended straight onto it would merge into a line that parses as
+# neither. So under the lock, when the log does not end in "\n", the record
+# goes out with one in front of it, in the same single write. The fragment
+# keeps a line of its own. Only a byte actually read decides: a failed read
+# adds nothing.
 fn _audit_append(path, line, len) {
-    var fd = file_open(path, O_WRONLY | O_CREAT | O_APPEND, 384);   # 0600
+    var fd = file_open(path, O_RDWR | O_CREAT | O_APPEND, 384);   # 0600; RDWR reads the last byte
     if (fd < 0) { return fd; }
     #ifndef CYRIUS_TARGET_AGNOS
     # Best effort, as the per-append chmod it replaces was: a log an older
@@ -199,8 +208,27 @@ fn _audit_append(path, line, len) {
     # The pre-append length, and the append offset on agnos (its kernel does
     # not honour O_APPEND yet). Negative on a pipe or tty: nothing to cut back.
     var base = xlseek(fd, 0, 2);
-    var n = file_write(fd, line, len);
-    if (n != len) {
+    var out = line;
+    var olen = len;
+    if (base > 0) {
+        var last[8];
+        var got = 0;
+        if (xlseek(fd, base - 1, 0) == base - 1) { got = file_read(fd, &last, 1); }
+        if (got != 1) {
+            # Put the offset back at the end: agnos writes at it, and a failed
+            # read must not leave this record over the log's last byte.
+            xlseek(fd, base, 0);
+        }
+        elif (load8(&last) != 10) {
+            out = alloc(len + 1);
+            store8(out, 10);
+            memcpy(out + 1, line, len);
+            olen = len + 1;
+        }
+    }
+    var n = file_write(fd, out, olen);
+    if (n == olen) { n = len; }
+    else {
         if (n > 0) {
             var cut = 0 - 1;
             # SAFETY: LOCK_EX has been held on this fd since `base` was read,

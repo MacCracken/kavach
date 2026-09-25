@@ -67,7 +67,7 @@ fn sev_exec(sandbox, command) {
 
     var out_cap = 1048576;
     var out_buf = alloc(out_cap);
-    var n = exec_capture(args, out_buf, out_cap);
+    var n = kv_exec_capture(args, out_buf, out_cap);
     var end_ns = mono_now_ns();
 
     return backend_capture_finish(out_buf, n, out_cap, "qemu SEV run failed", start_ns, end_ns);

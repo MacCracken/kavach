@@ -146,10 +146,13 @@ fn _persistent_spawn_inner(command, policy, seccomp_info, want_ns, uid, gid) {
     var out_rfd = load32(&outpipe);
     var out_wfd = load32(&outpipe + 4);
 
+    # Pinned before fork (ADR-005 §H4). No rootfs on this path.
+    var pin = kv_exec_pin(vec_get(args, 0));
     var pid = kv_fork();
     if (pid < 0) {
         sys_close(in_rfd); sys_close(in_wfd);
         sys_close(out_rfd); sys_close(out_wfd);
+        if (pin >= 0) { sys_close(pin); }
         return 0;
     }
     if (pid == 0) {
@@ -197,9 +200,10 @@ fn _persistent_spawn_inner(command, policy, seccomp_info, want_ns, uid, gid) {
                 sys_exit(SPAWN_EXIT_SECCOMP);
             }
         }
-        kv_execve(vec_get(args, 0), argv, envp);
+        kv_exec_child(pin, vec_get(args, 0), argv, envp);
         sys_exit(127);
     }
+    if (pin >= 0) { sys_close(pin); }
     # parent: keep the write-stdin + read-stdout ends
     sys_close(in_rfd);
     sys_close(out_wfd);

@@ -12,6 +12,16 @@ classification, credential proxy, HMAC-SHA256 audit chain — all in pure Cyrius
 
 ## Status
 
+**v3.12.7 — exec by pinned fd (H4) and a torn-record-safe audit log.** Every
+child now execs the binary kavach pinned before fork (`O_PATH` fd +
+`execveat`), not whatever sits at the path by exec time. That closes ADR-005
+§H4, the last open residual, across kavach's own exec sites and the runtime
+launches the stdlib used to run. An audit record that follows a torn fragment
+now starts on a line of its own. Verified on x86-64, and on aarch64 under qemu.
+**753** assertions green; the pinned roadmap in
+[docs/development/roadmap.md](docs/development/roadmap.md) sets out 3.12.8 to
+3.20.
+
 **v3.12.6 — toolchain + dependency refresh.** Cyrius pin `6.6.2` → `6.6.6`.
 The HMAC audit chain's append is now all or nothing: a short write is refused
 and rolled back, so a torn record can no longer be logged as written or corrupt
@@ -204,7 +214,7 @@ cyrius deps
 cyrius build src/main.cyr build/kavach
 ./build/kavach
 
-# Run the test suite (730 assertions).
+# Run the test suite (753 assertions).
 cyrius test tests/kavach.tcyr
 
 # Run the bench harness (25 benches).

@@ -55,9 +55,10 @@ Items tracked in [ADR-004](docs/adr/004-deferred-features.md) and
 [ADR-005](docs/adr/005-v2-hardening-pass.md) with documented residual risk
 and unblocking conditions:
 
-- **H4** — TOCTOU between `path_exists` and `exec_capture` on backend
-  binaries; waits on Cyrius `execveat` + `O_PATH|O_NOFOLLOW` fd-cache
-- **HTTP credential proxy** — direct env/file/stdin injection ships; HTTP
-  CONNECT tunnel deferred to Cyrius `lib/http.cyr` landing
-- **Seccomp / Landlock / cgroups hook wiring** — runtime guard precheck
-  runs; kernel-level enforcement deferred to Cyrius stdlib syscall wrappers
+- **HTTP credential proxy** — direct env/file/stdin injection and the
+  loopback HTTP proxy (`GET /v1/secret/<name>`) ship; HTTPS `CONNECT`
+  tunnelling is not implemented
+
+Resolved since earlier releases: the **H4** binary-path TOCTOU (exec by pinned
+fd, v3.12.7); seccomp, Landlock and cgroups are enforced in the exec child
+(v3.9.0 onward).
