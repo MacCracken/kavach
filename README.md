@@ -12,6 +12,20 @@ classification, credential proxy, HMAC-SHA256 audit chain — all in pure Cyrius
 
 ## Status
 
+**v3.13.1 — landlock rules enforced as documented, and a payload's own stdin.**
+Four landlock fixes. `merge_policies` carries the union of both policies' rules;
+it summed the counts and carried no list, so any merge with a rule denied every
+path. `policy_landlock_deny_all` denies every path in either call order, where a
+policy that already named paths kept them (and a deny-all payload cannot exec at
+all, which its doc now says). A rule naming a file allows that file; it failed
+every exec with 124. The WASM backend preopens exactly the policy's
+directories, none for deny-all, and confines wasmtime with landlock so a
+read-only rule holds; it preopened the workdir, read-write, whatever the policy
+said. And the process backend hands its payload `config_stdin`, where the
+payload read kavach's own stdin, and its unconfined capture now honours
+`config_env` and `config_workdir`. **1104** assertions green on x86-64,
+**1046** on aarch64 under qemu.
+
 **v3.13.0 — SGX and TDX quote verification.** A `SandboxPolicy` can now
 require attestation: `policy_attest_allow` names the measurements it accepts
 (MRENCLAVE for SGX, MRTD for TDX) and `policy_attest_root` the root CA. Under
@@ -256,10 +270,10 @@ cyrius deps
 cyrius build src/main.cyr build/kavach
 ./build/kavach
 
-# Run the test suite (971 assertions).
+# Run the test suite (1104 assertions).
 cyrius test tests/kavach.tcyr
 
-# Run the bench harness (27 benches).
+# Run the bench harness (29 benches).
 cyrius bench tests/kavach.bcyr
 
 # Cleanliness gates. Run these individually — `cyrius audit` is the

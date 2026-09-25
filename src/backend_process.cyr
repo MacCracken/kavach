@@ -65,6 +65,30 @@ fn process_exec(sandbox, command) {
     # 3.11.4.
     var tmo = 0;
     if (cfg != 0) { tmo = SandboxConfig_timeout_ms(cfg); }
+
+    # The payload's process setup, for both captures below: its stdin (3.11.8),
+    # its environment (3.12.0) and its working directory (3.12.2). Each is 0
+    # when unset, which is what these calls passed before: inherit this
+    # process's stdin, an empty environment, this process's working directory.
+    #
+    # ⚠ **Through 3.13.0 neither capture received `stdin`**, so `config_stdin`
+    # never reached a process payload: it read kavach's own stdin instead
+    # (measured: `/bin/cat` under a config holding `CONFIG-STDIN` printed what
+    # the host process had been handed, on both captures). And the unconfined
+    # capture was the stdlib-shaped `confine_capture`, which takes no
+    # environment and no working directory, so under a policy asking for no
+    # confinement `config_env` and `config_workdir` were dropped too, though
+    # 3.12.0 and 3.12.2 both said the process backend honours them.
+    var pexec_in = 0;
+    var pexec_in_len = 0;
+    var pexec_env = 0;
+    var pexec_wd = 0;
+    if (cfg != 0) {
+        pexec_in = SandboxConfig_stdin(cfg);
+        pexec_in_len = SandboxConfig_stdin_len(cfg);
+        pexec_env = SandboxConfig_env(cfg);
+        pexec_wd = SandboxConfig_workdir(cfg);
+    }
     # A sandbox naming a rootfs must run INSIDE it. The stdlib's exec_capture
     # forks and execs on the host with no child-side seam, so a rootfs-bearing
     # sandbox takes kavach's own confined capture instead. Before 3.9.1 there was
@@ -108,15 +132,9 @@ fn process_exec(sandbox, command) {
         if (cfg != 0) {
             if (SandboxConfig_require_ns(cfg) == 1) { want_ns = 1; }
         }
-        # 3.12.0: hand the payload the config's explicit environment. Unset (the
-        # default) is the empty envp this path always used.
-        var pexec_env = 0;
-        if (cfg != 0) { pexec_env = SandboxConfig_env(cfg); }
-        # 3.12.2: and the working directory, applied inside the rootfs.
-        var pexec_wd = 0;
-        if (cfg != 0) { pexec_wd = SandboxConfig_workdir(cfg); }
+        # The workdir is applied inside the rootfs.
         n = confine_capture_input_env_wd(args, pol, rootfs, cgroup_path, sec, buf,
-          PROCESS_MAX_OUTPUT, want_ns, tmo, 1, 0, 0, pexec_env, pexec_wd);
+          PROCESS_MAX_OUTPUT, want_ns, tmo, 1, pexec_in, pexec_in_len, pexec_env, pexec_wd);
         cgroup_teardown(cgroup_path);
         var end_rf = mono_now_ns();
         var rr = backend_capture_finish(buf, n, PROCESS_MAX_OUTPUT, "exec failed", start_ns, end_rf);
@@ -137,7 +155,8 @@ fn process_exec(sandbox, command) {
     # ran reported `exit_code = 0` (measured: `/bin/false`, real exit 1, and
     # `/bin/ls` on a missing path, real exit 2, both came back 0) and no
     # `timeout_ms` was ever enforced. One capture, so neither can drift again.
-    n = confine_capture(args, 0, 0, cgroup_path, 0, buf, PROCESS_MAX_OUTPUT, 0, tmo, 0);
+    n = confine_capture_input_env_wd(args, 0, 0, cgroup_path, 0, buf, PROCESS_MAX_OUTPUT, 0, tmo, 0,
+      pexec_in, pexec_in_len, pexec_env, pexec_wd);
     cgroup_teardown(cgroup_path);
     var end_ns = mono_now_ns();
 

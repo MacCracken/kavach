@@ -2,7 +2,7 @@
 
 > **Principle**: Security correctness first, then backend breadth, then performance. Every sandbox gets a number.
 
-This roadmap is **future-facing only** — shipped work lives in [CHANGELOG.md](../../CHANGELOG.md). Current release: **v3.13.0**. Toolchain pin: cc `6.6.6`; sigil `3.12.18` (the snapshot's — see CLAUDE.md hazard 4), samay `1.1.5`, ai-hwaccel `2.4.0` (agnosys dropped at v3.5.0 — its security backends are internalized).
+This roadmap is **future-facing only** — shipped work lives in [CHANGELOG.md](../../CHANGELOG.md). Current release: **v3.13.1**. Toolchain pin: cc `6.6.6`; sigil `3.12.18` (the snapshot's — see CLAUDE.md hazard 4), samay `1.1.5`, ai-hwaccel `2.4.0` (agnosys dropped at v3.5.0 — its security backends are internalized).
 
 **Every release below is pinned.** Each names what ships in it, in the order the principle sets. To
 move an item, edit this file; do not let it drift. Every release runs the CLAUDE.md development
@@ -17,7 +17,9 @@ what it is.
 
 3.13.0 shipped the verification, the measurement allowlist in `SandboxPolicy`, the gate in
 `sandbox_exec` that fails the exec on a mismatch, accept and reject tests from sigil's vectors,
-and the aarch64 support record (CHANGELOG 3.13.0). Open:
+and the aarch64 support record (CHANGELOG 3.13.0). 3.13.1 was a fix release: landlock rules
+merged, denied and applied to files as documented, the WASM backend honouring them, and the
+process backend handing its payload the config's stdin (CHANGELOG 3.13.1). Open:
 
 - [ ] **Fetch the quote from the running guest: Gramine for SGX, the TD quote for TDX.** Needs
   SGX or TDX hardware to verify on; the development machine is AMD. kavach's side of the hand-off is in place (`backend_attest_nonce`, `backend_attach_quote`),
@@ -113,6 +115,18 @@ default, writes only with kavach approval).
   (TCP bind/connect port allowlist, ABI v4; abstract-unix and signal scopes, ABI v6) are stored
   and add 3 + 2 + 2 to the strength score, but nothing applies them (`overview.md`'s modifier
   table, rechecked at 3.12.9).
+- **Seccomp on the WASM backend — apply it to wasmtime, or stop scoring it there.** `score_backend`
+  adds 5 for `seccomp_enabled` on every backend, and the WASM backend applies no filter: since
+  3.13.1 it confines wasmtime with landlock only. WASI is the guest's syscall boundary, so a filter
+  on wasmtime would be defence in depth, and it would have to admit what wasmtime's JIT needs.
+- **`IOCTL_DEV` (landlock ABI v5).** kavach handles rights up to ABI v3, so ioctl on a device file
+  is not restricted by any kavach ruleset. Handling it means adding it to `_landlock_handled_access`
+  from v5 and to the file rights of a rule that should allow it (CHANGELOG 3.13.1, the file-rule
+  entry).
+- **`config_stdin` on the backends that shell out.** gVisor, OCI, SGX, SEV, TDX, Firecracker and
+  SY-agnos run through `kv_exec_capture`, which takes no stdin, so they ignore it. Related: an
+  unset `config_stdin` hands every payload kavach's own stdin, the 3.11.8 default kept for
+  interactive payloads; whether a sandbox should inherit it at all is open.
 - The rest of [Foreign Platform Containers](#foreign-platform-containers): Windows and macOS
   guests, display through aethersafta, audio through dhvani, clipboard, USB and GPU passthrough,
   phylax boundary scanning, libro audit, templates.

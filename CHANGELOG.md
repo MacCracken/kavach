@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.13.1] — 2026-09-25
+
+Landlock as documented, and a payload's stdin. A fix release: five defects, each measured before
+its fix, where a policy or a config said one thing and the payload got another.
+- `merge_policies` denied every path whenever either side named a landlock rule.
+- `policy_landlock_deny_all` left a policy's rules in force.
+- A landlock rule naming a file failed every exec.
+- The WASM backend read no landlock rule at all.
+- The process backend never handed its payload `config_stdin`, so the payload read kavach's own
+  stdin, and its unconfined capture also dropped `config_env` and `config_workdir`.
+
+Three of these reached further than the policy or the config said: deny-all kept its rules, the
+WASM guest kept its workdir under deny-all, and a payload read the host's stdin. The others failed
+closed. Found on the way and recorded: a deny-all payload cannot exec at all on kavach's exec
+paths, since landlock refuses its own binary, although the code had called deny-all the right
+shape for a payload reading stdin. Each behaviour change is marked ⚠ below. 971 → **1104**
+assertions on x86-64; 942 → **1046** on aarch64 under qemu.
+
 ### Fixed — `merge_policies` denied every path when either side had a landlock rule
 
 `merge_policies` set `landlock_rules_len` to the sum of the two inputs' counts and never merged
@@ -197,6 +215,37 @@ exited 124 too, and so did a WASM guest whose policy named a file.
   failed every exec with 124: narrower than the rule asked for, and nothing ran.
 - `docs/architecture/overview.md`: a rule names a directory or a file.
 
+### Fixed — the process backend ignored `config_stdin`, and its unconfined capture `config_env` and `config_workdir`
+
+`process_exec` has two captures: a confined one, taken for a rootfs or a policy asking for
+seccomp or landlock, and an unconfined one for everything else. Neither passed the config's
+stdin, so a process payload never received `config_stdin`. It inherited kavach's own stdin
+instead, which is the documented meaning of an *unset* `config_stdin`: the payload read, and
+consumed, whatever the host process had on stdin. The unconfined capture was
+`confine_capture`, which takes no environment and no working directory, so under a policy
+asking for no confinement `config_env` and `config_workdir` were dropped as well. 3.12.0 and
+3.12.2 say the process backend honours both, and 3.12.2 calls an unconfined capture ignoring the
+workdir "the same defect in a new place". The capture-level tests call `confine_capture_*`
+directly, so none of them saw what `process_exec` passed.
+
+Measured through `sandbox_exec` before the change, with kavach's own stdin holding
+`PARENT-STDIN`. Under `policy_minimal()`: `/bin/cat` with `config_stdin` holding `CONFIG-STDIN`
+printed `PARENT-STDIN`; `/usr/bin/env` with a `config_env` entry printed nothing; `/bin/pwd` with
+`config_workdir("/tmp")` printed kavach's working directory. Under `policy_basic()`, the confined
+capture, `cat` printed `PARENT-STDIN` too, while the environment and the workdir arrived.
+
+- Both captures now get the config's stdin, environment and working directory:
+  `confine_capture_input_env_wd` on each, with the four values read once. Unset, each is what the
+  captures passed before (kavach's stdin, an empty environment, kavach's working directory), so a
+  config that sets none of them runs as it did. After the change, all six cases above print what
+  the config holds, and an empty `config_stdin` (length 0) is an immediate EOF on both captures.
+- `config_stdin`'s doc lists the backends that honour it: the process backend and WASM. The
+  backends that shell out through `kv_exec_capture` (gVisor, OCI, SGX, SEV, TDX, Firecracker,
+  SY-agnos) still do not take it.
+- ⚠ **A payload given `config_stdin` no longer reads kavach's stdin.** A consumer that relied on
+  the old behaviour, a payload reading the host's stdin while a config named other bytes, gets the
+  config's bytes now. An unset `config_stdin` still inherits kavach's stdin, as 3.11.8 documented.
+
 ### Tests
 
 Three tests, all of which fail against 3.13.0's merge (checked by restoring it: 18 assertions
@@ -309,7 +358,27 @@ without WRITE_FILE (2), the WASM backend preopening a file rule (3), its host ru
 directory for the module (4), and its host ruleset without the binary (1). The mask on directory
 rules was caught only by the WASM test until the read-write test gained its directory case.
 
+One test for the stdin fix, `process_exec_honours_config_io`, through `sandbox_exec` as a
+consumer calls it. It runs the unconfined capture (`policy_minimal()`), the confined capture
+reached by landlock rules, and, where the host loads a filter, the confined capture reached by
+seccomp (`policy_basic()`). Under qemu-user, which refuses a seccomp filter, the seccomp round is
+skipped; landlock is a no-op there but still takes the confined capture. In each: `/bin/cat`
+prints the config's stdin, `/usr/bin/env` shows the config's variable, `/bin/pwd` prints the
+config's workdir, and an empty `config_stdin` ends `cat` at once with nothing read. Each run has a
+5 s deadline, so a payload left reading a terminal fails instead of hanging. Against the code
+before it, 5 of the 12 assertions fail, with kavach's stdin a file or `/dev/null`: the unconfined
+stdin, environment and workdir, and the stdin on both confined rounds. Five mutants, each caught
+at its assertions: the confined capture without stdin (2), the unconfined capture without stdin
+(1), its environment (1) or its workdir (1), and the stdin length dropped (3).
+
 ### Verified
+
+- **3.13.1 as released.** x86-64 (kernel 7.2.6, landlock ABI 10, wasmtime 49): the suite 971 →
+  **1104**, with fmt `--check` showing no drift, lint 0 warnings, vet, `check-symbols.py`, the
+  security scan, fuzz (500), the bench harness and the smoke build. `cyrius distlib --all`: every
+  module section of both bundles matches its source, and `check-bundles.py` passes. aarch64:
+  cross-built, and the suite 942 → **1046** under qemu-aarch64 11.1.1; the agnos build links.
+  The `duplicate fn` set is unchanged (130 names, all in `lib/`). Per change, as each landed:
 
 - x86-64: the suite, 971 → **1004**. fmt `--check` with no drift across the tree, lint with 0
   warnings, vet, `check-symbols.py`, the security scan, and fuzz (500). `cyrius distlib --all`
@@ -345,71 +414,79 @@ rules was caught only by the WASM test until the read-write test gained its dire
 - With the file-rule fix, on aarch64: cross-built, and the suite 1033 → **1038** under
   qemu-aarch64 11.1.1. The process-backend file-rule assertions need landlock and skip there; the
   WASM additions run. The agnos build links.
+- With the stdin fix: the suite 1092 → **1104** on x86-64 and 1038 → **1046** on aarch64 under
+  qemu, where the seccomp round skips. `cyrius distlib --all` changes both bundles, since
+  `backend_process.cyr` and `lifecycle.cyr` are in both profiles.
 
 ### Performance
 
-Two new benchmarks, recorded last in the harness so their allocations follow every other bench:
-`merge_policies_plain` (no landlock rules, the common case) **197 ns** (191–211) and
-`merge_policies_landlock` (four rules and one) **343 ns** (331–363), from one pinned run.
-Carrying the rules costs about 150 ns per `composite_exec`, whose exec takes 2.7 ms.
+`bench-history.csv` gains a **3.13.1** row, pinned, with two new benchmarks:
+`merge_policies_plain` **209 ns** and `merge_policies_landlock` **347 ns**. The comparison is
+3.13.0 against this release with `scripts/bench-ab.py`'s sampling: 6 interleaved rounds per build,
+pinned to CPU 15. The 3.13.0 side was built from a scratch copy of the tag's `src/` and benches,
+because the script's own worktree under `/tmp` cannot resolve the `../` path dependencies.
 
-The two are only in this tree, so `scripts/bench-ab.py HEAD .` (5 interleaved rounds per side,
-pinned) compares the other 27. **26 show no measured change**; their ranges overlap, the exec
-path included (`process_exec_confined` 2.704 → 2.703 ms).
+| bench | 3.13.0 | 3.13.1 | Δ |
+|---|---|---|---|
+| `process_exec_echo` | 2.708 ms | 2.711 ms | +0.1% (ranges overlap) |
+| `process_exec_confined` | 2.693 ms | 2.692 ms | −0.1% (ranges overlap) |
+| `process_exec_large_output` | 130.904 ms | 127.424 ms | −2.7% (ranges overlap) |
+| `gate_clean_output` | 352.50 µs | 332.32 µs | −5.7% (separate) |
+| `code_scan_large_ac` | 527.39 µs | 504.22 µs | −4.4% (separate) |
+| `http_path_extract` | 100 ns | 86 ns | −14.5% (separate) |
 
-- ⚠ **`http_path_extract` has separate ranges, 101 → 87 ns (−13.9%), on a function this change
-  does not touch.** 3.12.9's A/B saw the same benchmark move with its function unchanged. Code
-  placement is the likely cause, as there; it was not isolated.
+- **21 of the 27 benchmarks both builds carry show no measured change**, the exec paths among
+  them. The row against 3.13.0's row reads `process_exec_echo` −7.4% and `process_exec_confined`
+  −4.7%; the interleaved runs do not reproduce that, as with the earlier bimodal rows.
+- ⚠ **Six have separate ranges, all faster, on code this release does not touch**:
+  `gate_clean_output`, `code_scan_large_ac`, the three secrets benchmarks (−4.0% to −5.2%) and
+  `http_path_extract`, which moved the same way in 3.12.9's A/B with its function unchanged then
+  too. Code placement is the likely cause; not a win to claim, and not isolated.
+- The changes' own costs, measured where no benchmark reaches them: carrying the rules costs
+  `merge_policies` about 150 ns; a rule naming a file costs the child one `fstat`, 455 ns; the
+  process backend reads four config fields. A WASM exec under a policy with rules goes from
+  5.4 ms to 13.1 ms, detailed below.
 
-The deny-all fix was measured against the merge fix (HEAD) with `scripts/bench-ab.py`'s own
-sampling and comparison, 5 interleaved rounds per side pinned to CPU 15. The HEAD side was built
-from a scratch copy of that commit's `src/`: the script's worktree under `/tmp` would have to
-resolve the `../` path dependencies from there. **26 of 29 show no measured change**, among them
-the exec paths, which now run `_spawn_apply_landlock` in the child (`process_exec_confined`
-2.701 → 2.699 ms, `process_exec_echo` 2.707 → 2.694 ms), and both merges (`merge_policies_plain`
-201 → 199 ns, `merge_policies_landlock` 347 → 342 ns). `policy_landlock_add`'s added check is not
-on a benchmarked path.
+Per change, as each landed, against the commit before it, with `scripts/bench-ab.py`'s method
+and 5 interleaved rounds per side, pinned:
 
-- ⚠ **Three benchmarks on functions this change does not touch have separate ranges:**
-  `state_valid_transition_check` 6 → 5 ns, `ct_streq_64` 198 → 206 ns (+4.0%) and
-  `gate_clean_output` 355.97 → 344.31 µs (−3.3%). That is the pattern the earlier A/Bs recorded;
-  code placement is the likely cause, and it was not isolated.
-
-The WASM fix changes the WASM exec path, which no benchmark covers, so `wasm_exec` was timed
-directly: the median of 21 runs of the probe, three rounds interleaved between the two builds,
-pinned to one CPU. **A policy without landlock is unchanged, 5.4 → 5.4 ms. A policy with rules
-goes from 5.4 ms (wasmtime unconfined and cached, the rules ignored) to 13.1 ms.**
-
-- Most of that is `-C cache=n`: wasmtime compiling the module instead of loading it from its
-  cache. Run directly, with fuel and the memory ceiling as `wasm_exec` sets them, the probe takes
-  3.7 ms cached and 7.0 ms without the cache, and the cost grows with the module.
-  `NO_NEW_PRIVS`, closing inherited descriptors and the landlock ruleset add about 0.1–0.3 ms
-  (measured without the fuel and memory flags, where the run stays under the polling step below).
-- The rest is the capture loop's polling, not work. It polls every 1 ms for its first 8 idle
-  rounds and every 5 ms after, so a payload still running after about 8 ms is noticed at the next
-  5 ms poll. The confined run crosses that line; the cached, unconfined run ends well inside it.
-- Keeping the cache under confinement would take wasmtime's cache configuration and a writable
-  cache directory in the ruleset. Not done.
-
-The 29 benchmarks, `scripts/bench-ab.py`'s method against the deny-all fix (HEAD): **26 show no
-measured change**, among them the exec paths (`process_exec_confined` 2.677 → 2.682 ms) and both
-merges.
-
-- ⚠ **Three benchmarks on functions this change does not touch have separate ranges:**
-  `ct_streq_64` 205 → 198 ns (−3.4%), `http_allowlist_hit` 70 → 75 ns (+7.1%) and
-  `http_allowlist_miss` 79 → 81 ns (+2.5%). `backend_wasm.cyr` is the only source file changed;
-  code placement again, not isolated.
-
-The file-rule fix adds one `fstat` per rule in the child, before the ruleset is applied: 455 ns on
-an `O_PATH` descriptor (200,000 calls, three rounds, pinned), against an exec of about 2.7 ms. No
-benchmark applies a landlock rule (`process_exec_confined` runs `policy_strict()`, which names
-none), so the harness cannot see it. Against the WASM fix (HEAD), `scripts/bench-ab.py`'s method:
-**28 of 29 show no measured change**, among them the exec paths (`process_exec_confined` 2.698 →
-2.747 ms, ranges overlapping).
-
-- ⚠ **`http_allowlist_miss` has separate ranges, 82 → 88 ns (+7.3%)**, on a function no source
-  file this change touches reaches. Its neighbour `http_allowlist_hit` had separate ranges in
-  the WASM fix's A/B and overlaps here; code placement, not isolated.
+- **The merge fix.** The two merge benchmarks were new, from one pinned run: `merge_policies_plain`
+  (no landlock rules, the common case) **197 ns** (191–211) and `merge_policies_landlock` (four
+  rules and one) **343 ns** (331–363). Of the other 27, 26 showed no measured change
+  (`process_exec_confined` 2.704 → 2.703 ms); ⚠ `http_path_extract` had separate ranges, 101 →
+  87 ns, on a function the fix does not touch.
+- **The deny-all fix.** 26 of 29 showed no measured change, among them the exec paths, which now
+  run `_spawn_apply_landlock` in the child (`process_exec_confined` 2.701 → 2.699 ms,
+  `process_exec_echo` 2.707 → 2.694 ms), and both merges (201 → 199 ns, 347 → 342 ns).
+  `policy_landlock_add`'s added check is not on a benchmarked path. ⚠ Three untouched functions
+  had separate ranges: `state_valid_transition_check` 6 → 5 ns, `ct_streq_64` 198 → 206 ns and
+  `gate_clean_output` 355.97 → 344.31 µs.
+- **The WASM fix.** 26 of 29 showed no measured change (`process_exec_confined` 2.677 →
+  2.682 ms); ⚠ `ct_streq_64` 205 → 198 ns, `http_allowlist_hit` 70 → 75 ns and
+  `http_allowlist_miss` 79 → 81 ns had separate ranges, with `backend_wasm.cyr` the only source
+  file changed. No benchmark covers the WASM exec path, so `wasm_exec` was timed directly: the
+  median of 21 runs of the probe, three rounds interleaved between the two builds, pinned. **A
+  policy without landlock is unchanged, 5.4 → 5.4 ms; a policy with rules goes from 5.4 ms
+  (wasmtime unconfined and cached, the rules ignored) to 13.1 ms.**
+  - Most of that is `-C cache=n`: wasmtime compiling the module instead of loading it from its
+    cache. Run directly, with fuel and the memory ceiling as `wasm_exec` sets them, the probe
+    takes 3.7 ms cached and 7.0 ms without the cache, and the cost grows with the module.
+    `NO_NEW_PRIVS`, closing inherited descriptors and the landlock ruleset add about 0.1–0.3 ms
+    (measured without the fuel and memory flags, where the run stays under the polling step).
+  - The rest is the capture loop's polling, not work. It polls every 1 ms for its first 8 idle
+    rounds and every 5 ms after, so a payload still running after about 8 ms is noticed at the
+    next 5 ms poll. The confined run crosses that line; the cached, unconfined run ends well
+    inside it.
+  - Keeping the cache under confinement would take wasmtime's cache configuration and a writable
+    cache directory in the ruleset. Not done.
+- **The file-rule fix.** One `fstat` per rule in the child, before the ruleset is applied: 455 ns
+  on an `O_PATH` descriptor (200,000 calls, three rounds, pinned), against an exec of about
+  2.7 ms. No benchmark applies a landlock rule (`process_exec_confined` runs `policy_strict()`,
+  which names none). 28 of 29 showed no measured change; ⚠ `http_allowlist_miss` 82 → 88 ns had
+  separate ranges, on a function the fix does not reach.
+- **The stdin fix** reads four config fields per exec and changes which capture function the
+  unconfined path calls; `process_exec_echo` and `process_exec_confined` overlap in the release
+  comparison above.
 
 ## [3.13.0] — 2026-09-25
 

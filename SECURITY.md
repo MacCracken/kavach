@@ -70,6 +70,15 @@ and unblocking conditions:
 
 Resolved since earlier releases:
 
+- **v3.13.1:**
+  - `policy_landlock_deny_all` on a policy that named paths left those rules in force, so the
+    payload could open the paths deny-all was meant to deny;
+  - the WASM backend read no landlock rule: a deny-all guest got its workdir, read-write, and a
+    read-only rule was not held read-only;
+  - a process payload given `config_stdin` read kavach's own stdin instead, and could consume
+    whatever the host process had there.
+
+  See CHANGELOG 3.13.1.
 - **v3.13.0:** `kavach_attestation_result_new` allocated 48 bytes for a
   56-byte struct, so setting `details` overwrote the first word of the next
   allocation. See CHANGELOG 3.13.0.

@@ -2047,6 +2047,97 @@ fn test_confine_capture_env() {
     return 0;
 }
 
+# ---- the process backend hands the payload its stdin, env and workdir ------
+#
+# The capture tests above call `confine_capture_*` directly, so none of them
+# saw what `process_exec` passed down. Through 3.13.0 it passed no stdin on
+# either capture, so a payload read kavach's own stdin instead of the config's
+# (measured: `/bin/cat` under a config holding `CONFIG-STDIN` printed what the
+# host process had on stdin). Its unconfined capture, taken when the policy
+# asks for no confinement, also passed no environment and no working
+# directory. These go through `sandbox_exec`, as a consumer does.
+
+# `cmd` on the PROCESS backend under `policy`, with the config's stdin, env and
+# workdir set where not 0. A 5 s deadline, so a payload left reading a terminal
+# fails rather than hangs.
+fn _t_pio_run(policy, cmd, stdin, env, wd) {
+    var c = config_new();
+    SandboxConfig_set_backend(c, KavachBackend.PROCESS);
+    SandboxConfig_set_policy(c, policy);
+    config_timeout_ms(c, 5000);
+    if (stdin != 0) { config_stdin(c, stdin, strlen(stdin)); }
+    if (env != 0) { config_env(c, env); }
+    if (wd != 0) { config_workdir(c, wd); }
+    var s = sandbox_create(c);
+    if (s == 0) { return 0; }
+    sandbox_transition(s, SandboxState.RUNNING);
+    var r = sandbox_exec(s, cmd);
+    sandbox_destroy(s);
+    return r;
+}
+
+# "<which>: <text>", an assertion message naming the capture.
+fn _t_pio_msg(which, text) {
+    return str_cstr(str_cat(str_cat(str_from(which), str_from(": ")), str_from(text)));
+}
+
+# Whether `r` exited 0 and its stdout holds `marker`.
+fn _t_pio_saw(r, marker) {
+    if (r == 0) { return 0; }
+    if (ExecResult_exit_code(r) != 0) { return 0; }
+    return cstr_contains(ExecResult_stdout(r), marker);
+}
+
+fn test_process_exec_honours_config_io() {
+    test_group("process_exec_honours_config_io");
+    kavach_init();
+    var env = vec_new();
+    vec_push(env, "KAVACH_PIO_VAR=reached-through-sandbox-exec");
+    var wd = _t_unique_tmp_path("/tmp/kavach-t-pio-");
+    kv_mkdir(wd, 493);                                     # 0755
+    var wd_line = str_cstr(str_cat(str_from(wd), str_from("\n")));
+
+    # Both captures: the unconfined one, for a policy asking for nothing, and
+    # the confined one, reached by landlock rules (which qemu-user takes as a
+    # no-op, still through the confined capture) and, where the host loads a
+    # filter, by seccomp as `config_new`'s default policy asks.
+    var rounds = 2;
+    if (_t_host_loads_seccomp() == 1) { rounds = 3; }
+    var round = 0;
+    while (round < rounds) {
+        var p = policy_minimal();
+        var which = "unconfined";
+        if (round == 1) {
+            p = _t_ll_add_runtime(policy_minimal());
+            which = "confined by landlock";
+        }
+        if (round == 2) {
+            p = policy_basic();
+            which = "confined by seccomp";
+        }
+        var r_in = _t_pio_run(p, "/bin/cat", "KAVACH-PIO-STDIN\n", 0, 0);
+        var r_env = _t_pio_run(p, "/usr/bin/env", 0, env, 0);
+        var r_wd = _t_pio_run(p, "/bin/pwd", 0, 0, wd);
+        assert_eq(_t_pio_saw(r_in, "KAVACH-PIO-STDIN"), 1, _t_pio_msg(which, "the payload reads the config's stdin"));
+        assert_eq(_t_pio_saw(r_env, "KAVACH_PIO_VAR=reached-through-sandbox-exec"), 1,
+          _t_pio_msg(which, "...sees the config's environment"));
+        assert_eq(_t_pio_saw(r_wd, wd_line), 1, _t_pio_msg(which, "...and runs in the config's workdir"));
+
+        # An empty stdin is an immediate EOF, not a fallback to kavach's own.
+        var re = _t_pio_run(p, "/bin/cat", "", 0, 0);
+        var eof = 0;
+        if (re != 0) {
+            if (ExecResult_exit_code(re) == 0 && ExecResult_timed_out(re) == 0) {
+                if (strlen(ExecResult_stdout(re)) == 0) { eof = 1; }
+            }
+        }
+        assert_eq(eof, 1, _t_pio_msg(which, "an empty stdin is EOF, and cat ends at once"));
+        round = round + 1;
+    }
+    kv_rmdir(wd);
+    return 0;
+}
+
 # 3.11.8: the payload really receives its stdin, and the parent really sees the
 # guest's exit code and stderr. `/bin/cat` is the smallest proof of the first;
 # `/bin/false` and `/bin/sh -c` of the rest.
@@ -5985,6 +6076,7 @@ fn main() {
     test_config_stdin();
     test_confine_capture_workdir();
     test_confine_capture_env();
+    test_process_exec_honours_config_io();
     test_confine_capture_input();
     test_wasm_fuel_calculation();
     test_wasm_trim();

@@ -184,7 +184,15 @@ fn config_policy(c, p)         { SandboxConfig_set_policy(c, p); return c; }
 fn config_timeout_ms(c, ms)    { SandboxConfig_set_timeout_ms(c, ms); return c; }
 
 # Bytes to hand the payload on stdin (3.11.8). `ptr = 0` means "inherit this
-# process's stdin", which is what every backend did before this existed.
+# process's stdin", which is what every backend did before this existed; a
+# non-zero `ptr` with `len = 0` is an empty stdin, an immediate EOF.
+#
+# Honoured by the process backend (since 3.13.1) and the WASM backend (since
+# 3.11.8). ⚠ Through 3.13.0 the process backend passed it to neither of its
+# captures, so a payload read kavach's own stdin in its place. The backends that
+# shell out through `kv_exec_capture` (gVisor, OCI, SGX, SEV, TDX, Firecracker,
+# SY-agnos) still do not take it. A persistent guest has its own channel,
+# `persistent_send`.
 #
 # ⚠ The buffer is NOT copied — it must outlive the `sandbox_exec` that consumes
 # it. And it is capped by pipe capacity: see `confine_capture_input`, which does
@@ -275,7 +283,9 @@ fn config_externalization(c, p) { SandboxConfig_set_externalization(c, p); retur
 #
 # Honoured by the process backend (`confine_capture_input`), `sandbox_spawn`,
 # and the OCI backend's `process.env`. NOT honoured by persistent sandboxes,
-# which have no config in scope — see `_persistent_spawn_inner`.
+# which have no config in scope — see `_persistent_spawn_inner`. Through 3.13.0
+# the process backend honoured it, and `config_workdir`, only under a policy
+# asking for confinement: its unconfined capture took neither.
 fn config_env(c, v) { SandboxConfig_set_env(c, v); return c; }
 
 # Build a NULL-terminated envp from a vec of "KEY=VALUE" cstrs. `v == 0` (the
