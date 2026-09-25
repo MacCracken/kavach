@@ -57,14 +57,25 @@ fn _oci_state_root() {
 # 1 when `path` is a directory we own with no group/other bits set.
 #[must_use]
 fn _oci_dir_is_ours(path) {
-    var sb[144];
+    # agnos: kv_lstat refuses there, and agnos's stat has no owner field
+    # (STAT_UID is not defined), so the check is Linux-only.
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    var sb[144];                                        # >= struct stat on x86-64 (144) and aarch64 (128)
     if (kv_lstat(path, &sb) != 0) { return 0; }
-    var mode = load64(&sb + 24) & 65535;
+    # st_mode and st_uid are 32-bit fields at per-arch offsets. Until 3.12.8
+    # this read x86-64's (+24 and +28) on every arch. aarch64 has st_uid at +24
+    # and st_gid at +28, so there it compared the owner's low bits as the mode
+    # and the group as the owner.
+    var mode = load32(&sb + STAT_MODE);
     if ((mode & 61440) != 16384) { return 0; }          # S_IFDIR, and NOT S_IFLNK
     if ((mode & 63) != 0) { return 0; }                 # any group/other bit -> refuse
-    var uid = (load64(&sb + 24) >> 32) & 4294967295;
+    var uid = load32(&sb + STAT_UID);
     if (uid != sys_getuid()) { return 0; }
     return 1;
+    #endif
 }
 
 # ── host capture with a real exit status (3.9.2) ──────────

@@ -46,12 +46,12 @@ enum AuditConst {
     EPROTONOSUPPORT = 93;
 }
 
-# Socket-syscall numbers (SYS_SOCKET_NR/SYS_BIND_NR/SYS_SENDTO_NR/
-# SYS_RECVFROM_NR) are hardcoded LINUX x86_64 numbers supplied by
-# src/sys_security_syscalls.cyr. They are referenced ONLY from the
-# `#ifndef CYRIUS_TARGET_AGNOS` branches below — on agnos they alias to wholly
-# different sovereign syscalls (memory-unsafe), so the agnos branch never issues
-# them (see the DANGER note in sys_security_syscalls.cyr).
+# The netlink socket calls go through the stdlib's sys_socket / sys_bind /
+# sys_sendto / sys_recvfrom, which carry each architecture's own number. Until
+# 3.12.8 they were raw x86-64 numbers (41/49/44/45) that were right on aarch64
+# only because cyrius renumbers those four. They are reached ONLY from the
+# `#ifndef CYRIUS_TARGET_AGNOS` branches below: agnos has no BSD sockets, and
+# the stdlib does not define the first three there.
 
 # ================================================================
 # Audit rule type constants
@@ -289,13 +289,13 @@ fn audit_nlmsg_len(buf): i64 {
 
 fn audit_open(config): i64 {
     #ifdef CYRIUS_TARGET_AGNOS
-    # AGNOS has no NETLINK_AUDIT and no BSD sockets. The socket()/bind() numbers
-    # used below (SYS_SOCKET_NR=41, SYS_BIND_NR=49) are LINUX x86_64 and alias
-    # DANGEROUSLY on agnos's 0-62 table (#41=sleep_ms, #49=sock_recv), so a raw
-    # syscall(49, fd, sockaddr, 12) would invoke sock_recv with a sockaddr as a
-    # destination buffer — memory-unsafe. Never reach them; report unsupported the
-    # same way security.cyr does for LANDLOCK/SECCOMP/NAMESPACES. The sovereign
-    # audit path on AGNOS is the HMAC chain in audit.cyr, not netlink.
+    # AGNOS has no NETLINK_AUDIT and no BSD sockets. The Linux socket()/bind()
+    # numbers (41, 49) alias DANGEROUSLY on agnos's 0-62 table (#41=sleep_ms,
+    # #49=sock_recv), so a raw syscall(49, fd, sockaddr, 12) would invoke
+    # sock_recv with a sockaddr as a destination buffer — memory-unsafe. Never
+    # reach them; report unsupported the same way security.cyr does for
+    # LANDLOCK/SECCOMP/NAMESPACES. The sovereign audit path on AGNOS is the HMAC
+    # chain in audit.cyr, not netlink.
     return kavach_err_not_supported("NETLINK_AUDIT");
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
@@ -304,7 +304,7 @@ fn audit_open(config): i64 {
     if (audit_config_use_netlink(config) == 1) {
         # socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_AUDIT)
         var sock_flags = SOCK_RAW | SOCK_CLOEXEC;
-        fd = syscall(SYS_SOCKET_NR, AF_NETLINK, sock_flags, NETLINK_AUDIT);
+        fd = sys_socket(AF_NETLINK, sock_flags, NETLINK_AUDIT);
         if (fd < 0) {
             var errno = 0 - fd;
             if (errno == EPERM) {
@@ -321,7 +321,7 @@ fn audit_open(config): i64 {
 
         # Bind the socket
         var sa = audit_sockaddr_nl(sys_getpid());
-        var ret = syscall(SYS_BIND_NR, fd, sa, 12);
+        var ret = sys_bind(fd, sa, 12);
         if (ret < 0) {
             sys_close(fd);
             return kavach_err_syscall_failed(0 - ret, "bind(NETLINK_AUDIT) failed");
@@ -361,7 +361,7 @@ fn audit_close(handle): i64 {
 
 fn audit_send_raw(handle, buf, buf_len): i64 {
     #ifdef CYRIUS_TARGET_AGNOS
-    # SYS_SENDTO_NR=44 is LINUX; on agnos #44 is unassigned. No netlink on agnos.
+    # Linux sendto is 44; on agnos #44 is unassigned. No netlink on agnos.
     return kavach_err_not_supported("NETLINK_AUDIT");
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
@@ -371,7 +371,7 @@ fn audit_send_raw(handle, buf, buf_len): i64 {
     }
 
     # sendto(fd, buf, len, 0, NULL, 0)
-    var ret = syscall(SYS_SENDTO_NR, fd, buf, buf_len, 0, 0, 0);
+    var ret = sys_sendto(fd, buf, buf_len, 0, 0, 0);
     if (ret < 0) {
         return kavach_err_syscall_failed(0 - ret, "send(audit) failed");
     }
@@ -387,7 +387,7 @@ fn audit_send_raw(handle, buf, buf_len): i64 {
 
 fn audit_recv_raw(handle, buf, buf_len): i64 {
     #ifdef CYRIUS_TARGET_AGNOS
-    # SYS_RECVFROM_NR=45 is LINUX; on agnos #45 is getrandom. No netlink on agnos.
+    # Linux recvfrom is 45; on agnos #45 is getrandom. No netlink on agnos.
     return kavach_err_not_supported("NETLINK_AUDIT");
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
@@ -397,7 +397,7 @@ fn audit_recv_raw(handle, buf, buf_len): i64 {
     }
 
     # recvfrom(fd, buf, len, 0, NULL, NULL)
-    var ret = syscall(SYS_RECVFROM_NR, fd, buf, buf_len, 0, 0, 0);
+    var ret = sys_recvfrom(fd, buf, buf_len, 0, 0, 0);
     if (ret < 0) {
         return kavach_err_syscall_failed(0 - ret, "recv(audit) failed");
     }

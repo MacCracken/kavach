@@ -1,28 +1,27 @@
-# sys_security_syscalls.cyr — raw x86_64 *LINUX* syscall numbers the
-# internalized security/mac/kernel_audit backends need on the LINUX HOST target.
-# (The prior comment mislabeled these "agnos-only" — they are plain Linux
-# x86_64 numbers; that mislabel is exactly the confusion the 3.5.3 fix corrects.)
-# The landlock / prctl / close numbers come from cyrius's lib/syscalls; only
-# these are kept here. Extracted (NOT the whole per-arch layer) with the
-# agnosys → agnodrm decomposition, to avoid duplicating cyrius's syscall layer.
+# sys_security_syscalls.cyr — the syscall numbers kavach still spells itself,
+# because the cyrius stdlib does not name them yet: unshare(2) and chroot(2).
 #
-# ⚠ DANGER ON AGNOS — these numbers ALIAS catastrophically on agnos's own 0-62
-# syscall table (#41=sleep_ms, #44=unassigned, #45=getrandom, #49=sock_recv;
-# #272/#520 are out of range). A raw syscall() with any of them on agnos would
-# invoke the WRONG sovereign syscall (e.g. syscall(49,fd,sockaddr,12) → sock_recv
-# with a sockaddr pointer as a destination buffer = memory-unsafe garbage).
-# Therefore EVERY consumer of these constants — kernel_audit.cyr
-# (audit_open/send_raw/recv_raw/agnos_log) and security.cyr (unshare) — MUST
-# reference them ONLY inside a `#ifndef CYRIUS_TARGET_AGNOS` branch; the agnos
-# branch returns kavach_err_not_supported (the security.cyr precedent). Confinement on
-# agnos is the capability layer's job, not these Linux syscalls.
+# **x86-64 only, and compiled only there.** cyrius spells syscall numbers in
+# x86-64 terms, and its aarch64 backend renumbers the ones it knows at each
+# syscall() site. It does not know these two, so aarch64 would run them as
+# other calls: 272 is kcmp, 161 is sethostname. The enum sits inside
+# `#ifdef CYRIUS_ARCH_X86`, so an aarch64 use is a compile error ("undefined
+# variable") rather than a different syscall. The aarch64 callers refuse
+# instead: security_create_namespace and _spawn_enter_rootfs. Both constants go
+# when the stdlib declares SYS_UNSHARE and SYS_CHROOT (filed upstream at
+# 3.12.8).
+#
+# ⚠ AGNOS — both numbers are outside agnos's 0-62 syscall table. Every use sits
+# inside `#ifndef CYRIUS_TARGET_AGNOS`, and the agnos branch returns
+# kavach_err_not_supported: confinement on agnos is the capability layer's job.
+#
+# Until 3.12.8 this file also held the socket family (41/49/44/45), which
+# kernel_audit.cyr now reaches through the stdlib's sys_socket / sys_bind /
+# sys_sendto / sys_recvfrom, an unused pivot_root (155), and a second copy of
+# kernel_audit.cyr's SYS_AGNOS_AUDIT_LOG.
+#ifdef CYRIUS_ARCH_X86
 enum SecuritySyscall {
-    SYS_UNSHARE = 272;          # Linux x86_64 unshare   (out of agnos 0-62 range)
-    SYS_SOCKET_NR = 41;         # Linux x86_64 socket    (agnos #41 = sleep_ms!)
-    SYS_BIND_NR = 49;           # Linux x86_64 bind      (agnos #49 = sock_recv!)
-    SYS_SENDTO_NR = 44;         # Linux x86_64 sendto    (agnos #44 = unassigned)
-    SYS_RECVFROM_NR = 45;       # Linux x86_64 recvfrom  (agnos #45 = getrandom!)
-    SYS_AGNOS_AUDIT_LOG = 520;  # claimed-custom; NONEXISTENT on agnos (out of range)
-    SYS_CHROOT_NR = 161;        # Linux x86_64 chroot     (agnos #161 out of range)
-    SYS_PIVOT_ROOT_NR = 155;    # Linux x86_64 pivot_root (agnos #155 out of range)
+    SYS_UNSHARE = 272;          # x86-64 unshare
+    SYS_CHROOT_NR = 161;        # x86-64 chroot
 }
+#endif

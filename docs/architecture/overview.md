@@ -111,7 +111,7 @@ policy_strict() ─► SandboxPolicy{ seccomp_enabled=1, seccomp_profile="strict
                                   landlock_abstract_unix=1, landlock_signal=1 }
 ```
 
-The `memory_limit_mb` / `cpu_limit_tenths` / `max_pids` fields are honored by `src/cgroup.cyr` (v3.2.0+); the `seccomp_*` and `landlock_*` fields wait on v3.3.0 + future seccomp.
+The `memory_limit_mb` / `cpu_limit_tenths` / `max_pids` fields are honored by `src/cgroup.cyr` (v3.2.0+). `seccomp_enabled` and the Landlock filesystem rules are applied in the exec child on the process backend and `sandbox_spawn` (by `confine_child`) and for persistent guests (by their own sequence in `persistent.cyr`): seccomp since v3.9.0 (on the process backend without a rootfs, since v3.11.3), with the architecture check since v3.12.8 ([ADR-007](../adr/007-syscall-numbers-across-architectures.md)), and the full Landlock right set since v3.11.1. The OCI-family backends leave syscall filtering to their runtime. The Landlock network and scope fields are not enforced yet.
 
 ### Backend selection
 
@@ -161,14 +161,16 @@ sandbox_exec(sb, "echo hi")
 | Firecracker | 90 | fortress |
 
 Policy modifiers (additive, clamped to [0, 100]). The score reflects what the
-sandbox *claims* to enforce; runtime enforcement is per-feature (cgroups v2
-shipped in v3.2.0; Landlock is the v3.5.0 feature cut; seccomp is
-upstream-blocked on cyrius syscall wrappers — see the roadmap):
+sandbox *claims* to enforce; runtime enforcement is per-feature: cgroups v2
+since v3.2.0, and seccomp (v3.9.0) and Landlock filesystem rules (v3.11.1) in
+the exec child on the process backend, `sandbox_spawn` and persistent guests.
+The rows still marked "claim only" predate that work and are rechecked in the
+3.12.9 documentation audit:
 
 | Modifier | +Score | Enforced at runtime today? |
 |----------|-------:|----------------------------|
-| seccomp enabled | +5 | No — claim only; blocked on upstream cyrius wrappers |
-| landlock rules present | +3 | No — claim only; v3.5.0 |
+| seccomp enabled | +5 | **Yes** on the process backend, `sandbox_spawn` and persistent guests (v3.9.0; the rootfs-less process path since v3.11.3; architecture-checked since v3.12.8); OCI-family backends leave it to their runtime |
+| landlock rules present | +3 | **Yes** on the same paths (v3.11.1) |
 | network disabled | +5 | Backend-dependent (microVM/OCI yes, Process no) |
 | read-only rootfs | +3 | Backend-dependent (OCI/gVisor/microVM yes) |
 | memory OR cpu limit set | +2 | **Yes** (v3.2.0 via cgroups v2 on process backend) |
@@ -276,13 +278,14 @@ Each backend is a plug into the dispatch table. To add `<name>`:
 
 See [ADR-004](../adr/004-deferred-features.md) for rationale; [`development/roadmap.md`](../development/roadmap.md) pins each open item to a release.
 
-What's still deferred at v3.12.7 (each row checked against the source; see the roadmap for the release each is pinned to):
+What's still deferred at v3.12.8 (each row checked against the source; see the roadmap for the release each is pinned to):
 
 | Feature | Blocking dep | Trigger condition |
 |---------|--------------|-------------------|
 | **SGX / SEV-SNP / TDX attestation + sealing** | None upstream: sigil 3.12.18 ships `sgx_quote_verify_full`, `tdx_quote_verify_full` and the `snp_report_*` family | kavach-side work: fetch evidence per backend, verify, measurement allowlist, SGX sealing |
 | **Firecracker jailer / vsock / snapshot** | None upstream: the stdlib has `sys_setresuid` / `sys_setresgid` | kavach-side work; lower priority, since the microVM boundary already isolates |
 | **Stiva OCI backend** | stiva's runc-compatible OCI-runtime CLI | Single-line addition to `_oci_runtime_path()` once stiva ships it |
+| **aarch64 namespaces + rootfs entry** | cyrius stdlib names for `unshare` / `chroot` (filed at v3.12.8) | Refused on aarch64 until then; call `sys_unshare` / `sys_chroot` once the pin carries them |
 | **async exec** | Cyrius async story still maturing | Synchronous fork+wait remains correct for sandbox-runtime semantics |
 | **Full regex in pattern matchers** | PCRE engine in Cyrius | hand-rolled literal-prefix + char-class matchers cover the v3.x surface |
 

@@ -12,6 +12,18 @@ classification, credential proxy, HMAC-SHA256 audit chain — all in pure Cyrius
 
 ## Status
 
+**v3.12.8 — ABI repairs.** The seccomp filter now checks the architecture.
+Through 3.12.7 an x86-64 payload could make a denied call through the i386 gate
+(`int 0x80`) or as an x32 call, and on aarch64 the filter compared x86-64
+numbers. Filters now admit only the build's own ABI, with a table per
+architecture ([ADR-007](docs/adr/007-syscall-numbers-across-architectures.md)).
+⚠ So a 32-bit payload is killed under a kavach filter. On aarch64, `unshare`
+and `chroot`, which the stdlib does not name and kavach's x86 numbers ran as
+`kcmp` and `sethostname`, are refused until cyrius names them. The OCI state
+root reads `struct stat` at the right offsets. CI now cross-builds aarch64 and
+runs the suite under qemu: **812** assertions green on x86-64, **791** on
+aarch64.
+
 **v3.12.7 — exec by pinned fd (H4) and a torn-record-safe audit log.** Every
 child now execs the binary kavach pinned before fork (`O_PATH` fd +
 `execveat`), not whatever sits at the path by exec time. That closes ADR-005
@@ -19,7 +31,7 @@ child now execs the binary kavach pinned before fork (`O_PATH` fd +
 launches the stdlib used to run. An audit record that follows a torn fragment
 now starts on a line of its own. Verified on x86-64, and on aarch64 under qemu.
 **753** assertions green; the pinned roadmap in
-[docs/development/roadmap.md](docs/development/roadmap.md) sets out 3.12.8 to
+[docs/development/roadmap.md](docs/development/roadmap.md) set out 3.12.8 to
 3.20.
 
 **v3.12.6 — toolchain + dependency refresh.** Cyrius pin `6.6.2` → `6.6.6`.
@@ -214,7 +226,7 @@ cyrius deps
 cyrius build src/main.cyr build/kavach
 ./build/kavach
 
-# Run the test suite (753 assertions).
+# Run the test suite (812 assertions).
 cyrius test tests/kavach.tcyr
 
 # Run the bench harness (25 benches).
@@ -246,7 +258,7 @@ consumer's `cyrius.cyml`:
 [deps.kavach]
 git     = "https://github.com/MacCracken/kavach.git"
 path    = "../kavach"          # local sibling checkout (optional)
-tag     = "3.12.6"
+tag     = "3.12.8"
 modules = ["dist/kavach.cyr"]
 
 # REQUIRED: kavach's transitive stdlib. `cyrius distlib` records only
@@ -260,7 +272,7 @@ modules = ["dist/kavach.cyr"]
 # async_* / fdlopen_*. Curating a minimal subset is fragile (the transitive
 # needs cascade), so mirror kavach's own [deps].stdlib. The verified-working
 # set (kavach's [deps].stdlib minus the test-only args/assert/bench; checked
-# on cyrius 6.6.6 at v3.12.6) is:
+# on cyrius 6.6.6 at v3.12.8) is:
 [deps]
 stdlib = [
     "alloc", "async", "atomic", "bayan", "chrono", "ct", "dynlib", "fdlopen",

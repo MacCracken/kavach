@@ -651,13 +651,13 @@ fn kv_sleep_ms(ms): i64 {
     return 0;
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
-    # 35 = nanosleep on x86_64 Linux. On aarch64 it is correct only because
-    # cyrius translates this raw number (since 6.6.5; before, it ran unlinkat).
-    # The stdlib now has sys_nanosleep, which would not depend on that.
+    # sys_nanosleep carries each architecture's number. Until 3.12.8 this was a
+    # raw 35, right on aarch64 only through cyrius's translation row (since
+    # 6.6.5; before that, aarch64 ran it as unlinkat).
     var ts[16];
     store64(&ts, ms / 1000);
     store64(&ts + 8, (ms % 1000) * 1000000);
-    return syscall(35, &ts, 0);
+    return sys_nanosleep(&ts, 0);
     #endif
 }
 

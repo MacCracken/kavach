@@ -59,6 +59,12 @@ and unblocking conditions:
   loopback HTTP proxy (`GET /v1/secret/<name>`) ship; HTTPS `CONNECT`
   tunnelling is not implemented
 
-Resolved since earlier releases: the **H4** binary-path TOCTOU (exec by pinned
-fd, v3.12.7); seccomp, Landlock and cgroups are enforced in the exec child
-(v3.9.0 onward).
+Resolved since earlier releases:
+
+- **Seccomp architecture check** (v3.12.8). The filter checks
+  `seccomp_data.arch` and uses a table per architecture, so a denied call can
+  no longer be made through another ABI: the i386 gate (`int 0x80`) or an x32
+  call on x86-64. On aarch64 it now denies the right calls. See
+  [ADR-007](docs/adr/007-syscall-numbers-across-architectures.md).
+- The **H4** binary-path TOCTOU: exec by pinned fd (v3.12.7).
+- Seccomp, Landlock and cgroups are enforced in the exec child (v3.9.0 onward).

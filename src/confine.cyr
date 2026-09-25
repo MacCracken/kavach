@@ -117,7 +117,24 @@ fn _spawn_enter_rootfs(rootfs) {
     #ifdef CYRIUS_TARGET_AGNOS
     return 0 - 1;
     #endif
+    #ifdef CYRIUS_ARCH_AARCH64
+    # ⛔ REFUSED ON AARCH64, before any side effect, until the stdlib names
+    # chroot(2). Through 3.12.7 this issued x86-64 161, which cyrius does not
+    # renumber and which aarch64 runs as sethostname(2), with the rootfs path as
+    # the name and whatever the length register held. Where that failed, the
+    # child exited closed. Where it succeeded (root, and a stray length of 64 or
+    # less), it renamed the host's UTS namespace and this function returned 0:
+    # the payload ran in the host's filesystem, reported as confined. kavach's
+    # own spawn paths never got here on aarch64, only because the namespace step
+    # before it failed first (see security_create_namespace). The native number
+    # (51) is not reachable through syscall(): cyrius renumbers any 51 to 204,
+    # reading it as x86 getsockname. That is why cyrius's rules forbid writing a
+    # native number under an aarch64 #ifdef. Filed upstream at 3.12.8; this
+    # refusal lifts when the stdlib declares SYS_CHROOT.
+    return 0 - 1;
+    #endif
     #ifndef CYRIUS_TARGET_AGNOS
+    #ifndef CYRIUS_ARCH_AARCH64
     # Detach propagation, or our mounts (and the chroot) leak to the host.
     if (sys_mount(0, "/", 0, MS_REC_PRIVATE, 0) < 0) { return 0 - 1; }
     if (syscall(SYS_CHROOT_NR, rootfs) < 0) { return 0 - 1; }
@@ -125,6 +142,7 @@ fn _spawn_enter_rootfs(rootfs) {
     # escape route.
     if (syscall(SYS_CHDIR, "/") < 0) { return 0 - 1; }
     return 0;
+    #endif
     #endif
 }
 

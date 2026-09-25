@@ -1021,24 +1021,27 @@ fn test_audit_log_mode_0600() {
     return 0;
 }
 
-# Cap this process's file size (RLIMIT_FSIZE, resource 1). The stdlib has no
+# Cap this process's file size (RLIMIT_FSIZE, resource 1).
+fn _t_set_fsize_limit(bytes) { return _t_set_rlimit(1, bytes); }
+
+# Set one of this process's resource limits, soft and hard. The stdlib has no
 # rlimit wrapper, so prlimit64 goes by number — the KERNEL's own, per arch,
 # because neither is an ESYSXLAT row: x86_64 302, aarch64 261 (as an x86
 # number 261 is futimesat, which aarch64 lacks, so no row can ever claim it).
-# -1 anywhere else: the caller reports the rollback as not exercisable.
-fn _t_set_fsize_limit(bytes) {
+# -1 anywhere else: the caller reports what it needed as not exercisable.
+fn _t_set_rlimit(resource, value) {
     var rl[16];
-    store64(&rl, bytes);        # rlim_cur
-    store64(&rl + 8, bytes);    # rlim_max
+    store64(&rl, value);        # rlim_cur
+    store64(&rl + 8, value);    # rlim_max
     #ifdef CYRIUS_TARGET_LINUX
     #ifdef CYRIUS_ARCH_X86
-    # SAFETY: prlimit64(0 = this process, RLIMIT_FSIZE, &rl, no old-limit out);
+    # SAFETY: prlimit64(0 = this process, resource, &rl, no old-limit out);
     # rl is a 16-byte {rlim_cur, rlim_max} on this frame and is only read.
-    return syscall(302, 0, 1, &rl, 0);
+    return syscall(302, 0, resource, &rl, 0);
     #endif
     #ifdef CYRIUS_ARCH_AARCH64
     # SAFETY: as the x86_64 arm, in aarch64 numbering.
-    return syscall(261, 0, 1, &rl, 0);
+    return syscall(261, 0, resource, &rl, 0);
     #endif
     #endif
     return 0 - 1;
@@ -2379,6 +2382,13 @@ fn test_process_backend_real_exec() {
     # to prove the fork+exec+capture pipeline actually runs.
     var r = process_exec(sb, "/bin/echo hello_from_process_backend");
     assert(r != 0, "exec returned a result");
+    if (_t_host_loads_seccomp() == 0) {
+        # The default policy asks for seccomp and this host will not load a
+        # filter (qemu-user answers PR_SET_SECCOMP with EINVAL). The contract
+        # is to refuse, not to run the payload unfiltered.
+        assert_eq(ExecResult_exit_code(r), 125, "host refuses seccomp: the child exits SPAWN_EXIT_SECCOMP");
+        return 0;
+    }
     assert_eq(ExecResult_exit_code(r), 0, "exit 0");
     var out = ExecResult_stdout(r);
     assert(cstr_contains(out, "hello_from_process_backend") == 1, "stdout captured");
@@ -2868,12 +2878,17 @@ fn test_spawn_applies_seccomp() {
     var sb = _spawn_running_sandbox(p);
     var sp = sandbox_spawn(sb, "/bin/true", 0);
     assert(sp != 0, "spawns with seccomp enabled");
-    if (spawn_seccomp_available() == 0) {
+    if (_t_host_loads_seccomp() == 0) {
         # Host refuses seccomp. The contract is fail-closed, so assert the
         # refusal is clean and named rather than skipping.
         var c0 = spawned_wait(sp);
         assert_eq(c0, 125, "child exits SPAWN_EXIT_SECCOMP rather than running unfiltered");
-        assert(strstr(spawn_exit_name(c0), "seccomp") >= 0, "and the code names seccomp");
+        # spawn_exit_name answers 0 for a code that is not a confinement code,
+        # so check before strstr: a filter that kills the child outright (as a
+        # broken architecture check does) otherwise segfaults the suite here.
+        if (spawn_exit_name(c0) != 0) {
+            assert(strstr(spawn_exit_name(c0), "seccomp") >= 0, "and the code names seccomp");
+        }
         return 0;
     }
     assert_eq(spawned_wait(sp), 0, "and the payload actually ran (execve survived the filter)");
@@ -2911,16 +2926,39 @@ fn test_bpf_write_insn_bytes() {
     return 0;
 }
 
+# Whether this host loads seccomp filters at all, asked with the smallest
+# valid filter (one RET ALLOW) rather than with kavach's. spawn_seccomp_available
+# probes with the exec filter itself, so a filter the kernel rejects (a bad jump,
+# say) reads there as "this host has no seccomp", and every test that accepts a
+# fail-closed 125 on such a host would accept the bug too.
+fn _t_host_loads_seccomp() {
+    var f = alloc(8);
+    security_bpf_write_insn(f, 0, 6, 0, 0, 2147418112);      # RET ALLOW
+    var pid = kv_fork();
+    if (pid == 0) {
+        var r_t, r_v = security_load_seccomp(f, 8);
+        if (is_ok(r_t) == 0) { sys_exit(1); }
+        sys_exit(0);
+    }
+    var st[8];
+    store64(&st, 0);
+    kv_waitpid(pid, &st, 0);
+    if ((load32(&st) & 65535) == 0) { return 1; }
+    return 0;
+}
+
 fn test_seccomp_filter_actually_loads() {
     test_group("seccomp_filter_actually_loads");
     # The end-to-end property the byte test protects: the kernel accepts the
     # filter. Loaded in a CHILD so the test process stays unconfined.
-    if (spawn_seccomp_available() == 0) {
+    if (_t_host_loads_seccomp() == 0) {
         # Nothing to assert about a filter this kernel will not load; the
         # fail-closed path is covered by test_spawn_applies_seccomp.
         assert_eq(1, 1, "host refuses seccomp — load path not exercisable here");
         return 0;
     }
+    assert_eq(spawn_seccomp_available(), 1,
+      "the host loads a one-instruction filter, so it must load kavach's");
     var sf_t, sf_v = security_create_exec_seccomp_filter();
     var info = result_unwrap(sf_t, sf_v);
     var pid = sys_fork();
@@ -2949,51 +2987,257 @@ fn test_seccomp_filter_actually_loads() {
     return 0;
 }
 
+# The native column of a two-column syscall table. The pairs are written out
+# again here rather than read from the implementation's tables, so a wrong
+# entry there cannot agree with itself.
+fn _t_nr(x86_64_nr, aarch64_nr) {
+    #ifdef CYRIUS_ARCH_AARCH64
+    return aarch64_nr;
+    #endif
+    #ifdef CYRIUS_ARCH_X86
+    return x86_64_nr;
+    #endif
+}
+
+fn _t_vec_has(v, x) {
+    var i = 0;
+    while (i < vec_len(v)) {
+        if (vec_get(v, i) == x) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# One BPF instruction read back: struct sock_filter, little-endian.
+fn _t_insn_code(f, idx) { return load8(f + idx * 8) | (load8(f + idx * 8 + 1) << 8); }
+fn _t_insn_jt(f, idx) { return load8(f + idx * 8 + 2); }
+fn _t_insn_jf(f, idx) { return load8(f + idx * 8 + 3); }
+fn _t_insn_k(f, idx) { return load32(f + idx * 8 + 4); }
+
+# Both filters open with the architecture check. `kill_idx` is where the x32
+# branch must land on x86-64: the filter's RET KILL, wherever it sits.
+fn _t_check_seccomp_prologue(f, kill_idx) {
+    # AUDIT_ARCH_X86_64 = 0xC000003E, AUDIT_ARCH_AARCH64 = 0xC00000B7.
+    var arch = _t_nr(3221225534, 3221225655);
+    assert_eq(_t_insn_code(f, 0), 32, "insn 0 is LD");
+    assert_eq(_t_insn_k(f, 0), 4, "... of seccomp_data.arch (+4)");
+    assert_eq(_t_insn_code(f, 1), 21, "insn 1 is JEQ");
+    assert_eq(_t_insn_k(f, 1), arch, "... against this build's AUDIT_ARCH");
+    assert_eq(_t_insn_jt(f, 1), 1, "... a match skips the KILL");
+    assert_eq(_t_insn_jf(f, 1), 0, "... a mismatch falls into it");
+    assert_eq(_t_insn_code(f, 2), 6, "insn 2 is RET");
+    assert_eq(_t_insn_k(f, 2), 2147483648, "... KILL_PROCESS for any other ABI");
+    assert_eq(_t_insn_code(f, 3), 32, "insn 3 is LD");
+    assert_eq(_t_insn_k(f, 3), 0, "... of seccomp_data.nr (+0), only after the arch passed");
+    #ifdef CYRIUS_ARCH_X86
+    assert_eq(_t_insn_code(f, 4), 53, "insn 4 is JGE (x86-64: the x32 check)");
+    assert_eq(_t_insn_k(f, 4), 1073741824, "... against X32_SYSCALL_BIT (bit 30)");
+    assert_eq(4 + 1 + _t_insn_jt(f, 4), kill_idx, "... and lands on the KILL");
+    assert_eq(_t_insn_jf(f, 4), 0, "... a native nr falls through to the table");
+    #endif
+    return 0;
+}
+
 fn test_exec_seccomp_filter_shape() {
     test_group("exec_seccomp_filter_shape");
-    # The allowlist profile cannot be used pre-exec: execve(59) is not in it, so
+    # The allowlist profile cannot be used pre-exec: execve is not in it, so
     # loading it before an exec kills the child on that exec. This is the
     # property that forced a second filter to exist, so pin it.
     var basic_t, basic_v = security_create_basic_seccomp_filter();
     assert(is_ok(basic_t) == 1, "basic filter builds");
+    assert_eq(_t_vec_has(_seccomp_allow_list(), _t_nr(59, 221)), 0,
+      "execve (x86-64 59 / aarch64 221) is not in the allowlist");
 
     var exec_res_t, exec_res_v = security_create_exec_seccomp_filter();
     assert(is_ok(exec_res_t) == 1, "exec-safe filter builds");
     var info = result_unwrap(exec_res_t, exec_res_v);
     var len = security_seccomp_filter_len(info);
     assert(len % 8 == 0, "filter is a whole number of BPF insns");
-    var n_deny = vec_len(_seccomp_deny_list());
-    assert_eq(len / 8, n_deny + 3, "LD + one JEQ per denied call + RET ALLOW + RET KILL");
+    var deny = _seccomp_deny_list();
+    var n_deny = vec_len(deny);
+    assert_eq(n_deny, _t_nr(20, 19), "20 denied calls on x86-64, 19 on aarch64 (no sysfs)");
+    var p = _t_nr(5, 4);
+    assert_eq(len / 8, p + n_deny + 2,
+      "arch check + one JEQ per denied call + RET ALLOW + RET KILL");
 
     # Every denied syscall must appear as a JEQ's k operand, and each JEQ must
     # jump to the LAST instruction (the KILL). An off-by-one in that jump would
     # silently send a denied syscall to ALLOW.
     var ptr = security_seccomp_filter_ptr(info);
-    var kill_idx = n_deny + 2;
+    var kill_idx = p + n_deny + 1;
+    _t_check_seccomp_prologue(ptr, kill_idx);
     var i = 0;
     var ok_jumps = 1;
     while (i < n_deny) {
-        var off = (1 + i) * 8;
-        var k = load32(ptr + off + 4);
-        if (k != vec_get(_seccomp_deny_list(), i)) { ok_jumps = 0; }
-        var jt = load8(ptr + off + 2);
-        # from index 1+i, skipping jt lands on 1+i+1+jt; that must be kill_idx.
-        if ((1 + i) + 1 + jt != kill_idx) { ok_jumps = 0; }
+        var at = p + i;
+        if (_t_insn_code(ptr, at) != 21) { ok_jumps = 0; }
+        if (_t_insn_k(ptr, at) != vec_get(deny, i)) { ok_jumps = 0; }
+        # from index at, skipping jt lands on at+1+jt; that must be kill_idx.
+        if (at + 1 + _t_insn_jt(ptr, at) != kill_idx) { ok_jumps = 0; }
         i = i + 1;
     }
     assert_eq(ok_jumps, 1, "every denied syscall JEQs to the KILL instruction");
+    assert_eq(_t_insn_k(ptr, p + n_deny), 2147418112, "falling through every JEQ is ALLOW");
+    assert_eq(_t_insn_k(ptr, kill_idx), 2147483648, "the jump target is KILL_PROCESS");
 
-    # mount and ptrace are the two that matter most for container escape.
-    var has_mount = 0;
-    var has_ptrace = 0;
-    var j = 0;
-    while (j < n_deny) {
-        if (vec_get(_seccomp_deny_list(), j) == 165) { has_mount = 1; }
-        if (vec_get(_seccomp_deny_list(), j) == 101) { has_ptrace = 1; }
-        j = j + 1;
+    # The numbers are this architecture's own. Through 3.12.7 the table was
+    # x86-64's on every arch, and on aarch64 it denied nanosleep (101) while
+    # the real ptrace (117), mount (40) and unshare (97) went through.
+    assert_eq(_t_vec_has(deny, _t_nr(165, 40)), 1, "mount is denied (x86-64 165 / aarch64 40)");
+    assert_eq(_t_vec_has(deny, _t_nr(101, 117)), 1, "ptrace is denied (x86-64 101 / aarch64 117)");
+    assert_eq(_t_vec_has(deny, _t_nr(272, 97)), 1, "unshare is denied (x86-64 272 / aarch64 97)");
+    assert_eq(_t_vec_has(deny, _t_nr(35, 101)), 0, "nanosleep is not (x86-64 35 / aarch64 101)");
+    return 0;
+}
+
+fn test_basic_seccomp_filter_shape() {
+    test_group("basic_seccomp_filter_shape");
+    var r_t, r_v = security_create_basic_seccomp_filter();
+    assert(is_ok(r_t) == 1, "basic filter builds");
+    var info = result_unwrap(r_t, r_v);
+    var ptr = security_seccomp_filter_ptr(info);
+    var len = security_seccomp_filter_len(info);
+    var allow = _seccomp_allow_list();
+    var m = vec_len(allow);
+    assert_eq(m, _t_nr(20, 19), "20 allowed calls on x86-64, 19 on aarch64 (no arch_prctl)");
+    var p = _t_nr(5, 4);
+    assert_eq(len / 8, p + m + 2, "arch check + one JEQ per allowed call + RET KILL + RET ALLOW");
+
+    # Here the fall-through is the KILL, so that is where the x32 branch must
+    # land. The ALLOW sits one instruction later, where an off-by-one would
+    # send every x32 call.
+    var kill_idx = p + m;
+    var allow_idx = p + m + 1;
+    _t_check_seccomp_prologue(ptr, kill_idx);
+    var i = 0;
+    var ok = 1;
+    while (i < m) {
+        var at = p + i;
+        if (_t_insn_code(ptr, at) != 21) { ok = 0; }
+        if (_t_insn_k(ptr, at) != vec_get(allow, i)) { ok = 0; }
+        if (at + 1 + _t_insn_jt(ptr, at) != allow_idx) { ok = 0; }
+        i = i + 1;
     }
-    assert_eq(has_mount, 1, "mount(165) is denied");
-    assert_eq(has_ptrace, 1, "ptrace(101) is denied");
+    assert_eq(ok, 1, "every allowed syscall JEQs to the ALLOW instruction");
+    assert_eq(_t_insn_k(ptr, kill_idx), 2147483648, "falling through every JEQ is KILL_PROCESS");
+    assert_eq(_t_insn_k(ptr, allow_idx), 2147418112, "the jump target is ALLOW");
+    assert_eq(_t_vec_has(allow, _t_nr(0, 63)), 1, "read is allowed (x86-64 0 / aarch64 63)");
+    assert_eq(_t_vec_has(allow, _t_nr(231, 94)), 1, "exit_group is allowed (x86-64 231 / aarch64 94)");
+    return 0;
+}
+
+# Fork a child that loads the exec-safe filter (when `filtered`) and then
+# enters the kernel one way; return its wait status. The ways:
+#   1  umount2 by the stdlib's name — a denied call in the native ABI
+#   2  getpid as an x32 call (x86-64: nr 39 with bit 30 set)
+#   3  getpid through the i386 gate (x86-64: `int 0x80`, i386 nr 20)
+# Unfiltered, each returns (an error or a pid) and the child exits 0. Filtered,
+# each must be SECCOMP_RET_KILL_PROCESS: death by SIGSYS. The core limit is
+# zeroed first so an expected kill does not leave a core dump behind.
+fn _t_seccomp_probe(way, filtered, info) {
+    var pid = kv_fork();
+    if (pid == 0) {
+        _t_set_rlimit(4, 0);                        # RLIMIT_CORE
+        if (filtered == 1) {
+            var r_t, r_v = security_load_seccomp(security_seccomp_filter_ptr(info),
+              security_seccomp_filter_len(info));
+            if (is_ok(r_t) == 0) { sys_exit(60); }
+        }
+        if (way == 1) { sys_umount2("/kavach-t-never-mounted", 0); }
+        #ifdef CYRIUS_ARCH_X86
+        # SAFETY: getpid in the x32 numbering (39 | __X32_SYSCALL_BIT). No
+        # arguments and no memory is touched; where the kernel has no x32 ABI
+        # it returns -ENOSYS.
+        if (way == 2) { syscall(1073741863); }
+        if (way == 3) { _t_int80_getpid(); }
+        #endif
+        sys_exit(0);
+    }
+    var st[8];
+    store64(&st, 0);
+    kv_waitpid(pid, &st, 0);
+    return load32(&st);
+}
+
+# i386 getpid through `int 0x80`. The only register it writes is eax (the
+# result), and nothing reads it.
+fn _t_int80_getpid() {
+    #ifdef CYRIUS_ARCH_X86
+    # SAFETY: i386 getpid (nr 20) takes no arguments and touches no memory.
+    # Linux preserves every register but rax across `int 0x80` from 64-bit
+    # code (r8-r11 too, since 4.17). Without IA32 emulation the gate raises
+    # SIGSEGV, which the caller reads as "not exercisable here".
+    asm {
+        0xB8; 0x14; 0x00; 0x00; 0x00;   # mov eax, 20        ; i386 getpid
+        0xCD; 0x80;                     # int 0x80           ; enter through the i386 gate
+    }
+    #endif
+    return 0;
+}
+
+# The kill path itself, exercised. The shape tests pin the bytes; this pins
+# what the kernel does with them. Measured against the 3.12.7 filter (no arch
+# check), ways 2 and 3 ran and exited 0 under the filter; a number-only filter
+# admits both.
+fn test_seccomp_kills_what_it_denies() {
+    test_group("seccomp_kills_what_it_denies");
+    if (_t_host_loads_seccomp() == 0) {
+        assert_eq(1, 1, "host refuses seccomp — kill path not exercisable here");
+        return 0;
+    }
+    var sf_t, sf_v = security_create_exec_seccomp_filter();
+    var info = result_unwrap(sf_t, sf_v);
+
+    var ctl = _t_seccomp_probe(1, 0, info);
+    assert_eq(ctl & 127, 0, "unfiltered, umount2 returns (EPERM or EINVAL, no signal)");
+    var st = _t_seccomp_probe(1, 1, info);
+    assert_eq(st & 127, 31, "filtered, a denied call in the native ABI dies by SIGSYS");
+
+    #ifdef CYRIUS_ARCH_X86
+    ctl = _t_seccomp_probe(2, 0, info);
+    assert_eq(ctl & 127, 0, "unfiltered, an x32 getpid returns (a pid, or ENOSYS without x32)");
+    st = _t_seccomp_probe(2, 1, info);
+    assert_eq(st & 127, 31, "filtered, an x32 call dies by SIGSYS (bit 30 is checked)");
+
+    ctl = _t_seccomp_probe(3, 0, info);
+    if ((ctl & 127) != 0) {
+        assert_eq(1, 1, "no IA32 emulation on this kernel — the i386 gate is not exercisable");
+        return 0;
+    }
+    st = _t_seccomp_probe(3, 1, info);
+    assert_eq(st & 127, 31, "filtered, an i386 int 0x80 call dies by SIGSYS (the arch is checked)");
+    #endif
+    return 0;
+}
+
+# The name map answers in this build's numbering, and leaves out a name the
+# architecture does not have rather than lending it another call's number.
+fn test_syscall_name_map_is_native() {
+    test_group("syscall_name_map_is_native");
+    security_syscall_map_reset();
+    assert_eq(security_syscall_name_to_nr("openat"), _t_nr(257, 56), "openat (x86-64 257 / aarch64 56)");
+    assert_eq(security_syscall_name_to_nr("mount"), _t_nr(165, 40), "mount (x86-64 165 / aarch64 40)");
+    assert_eq(security_syscall_name_to_nr("execve"), _t_nr(59, 221), "execve (x86-64 59 / aarch64 221)");
+    assert_eq(security_syscall_name_to_nr("open"), _t_nr(2, 0 - 1), "open: x86-64 2; aarch64 has none");
+    assert_eq(security_syscall_name_to_nr("fork"), _t_nr(57, 0 - 1), "fork: x86-64 57; aarch64 has none");
+    assert_eq(security_syscall_name_to_nr("no_such_call"), 0 - 1, "an unknown name is -1");
+    return 0;
+}
+
+# unshare(2) and chroot(2) have no stdlib name, and on aarch64 kavach's own
+# x86-64 numbers ran kcmp and sethostname. Both refuse there now, before any
+# side effect. On x86-64 they are exercised by the namespace and rootfs tests.
+fn test_aarch64_refuses_unnamed_calls() {
+    test_group("aarch64_refuses_unnamed_calls");
+    #ifdef CYRIUS_ARCH_AARCH64
+    var r_t, r_v = security_create_namespace(NS_NETWORK);
+    assert_eq(is_ok(r_t), 0, "namespaces refuse on aarch64");
+    assert_eq(_spawn_enter_rootfs("/tmp"), 0 - 1, "rootfs entry refuses on aarch64");
+    assert_eq(spawn_namespaces_available(NS_NETWORK), 0, "and the probe reports none");
+    #endif
+    #ifdef CYRIUS_ARCH_X86
+    assert_eq(1, 1, "x86-64 issues both calls; covered by the namespace and rootfs tests");
+    #endif
     return 0;
 }
 
@@ -3323,6 +3567,20 @@ fn test_oci_state_root_rejects_a_hostile_dir() {
     sys_unlink(f);
 
     assert_eq(_oci_dir_is_ours("/tmp/kavach-t-absent-entirely"), 0, "an absent path is refused");
+
+    # Someone else's directory -> refused, by the OWNER check alone. /proc/1/fd
+    # is a directory at mode 0500 owned by root on any Linux host, so it passes
+    # the type and permission checks and only st_uid can refuse it. Until
+    # 3.12.8 those fields were read at x86-64 offsets on every arch.
+    if (sys_getuid() != 0) {
+        var sb[144];
+        if (kv_lstat("/proc/1/fd", &sb) == 0) {
+            var m = load32(&sb + STAT_MODE);
+            assert_eq(m & 61440, 16384, "/proc/1/fd is a directory");
+            assert_eq(m & 63, 0, "... with no group or other bits");
+            assert_eq(_oci_dir_is_ours("/proc/1/fd"), 0, "... and root's, so it is refused");
+        }
+    }
     return 0;
 }
 
@@ -3477,6 +3735,12 @@ fn test_oci_take_file_refuses_a_symlink() {
 fn test_oci_err_path_is_uid_scoped() {
     test_group("oci_err_path_is_uid_scoped");
     var p = _oci_err_path("abc123");
+    # 0 means the state root was refused. Stop here rather than hand strstr a
+    # null: on aarch64 through 3.12.7 every state root was refused (struct stat
+    # read at x86-64 offsets), and this test's strstr(0, ...) took the suite
+    # down with a segfault.
+    assert(p != 0, "a scratch path is built");
+    if (p == 0) { return 0; }
     assert_eq(strstr(p, "/tmp/kavach-runc-") >= 0, 1, "under the uid-scoped state root");
     assert_eq(strstr(p, "abc123") >= 0, 1, "and names the container");
     # Distinct containers must not share a scratch file, or two concurrent runs
@@ -4050,7 +4314,12 @@ fn test_persistent_namespaces_are_opt_in_and_fail_closed() {
         var s0[8];
         store64(&s0, 0);
         kv_waitpid(PersistentGuest_pid(g0), &s0, 0);
-        assert_eq((load64(&s0) >> 8) & 255, 0, "the default path still runs the guest");
+        # policy_basic() asks for seccomp; a host that will not load a filter
+        # must refuse the guest (qemu-user answers PR_SET_SECCOMP with EINVAL).
+        var want0 = 0;
+        if (_t_host_loads_seccomp() == 0) { want0 = 125; }
+        assert_eq((load64(&s0) >> 8) & 255, want0,
+          "the default path runs the guest, or refuses it on a host without seccomp");
     }
 
     # Opt in: the guest either runs INSIDE a user namespace - where it is
@@ -4246,6 +4515,10 @@ fn main() {
     test_bpf_write_insn_bytes();
     test_seccomp_filter_actually_loads();
     test_exec_seccomp_filter_shape();
+    test_basic_seccomp_filter_shape();
+    test_seccomp_kills_what_it_denies();
+    test_syscall_name_map_is_native();
+    test_aarch64_refuses_unnamed_calls();
     test_spawn_terminate_escalates();
     test_spawn_null_handles();
     test_spawn_namespaces_environment_aware();

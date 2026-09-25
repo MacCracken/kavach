@@ -11,3 +11,4 @@ accepted — supersession is recorded via status updates, not rewrites.
 | [004](004-deferred-features.md) | Deferred features and their unblocking conditions | Accepted | v3.0.0 |
 | [005](005-v2-hardening-pass.md) | v3.0 P(-1) hardening pass | Accepted | v3.0.0 |
 | [006](006-library-surface-and-bundle-generation.md) | Library surface (`[lib]` + `dist/kavach.cyr`) and bundle generation | Accepted | v3.6.0 |
+| [007](007-syscall-numbers-across-architectures.md) | Syscall numbers across architectures: native-ABI seccomp, and refusal over native numbers | Accepted | v3.12.8 |

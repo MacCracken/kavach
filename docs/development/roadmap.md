@@ -2,7 +2,7 @@
 
 > **Principle**: Security correctness first, then backend breadth, then performance. Every sandbox gets a number.
 
-This roadmap is **future-facing only** — shipped work lives in [CHANGELOG.md](../../CHANGELOG.md). Current release: **v3.12.7**. Toolchain pin: cc `6.6.6`; sigil `3.12.18` (the snapshot's — see CLAUDE.md hazard 4), samay `1.1.5`, ai-hwaccel `2.4.0` (agnosys dropped at v3.5.0 — its security backends are internalized).
+This roadmap is **future-facing only** — shipped work lives in [CHANGELOG.md](../../CHANGELOG.md). Current release: **v3.12.8**. Toolchain pin: cc `6.6.6`; sigil `3.12.18` (the snapshot's — see CLAUDE.md hazard 4), samay `1.1.5`, ai-hwaccel `2.4.0` (agnosys dropped at v3.5.0 — its security backends are internalized).
 
 **Every release below is pinned.** Each names what ships in it, in the order the principle sets. To
 move an item, edit this file; do not let it drift. Every release runs the CLAUDE.md development
@@ -12,39 +12,6 @@ with no dependency (for example the scanner work in 3.20) can be pulled forward;
 what it is.
 
 ---
-
-## 3.12.8 — ABI repairs: seccomp, and the aarch64 x86-isms
-
-These repairs come before any 3.13 feature work. 3.12.8 was to be the P(-1) closeout unless more
-repairs were needed before 3.13; these are those repairs, so the closeout moves to 3.12.9. Each
-was found at 3.12.7 by reading the code against the cyrius 6.6.6 syscall tables. The aarch64
-effects are inferred from those tables and have not yet been run on hardware.
-
-- [ ] **The seccomp filter checks the architecture.** `security_create_exec_seccomp_filter` loads
-  only `seccomp_data.nr`, never `seccomp_data.arch`, and its deny list is x86-64 syscall numbers.
-  On aarch64 those numbers name other calls: x86-64 `ptrace` (101) is aarch64 `nanosleep`. So the
-  filter kills benign calls there and allows the real `ptrace`, `mount` and `unshare`. On x86-64,
-  a number-only filter is the pitfall seccomp(2) warns about, because the i386 (`int 0x80`) and
-  x32 syscall numbers differ; that has not been demonstrated here. Fix: load `arch`, KILL on
-  anything but the build's `AUDIT_ARCH_*` (and on the x32 bit on x86-64), and build the deny list
-  per architecture.
-- [ ] **Rootfs entry calls `chroot` by the right number.** `SYS_CHROOT_NR = 161` is x86-64
-  `chroot`, cyrius 6.6.6 has no translation row for it, and on aarch64 161 is `sethostname`.
-  Unprivileged, the call most likely fails and the child exits closed. As root it can succeed,
-  leaving the payload in the host's root filesystem. **The most severe item here.**
-- [ ] **Namespaces call `unshare` by the right number.** `SYS_UNSHARE = 272` is x86-64, with no
-  translation row; on aarch64, 272 is a different call. Namespace creation fails there — closed,
-  not open.
-- [ ] **`_oci_dir_is_ours` reads `st_mode` / `st_uid` at x86-64 `struct stat` offsets** (24 and
-  28); aarch64 has them at 16 and 24. Use the stdlib's `STAT_MODE` and a per-arch uid offset.
-- [ ] **Re-run the aarch64 suite.** Under qemu-user it fails 19 assertions in 9 fork/exec groups
-  and then segfaults, identically on 3.12.5 and 3.12.7. At least two groups trace to the items
-  above: exit 125 is `SPAWN_EXIT_SECCOMP`, and the OCI state-root check. Re-run after the fixes,
-  then confirm on real aarch64 hardware before claiming aarch64 exec support.
-- [ ] **Keep it from recurring.** Add an aarch64 cross-build and a qemu run of the confinement
-  tests to CI, so the next x86-only value fails a build instead of a release. File upstream: the
-  stdlib names neither `SYS_CHROOT` / `SYS_UNSHARE` nor `AUDIT_ARCH_*`, so kavach needs its own
-  per-arch table until it does.
 
 ## 3.12.9 — P(-1) closeout
 
@@ -58,10 +25,21 @@ starts at 3.13.0.
   - the remaining sigil overlaps (`syserr_*`, the `agnosys_*` helpers, `attestation_result_new`)
     get the `<crate>_` prefix that ADR-006 describes;
   - `file_restrict_mode` has had no caller since 3.12.6;
-  - `kv_sleep_ms` still passes the raw x86 number 35, correct only through cyrius's translation
-    row; use `sys_nanosleep`;
   - agnos: sweep every `sys_*` call reachable there for the Linux argument order (3.12.6 fixed the
-    opens).
+    opens);
+  - **the exec-safe deny list has two doors around it** (found at 3.12.8). The new mount API
+    (`open_tree`, `move_mount`, `fsopen`, `fsconfig`, `fsmount`, `fspick`: 428–433;
+    `mount_setattr`: 442; the same numbers on x86-64 and aarch64) does what the denied `mount`
+    does. `clone` and `clone3` with `CLONE_NEW*` flags re-namespace the way the denied `unshare`
+    does. Decide per call whether to deny it, filter its flags, or record why not. `clone`'s flags
+    are an argument a filter can test; `clone3` passes them in a struct, which seccomp cannot
+    read;
+  - **`confine_child` with a rootfs and `want_ns = 0`** makes `/` private in the caller's own
+    mount namespace, which as root is the host's. kavach's own callers always pass 1 with a rootfs;
+    a direct caller of the exported function can pass 0. Enforce "a rootfs implies `NS_MOUNT`"
+    inside it;
+  - **flip `aarch64-native` in CI to blocking** once it has run green; that run is the first on
+    aarch64 hardware, and the point at which aarch64 exec support can be claimed.
 - [ ] **Benchmark tooling.** `bench-history.sh` pins to one CPU: unpinned exec timings are bimodal
   on the development host (3.12.7). A checked-in interleaved A/B script replaces the ad-hoc ones
   used for 3.12.6 and 3.12.7.
@@ -148,6 +126,21 @@ default, writes only with kavach approval).
 ### Blocked — awaiting upstream
 
 Each entry carries **what it means**, **who owns the upstream work**, and **trigger condition**.
+
+### aarch64 namespaces and rootfs entry
+
+- **What it means.** Since 3.12.8, `security_create_namespace` returns not-supported on aarch64 and
+  `_spawn_enter_rootfs` returns -1 there, so an aarch64 sandbox gets no namespaces and no rootfs.
+  kavach's x86-64 numbers for `unshare` (272) and `chroot` (161) run `kcmp` and `sethostname` on
+  aarch64. The native numbers are not an option: cyrius renumbers 51 to `getsockname`, and a
+  native number under an aarch64 `#ifdef` is what ADR-007 and the cyrius guide rule out.
+- **Who owns it.** Upstream: cyrius, filed as
+  `cyrius/docs/development/issues/2026-09-25-kavach-unshare-chroot-unnamed-aarch64-chroot-unreachable.md`.
+  It asks for `SYS_UNSHARE` and `SYS_CHROOT` in both Linux peers with `ESYSXLAT` rows `272→97` and
+  `161→51`. The `161→51` row has to sit below the `51→204` getsockname row.
+- **Trigger condition.** A cyrius release declaring both names. Then move the pin, call
+  `sys_unshare` / `sys_chroot`, delete the two constants in `src/sys_security_syscalls.cyr` and the
+  aarch64 refusals, and run the namespace and rootfs tests on the `aarch64-native` CI job.
 
 ### Stiva OCI backend
 

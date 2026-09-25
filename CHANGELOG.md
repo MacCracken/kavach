@@ -7,6 +7,245 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.12.8] — 2026-09-25
+
+The ABI repairs pinned ahead of 3.13. The seccomp filter now checks the architecture. Every
+syscall number kavach writes is correct for the architecture it runs on, or refuses to compile
+there. CI builds and runs aarch64. This is the first release whose whole test suite passes on
+aarch64 (under qemu-user, 791/791; 3.12.7 failed 19 assertions and then segfaulted).
+
+Two behaviour changes, both fail-closed; see **Breaking**. A 32-bit or x32 syscall under a kavach
+seccomp filter now kills the process. On aarch64, namespaces and rootfs entry are refused until
+the stdlib names `unshare` and `chroot`. ADR-007 records the decisions.
+
+### Breaking
+
+- **A 32-bit payload dies under a kavach seccomp filter.** Every filter now kills any
+  `seccomp_data.arch` other than the build's own, and on x86-64 any x32 call. An i386 binary on
+  x86-64, or an AArch32 binary on aarch64, is killed at its first syscall after exec. To run one,
+  use a policy with `seccomp_enabled = 0`.
+- **Removed from `src/sys_security_syscalls.cyr`, and so from both bundles:** `SYS_SOCKET_NR`,
+  `SYS_BIND_NR`, `SYS_SENDTO_NR`, `SYS_RECVFROM_NR`, `SYS_PIVOT_ROOT_NR`, and that file's second
+  copy of `SYS_AGNOS_AUDIT_LOG` (`kernel_audit.cyr` keeps its own). They were raw x86-64 numbers,
+  and no first-party repo references them. Migrate to the stdlib's `sys_socket`, `sys_bind`,
+  `sys_sendto` and `sys_recvfrom`, or its `SYS_*` names. `SYS_UNSHARE` and `SYS_CHROOT_NR`
+  remain, but are now declared only when building for x86-64.
+
+### Fixed — the seccomp filter checks the architecture
+
+Both filters loaded only `seccomp_data.nr` and compared it with x86-64 numbers. seccomp(2) warns
+that this is not enough: each ABI numbers syscalls differently, and one process can use more than
+one.
+
+- **On x86-64, a denied call could be made through the i386 gate.** Measured against the 3.12.7
+  exec filter, built from the tag, on a kernel with IA32 emulation and x32 enabled:
+  - a native `umount2` was killed;
+  - the same `umount2` through `int 0x80` (i386 number 52, which x86-64 reads as `getpeername`)
+    ran, and returned `ENOENT`;
+  - an x32 `getpid` ran, and so did an i386 `getpid`.
+- **On aarch64, the filter denied the wrong calls.** x86-64 `ptrace` (101) is aarch64
+  `nanosleep`, so the filter killed `nanosleep`, and the real `ptrace` (117), `mount` (40) and
+  `unshare` (97) went through. This is read from the tables, not run: qemu-user refuses to load
+  filters, and it has not been on hardware.
+- **Fix.** Every filter starts with an architecture check. It loads `arch`, kills anything but the
+  build's `AUDIT_ARCH_*`, then loads `nr`. On x86-64 it also kills any `nr` with bit 30 set (x32).
+  The deny and allow tables are per-architecture, one column each, with native numbers from
+  `asm/unistd_64.h` and `asm-generic/unistd.h`. They are deliberately not the stdlib's `SYS_*`
+  names, which on aarch64 include x86 numbers renumbered only at a `syscall()` site.
+- **One builder.** Both filters come from `_seccomp_build`, and the basic filter's 23 hand-written
+  instructions are gone. Each filter is 27 instructions on x86-64 (was 23) and 25 on aarch64,
+  which has no `sysfs` or `arch_prctl`.
+- **New API:** `security_seccomp_native_arch()`, plus the constants `AUDIT_ARCH_X86_64`,
+  `AUDIT_ARCH_AARCH64`, `BPF_JMP_JGE_K`, `SECCOMP_DATA_NR`, `SECCOMP_DATA_ARCH` and
+  `X32_SYSCALL_BIT`.
+
+**Tests.**
+
+- `exec_seccomp_filter_shape` and the new `basic_seccomp_filter_shape` read back every prologue
+  byte. They check the per-architecture counts (20 or 19), that each JEQ lands on its target, and
+  that the x32 branch lands on the KILL. They also check `mount`, `ptrace` and `unshare` in the
+  right numbering, and that `nanosleep` is not denied. The expected pairs are written out in the
+  test, not read from the tables.
+- `seccomp_kills_what_it_denies` forks a child per way into the kernel: a denied native call, an
+  x32 call, and `int 0x80`. Each is expected to die by SIGSYS under the filter and to return
+  without it. The two x86-only ways run on x86-64 only.
+- The same probes, built against the 3.12.7 tree, reproduce the gap: the native call is killed,
+  and the x32 call, the i386 `getpid` and the i386 `umount2` all run.
+
+Five mutants each fail:
+
+- no x32 check: 3 failures, including the SIGSYS probe;
+- the x32 jump off by one: 16. The kernel rejects that filter, and every seccomp test now says so;
+- the arch JEQ inverted: 12;
+- `nr` loaded where `arch` should be: 10;
+- the x86-64 column swapped for aarch64's: 20.
+
+### Fixed — `security_syscall_name_to_nr` answers in the build's numbering
+
+It returned the x86-64 number on every architecture. The map is now two-column like the filter
+tables. A name the build's architecture lacks maps to -1, rather than to another call's number.
+On aarch64 that is `open`, `stat`, `access`, `pipe`, `dup2`, `fork`, `mkdir`, `rmdir`, `unlink`
+and `chmod`, whose libc uses the `*at` forms, `pipe2`, `dup3` and `clone`.
+
+### Fixed — aarch64 refuses `unshare` and `chroot` instead of running other calls
+
+The stdlib names neither call, and kavach issued the x86-64 numbers. Measured under
+`qemu-aarch64 -strace` on cyrius 6.6.6 codegen:
+
+- raw 272 runs `kcmp`;
+- raw 161 runs `sethostname`, with the rootfs path as the name and whatever `x1` held as the length;
+- native 51 is renumbered to 204, `getsockname`;
+- native 97 does reach `unshare`.
+
+What that meant through 3.12.7:
+
+- Namespace creation on aarch64 failed, closed: `kcmp`, handed the clone flags as a pid, answers
+  `ESRCH`. So no aarch64 sandbox got a namespace.
+- Rootfs entry was never reached on kavach's own paths, because the namespace step before it
+  failed first. Reached as root, with a stray length of 64 or less, it would have renamed the
+  host's UTS namespace and returned 0. The payload would have run in the host's filesystem,
+  reported as confined.
+
+**Why not the native numbers.** 51 cannot be reached through `syscall()` at all. 97 works today
+only because nothing claims it. The cyrius guide's rule 3 is to never write an aarch64-native
+number under an aarch64 `#ifdef`, because the translation rows match numbers, not intent. That is
+already live in the first-party tree: takumi's native `ppoll` (73) runs as `flock` since cyrius
+6.6.4 added a `73→32` row (measured; takumi pins 6.6.2, so it is not hit yet).
+
+**Fix.**
+
+- `security_create_namespace` returns not-supported on aarch64, and `spawn_namespaces_available`
+  answers 0.
+- `_spawn_enter_rootfs` returns -1 before its private mount.
+- `SYS_UNSHARE` and `SYS_CHROOT_NR` are declared only under `#ifdef CYRIUS_ARCH_X86`, so an
+  aarch64 use is a compile error.
+- A confined child that needs either call exits 123, the code it already exited with.
+- Requested upstream: `cyrius/docs/development/issues/2026-09-25-kavach-unshare-chroot-unnamed-aarch64-chroot-unreachable.md`.
+  The refusals lift when the stdlib declares `SYS_UNSHARE` and `SYS_CHROOT`.
+
+### Fixed — the OCI state-root check reads `struct stat` at the right offsets
+
+`_oci_dir_is_ours` read `st_mode` and `st_uid` at x86-64 offsets (+24, +28) on every
+architecture. aarch64 keeps them at +16 and +24, so there it compared the owner's low bits as the
+mode and the group as the owner, and refused every state root. Every OCI run on aarch64 failed.
+That was 8 of the 9 failing test groups under qemu at 3.12.7 (17 of 19 assertions). It was also
+the segfault: `oci_err_path_is_uid_scoped` handed the refused (null) path to `strstr`.
+
+- **Fix.** It reads through the stdlib's `STAT_MODE` and `STAT_UID`. agnos returns before
+  reading, because agnos's `stat` has no owner field.
+- **Tests.** `oci_state_root_rejects_a_hostile_dir` now covers the owner branch with `/proc/1/fd`,
+  a root-owned directory at mode 0500 on any Linux host. It passes the type and permission checks,
+  so only the owner check can refuse it.
+- **Mutants.** Without the owner check, exactly this assertion fails. Reading the uid at the mode
+  offset fails 18. Seventeen are the same assertions in the same eight OCI groups that failed on
+  aarch64 at 3.12.7, which confirms what those were. The eighteenth is the scratch-path check
+  where aarch64 segfaulted.
+- **The segfault.** `oci_err_path_is_uid_scoped` now stops on a null path instead of crashing the
+  suite.
+
+### Changed — stdlib names in place of raw numbers
+
+- `kernel_audit.cyr` opens its netlink socket through `sys_socket`, `sys_bind`, `sys_sendto` and
+  `sys_recvfrom`. They were raw 41, 49, 44 and 45, right on aarch64 only because cyrius renumbers
+  those four.
+- `kv_sleep_ms` uses `sys_nanosleep`, where it passed a raw 35. This was planned for 3.12.9 and
+  pulled forward.
+- `src/` now contains no `syscall(<number>)` at all.
+- `dist/kavach-confine.deps` drops `net`. It was kept only because comments in the trimmed
+  `sys_security_syscalls.cyr` named `sock_recv`, a `net.cyr` symbol. A consumer declaring exactly
+  the new 18 leaves builds and runs on x86-64 and aarch64.
+
+### CI
+
+- **`aarch64` (blocking).** Cross-builds `src/main.cyr` for aarch64 and agnos, smoke-runs the
+  aarch64 binary, and runs the test suite under qemu-aarch64. Locally that is 791/791 under
+  Ubuntu 24.04's qemu 8.2.2 (also with `CYRIUS_DCE=1`, as CI builds) and under 11.1.1.
+- **`aarch64-native` (informational).** Runs the same test binary on an `ubuntu-24.04-arm`
+  runner, where seccomp filters actually load. The aarch64 tables have not met a real kernel yet,
+  so this job reports without blocking until its first green run. Then drop `continue-on-error`,
+  and aarch64 exec support can be claimed.
+- **The security scan's `syscall 59` gate never fired.** The scan ran plain `grep`, where `\(`
+  opens a group, so that pattern did not compile. GNU grep printed "Unmatched ( or \(", the scan
+  discarded that stderr, and every tree passed the gate, including one with a planted
+  `syscall(59, …)`. (The `/etc` pattern has no `\(` and did work.)
+  - It now uses `grep -E`, and a pattern that does not compile fails the job.
+  - Two new gates: any `syscall(<number>)` in `src/`, and any `SYS_*` number declared outside
+    `sys_security_syscalls.cyr` and `kernel_audit.cyr`.
+  - The script, extracted from the workflow and run under `bash -e` with GNU grep, passes this
+    tree and flags 3.12.7's raw 35. It also flags a planted `syscall(59, …)` (under both syscall
+    gates) and a planted `SYS_FOO = 12`.
+
+### Tests
+
+- x86-64: 753 → **812** assertions.
+- aarch64 under qemu-user: 3.12.7 failed 19 assertions in 9 groups and then segfaulted; 3.12.8
+  passes **791/791**.
+- **Seccomp-dependent tests fail closed.** `process_real_exec` and the persistent default path
+  assumed seccomp loads. On a host that refuses it (qemu-user answers `PR_SET_SECCOMP` with
+  `EINVAL`, seen in `-strace`), they now assert the fail-closed 125, as
+  `sandbox_spawn_applies_seccomp` already did.
+- **"This host has no seccomp" is now asked with a one-instruction filter**
+  (`_t_host_loads_seccomp`), not with kavach's own. `spawn_seccomp_available` probes with the exec
+  filter, so a filter the kernel rejected used to read as "no seccomp here", and every test
+  allowing for that host accepted the bug. `seccomp_filter_actually_loads` now fails when the host
+  loads the trivial filter and not kavach's.
+- **Two tests no longer crash the suite on a regression; each now reports a failed assertion.**
+  - `sandbox_spawn_applies_seccomp` handed `spawn_exit_name`'s 0 (not a confinement code) to
+    `strstr`, which crashed the run under the arch mutants.
+  - `oci_err_path_is_uid_scoped` handed a null path to `strstr`, which is the segfault aarch64
+    hit at 3.12.7.
+- The prlimit helper is generalized to `_t_set_rlimit`. The SIGSYS probes zero `RLIMIT_CORE`, so
+  an expected kill does not store a core dump.
+
+### Docs
+
+- ADR-007: native-ABI-only filters, per-architecture tables, and refusal over native numbers.
+- The roadmap drops 3.12.8 as shipped. 3.12.9 gains three items found here:
+  - a deny list that `mount` alone does not cover (the new mount API, and `clone`/`clone3` with
+    namespace flags);
+  - `confine_child` entering a rootfs with no mount namespace when a caller passes `want_ns = 0`;
+  - flipping the native aarch64 job to blocking.
+
+  "Blocked — awaiting upstream" gains the aarch64 refusals, which lift with the cyrius filing.
+- `SECURITY.md` lists the architecture check as resolved.
+- The CLAUDE.md syscall rule now covers native numbers.
+
+### Verified
+
+- fmt 0 drift; lint 0 in `src/` (the test file keeps its 7 pre-existing long lines); `vet` clean;
+  `check --with-deps src/lib.cyr` clean.
+- Builds: plain, `CYRIUS_DCE=1`, `--agnos` and `--aarch64`. All four have 0 undefined, no
+  raw-syscall warning, and the same 149 `duplicate fn` names as 3.12.7.
+- Tests **812/812** (x86-64) and **791/791** (aarch64, qemu 8.2.2 and 11.1.1). samay **12/12**;
+  fuzz ok.
+- `distlib --all --check` fresh; `deps --verify` 75/0.
+- Consumers on cyrius 6.6.6, both building clean and running:
+  - a confine-only one, declaring exactly the 18 sidecar leaves: 27 filter instructions on
+    x86-64, 25 on aarch64 under qemu;
+  - one with a real `[deps.kavach]`, which vendors the 3.12.8 bundle and runs `sandbox_exec`.
+
+### Performance
+
+`bench-history.csv` gains a **3.12.8** row. The comparison below is medians of 5 interleaved
+runs against a build of the 3.12.7 tag, pinned to one CPU.
+
+| bench | 3.12.7 | 3.12.8 | Δ |
+|---|---|---|---|
+| `process_exec_echo` | 2.672 ms | 2.714 ms | +1.6% (ranges overlap) |
+| `process_exec_confined` | 2.773 ms | 2.666 ms | −3.9% (ranges overlap) |
+| `audit_chain_record_to_tmpfs` | 12.05 µs | 12.56 µs | +4.2% (ranges overlap) |
+| `cgroup_wrap_argv` | 350 ns | 364 ns | +4.0% (ranges overlap) |
+
+- **The architecture check costs nothing measurable.** It adds four BPF instructions to each
+  syscall of a confined child on x86-64 (three on aarch64), against a fork and exec of about
+  2.7 ms.
+- **No row moved with separate ranges.** Every other row is within ±2.6%, and neither the `audit`
+  nor the `cgroup` code changed.
+- ⚠ **The release row is a single unpinned run**, and it reads +3% to +8% on CPU-only benchmarks
+  whose code did not change, and −19.9% on `process_exec_confined`. None of that survives the
+  pinned comparison. It is the frequency-scaling behaviour recorded at 3.12.7; the fix for the
+  tooling is on the 3.12.9 list.
+
 ## [3.12.7] — 2026-09-24
 
 Closes the last open ADR-005 residual, H4, and keeps the audit log readable after a torn record.

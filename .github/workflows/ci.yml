@@ -168,6 +168,90 @@ jobs:
           cyrius build tests/kavach.fcyr build/kavach_fuzz
           timeout 10 build/kavach_fuzz 500 || { echo "FUZZ CRASH"; exit 1; }
 
+  aarch64:
+    # 3.12.8. Until this job existed nothing built or ran kavach for aarch64,
+    # and x86-64 values sat in the tree for releases: raw syscall numbers the
+    # aarch64 backend ran as other calls, `struct stat` read at x86-64
+    # offsets, and a seccomp filter of x86-64 numbers. Under qemu-user the
+    # 3.12.7 suite failed 19 assertions and then segfaulted; this job fails
+    # the build on any of that instead. The agnos build rides along because
+    # agnos compiles a different arm of every `#ifdef CYRIUS_TARGET_AGNOS`.
+    name: aarch64 (cross-build + qemu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Cyrius toolchain
+        # Same step as build-and-test: the cyrius.cyml pin, via the upstream
+        # installer, which also ships cycc_aarch64.
+        run: |
+          set -e
+          CYRIUS_VERSION="${CYRIUS_VERSION:-$(grep -E '^cyrius[[:space:]]*=' cyrius.cyml | sed -E 's/^cyrius[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/')}"
+          echo "Installing Cyrius $CYRIUS_VERSION"
+          curl -sSf https://raw.githubusercontent.com/MacCracken/cyrius/main/scripts/install.sh | \
+            CYRIUS_VERSION="$CYRIUS_VERSION" sh
+          echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
+
+      - name: Install qemu-user
+        # Verified locally against Ubuntu 24.04's qemu-aarch64 8.2.2 and 11.1.1.
+        # qemu-user answers PR_SET_SECCOMP with EINVAL, so the seccomp tests
+        # take their fail-closed arm here; the native job below loads filters.
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-user
+          qemu-aarch64 --version | head -1
+
+      - name: Resolve dependencies
+        run: cyrius deps
+
+      - name: Cross-build (aarch64, agnos)
+        # kavach's own x86-64-only syscall numbers are declared under
+        # `#ifdef CYRIUS_ARCH_X86`, so an aarch64 use of one fails right here.
+        run: |
+          mkdir -p build
+          cyrius build --aarch64 src/main.cyr build/kavach-aarch64
+          file build/kavach-aarch64 | grep -q "ARM aarch64" || { echo "not an aarch64 ELF"; exit 1; }
+          cyrius build --agnos src/main.cyr build/kavach-agnos
+          cyrius build --aarch64 tests/kavach.tcyr build/kavach-test-aarch64
+
+      - name: Smoke test (aarch64, qemu)
+        run: |
+          qemu-aarch64 build/kavach-aarch64 > /tmp/kavach_a64_out 2>&1 || true
+          grep -q "kavach v" /tmp/kavach_a64_out || { echo "FAIL: banner missing"; cat /tmp/kavach_a64_out; exit 1; }
+
+      - name: Tests (aarch64, qemu)
+        run: qemu-aarch64 build/kavach-test-aarch64
+
+      - name: Upload the aarch64 test binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: kavach-test-aarch64
+          path: build/kavach-test-aarch64
+          retention-days: 7
+
+  aarch64-native:
+    # The same test binary on aarch64 hardware, where seccomp filters load and
+    # the per-arch tables meet a real kernel. Informational until its first
+    # green run (it has never run before 3.12.8): drop `continue-on-error`
+    # then, and aarch64 exec support can be claimed.
+    name: aarch64 (native, informational)
+    needs: aarch64
+    runs-on: ubuntu-24.04-arm
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: kavach-test-aarch64
+          path: build
+
+      - name: Tests (aarch64, native)
+        run: |
+          chmod +x build/kavach-test-aarch64
+          uname -m
+          build/kavach-test-aarch64
+
   security:
     name: Security Scan
     runs-on: ubuntu-latest
@@ -182,13 +266,28 @@ jobs:
         # constants because their job is to DETECT sandboxed code
         # touching those paths — pattern data, not access. Anywhere
         # else under src/ that hardcodes `/etc/` is a regression.
+        #
+        # ⚠ Patterns are EXTENDED regexes (`grep -E`). Until 3.12.8 the scan ran
+        # plain `grep`, where `\(` opens a group: the syscall-59 pattern did not
+        # compile (GNU grep: "Unmatched ( or \("), the stderr below swallowed the
+        # error, and the gate passed on every tree — a planted `syscall(59, …)`
+        # went through. A pattern that does not compile now fails the job.
         run: |
           FAIL=0
           scan() {
             local label="$1"; shift
             local pat="$1"; shift
             local hits
-            hits=$(grep -rn "$pat" src/ 2>/dev/null | awk -F: '
+            # grep exits 1 on a valid pattern (no match in /dev/null) and 2 on
+            # one that does not compile; `||` keeps `bash -e` from stopping on the 1.
+            local rc=0
+            grep -E -e "$pat" /dev/null > /dev/null 2>&1 || rc=$?
+            if [ "$rc" -eq 2 ]; then
+              echo "FAIL: $label — pattern does not compile: $pat"
+              FAIL=1
+              return
+            fi
+            hits=$(grep -rnE -e "$pat" src/ 2>/dev/null | awk -F: '
               { line=$3; for(i=4;i<=NF;i++) line=line":"$i;
                 sub(/^[[:space:]]+/,"",line);
                 if (substr(line,1,1) != "#") print $1":"$2":"line }')
@@ -204,6 +303,16 @@ jobs:
           }
           # Raw execve outside the documented backend entry points.
           scan "raw execve (syscall 59)" '\bsyscall\(\s*59\b' src/backend_process.cyr
+          # Any raw syscall number (3.12.8). Spell the stdlib's SYS_* / sys_*:
+          # each Linux peer carries its own number, and aarch64 runs an
+          # untranslated x86 number as a different call, silently.
+          scan "raw syscall number (use the stdlib's SYS_* / sys_*)" '\bsyscall\(\s*[0-9]'
+          # A syscall number kavach declares itself. Only the two files that
+          # document why may: sys_security_syscalls.cyr (x86-64 unshare and
+          # chroot, which the stdlib does not name yet) and kernel_audit.cyr
+          # (the agnos audit call).
+          scan "SYS_* number declared in src/" '\bSYS_[A-Z0-9_]+\s*=\s*[0-9]' \
+            src/sys_security_syscalls.cyr src/kernel_audit.cyr
           # Hardcoded /etc paths — kavach has no business writing to
           # system config; injection / mount escape territory.
           # Scanner modules carry pattern strings, not access calls.
