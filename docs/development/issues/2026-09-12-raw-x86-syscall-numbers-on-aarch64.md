@@ -4,6 +4,20 @@
 close-out (2026-09-12), kavach **3.12.5** at cyrius pin 6.6.2; every behaviour below was traced under
 `qemu-aarch64 -strace` with a cyrius 6.6.3 aarch64 build.
 
+**Update 2026-09-24 — kavach 3.12.6 on cyrius 6.6.6, re-measured under `qemu-aarch64 -strace`:**
+
+- **Defect 3 (`kv_sleep_ms`) is fixed by the pin.** cyrius 6.6.5 translates raw x86 `35` to aarch64
+  `nanosleep` (the call now sleeps its full 250 ms), with no kavach change.
+- **Defects 1 and 2 are unchanged.** `syscall(91)` still runs `capset` (asked for 0644, the file
+  stays 0600), and `131072` still opens `O_LARGEFILE`.
+- cyrius now supplies what the proposed fix below asks for: `sys_fchmod` with a per-arch
+  `SYS_FCHMOD` (x86_64 91, aarch64 52), a per-arch `O_NOFOLLOW` (x86_64 `0x20000`, aarch64
+  `0x8000`), and `SYS_NANOSLEEP`. Proposed-fix items 2 and 3 are superseded by those names.
+- 6.6.6's aarch64 build warns at `src/util.cyr:359`: "raw syscall 91 is x86_64 `fchmod`; on
+  ELF-aarch64 that number is `capset`. Use SYS_FCHMOD".
+- What is left is kavach's to do: `sys_fchmod(fd, mode)` with its result checked, and
+  `O_NOFOLLOW` in place of `131072` in `file_write_secure_r` and `file_write_secure_modal`.
+
 **Severity:** Medium. Nothing here is exploitable at the final path component, and every wrong syscall fails
 rather than corrupting anything. But two of the three defects sit in the **credential-write path**
 (requested permissions silently never applied; `O_NOFOLLOW` silently dropped), and the third turns

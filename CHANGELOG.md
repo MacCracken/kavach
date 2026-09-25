@@ -167,10 +167,23 @@ built on 6.6.4, 6.6.5 and 6.6.6:
 6.6.5 pads every call made inside an expression to 16-byte stack alignment. That is an ABI
 correctness fix, and a plausible cost for call-dense scan loops; it is not root-caused further here.
 
-### Not changed
+### aarch64 — the pin fixes one of the three raw-syscall defects; two remain in kavach
 
-`docs/development/issues/2026-09-12-raw-x86-syscall-numbers-on-aarch64.md` stays open. 6.6.6's
-only new aarch64 syscall translation is `statfs`, and it translates no open-flag values.
+Measured by cross-building with `cyrius build --aarch64` and running under `qemu-aarch64 -strace`
+on both toolchains:
+
+| call site | 3.12.5 on 6.6.2 | 3.12.6 on 6.6.6 |
+|---|---|---|
+| `kv_sleep_ms`, raw `syscall(35)` | `unlinkat` → EFAULT, no sleep | **`nanosleep`**, sleeps |
+| `file_write_secure_modal`, raw `syscall(91)` | `capset`; mode stays 0600 | same |
+| open flag `131072` (both secure writes) | `O_LARGEFILE`; `O_NOFOLLOW` lost | same |
+
+The nanosleep fix is cyrius 6.6.5's raw-x86 `35 → 101` translation row. The other two are
+kavach's own raw x86 values, and cyrius now supplies the replacements: per-arch `SYS_FCHMOD` with
+`sys_fchmod`, and per-arch `O_NOFOLLOW`. 6.6.6's aarch64 build warns at `src/util.cyr:359`: "raw
+syscall 91 is x86_64 `fchmod`; on ELF-aarch64 that number is `capset`". It does not translate 91,
+because that number is a real call on aarch64, and it does not translate flag values.
+`docs/development/issues/2026-09-12-raw-x86-syscall-numbers-on-aarch64.md` stays open for those two.
 
 ## [3.12.5] — 2026-09-10
 
