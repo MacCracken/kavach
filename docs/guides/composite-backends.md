@@ -43,9 +43,22 @@ Neither input's list is shared, so adding a rule to the merged policy, or to
 an input afterwards, changes only that policy.
 
 A deny-all input is the exception. `policy_landlock_deny_all` asks for a
-ruleset naming no path by leaving the count above the rule list, and a merge
-with such a policy is deny-all whatever the other side allows. That includes a
-deny-all policy that also names rules, although on its own it applies them.
+ruleset naming no path, written as a count above the rule list, and a merge
+with such a policy is deny-all whatever the other side allows. Alone or
+merged, a deny-all policy applies no rule: `policy_landlock_deny_all` drops
+the rules the policy named, `policy_landlock_add` refuses one afterwards, and
+the exec child reads any count above the list as deny-all, the test the merge
+makes (`policy_landlock_is_deny_all`). Through v3.13.0 a policy that named
+rules and was then made deny-all still applied them on its own, and denied
+every path only once merged.
+
+Every path includes the payload's own executable. The child applies landlock
+before it execs the payload, so the exec is refused (EACCES) and a composite
+exec with a deny-all side does not start its payload: it exits 127. A layer
+that makes the merge deny-all stops the payload; it does not confine one that
+has to run. To confine that, name its binary (and, if dynamically linked, its
+loader and libraries) with `policy_landlock_add`; landlock denies every other
+path already.
 
 Through v3.13.0 the merge summed the two counts and carried no list, and a
 count with no list is deny-all: a merge with a rule on either side denied the

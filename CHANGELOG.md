@@ -30,18 +30,77 @@ the contents under the merge as well.
   ("additive (concat)"), and the Rust original, whose comment gives the reason: landlock names
   allowed paths, and the inner layer may need paths of its own.
 - **A deny-all input keeps the merge deny-all**, as an empty list with a count of one. That side
-  has said the payload needs no path, and a union would let the other side's rules hand it some: a
-  payload that reads everything it needs from stdin, the case `policy_landlock_deny_all` exists
-  for, would gain whatever the other policy allows. This is the stricter reading, the one
-  `network_enabled` (AND) and the attestation merge take. It holds when the deny-all input also
-  names rules, although on its own such a policy applies them. Deny-all is recognised the way
-  `policy_landlock_deny_all` writes it, a count above the list's length.
+  has said the payload gets no path, and a union would let the other side's rules hand it
+  whatever they allow. (The payload `policy_landlock_deny_all` was written for, one reading its
+  input from stdin, cannot start under it at all; see the next entry.) This is the stricter
+  reading, the one `network_enabled` (AND) and the attestation merge take. It holds when the deny-all input's list
+  also holds rules. Deny-all is recognised the way `policy_landlock_deny_all` writes it, a count
+  above the list's length; the next entry makes a deny-all policy apply no rule on its own either.
 - ⚠ **A composite exec whose policies name landlock rules now runs its payload.** On a kernel
   with landlock, from 3.11.3 through 3.13.0, the merge enforced deny-all and the payload's own
   binary could not be opened. It now gets the union of both policies' paths: the documented
   behaviour, and wider than what those releases enforced.
 - `docs/guides/composite-backends.md`: the landlock rows (the list's union and deny-all), with the
   reasons. `composite.cyr`'s header no longer says the merge always takes the stricter side.
+
+### Fixed — `policy_landlock_deny_all` left the policy's rules in force
+
+`policy_landlock_deny_all` is documented as "Deny the payload every filesystem path", but on a
+policy that named rules it set `landlock_rules_len` to the list's length plus one and kept the
+list. `confine_child` and the persistent guest's child sequence passed the list and the count to
+`security_apply_landlock`, which walks min(count, list length) rules, so every rule still
+applied. Call order changed the meaning as well: `policy_landlock_add` after
+`policy_landlock_deny_all` reset the count to the list's length and ended the deny-all. And the
+merge above reads any count over the list as deny-all, so one policy allowed its rules alone and
+denied every path merged.
+
+Measured on this tree before the change (3.13.0's `policy.cyr`, `confine.cyr` and
+`persistent.cyr`, with the merge fix above), landlock ABI 10. A policy allowing `/bin/cat`'s
+runtime paths and a probe directory, then made deny-all (count 6 over a list of 5), read the probe
+through `sandbox_exec` (exit 0) and as a persistent guest. With the calls the other way round
+(count 5, list 5; the add returned 0), the same. `merge_policies` of the first with a plain policy
+gave a count of 1 over an empty list, and `/bin/cat` exited 127 under it, directly and through
+`composite_exec`. After the change none of these reads the probe, and the rules alone still do.
+
+**Deny-all means no path.** The function's name and first doc line, the 3.11.3 entry that added it
+("a ruleset that permits nothing"), the 2026-08-04 filing from agnosai it answered ("a total-deny
+landlock"), the merge and the composite guide all read it that way. Only the `+ 1` did not, and
+it made the call a no-op on any policy with a rule. The other reading, a ruleset only when there
+are no rules, keeps that no-op: a caller who asked for no path would get the paths an earlier call
+named.
+
+- `policy_landlock_deny_all` replaces the list with a fresh empty one and sets the count to one,
+  the form the merge gives a deny-all side. A caller holding the old list, or another policy
+  sharing it, keeps its rules.
+- `policy_landlock_add` returns -1 on a deny-all policy and leaves it deny-all. The two calls give
+  the same policy in either order, as the merge does for two policies.
+- One function now turns a policy into a ruleset in the child, `_spawn_apply_landlock`
+  (`confine.cyr`), called by `confine_child` and by the persistent guest's sequence. For a
+  deny-all policy it passes no list, so the ruleset names no path whatever the list holds; every
+  other policy is walked as before. It makes no list in the child: for a count with no list, both
+  paths used to allocate an empty one there, after `fork`.
+- Added `policy_landlock_is_deny_all(p)`: whether the count is above the list. The child's step,
+  `merge_policies` and `policy_landlock_add` all ask it, and `composite.cyr`'s private
+  `_landlock_denies_all` is gone. A count set above a list of rules through the raw accessor is
+  now deny-all in the child as well as in the merge; through 3.13.0 the child applied the whole
+  list.
+- ⚠ **A deny-all payload does not start, and never did.** Every path includes the payload's own
+  executable: landlock goes on in the child before `execve`, and the exec opens the binary. Under
+  a ruleset naming no path, `execveat` of the pinned binary fails with EACCES and the child exits
+  127: measured with `/bin/true` and `/usr/bin/echo` through `sandbox_exec`, `/bin/cat` as a
+  persistent guest, and `execveat`'s return in a forked child (-13, `/bin/true` and
+  `/usr/bin/true`). This was already so on 3.13.0 for a deny-all policy with no rules.
+  `policy.cyr` called deny-all "exactly right for a payload that needs no files", with agnosai's
+  `cxvm` reading its bytecode from stdin as the example; that was never true for an exec'd
+  payload, and the doc now says what the call does. A payload that has to start is confined with
+  `policy_landlock_add`, naming its binary and, if it is dynamically linked, its loader and
+  libraries.
+- ⚠ **A policy that names rules and calls `policy_landlock_deny_all`, in either order, now denies
+  every path, so its payload no longer starts** (exit 127). Through 3.13.0 it ran with its rules. A
+  caller that used deny-all as a "deny everything else" switch should drop the call: landlock
+  already denies every path the rules do not name.
+- `docs/guides/composite-backends.md`: a deny-all policy applies no rule alone either, and a
+  composite exec with a deny-all side does not start its payload.
 
 ### Tests
 
@@ -58,10 +117,11 @@ fail across the three).
   alone cannot read the overlay's path.
 - `composite_merge_deny_all_wins`: deny-all merged with rules (in either order), with a side that
   has no landlock, or with another deny-all gives an empty list and a count of one. So does a
-  deny-all input that names rules, and a count with no list. A rule added to the deny-all input
-  afterwards does not reach the merge. Where landlock is present, a merge with deny-all reads
-  nothing, directly and through `composite_exec`. The control, the same rules merged with a plain
-  policy, reads the probe.
+  count above a list that holds rules, and a count with no list. The merge's list is not the
+  deny-all input's, and an add on that input is refused. (Both changed with the deny-all fix:
+  `policy_landlock_deny_all` no longer leaves rules in a list, and the add is refused.) Where
+  landlock is present, a merge with deny-all reads nothing, directly and through
+  `composite_exec`. The control, the same rules merged with a plain policy, reads the probe.
 
   Against 3.13.0 this test fails on its structural assertions and on the control. Its two denials
   pass there, because that merge denied every path whatever its inputs.
@@ -69,7 +129,36 @@ fail across the three).
 Five mutants of the fix, each failing the suite at the assertions written for it: reusing the
 base's list (5 assertions), letting the other side's rules through a deny-all (7), ignoring the
 count bound (1), dropping landlock from the merge (19), and recognising deny-all by effect, a
-count over an empty list, rather than by the sentinel (1).
+count over an empty list, rather than by the sentinel (1). These counts were taken before the
+deny-all fix changed `composite_merge_deny_all_wins`.
+
+Three tests for the deny-all fix, all of which fail against the code before it. They were built
+against this tree's previous `src/`, with the new predicate stood in by the body of
+`composite.cyr`'s old `_landlock_denies_all`: 17 assertions fail across the three, and 1 more in
+`composite_merge_deny_all_wins` (the refused add).
+
+- `landlock_deny_all_drops_the_rules`: rules then deny-all leaves an empty list and a count of
+  one; it reads as deny-all, still takes the confined path, and leaves the list a caller held
+  intact. An add after deny-all is refused, in either order, and the policy stays deny-all.
+  Merged with a plain policy it is deny-all, as it is alone. The predicate answers 0 for a null
+  policy, no landlock, rules, and a count below the list, and 1 for a count above the list (where
+  an add is refused and the list left alone) and for a count with no list.
+- `landlock_deny_all_denies_the_rules_paths`: the control, rules that let `/bin/cat` read the
+  probe through `sandbox_exec` and as a persistent guest. Where landlock is present, the same rules
+  with deny-all, in either order, read nothing on either path, and neither does their merge with a
+  plain policy.
+- `landlock_count_above_the_list_denies_all`: a count set above a list of rules through the raw
+  accessor. Where landlock is present, neither `sandbox_exec` nor a persistent guest applies any
+  of the list's rules; this runs before the add, which through 3.13.0 would have reset the count.
+  Merged, the policy is deny-all; an add is refused and the list left as it was.
+
+Seven mutants of the fix, each failing the suite at the assertions written for it: the child
+walking a deny-all policy's list (2 assertions), `policy_landlock_deny_all` keeping the list (3),
+`policy_landlock_add` not refusing (12), emptying the old list in place rather than replacing it
+(2), the persistent guest or `confine_child` keeping its own inline walk (1 each), and the merge
+recognising deny-all by effect, a count over an empty list. That one stops the suite in
+`composite_merge_deny_all_wins`: the merge copies a count's worth of rules from a shorter list,
+and `vec_get` aborts.
 
 ### Verified
 
@@ -81,6 +170,15 @@ count over an empty list, rather than by the sentinel (1).
 - aarch64: cross-built, and the suite 942 → **971** under qemu-aarch64 11.1.1. qemu-user reports
   landlock ABI 0, so the four assertions that need enforcement skip there, as the existing
   landlock tests' do. The agnos build links.
+- With the deny-all fix, on x86-64 (kernel 7.2.6, landlock ABI 10): the suite, 1004 → **1037**;
+  fmt `--check` with no drift across the tree, lint with 0 warnings, vet, `check-symbols.py`, the
+  security scan, fuzz (500), the bench harness, and the smoke build. `cyrius distlib --all`
+  changes both bundles this time, since `policy.cyr` and `confine.cyr` are in both profiles; every
+  module section of each bundle matches its source, the `.deps` sidecars are unchanged, and
+  `check-bundles.py` passes. The `duplicate fn` set is unchanged (the same 130 names).
+- With the deny-all fix, on aarch64: cross-built, and the suite 971 → **997** under qemu-aarch64
+  11.1.1. The seven new assertions that need landlock enforcement skip there. The agnos build
+  links.
 
 ### Performance
 
@@ -96,6 +194,20 @@ path included (`process_exec_confined` 2.704 → 2.703 ms).
 - ⚠ **`http_path_extract` has separate ranges, 101 → 87 ns (−13.9%), on a function this change
   does not touch.** 3.12.9's A/B saw the same benchmark move with its function unchanged. Code
   placement is the likely cause, as there; it was not isolated.
+
+The deny-all fix was measured against the merge fix (HEAD) with `scripts/bench-ab.py`'s own
+sampling and comparison, 5 interleaved rounds per side pinned to CPU 15. The HEAD side was built
+from a scratch copy of that commit's `src/`: the script's worktree under `/tmp` would have to
+resolve the `../` path dependencies from there. **26 of 29 show no measured change**, among them
+the exec paths, which now run `_spawn_apply_landlock` in the child (`process_exec_confined`
+2.701 → 2.699 ms, `process_exec_echo` 2.707 → 2.694 ms), and both merges (`merge_policies_plain`
+201 → 199 ns, `merge_policies_landlock` 347 → 342 ns). `policy_landlock_add`'s added check is not
+on a benchmarked path.
+
+- ⚠ **Three benchmarks on functions this change does not touch have separate ranges:**
+  `state_valid_transition_check` 6 → 5 ns, `ct_streq_64` 198 → 206 ns (+4.0%) and
+  `gate_clean_output` 355.97 → 344.31 µs (−3.3%). That is the pattern the earlier A/Bs recorded;
+  code placement is the likely cause, and it was not isolated.
 
 ## [3.13.0] — 2026-09-25
 

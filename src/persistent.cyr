@@ -193,16 +193,7 @@ fn _persistent_spawn_inner(command, policy, seccomp_info, want_ns, uid, gid) {
                 }
             }
         }
-        if (policy != 0) {
-            if (SandboxPolicy_landlock_rules_len(policy) > 0) {
-                var _pl = SandboxPolicy_landlock_rules(policy);
-                if (_pl == 0) { _pl = vec_new(); }
-                if (is_ok(security_apply_landlock(_pl,
-                      SandboxPolicy_landlock_rules_len(policy))) == 0) {
-                    sys_exit(SPAWN_EXIT_LANDLOCK);
-                }
-            }
-        }
+        if (_spawn_apply_landlock(policy) != 0) { sys_exit(SPAWN_EXIT_LANDLOCK); }
         if (seccomp_info != 0) {
             if (syscall(SYS_PRCTL, 38, 1, 0, 0, 0) < 0) { sys_exit(SPAWN_EXIT_NNP); }
             if (is_ok(security_load_seccomp(security_seccomp_filter_ptr(seccomp_info),

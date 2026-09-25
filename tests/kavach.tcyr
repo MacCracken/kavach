@@ -4563,8 +4563,8 @@ fn _t_ll_has(p, path, access) {
     return 0;
 }
 
-# Whether `p` is deny-all in the form `policy_landlock_deny_all` gives a policy
-# with no rules: an empty list and a count of one.
+# Whether `p` is deny-all in the form `policy_landlock_deny_all` gives it: an
+# empty list and a count of one.
 fn _t_ll_deny_all_form(p) {
     if (_t_ll_len(p) != 0) { return 0; }
     if (SandboxPolicy_landlock_rules_len(p) != 1) { return 0; }
@@ -4613,7 +4613,11 @@ fn _t_merge_probes_remove(root) {
 # A policy allowing what `/bin/cat` needs to load: `/usr`, and `/bin`, `/lib`
 # and `/lib64` where they exist. A rule on a missing path fails the exec closed.
 fn _t_merge_runtime() {
-    var p = policy_minimal();
+    return _t_ll_add_runtime(policy_minimal());
+}
+
+# Add those rules to `p`, and return it.
+fn _t_ll_add_runtime(p) {
     policy_landlock_add(p, "/usr", FS_READ_ONLY);
     if (file_exists("/bin") == 1) { policy_landlock_add(p, "/bin", FS_READ_ONLY); }
     if (file_exists("/lib") == 1) { policy_landlock_add(p, "/lib", FS_READ_ONLY); }
@@ -4739,21 +4743,23 @@ fn test_composite_merge_deny_all_wins() {
       "...and with a side that has no landlock");
     assert_eq(_t_ll_deny_all_form(merge_policies(d, d)), 1, "...or another deny-all");
 
-    # A deny-all side that also names rules still wins, though alone it applies
-    # them; so does a count set with no list behind it.
+    # Any count above the list is deny-all: over a list that holds rules, which
+    # through 3.13.0 is what `policy_landlock_deny_all` left on a policy with
+    # rules, and with no list behind it.
     var dr = policy_minimal();
     policy_landlock_add(dr, "/srv/dr", FS_READ_ONLY);
-    policy_landlock_deny_all(dr);
+    SandboxPolicy_set_landlock_rules_len(dr, 2);
     assert_eq(_t_ll_deny_all_form(merge_policies(a, dr)), 1,
-      "a deny-all side with rules of its own still makes the merge deny-all");
+      "a deny-all side with rules in its list still makes the merge deny-all");
     var bare = policy_minimal();
     SandboxPolicy_set_landlock_rules_len(bare, 2);
     assert_eq(_t_ll_deny_all_form(merge_policies(bare, a)), 1, "so does a count with no list");
 
-    # The merge's empty list is its own: a rule added to the deny-all input
-    # afterwards leaves the merge denying everything.
-    policy_landlock_add(d, "/srv/a", FS_READ_ONLY);
-    assert_eq(_t_ll_deny_all_form(m), 1, "a later add on the input does not reach the merge");
+    # The merge's empty list is its own, and a rule for the deny-all input is
+    # refused, so nothing reaches the merge that way.
+    assert(policy_landlock_rules(m) != policy_landlock_rules(d), "the merge's list is not the input's");
+    assert_eq(policy_landlock_add(d, "/srv/a", FS_READ_ONLY), 0 - 1, "an add on the input is refused");
+    assert_eq(_t_ll_deny_all_form(m), 1, "...and the merge still denies everything");
 
     var root = _t_merge_probes();
     if (_t_merge_reads(policy_minimal(), 0, root, "base") == 1) {
@@ -4772,6 +4778,149 @@ fn test_composite_merge_deny_all_wins() {
               "...and nothing through composite_exec either");
         }
     }
+    _t_merge_probes_remove(root);
+    return 0;
+}
+
+# --- policy_landlock_deny_all denies every path ----------------------------
+#
+# Through 3.13.0 `policy_landlock_deny_all` set the count to the list's length
+# plus one and kept the list, and the child walked the list: a policy that named
+# paths and was then made deny-all still permitted them. A later
+# `policy_landlock_add` reset the count and so ended the deny-all. Merged, the
+# same policy denied every path. Measured on 3.13.0 through `sandbox_exec` and a
+# persistent guest: `/bin/cat` read a file its rules allowed in either order.
+
+# `p` with the rules `/bin/cat` needs and a rule for `<root>/base`.
+fn _t_da_allow(p, root) {
+    _t_ll_add_runtime(p);
+    policy_landlock_add(p, _t_merge_path(root, "base", 0), FS_READ_ONLY);
+    return p;
+}
+
+# Whether `/bin/cat <root>/<name>/probe.txt`, run as a persistent guest confined
+# by `policy`, prints the probe.
+fn _t_da_persist_reads(policy, root, name) {
+    var cmd = str_cstr(str_cat(str_from("/bin/cat "), str_from(_t_merge_path(root, name, 1))));
+    var g = persistent_spawn_confined(cmd, policy);
+    if (g == 0) { return 0; }
+    sys_close(PersistentGuest_stdin_fd(g));
+    var buf = alloc(256);
+    var total = 0;
+    var r = persistent_read(g, buf, 255);
+    while (r > 0 && total < 255) {
+        total = total + r;
+        r = persistent_read(g, buf + total, 255 - total);
+    }
+    store8(buf + total, 0);
+    var st[8];
+    store64(&st, 0);
+    kv_waitpid(PersistentGuest_pid(g), &st, 0);
+    sys_close(PersistentGuest_stdout_fd(g));
+    return cstr_contains(buf, "MERGE-PROBE-CONTENT");
+}
+
+fn test_landlock_deny_all_drops_the_rules() {
+    test_group("landlock_deny_all_drops_the_rules");
+    # Rules, then deny-all: the rules go, leaving the form a merge with a
+    # deny-all side gives.
+    var p = policy_minimal();
+    policy_landlock_add(p, "/srv/a", FS_READ_ONLY);
+    policy_landlock_add(p, "/srv/b", FS_READ_WRITE);
+    var held = policy_landlock_rules(p);
+    assert_eq(policy_landlock_deny_all(p), 0, "deny_all on a policy with rules succeeds");
+    assert_eq(_t_ll_deny_all_form(p), 1, "...and leaves an empty list and a count of one");
+    assert_eq(policy_landlock_is_deny_all(p), 1, "...which reads as deny-all");
+    assert_eq(policy_wants_confinement(p), 1, "...and still takes the confined path");
+    assert(policy_landlock_rules(p) != held, "the list is a fresh one");
+    assert_eq(vec_len(held), 2, "...so the list a caller held keeps its rules");
+
+    # A rule after deny-all is refused, whether or not rules came before it.
+    var q = policy_minimal();
+    policy_landlock_deny_all(q);
+    assert_eq(policy_landlock_add(q, "/srv/a", FS_READ_ONLY), 0 - 1, "an add after deny_all is refused");
+    assert_eq(_t_ll_deny_all_form(q), 1, "...and the policy stays deny-all");
+    assert_eq(policy_landlock_add(p, "/srv/c", FS_READ_ONLY), 0 - 1, "so is one after rules and deny_all");
+    assert_eq(_t_ll_deny_all_form(p), 1, "...which stays deny-all too");
+
+    # The merge reads the policy as the policy reads itself.
+    assert_eq(_t_ll_deny_all_form(merge_policies(p, policy_minimal())), 1,
+      "merged with a plain policy it is deny-all, as it is alone");
+
+    # The predicate: a count above the list, however it was set.
+    assert_eq(policy_landlock_is_deny_all(0), 0, "a null policy is not deny-all");
+    assert_eq(policy_landlock_is_deny_all(policy_strict()), 0, "nor is one with no landlock");
+    var r = policy_minimal();
+    policy_landlock_add(r, "/srv/a", FS_READ_ONLY);
+    policy_landlock_add(r, "/srv/b", FS_READ_ONLY);
+    assert_eq(policy_landlock_is_deny_all(r), 0, "nor one with rules");
+    SandboxPolicy_set_landlock_rules_len(r, 1);
+    assert_eq(policy_landlock_is_deny_all(r), 0, "nor one whose count is below its list");
+    SandboxPolicy_set_landlock_rules_len(r, 3);
+    assert_eq(policy_landlock_is_deny_all(r), 1, "a count above the list is deny-all");
+    assert_eq(policy_landlock_add(r, "/srv/c", FS_READ_ONLY), 0 - 1, "...so an add is refused");
+    assert_eq(_t_ll_len(r), 2, "...and the list is left as it was");
+    var bare = policy_minimal();
+    SandboxPolicy_set_landlock_rules_len(bare, 1);
+    assert_eq(policy_landlock_is_deny_all(bare), 1, "so is a count with no list");
+    return 0;
+}
+
+fn test_landlock_deny_all_denies_the_rules_paths() {
+    test_group("landlock_deny_all_denies_the_rules_paths");
+    var root = _t_merge_probes();
+    # Baseline, as in landlock_denies_a_path_outside_its_rules.
+    if (_t_merge_reads(policy_minimal(), 0, root, "base") == 0) {
+        _t_merge_probes_remove(root);
+        return 0;
+    }
+    # The control: these rules let cat read the probe, on both paths.
+    var allow = _t_da_allow(policy_minimal(), root);
+    assert_eq(_t_merge_reads(allow, 0, root, "base"), 1, "the rules alone read the probe");
+    assert_eq(_t_da_persist_reads(allow, root, "base"), 1, "...and as a persistent guest");
+
+    var rules_first = _t_da_allow(policy_minimal(), root);
+    policy_landlock_deny_all(rules_first);
+    var deny_first = policy_minimal();
+    policy_landlock_deny_all(deny_first);
+    _t_da_allow(deny_first, root);
+    # With no landlock in the kernel nothing is enforced, so these assert only
+    # where it is present.
+    if (security_landlock_abi_version() > 0) {
+        assert_eq(_t_merge_reads(rules_first, 0, root, "base"), 0,
+          "rules, then deny_all: sandbox_exec reads nothing - the rules are not applied");
+        assert_eq(_t_merge_reads(deny_first, 0, root, "base"), 0, "deny_all, then rules: the same");
+        assert_eq(_t_da_persist_reads(rules_first, root, "base"), 0,
+          "a persistent guest reads nothing either");
+        assert_eq(_t_da_persist_reads(deny_first, root, "base"), 0, "...in either order");
+        assert_eq(_t_merge_reads(merge_policies(rules_first, policy_minimal()), 0, root, "base"), 0,
+          "and merged, as alone, it reads nothing");
+    }
+    _t_merge_probes_remove(root);
+    return 0;
+}
+
+fn test_landlock_count_above_the_list_denies_all() {
+    test_group("landlock_count_above_the_list_denies_all");
+    # A count above a list that holds rules, set through the raw accessor. The
+    # merge has read that as deny-all since its fix; the child now does too,
+    # where through 3.13.0 it applied every rule in the list.
+    var root = _t_merge_probes();
+    var p = _t_da_allow(policy_minimal(), root);
+    var n = _t_ll_len(p);
+    SandboxPolicy_set_landlock_rules_len(p, n + 1);
+    # First, while the policy is exactly that. The add below would, through
+    # 3.13.0, have changed it.
+    if (_t_merge_reads(policy_minimal(), 0, root, "base") == 1) {
+        if (security_landlock_abi_version() > 0) {
+            assert_eq(_t_merge_reads(p, 0, root, "base"), 0,
+              "sandbox_exec applies none of the list's rules");
+            assert_eq(_t_da_persist_reads(p, root, "base"), 0, "...and neither does a persistent guest");
+        }
+    }
+    assert_eq(_t_ll_deny_all_form(merge_policies(p, policy_minimal())), 1, "merged, it is deny-all");
+    assert_eq(policy_landlock_add(p, "/srv/x", FS_READ_ONLY), 0 - 1, "an add is refused");
+    assert_eq(_t_ll_len(p), n, "...and the list is left as it was");
     _t_merge_probes_remove(root);
     return 0;
 }
@@ -5564,6 +5713,9 @@ fn main() {
     test_composite_merge_carries_landlock_rules();
     test_composite_merge_allows_either_sides_paths();
     test_composite_merge_deny_all_wins();
+    test_landlock_deny_all_drops_the_rules();
+    test_landlock_deny_all_denies_the_rules_paths();
+    test_landlock_count_above_the_list_denies_all();
     test_timeout_ms_is_enforced();
     test_timeout_does_not_truncate_fast_payloads();
     test_process_backend_reports_the_real_exit_code();

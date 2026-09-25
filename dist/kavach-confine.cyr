@@ -2318,8 +2318,13 @@ fn policy_strict() {
 # **Landlock is allow-list only.** A policy with one rule permits that subtree
 # and denies every other path; a policy with no rules gets no landlock ruleset
 # at all, which is not the same thing — see `policy_landlock_deny_all`.
+#
+# Refused (-1) on a deny-all policy, which stays deny-all: the rule would give
+# back a path that policy has taken away. Through 3.13.0 the rule was added and
+# the policy stopped being deny-all.
 fn policy_landlock_add(p, path, access) {
     if (p == 0) { return 0 - 1; }
+    if (policy_landlock_is_deny_all(p) == 1) { return 0 - 1; }
     var rules = SandboxPolicy_landlock_rules(p);
     if (rules == 0) {
         rules = vec_new();
@@ -2332,25 +2337,33 @@ fn policy_landlock_add(p, path, access) {
 
 # Deny the payload every filesystem path.
 #
-# A landlock ruleset naming **no** path-beneath rules permits nothing, which is
-# the strongest confinement available and is exactly right for a payload that
-# needs no files: it receives its input on an already-open descriptor, and
-# landlock does not affect descriptors that were open before it was applied.
-# agnosai's cx tool sandbox is that shape — `cxvm` reads its bytecode from
-# stdin.
+# The policy's ruleset names no path, so it permits nothing. Rules the policy
+# named before are dropped, and `policy_landlock_add` refuses one afterwards, so
+# the call means the same in either order, and the same as a deny-all side in
+# `merge_policies`. Through 3.13.0 the rules were kept and the child applied
+# them: a policy that named a path and was then made deny-all still permitted
+# that path, and denied everything only once merged.
 #
-# Distinct from leaving the rule list empty, which applies no ruleset and
-# therefore restricts nothing. The sentinel path is never opened: the count is
-# what makes `confine_child` install a ruleset, and a `FS_READ_ONLY` rule on a
-# path that cannot be opened would fail closed rather than silently widen.
+# ⚠ **Every path includes the payload's own executable.** Landlock goes on in
+# the child before `execve`, and the exec opens the binary, so a deny-all
+# payload never starts: the exec fails with EACCES and the child exits 127
+# (measured through `sandbox_exec` and a persistent guest; `sandbox_spawn`
+# execs the same way). Descriptors the child already holds stay usable, which
+# helps only code that goes on in the child without an exec. A payload that has
+# to start needs `policy_landlock_add` instead, naming its binary and, if it is
+# dynamically linked, its loader and libraries; every other path is then denied
+# already.
+#
+# Written as an empty list and a count of one. The count is what makes the
+# child install a ruleset, and a count above the list is how every reader
+# recognises deny-all (`policy_landlock_is_deny_all`). Distinct from naming no
+# rule at all, which installs no ruleset and restricts nothing.
 fn policy_landlock_deny_all(p) {
     if (p == 0) { return 0 - 1; }
-    var rules = SandboxPolicy_landlock_rules(p);
-    if (rules == 0) {
-        rules = vec_new();
-        SandboxPolicy_set_landlock_rules(p, rules);
-    }
-    SandboxPolicy_set_landlock_rules_len(p, vec_len(rules) + 1);
+    # A fresh list rather than the old one emptied: a caller holding the old
+    # list, or another policy sharing it, keeps its rules.
+    SandboxPolicy_set_landlock_rules(p, vec_new());
+    SandboxPolicy_set_landlock_rules_len(p, 1);
     return 0;
 }
 
@@ -2358,6 +2371,21 @@ fn policy_landlock_deny_all(p) {
 fn policy_landlock_rules(p) {
     if (p == 0) { return 0; }
     return SandboxPolicy_landlock_rules(p);
+}
+
+# Whether `p` denies the payload every path: its count asks for more rules than
+# its list holds. `policy_landlock_deny_all` writes an empty list and a count of
+# one; a count with no list reads the same, and so does any count set above the
+# list through the raw accessor. The child's landlock step
+# (`_spawn_apply_landlock`), `merge_policies` and `policy_landlock_add` all ask
+# this, so a policy means the same thing wherever it is used.
+fn policy_landlock_is_deny_all(p) {
+    if (p == 0) { return 0; }
+    var rules = SandboxPolicy_landlock_rules(p);
+    var have = 0;
+    if (rules != 0) { have = vec_len(rules); }
+    if (SandboxPolicy_landlock_rules_len(p) > have) { return 1; }
+    return 0;
 }
 
 # Whether this policy asks for any child-side confinement.
@@ -4206,6 +4234,33 @@ fn _spawn_cgroup_join(cgroup_path) {
     return 0;
 }
 
+# Install `policy`'s landlock ruleset in the calling process, the child, after
+# the rootfs and before `execve`. Returns 0, also when the policy asks for no
+# landlock (a count of 0), or -1 when the ruleset could not be applied.
+#
+# `confine_child` and the persistent guest's sequence both call this, so they
+# cannot differ on what a policy means. Until 3.11.3 `confine_child` passed
+# `(0, 0)`, which `security_apply_landlock` answers `Ok(0)` at once: the count
+# was checked, the rules never sent, and no ruleset installed.
+#
+# A deny-all policy (`policy_landlock_is_deny_all`) gets a ruleset naming no
+# path, whatever its list holds: the null list gives the walk nothing, and the
+# count still makes `security_apply_landlock` install the ruleset. Through
+# 3.13.0 both paths passed the list, and the walk, bounded by the list and the
+# count, applied every rule in it, so a deny-all policy that also named paths
+# permitted them. Any other policy holds at least `count` rules, and the first
+# `count` are applied. Unlike the code it replaced, this makes no list after
+# `fork` for a count with no list.
+fn _spawn_apply_landlock(policy) {
+    if (policy == 0) { return 0; }
+    var count = SandboxPolicy_landlock_rules_len(policy);
+    if (count <= 0) { return 0; }
+    var rules = SandboxPolicy_landlock_rules(policy);
+    if (policy_landlock_is_deny_all(policy) == 1) { rules = 0; }
+    if (is_ok(security_apply_landlock(rules, count)) == 0) { return 0 - 1; }
+    return 0;
+}
+
 # Redirect stdio for the detached child: stdin from /dev/null, stdout+stderr to
 # `log_path` (or /dev/null when none was given). Returns 0 / -1.
 fn _spawn_redirect_stdio(log_path) {
@@ -4306,24 +4361,7 @@ fn confine_child_wd(policy, rootfs, cgroup_path, uid, gid, seccomp_info, want_ns
     # After the chroot, so the path resolves inside the container. See the fn's header.
     if (_spawn_enter_workdir(workdir) != 0) { sys_exit(SPAWN_EXIT_WORKDIR); }
 
-    if (policy != 0) {
-        if (SandboxPolicy_landlock_rules_len(policy) > 0) {
-            # 3.11.3: the policy's ACTUAL rules, where this passed `(0, 0)` —
-            # a null list with a zero count, which `security_apply_landlock`
-            # answers `Ok(0)` to immediately. The count was checked, the rules
-            # were never sent, and no ruleset was ever installed.
-            #
-            # A `deny_all` policy carries a count with an empty list on purpose:
-            # a ruleset with no path-beneath rules permits nothing, so the count
-            # is passed rather than the list length.
-            var _ll = SandboxPolicy_landlock_rules(policy);
-            if (_ll == 0) { _ll = vec_new(); }
-            if (is_ok(security_apply_landlock(_ll,
-                  SandboxPolicy_landlock_rules_len(policy))) == 0) {
-                sys_exit(SPAWN_EXIT_LANDLOCK);
-            }
-        }
-    }
+    if (_spawn_apply_landlock(policy) != 0) { sys_exit(SPAWN_EXIT_LANDLOCK); }
     if (seccomp_info != 0) {
         if (is_ok(security_load_seccomp(security_seccomp_filter_ptr(seccomp_info),
               security_seccomp_filter_len(seccomp_info))) == 0) {
