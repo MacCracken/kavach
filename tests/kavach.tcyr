@@ -1594,7 +1594,10 @@ fn test_quarantine_update_refuses_a_symlinked_entry() {
     var base = _t_unique_tmp_path("/tmp/kavach-t-qupd-");
     var q = quarantine_storage_new(base);
     assert(q != 0, "a store");
-    if (q == 0) { return 0; }
+    if (q == 0) {
+        kv_rmdir(base);
+        return 0;
+    }
     var sr = scan_result_new();
     ScanResult_set_verdict(sr, ScanVerdict.BLOCK);
     var id = quarantine_store(q, "blocked", 7, sr, "sb-u");
@@ -1612,6 +1615,21 @@ fn test_quarantine_update_refuses_a_symlinked_entry() {
     assert(quarantine_update_status(q, 424242, 2) != KAVACH_ERR_OK, "an unknown id is an error, not a new file");
     kv_unlink(meta);
     kv_unlink(victim);
+    assert_eq(_t_quarantine_remove(base, id, 0), 0, "the store held the entry's files alone, and is gone");
+    return 0;
+}
+
+# Remove the store at `base`: the `.bin` and `.meta` of entries `id1` and, unless
+# 0, `id2`, then the directory. 0 when the directory is gone; -1 when it would not
+# go, which means the store held a file these tests did not expect.
+fn _t_quarantine_remove(base, id1, id2) {
+    kv_unlink(_qpath(base, id1, "bin"));
+    kv_unlink(_qpath(base, id1, "meta"));
+    if (id2 != 0) {
+        kv_unlink(_qpath(base, id2, "bin"));
+        kv_unlink(_qpath(base, id2, "meta"));
+    }
+    if (kv_rmdir(base) != 0) { return 0 - 1; }
     return 0;
 }
 
@@ -1666,7 +1684,15 @@ fn test_persistent_guest_closes_inherited_fds() {
 
 fn test_quarantine_store() {
     test_group("quarantine_store");
-    var q = quarantine_storage_new("/tmp/kavach-test-quar");
+    # A store of its own, removed at the end. Until the shared
+    # /tmp/kavach-test-quar, every run left its two entries' four files behind.
+    var base = _t_unique_tmp_path("/tmp/kavach-t-qstore-");
+    var q = quarantine_storage_new(base);
+    assert(q != 0, "a store");
+    if (q == 0) {
+        kv_rmdir(base);
+        return 0;
+    }
     var sr = scan_result_new();
     ScanResult_set_verdict(sr, ScanVerdict.BLOCK);
     var id = quarantine_store(q, "blocked stdout", 14, sr, "sb-1");
@@ -1675,6 +1701,10 @@ fn test_quarantine_store() {
     # Entry IDs are 64-bit random (v2.1); two stores must yield distinct ids.
     var id2 = quarantine_store(q, "second", 6, sr, "sb-2");
     assert(id != id2, "distinct random ids");
+    # A directory that already exists is reused: operators keep a store across
+    # runs, which the shared directory exercised on every run after the first.
+    assert(quarantine_storage_new(base) != 0, "an existing store directory is reused");
+    assert_eq(_t_quarantine_remove(base, id, id2), 0, "the store held the entries' files alone, and is gone");
     return 0;
 }
 
@@ -5995,6 +6025,116 @@ fn test_attest_other_paths_refuse() {
 # and v6, and the shell-out backends
 # ================================================================
 
+# ---- a payload starts with SIGPIPE at its default (3.13.2) ----------------
+#
+# A signal set to SIG_IGN stays ignored across `execve`, so a payload inherited
+# SIGPIPE ignored whenever kavach's own process ignored it, as the GitHub
+# Actions runner starts its steps. There `head` writing past a full capture got
+# EPIPE and exited 1, where it dies of SIGPIPE (141) elsewhere. These tests make
+# this process ignore SIGPIPE, as the runner does, and put the disposition back.
+
+# 1 when the SigIgn mask in `status`, the text of a /proc/<pid>/status, has
+# SIGPIPE's bit (13, so 0x1000), 0 when not, -1 when there is no mask.
+fn _t_sigign_has_sigpipe(status) {
+    var at = strstr(status, "SigIgn:");
+    if (at < 0) { return 0 - 1; }
+    var p = status + at + 7;
+    while (load8(p) == 9 || load8(p) == 32) { p = p + 1; }
+    var len = 0;
+    while (_t_hex_digit(load8(p + len)) >= 0) { len = len + 1; }
+    if (len < 4) { return 0 - 1; }
+    return _t_hex_digit(load8(p + len - 4)) & 1;
+}
+
+# The value of hex digit `c`, or -1.
+fn _t_hex_digit(c) {
+    if (c >= 48 && c <= 57) { return c - 48; }
+    if (c >= 97 && c <= 102) { return c - 87; }
+    return 0 - 1;
+}
+
+# Whether this process ignores SIGPIPE: 1, 0, or -1 when it cannot tell.
+fn _t_self_ignores_sigpipe() {
+    var buf = alloc(4096);
+    var n = file_read_all("/proc/self/status", buf, 4095);
+    if (n < 0) { n = 0; }
+    store8(buf + n, 0);
+    return _t_sigign_has_sigpipe(buf);
+}
+
+# Make this process ignore SIGPIPE; return what `_t_restore_sigpipe` puts back.
+fn _t_ignore_sigpipe() {
+    var was = _t_self_ignores_sigpipe();
+    signal_ignore(SIGPIPE);
+    return was;
+}
+
+fn _t_restore_sigpipe(was) {
+    if (was == 1) {
+        signal_ignore(SIGPIPE);
+        return 0;
+    }
+    signal_default(SIGPIPE);
+    return 0;
+}
+
+# Whether `out`, a payload's `grep SigIgn /proc/self/status`, shows SIGPIPE
+# ignored: 1, 0, or -1 when there is no mask in it.
+fn _t_payload_ignored_sigpipe(out) {
+    if (out == 0) { return 0 - 1; }
+    return _t_sigign_has_sigpipe(out);
+}
+
+fn test_payloads_start_with_default_sigpipe() {
+    test_group("payloads_start_with_default_sigpipe");
+    kavach_init();
+    var cmd = "/bin/grep SigIgn /proc/self/status";
+    var was = _t_ignore_sigpipe();
+    assert_eq(_t_self_ignores_sigpipe(), 1, "this process now ignores SIGPIPE, as the runner's steps do");
+
+    # The capture: every backend that runs a payload or a runtime through it.
+    var r = _t_pio_run(policy_minimal(), cmd, 0, 0, 0);
+    var cap_out = 0;
+    if (r != 0) { cap_out = ExecResult_stdout(r); }
+
+    # sandbox_spawn, whose stdout goes to its log.
+    var log = _t_unique_tmp_path("/tmp/kavach-t-sigpipe-spawn-");
+    var sp = sandbox_spawn(_spawn_running_sandbox(0), cmd, log);
+    var spawn_out = 0;
+    if (sp != 0) {
+        spawned_wait(sp);
+        spawn_out = alloc(4096);
+        var sn = file_read_all(log, spawn_out, 4095);
+        if (sn < 0) { sn = 0; }
+        store8(spawn_out + sn, 0);
+    }
+    kv_unlink(log);
+
+    # A persistent guest, which answers on its stdout pipe.
+    var g = persistent_spawn(cmd);
+    var guest_out = 0;
+    if (g != 0) {
+        sys_close(PersistentGuest_stdin_fd(g));
+        guest_out = alloc(4096);
+        var total = 0;
+        var gr = persistent_read(g, guest_out, 4095);
+        while (gr > 0 && total < 4095) {
+            total = total + gr;
+            gr = persistent_read(g, guest_out + total, 4095 - total);
+        }
+        store8(guest_out + total, 0);
+        var gst[8];
+        store64(&gst, 0);
+        kv_waitpid(PersistentGuest_pid(g), &gst, 0);
+    }
+    _t_restore_sigpipe(was);
+
+    assert_eq(_t_payload_ignored_sigpipe(cap_out), 0, "a captured payload does not inherit the ignore");
+    assert_eq(_t_payload_ignored_sigpipe(spawn_out), 0, "nor does a spawned one");
+    assert_eq(_t_payload_ignored_sigpipe(guest_out), 0, "nor a persistent guest");
+    return 0;
+}
+
 # ---- a full buffer ends a stream without blocking the payload ------------
 #
 # Through 3.13.1 a full buffer only stopped the drain's reads. The payload then
@@ -6007,15 +6147,19 @@ fn test_capture_ends_a_full_stream() {
     var buf = alloc(65536);
 
     # stdout past the buffer: the pipe is closed and the payload's next write
-    # fails, SIGPIPE, as under `exec_capture`.
+    # fails, SIGPIPE, as under `exec_capture`. Run with this process ignoring
+    # SIGPIPE, as the GitHub Actions runner starts its steps: the payload must
+    # still die of the signal (see `test_payloads_start_with_default_sigpipe`).
     var oargs = vec_new();
     vec_push(oargs, "/usr/bin/head");
     vec_push(oargs, "-c");
     vec_push(oargs, "300000");
     vec_push(oargs, "/dev/zero");
+    var was = _t_ignore_sigpipe();
     var t0 = mono_now_ns();
     var n = confine_capture_input(oargs, 0, 0, 0, 0, buf, 65536, 0, 20000, 0, "", 0);
     var ms = (mono_now_ns() - t0) / 1000000;
+    _t_restore_sigpipe(was);
     assert_eq(confine_last_timed_out(), 0, "stdout past the buffer ends the run, not the deadline");
     assert_eq(n, 65535, "the buffer keeps the first 64 KiB, less the terminator");
     assert_eq(confine_last_exit(), 141, "and the payload's next write fails: SIGPIPE, 128 + 13");
@@ -6829,6 +6973,7 @@ fn main() {
     test_attestation_result_fits_its_allocation();
     test_attest_gate_decides_the_exec();
     test_attest_other_paths_refuse();
+    test_payloads_start_with_default_sigpipe();
     test_capture_ends_a_full_stream();
     test_capture_payload_dies_with_kavach();
     test_results_keep_their_own_stderr();

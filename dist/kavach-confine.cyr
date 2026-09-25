@@ -4388,6 +4388,19 @@ fn _spawn_enter_workdir(workdir) {
     #endif
 }
 
+# SIGPIPE back to its default in the payload (3.13.2), with the stdlib's
+# `signal_default`. A signal set to SIG_IGN stays ignored across `execve`, so a
+# payload inherited SIGPIPE ignored whenever kavach's own process ignored it, as
+# a server often does and as the GitHub Actions runner starts its steps. A
+# payload writing to a closed pipe then got EPIPE where it dies of SIGPIPE
+# outside a sandbox: measured, `head` writing past a full capture exited 1, not
+# 141. agnosai filed the stdlib function for this divergence. The capture,
+# `sandbox_spawn` and persistent guests call it first in the child.
+fn _spawn_default_sigpipe() {
+    signal_default(SIGPIPE);
+    return 0;
+}
+
 # The capture's payload dies with kavach (3.13.2): PR_SET_PDEATHSIG (1) with
 # SIGKILL (9), set in the child before `execve`, which keeps it for a binary
 # that is not set-id. Through 3.13.1 a payload outlived a kavach killed
@@ -4824,6 +4837,7 @@ fn confine_capture_input_env_wd(args, policy, rootfs, cgroup_path, seccomp_info,
         return 0 - 1;
     }
     if (pid == 0) {
+        _spawn_default_sigpipe();
         _spawn_die_with_parent(ppid);
         _kv_exec_keep_fd = pin;
         sys_close(rfd);
@@ -5495,6 +5509,7 @@ fn sandbox_spawn(sandbox, command, log_path) {
         # rather than staring at one opaque number. 12x is chosen to sit below
         # 126/127, which the shell already reserves for "not executable" and
         # "not found".
+        _spawn_default_sigpipe();
         _kv_exec_keep_fd = pin;
         kv_setsid();
         if (_spawn_redirect_stdio(log_path) != 0) { sys_exit(SPAWN_EXIT_STDIO); }

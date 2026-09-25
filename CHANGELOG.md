@@ -11,9 +11,10 @@ The roadmap's 3.13.2 items: what kavach accepted, scored or documented and did n
 measured before its change. The gVisor, OCI and SY-agnos backends now report their runtime's run;
 an unset `config_stdin` is an empty stdin; landlock scopes and `IOCTL_DEV` are applied; the WASM
 backend runs wasmtime under the policy's seccomp and scopes; TCP port counts are no longer
-scored. Three defects found on the way are fixed with them: the capture hung on a payload that
-filled its buffer, a result's stderr changed when the next exec ran, and a payload outlived a
-kavach killed mid-capture. Every behaviour change is marked ⚠.
+scored. Four defects found on the way are fixed with them: the capture hung on a payload that
+filled its buffer, a result's stderr changed when the next exec ran, a payload outlived a kavach
+killed mid-capture, and a payload inherited kavach's SIGPIPE ignore. Every behaviour change is
+marked ⚠.
 
 ### Fixed — the gVisor, OCI and SY-agnos backends did not report their runtime's run
 
@@ -146,8 +147,10 @@ deadline, exit 137 and no stdout, and hung with none. It is the capture of the p
 backends, and now of the three above.
 
 - **A full stdout is closed**, so the payload's next write fails: SIGPIPE, exit 141, as under the
-  stdlib's `exec_capture` and 3.9.2's OCI capture. The same `cat` returns in 4 ms from the
-  capture and 546 ms from `sandbox_exec`, whose gate then scans the 1 MiB, with exit 141.
+  stdlib's `exec_capture` and 3.9.2's OCI capture. A payload now always starts with SIGPIPE at
+  its default (below), so this holds whatever kavach's own disposition. The same `cat` returns
+  in 4 ms from the capture and 546 ms from `sandbox_exec`, whose gate then scans the 1 MiB, with
+  exit 141.
 - **A full stderr is read on into a sink**, so diagnostics never stop a payload. The script
   returns in 48 ms with exit 3, `done-stdout`, and its first 64 KiB of stderr.
 - ⚠ **A payload that writes more stdout than the buffer holds (1 MiB on each of these backends)
@@ -172,19 +175,42 @@ its parent is already gone; after the change the same `sleep` is gone. ⚠ **A p
 outlives the kavach process that captures it.** `sandbox_spawn` and persistent guests, which
 hand the caller a handle to a process meant to run on, are unchanged.
 
+### Fixed — a payload inherited kavach's SIGPIPE ignore ⚠
+
+A signal set to SIG_IGN stays ignored across `execve`, and no kavach exec path reset one, so a
+payload inherited SIGPIPE ignored whenever kavach's own process ignored it: a server often does,
+and the GitHub Actions runner starts its steps that way. A payload writing to a closed pipe then
+got EPIPE where it would die of SIGPIPE outside a sandbox, the divergence agnosai filed against
+the stdlib, which added `signal_default` for it (cyrius 6.5.7). Found when the full-buffer fix
+above failed CI on x86-64 and aarch64: `head` writing past the capture's closed pipe exited 1,
+not 141, which `trap '' PIPE` reproduces locally. Measured before the change, with this process
+ignoring SIGPIPE: a payload's own `/proc/self/status` had SIGPIPE in `SigIgn` on the capture,
+`sandbox_spawn` and persistent guests alike.
+
+- The capture, `sandbox_spawn` and persistent guests call `signal_default(SIGPIPE)` first in the
+  child (`_spawn_default_sigpipe`). After the change the bit is clear on all three, and `head`
+  dies of SIGPIPE (141) whatever kavach's disposition.
+- ⚠ **A payload starts with SIGPIPE at its default**, not ignored because kavach's process
+  ignored it. A payload that wants it ignored sets that itself. The other dispositions and the
+  signal mask are inherited as before.
+
 ### Tests
 
-Nine new tests and twelve changed, 1104 → **1222** assertions on x86-64 and 1046 → **1150** on
+Ten new tests and fourteen changed, 1104 → **1230** assertions on x86-64 and 1046 → **1158** on
 aarch64 under qemu. Built against 3.13.1's `src/`, with the new names stood in by 3.13.1's
 behaviour (an unset stdin inherits, no scope reaches a ruleset, no filter reaches wasmtime, the
-old gVisor, OCI and SY-agnos exec bodies behind the new `_*_exec_with` seam), **63** assertions
+old gVisor, OCI and SY-agnos exec bodies behind the new `_*_exec_with` seam), **66** assertions
 fail. Three of those are the OCI tests that now read stderr from the shared capture, which
-3.13.1's `_oci_run` did not fill, and one is the struct size; the other 59 fail on the
+3.13.1's `_oci_run` did not fill, and one is the struct size; the other 62 fail on the
 behaviours above.
 
 - `capture_ends_a_full_stream`: `head` of 300 KB into a 64 KiB buffer ends with SIGPIPE (141)
-  and 65535 bytes, not at the 20 s deadline; a shell writing 200 KB of stderr, then
-  `done-stdout` and `exit 3`, finishes with both and its first 64 KiB of stderr.
+  and 65535 bytes, not at the 20 s deadline, with this process ignoring SIGPIPE as the runner's
+  steps do; a shell writing 200 KB of stderr, then `done-stdout` and `exit 3`, finishes with both
+  and its first 64 KiB of stderr.
+- `payloads_start_with_default_sigpipe`: with this process ignoring SIGPIPE, `grep SigIgn
+  /proc/self/status` as a captured payload, a spawned one and a persistent guest: SIGPIPE's bit is
+  clear on all three.
 - `capture_payload_dies_with_kavach`: a helper process runs a capture of a shell that records its
   pid and `exec`s `sleep 30`, and is SIGKILLed; the `sleep` must be gone within 2 s.
 - `results_keep_their_own_stderr`: two `ls` of missing paths through `sandbox_exec`, unconfined
@@ -216,9 +242,12 @@ behaviours above.
   config argument and the capture's stderr; the large-stderr run is 200 KB under a 20 s deadline),
   `oci_stale_runtime_log_is_cleared` and `oci_log_path_is_uid_scoped` (the stderr file's two
   tests, on the log file, the scratch file left), and `wasm_default_memory`, which checks the
-  ceiling under `policy_minimal()` where the host cannot load a filter.
+  ceiling under `policy_minimal()` where the host cannot load a filter. And the two quarantine
+  tests that write a store now remove it: `quarantine_store` stored its two entries in a shared
+  `/tmp/kavach-test-quar` and left them there on every run, and
+  `quarantine_update_refuses_a_symlinked_entry` left its store directory and the entry's `.bin`.
 
-36 mutants of the change, each reverting one piece, all caught: the capture's two full-stream
+39 mutants of the change, each reverting one piece, all caught: the capture's two full-stream
 rules (3 and 6 assertions); the stderr copy in each of the four places it is made (2 to 6); the
 stdin resolver's two rules and the process backend reading the raw field (3 to 7); each of the
 three `IOCTL_DEV` changes (2 to 17: a right granted and no longer handled makes the kernel refuse
@@ -226,14 +255,15 @@ the rule); the scopes dropped from the ruleset, the attribute kept at 8 bytes, f
 handled for a scope-only ruleset, the child passing no scopes and the routing ignoring them (2 to
 8); the port score (2); each of the WASM changes (1 or 2); each of the runtime capture's settings
 and result fields (3 to 9); each backend passing no config or building its result the old way (4
-or 5); SY-agnos's `-i` and removal (1 each); OCI's exit status and log unlink (4 and 1); and the
-parent-death guard (1).
+or 5); SY-agnos's `-i` and removal (1 each); OCI's exit status and log unlink (4 and 1); the
+parent-death guard (1); and the SIGPIPE reset at each of its three call sites (1 or 2).
 
 ### Verified
 
-- The suite: 1222 of 1222 on x86-64 (kernel 7.2.6, landlock ABI 10, wasmtime 49), and 1150 of
-  1150 on aarch64 under qemu-aarch64 11.1.1, where seccomp and landlock are unavailable and their
-  assertions take the refusal branches.
+- The suite: 1230 of 1230 on x86-64 (kernel 7.2.6, landlock ABI 10, wasmtime 49), and 1158 of
+  1158 on aarch64 under qemu-aarch64 11.1.1, where seccomp and landlock are unavailable and their
+  assertions take the refusal branches. Both again under `trap '' PIPE`, as the GitHub Actions
+  runner starts its steps.
 - `cyrius fmt --check` over `src/` and `tests/`, `cyrius lint` (0 warnings in 47 files),
   `cyrius vet src/main.cyr`, `scripts/check-symbols.py`, `cyrius distlib --all` with
   `scripts/check-bundles.py` (both bundles compile with only their sidecar's stdlib), the CI
@@ -245,17 +275,19 @@ parent-death guard (1).
 ### Performance
 
 `scripts/bench-ab.py`'s method against the 3.13.1 tag: 7 interleaved rounds per side, pinned to
-one CPU.
+one CPU, on the tree with every change above.
 
-- **24 of the 29 benchmarks show no measured change**, the exec paths among them:
-  `process_exec_echo` 2.668 → 2.695 ms, `process_exec_confined` 2.676 → 2.703 ms and
-  `process_exec_large_output` 127.2 → 128.3 ms, each with overlapping ranges. The empty stdin
-  pipe an unset `config_stdin` now costs, and the parent-death `prctl`, do not show.
+- **26 of the 29 benchmarks show no measured change**, the exec paths among them:
+  `process_exec_echo` 2.717 → 2.691 ms, `process_exec_confined` 2.714 → 2.701 ms and
+  `process_exec_large_output` 127.8 → 129.3 ms, each with overlapping ranges. The empty stdin
+  pipe an unset `config_stdin` now costs, and the child's parent-death `prctl` and SIGPIPE
+  `rt_sigaction`, do not show.
 - **Scoring is faster**, the port branches gone: `score_backend_process_strict` 16 → 15 ns and
-  `score_all_backends_strict` 160 → 144 ns (−10.0%), ranges separate.
-- **Three benchmarks on code this work did not change moved apart**: `policy_strict_create`
-  45 → 51 ns, `http_allowlist_hit` 70 → 76 ns and `http_allowlist_miss` 80 → 81 ns. Their
-  sources are as in 3.13.1; what moved them is not measured here.
+  `score_all_backends_strict` 160 → 145 ns (−9.4%), ranges separate.
+- **`http_allowlist_hit` moved apart, 70 → 76 ns**, on code this work did not change; what moved
+  it is not measured here. An earlier run on the tree before the SIGPIPE reset had it at 76 ns
+  too, with `policy_strict_create` and `http_allowlist_miss` apart as well; those two overlap in
+  this one.
 
 ### Docs — the roadmap after 3.13.1
 

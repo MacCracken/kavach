@@ -159,6 +159,7 @@ fn _persistent_spawn_inner(command, policy, seccomp_info, want_ns, uid, gid) {
         return 0;
     }
     if (pid == 0) {
+        _spawn_default_sigpipe();
         # child: wire the pipe ends to stdin/stdout, /dev/null to stderr
         sys_close(in_wfd);
         sys_close(out_rfd);

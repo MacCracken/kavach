@@ -33,7 +33,8 @@ Done in the tree and described in the CHANGELOG's [Unreleased] section; this sec
 - [x] **Landlock network rules and scopes:** the scopes (ABI v6) are applied; the TCP port counts
   are no longer scored. Port rules need a list and a setter, unpinned below.
 - [x] Found on the way: the capture hung on a payload that filled its buffer, a result's stderr
-  changed when the next exec ran, and a payload outlived a kavach killed mid-capture.
+  changed when the next exec ran, a payload outlived a kavach killed mid-capture, and a payload
+  inherited kavach's SIGPIPE ignore.
 
 ### Later in 3.13.x
 
