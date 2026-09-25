@@ -260,41 +260,56 @@ because that copy lives under `/tmp`. Run from a directory outside `/tmp`, it pa
 ### Performance
 
 `bench-history.csv` gains a **3.12.5** row, recorded retroactively on 2026-09-24 at the unchanged
-3.12.5 tree on cyrius 6.6.2 (3.11.15 through 3.12.5 shipped without rows), and a **3.12.6** row.
-The table shows medians of 5 interleaved, CPU-pinned runs of each binary. Listed rows have
-non-overlapping ranges; the other 15 are within noise.
+3.12.5 tree on cyrius 6.6.2 (3.11.15 through 3.12.5 shipped without rows), and a **3.12.6** row
+recorded on the final code. CSV rows are single runs. Every comparison below uses medians of 5
+interleaved, CPU-pinned runs of each binary.
 
-| bench | 3.12.5 (6.6.2) | 3.12.6 (6.6.6) | Δ |
+**Toolchain: 3.12.5 on 6.6.2 vs the pin move on 6.6.6.** Listed rows have non-overlapping ranges.
+Of the other 16, `cgroup_policy_has_limits` moved by one 1 ns step and the rest are within noise.
+Rows marked † move with code placement (see the next table), so their deltas here cannot be
+attributed to the compiler's code.
+
+| bench | 3.12.5 (6.6.2) | pin move (6.6.6) | Δ |
 |---|---|---|---|
 | `secrets_scan_clean_text` | 15.05 µs | 16.67 µs | +10.8% |
 | `secrets_scan_with_secrets` | 7.49 µs | 8.07 µs | +7.7% |
 | `secrets_redact` | 6.46 µs | 7.22 µs | +11.7% |
-| `http_path_extract` | 110 ns | 118 ns | +7.3% |
-| `http_allowlist_hit` | 68 ns | 73 ns | +7.4% |
-| `http_allowlist_miss` | 77 ns | 86 ns | +11.7% |
 | `process_exec_large_output` | 122.06 ms | 128.60 ms | +5.4% |
-| `ct_streq_64` | 195 ns | 172 ns | −11.8% |
 | `code_scan_large_naive` | 6.00 ms | 5.64 ms | −5.9% |
+| `http_path_extract` † | 110 ns | 118 ns | +7.3% |
+| `http_allowlist_hit` † | 68 ns | 73 ns | +7.4% |
+| `http_allowlist_miss` † | 77 ns | 86 ns | +11.7% |
+| `ct_streq_64` † | 195 ns | 172 ns | −11.8% |
 
-⚠ **The regressions are toolchain-side**: none of this release's source changes touch those paths.
-The same kavach tree was built on 6.6.4, 6.6.5 and 6.6.6:
+⚠ **The `secrets_*` and `process_exec_large_output` regressions are toolchain-side.** None of this
+release's source changes touch those paths, and those rows do not move with placement. Building the
+same kavach tree on 6.6.4, 6.6.5 and 6.6.6 shows:
 
-- The `secrets_*` rows rise at each step (`secrets_redact` 6.43 → 6.69 → 7.07 µs).
-- `http_allowlist_hit` and `process_exec_large_output` step up at 6.6.5.
+- the `secrets_*` rows rise at each step (`secrets_redact` 6.43 → 6.69 → 7.07 µs);
+- `process_exec_large_output` steps up at 6.6.5.
 
 6.6.5 pads every call made inside an expression to 16-byte stack alignment. That is an ABI
 correctness fix, and a plausible cost for call-dense scan loops; it is not root-caused further here.
 
-**The all-or-nothing append costs the same as the call it replaces.** It adds one `lseek`, and `fchmod(fd)` replaces `chmod(path)`, which
-also drops a path walk.
+**Placement.** Four rows move when code that never runs is added. All three builds are on 6.6.6:
+the pin move alone; the same plus an unexecuted copy of `_audit_append`, reached only from a branch
+that is never taken, so the old append still runs; and the final code.
 
-| | `file_append_locked` | `_audit_append` |
-|---|---|---|
-| focused A/B: 20,000 records to tmpfs, 7 interleaved CPU-pinned runs, median (range) | 11,645 ns (11,378–11,763) | 11,525 ns (11,189–11,620) |
-| `audit_chain_record_to_tmpfs`: 5 interleaved pinned runs of `kavach.bcyr`, median | 11.31 µs | 11.42 µs (ranges overlap) |
+| bench | pin move | + unexecuted copy | final |
+|---|---|---|---|
+| `ct_streq_64` | 168 ns | 185 ns (+10.1%) | 188 ns (+11.9%) |
+| `http_path_extract` | 114 ns | 96 ns (−15.8%) | 96 ns (−15.8%) |
+| `http_allowlist_miss` | 84 ns | 78 ns (−7.1%) | 79 ns (−6.0%) |
+| `http_allowlist_hit` | 71 ns | 69 ns (−2.8%) | 69 ns (−2.8%) |
 
-The 3.12.6 CSV row was recorded on the final code: `audit_chain_record_to_tmpfs` 11.61 µs. CSV rows
-are single runs, so the comparisons above use interleaved medians.
+The unexecuted copy moves these rows as far as the fix does, so the shifts come from where code
+lands, not from what runs. The other 21 rows, the `secrets_*` rows among them, stayed within noise.
+Read the † rows' history with this in mind: the toolchain move shifts placement far more than one
+function does.
+
+**The all-or-nothing append costs the same as the call it replaces.** It adds one `lseek`, and
+`fchmod(fd)` replaces `chmod(path)`, which also drops a path walk. In the same runs,
+`audit_chain_record_to_tmpfs` went from 11.80 µs to 11.35 µs (−3.8%), with overlapping ranges.
 
 ## [3.12.5] — 2026-09-10
 
