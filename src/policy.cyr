@@ -65,6 +65,13 @@ fn policy_strict() {
 
 # Allow the payload access to `path`, and to everything beneath it.
 #
+# A `path` that is a file, not a directory, allows that file alone, with the
+# rights a file can hold: read and execute for `FS_READ_ONLY`, and write and
+# truncate as well for `FS_READ_WRITE`. Creating, removing or renaming it takes
+# a rule on its directory. Through 3.13.0 a rule naming a file failed every
+# exec closed (exit 124): it was given directory rights, which landlock refuses
+# on a file.
+#
 # **Before 3.11.3 there was no way to say this.** `landlock_rules_len` was a
 # bare counter with no list behind it, and `confine_child` called
 # `security_apply_landlock(0, 0)` — so a consumer could not express a rule, both

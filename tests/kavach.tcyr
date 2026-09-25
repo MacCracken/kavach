@@ -2463,6 +2463,18 @@ fn test_wasm_preopens_follow_the_policy() {
     assert(streq(_t_wa_preopens(c, 0), "REFUSED") == 1, "a rule path with :: is refused");
     assert(streq(_t_wa_preopens(policy_minimal(), "/srv/w::/etc"), "REFUSED") == 1,
       "...and so is such a workdir");
+
+    # A rule naming a file gets no preopen: `--dir` takes a directory, and the
+    # file's directory would give the guest its siblings. A path that does not
+    # exist (the /srv paths above) is passed on, to fail the exec closed.
+    var file = _t_unique_tmp_path("/tmp/kavach-t-wafile-");
+    file_write_all(file, "x", 1);
+    var fr = policy_minimal();
+    policy_landlock_add(fr, "/srv/a", FS_READ_ONLY);
+    policy_landlock_add(fr, file, FS_READ_ONLY);
+    assert(streq(_t_wa_preopens(fr, 0), "--dir /srv/a") == 1,
+      "a rule naming a file is not preopened, and a missing path still is");
+    kv_unlink(file);
     return 0;
 }
 
@@ -2474,9 +2486,11 @@ fn test_wasm_host_policy_confines_wasmtime() {
     var h = _wasm_host_policy(r, "/opt/wt/bin/wasmtime", "/opt/tools/t.wasm");
     assert_eq(_t_ll_has(h, "/srv/a", FS_READ_ONLY), 1, "the ruleset holds the policy's rules, each with its access");
     assert_eq(_t_ll_has(h, "/srv/b", FS_READ_WRITE), 1, "...both of them");
-    assert_eq(_t_ll_has(h, "/opt/wt/bin", FS_READ_ONLY), 1, "wasmtime's directory, read-only");
+    assert_eq(_t_ll_has(h, "/opt/wt/bin/wasmtime", FS_READ_ONLY), 1, "wasmtime's binary, read-only");
     assert_eq(_t_ll_has(h, "/usr", FS_READ_ONLY), 1, "/usr, for its libraries");
-    assert_eq(_t_ll_has(h, "/opt/tools", FS_READ_ONLY), 1, "and the module's directory");
+    assert_eq(_t_ll_has(h, "/opt/tools/t.wasm", FS_READ_ONLY), 1, "and the module");
+    assert_eq(_t_ll_has(h, "/opt/wt/bin", FS_READ_ONLY) + _t_ll_has(h, "/opt/tools", FS_READ_ONLY), 0,
+      "each file alone, not its directory");
     assert_eq(policy_landlock_is_deny_all(h), 0, "it is a ruleset of those paths, not deny-all");
     assert(h != r && _t_ll_len(r) == 2, "the policy itself is left as it was");
 
@@ -2486,21 +2500,24 @@ fn test_wasm_host_policy_confines_wasmtime() {
     policy_landlock_deny_all(d);
     var hd = _wasm_host_policy(d, "/usr/bin/wasmtime", "/opt/tools/t.wasm");
     assert_eq(policy_landlock_is_deny_all(hd), 0, "a deny-all policy still lets wasmtime start");
-    assert_eq(_t_ll_has(hd, "/opt/tools", FS_READ_ONLY), 1, "...and read its module");
+    assert_eq(_t_ll_has(hd, "/opt/tools/t.wasm", FS_READ_ONLY), 1, "...and read its module");
     assert_eq(_t_ll_has(hd, "/srv/a", FS_READ_ONLY), 0, "...and names no path of the policy's");
 
-    # Only the rules the child applies, and the module's directory for a module
-    # under the root or named relative to the working directory.
+    # Only the rules the child applies; and the module as named, which for a
+    # module under the root is not `/`, and for a bare name not the working
+    # directory.
     var low = policy_minimal();
     policy_landlock_add(low, "/srv/a", FS_READ_ONLY);
     policy_landlock_add(low, "/srv/b", FS_READ_ONLY);
     SandboxPolicy_set_landlock_rules_len(low, 1);
     assert_eq(_t_ll_has(_wasm_host_policy(low, "/usr/bin/wasmtime", "/t.wasm"), "/srv/b", FS_READ_ONLY), 0,
       "a rule past the count is left out");
-    assert_eq(_t_ll_has(_wasm_host_policy(r, "/usr/bin/wasmtime", "/t.wasm"), "/", FS_READ_ONLY), 1,
-      "a module under the root gives /");
-    assert_eq(_t_ll_has(_wasm_host_policy(r, "/usr/bin/wasmtime", "t.wasm"), ".", FS_READ_ONLY), 1,
-      "and a bare name gives the working directory");
+    var hr = _wasm_host_policy(r, "/usr/bin/wasmtime", "/t.wasm");
+    assert(_t_ll_has(hr, "/t.wasm", FS_READ_ONLY) == 1 && _t_ll_has(hr, "/", FS_READ_ONLY) == 0,
+      "a module under the root is granted alone, not /");
+    var hb = _wasm_host_policy(r, "/usr/bin/wasmtime", "t.wasm");
+    assert(_t_ll_has(hb, "t.wasm", FS_READ_ONLY) == 1 && _t_ll_has(hb, ".", FS_READ_ONLY) == 0,
+      "and a bare name alone, not the working directory");
     return 0;
 }
 
@@ -2569,6 +2586,18 @@ fn test_wasm_guest_sees_the_policys_paths() {
     var rc = wasm_exec(_t_wa_sandbox(c, 0), probe);
     assert_eq(ExecResult_exit_code(rc), 1, "a rule path with :: is refused");
     assert_eq(cstr_contains(ExecResult_stderr(rc), "::"), 1, "...saying why");
+
+    # A rule naming a file: the guest runs, and gets no preopen for it. Until a
+    # file rule could be applied, it failed the exec closed (124) once wasmtime
+    # had a ruleset of its own, and `--dir` on a file fails it too ("Not a
+    # directory").
+    var fp = policy_minimal();
+    policy_landlock_add(fp, a, FS_READ_ONLY);
+    policy_landlock_add(fp, _t_merge_path(root, "w", 1), FS_READ_ONLY);
+    var rf = wasm_exec(_t_wa_sandbox(fp, 0), probe);
+    assert_eq(ExecResult_exit_code(rf), 0, "a policy naming a file runs its guest");
+    assert_eq(_t_wa_sees(ExecResult_stdout(rf), a), 1, "...which has the directory rule's path");
+    assert_eq(cstr_contains(ExecResult_stdout(rf), "WASM-W"), 0, "...and cannot reach the file");
 
     kv_unlink(str_cstr(str_cat(str_from(b), str_from("/created.txt"))));
     kv_unlink(str_cstr(str_cat(str_from(a), str_from("/created.txt"))));
@@ -5131,6 +5160,144 @@ fn test_landlock_count_above_the_list_denies_all() {
     return 0;
 }
 
+# --- a landlock rule naming a file -----------------------------------------
+#
+# Through 3.13.0 `security_apply_landlock` gave a rule naming a file the same
+# rights as one naming a directory, READ_DIR and the MAKE_* and REMOVE_* rights
+# among them, and `landlock_add_rule` refuses those on a file with EINVAL. So a
+# policy naming a file failed every exec closed: `/bin/cat` of the very file its
+# rule named exited 124 (SPAWN_EXIT_LANDLOCK) through `sandbox_exec`, and a rule
+# on the file's directory read it.
+
+# `<root>/<name>`.
+fn _t_fr_path(root, name) {
+    return str_cstr(str_cat(str_cat(str_from(root), str_from("/")), str_from(name)));
+}
+
+# `cmd` through `sandbox_exec` on the PROCESS backend under `policy`.
+fn _t_fr_exec(policy, cmd) {
+    var c = config_new();
+    SandboxConfig_set_backend(c, KavachBackend.PROCESS);
+    SandboxConfig_set_policy(c, policy);
+    var s = sandbox_create(c);
+    if (s == 0) { return 0; }
+    sandbox_transition(s, SandboxState.RUNNING);
+    var r = sandbox_exec(s, cmd);
+    sandbox_destroy(s);
+    return r;
+}
+
+# Whether `/bin/cat <path>` under `policy` prints `marker`.
+fn _t_fr_reads(policy, path, marker) {
+    var r = _t_fr_exec(policy, str_cstr(str_cat(str_from("/bin/cat "), str_from(path))));
+    if (r == 0) { return 0; }
+    return cstr_contains(ExecResult_stdout(r), marker);
+}
+
+# `/bin/cp <src> <dst>`.
+fn _t_fr_cp(src, dst) {
+    var s = str_cat(str_from("/bin/cp "), str_from(src));
+    s = str_cat(str_cat(s, str_from(" ")), str_from(dst));
+    return str_cstr(s);
+}
+
+# Whether the file at `path` holds `marker`.
+fn _t_fr_holds(path, marker) {
+    var buf = alloc(256);
+    var n = 0;
+    var fd = file_open(path, O_RDONLY, 0);
+    if (fd >= 0) {
+        n = sys_read(fd, buf, 255);
+        sys_close(fd);
+    }
+    if (n < 0) { n = 0; }
+    store8(buf + n, 0);
+    return cstr_contains(buf, marker);
+}
+
+fn test_landlock_rule_on_a_file_allows_reading_it() {
+    test_group("landlock_rule_on_a_file_allows_reading_it");
+    var root = _t_unique_tmp_path("/tmp/kavach-t-frule-");
+    kv_mkdir(root, 493);                                   # 0755
+    var f = _t_fr_path(root, "named.txt");
+    var sib = _t_fr_path(root, "sibling.txt");
+    file_write_all(f, "FILE-RULE-NAMED\n", 16);
+    file_write_all(sib, "FILE-RULE-SIBLING\n", 18);
+    # Baseline, as in landlock_denies_a_path_outside_its_rules.
+    if (_t_fr_reads(policy_minimal(), f, "FILE-RULE-NAMED") == 1) {
+        var p = _t_ll_add_runtime(policy_minimal());
+        policy_landlock_add(p, f, FS_READ_ONLY);
+        # With no landlock in the kernel nothing is enforced, and cat reads
+        # either way, so these assert only where it is present.
+        if (security_landlock_abi_version() > 0) {
+            var r = _t_fr_exec(p, str_cstr(str_cat(str_from("/bin/cat "), str_from(f))));
+            assert(r != 0, "a result");
+            if (r != 0) {
+                assert_eq(ExecResult_exit_code(r), 0, "a read-only rule naming a file lets the exec run");
+                assert_eq(cstr_contains(ExecResult_stdout(r), "FILE-RULE-NAMED"), 1, "...and read that file");
+            }
+            assert_eq(_t_fr_reads(p, sib, "FILE-RULE-SIBLING"), 0,
+              "the rule is that file alone: a file beside it stays shut");
+        }
+    }
+    kv_unlink(f);
+    kv_unlink(sib);
+    kv_rmdir(root);
+    return 0;
+}
+
+fn test_landlock_rw_rule_on_a_file_allows_writing_it() {
+    test_group("landlock_rw_rule_on_a_file_allows_writing_it");
+    var root = _t_unique_tmp_path("/tmp/kavach-t-frule-");
+    kv_mkdir(root, 493);                                   # 0755
+    var src = _t_fr_path(root, "src.txt");
+    var dst = _t_fr_path(root, "dst.txt");
+    var created = _t_fr_path(root, "created.txt");
+    file_write_all(src, "FILE-RULE-COPIED\n", 17);
+    file_write_all(dst, "FILE-RULE-ORIGINAL\n", 19);
+    var cp = _t_fr_cp(src, dst);
+    if (security_landlock_abi_version() > 0) {
+        # cp opens the destination to write and truncate it: WRITE_FILE, and
+        # TRUNCATE from ABI v3, both of which a read-write rule on a file holds.
+        var p = _t_ll_add_runtime(policy_minimal());
+        policy_landlock_add(p, src, FS_READ_ONLY);
+        policy_landlock_add(p, dst, FS_READ_WRITE);
+        var r = _t_fr_exec(p, cp);
+        assert(r != 0, "a result");
+        if (r != 0) {
+            assert_eq(ExecResult_exit_code(r), 0, "a read-write rule naming a file lets cp write it");
+        }
+        assert_eq(_t_fr_holds(dst, "FILE-RULE-COPIED"), 1, "...and the file holds what was written");
+
+        # Read-only, the same file is not writable.
+        file_write_all(dst, "FILE-RULE-ORIGINAL\n", 19);
+        var q = _t_ll_add_runtime(policy_minimal());
+        policy_landlock_add(q, src, FS_READ_ONLY);
+        policy_landlock_add(q, dst, FS_READ_ONLY);
+        var rq = _t_fr_exec(q, cp);
+        assert(rq != 0 && ExecResult_exit_code(rq) != 0, "under a read-only rule cp fails");
+        assert_eq(_t_fr_holds(dst, "FILE-RULE-ORIGINAL"), 1, "...and the file is unchanged");
+
+        # A file rule does not reach the file's directory: creating a file
+        # beside it takes a rule on the directory.
+        var rc = _t_fr_exec(p, _t_fr_cp(src, created));
+        assert(rc != 0 && ExecResult_exit_code(rc) != 0, "a read-write rule on a file cannot create one beside it");
+        assert_eq(file_exists(created), 0, "...and none was created");
+        # A rule on the directory keeps the directory rights: the file-only mask
+        # applies to a rule that names a file, and to no other.
+        var dirp = _t_ll_add_runtime(policy_minimal());
+        policy_landlock_add(dirp, root, FS_READ_WRITE);
+        var rdir = _t_fr_exec(dirp, _t_fr_cp(src, created));
+        assert(rdir != 0 && ExecResult_exit_code(rdir) == 0, "a read-write rule on the directory can create it");
+        assert_eq(_t_fr_holds(created, "FILE-RULE-COPIED"), 1, "...with the copy in it");
+    }
+    kv_unlink(created);
+    kv_unlink(src);
+    kv_unlink(dst);
+    kv_rmdir(root);
+    return 0;
+}
+
 # --- 3.11.4: the deadline and the exit code -------------------------------
 
 fn _t_tmo_run(cmd, ms, pol) {
@@ -5925,6 +6092,8 @@ fn main() {
     test_landlock_deny_all_drops_the_rules();
     test_landlock_deny_all_denies_the_rules_paths();
     test_landlock_count_above_the_list_denies_all();
+    test_landlock_rule_on_a_file_allows_reading_it();
+    test_landlock_rw_rule_on_a_file_allows_writing_it();
     test_timeout_ms_is_enforced();
     test_timeout_does_not_truncate_fast_payloads();
     test_process_backend_reports_the_real_exit_code();

@@ -1243,6 +1243,21 @@ fn _landlock_allow_read_write(abi): i64 {
     return mask;
 }
 
+# The rights a rule naming a file, not a directory, can hold: the kernel's
+# ACCESS_FILE, less IOCTL_DEV. `landlock_add_rule` refuses any other right on a
+# non-directory with EINVAL. Measured one right at a time on 7.2.6 (ABI 10):
+# EXECUTE, WRITE_FILE, READ_FILE and TRUNCATE are taken on a file, and READ_DIR,
+# the REMOVE_* and MAKE_* rights and REFER are refused. IOCTL_DEV (ABI v5) is a
+# file right too, but kavach does not handle it, and a rule may grant only
+# handled rights: the kernel refuses it on kavach's rulesets.
+#
+# Masked with a rule's rights, this takes TRUNCATE only where the rule had it,
+# which `_landlock_allow_read_write` gives from ABI v3.
+fn _landlock_file_rights(): i64 {
+    return LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_WRITE_FILE
+    | LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_TRUNCATE;
+}
+
 # Filesystem access levels
 enum FsAccess {
     FS_NO_ACCESS = 0;
@@ -1340,6 +1355,25 @@ fn security_apply_landlock(rules, count): i64 {
             var path_fd = sys_open(path, 0x280000, 0);
             if (path_fd < 0) {
                 return kavach_err_syscall_failed(0 - path_fd, "landlock open path failed");
+            }
+
+            # A rule naming a file (anything but a directory, the open having
+            # followed a symlink) grants that file alone, and takes only the
+            # rights a file can hold. Until this was masked, the directory
+            # rights in both access masks made `landlock_add_rule` refuse every
+            # file rule with EINVAL, so any policy naming a file failed its exec
+            # closed (exit 124).
+            # SAFETY: `st` is 144 bytes, no smaller than struct stat on x86-64
+            # (144) or aarch64 (128), and STAT_MODE is the stdlib's per-arch
+            # offset of the 32-bit st_mode inside it.
+            var st[144];
+            var sr = sys_fstat(path_fd, &st);
+            if (sr < 0) {
+                syscall(SYS_CLOSE, path_fd);
+                return kavach_err_syscall_failed(0 - sr, "landlock stat path failed");
+            }
+            if ((load32(&st + STAT_MODE) & 61440) != 16384) {   # not S_IFDIR
+                allowed_access = allowed_access & _landlock_file_rights();
             }
 
             # LandlockPathBeneathAttr: { allowed_access: u64, parent_fd: i32 }
@@ -2302,6 +2336,13 @@ fn policy_strict() {
 }
 
 # Allow the payload access to `path`, and to everything beneath it.
+#
+# A `path` that is a file, not a directory, allows that file alone, with the
+# rights a file can hold: read and execute for `FS_READ_ONLY`, and write and
+# truncate as well for `FS_READ_WRITE`. Creating, removing or renaming it takes
+# a rule on its directory. Through 3.13.0 a rule naming a file failed every
+# exec closed (exit 124): it was given directory rights, which landlock refuses
+# on a file.
 #
 # **Before 3.11.3 there was no way to say this.** `landlock_rules_len` was a
 # bare counter with no list behind it, and `confine_child` called

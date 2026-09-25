@@ -126,8 +126,9 @@ and created a file in it.
 - **Read-only rules are held by landlock on the wasmtime process.** wasmtime's CLI has no
   read-only preopen: wasmtime 49 accepts `--dir X::/a::ro` and ignores the `::ro`, and the Rust
   original used the API's `DirPerms::READ`. So the child confines wasmtime to the policy's rules,
-  plus read-only access to what wasmtime needs: its binary's directory, `/usr`, `/lib` and
-  `/lib64` where they exist, and the module's directory. A guest's write under a read-only rule
+  plus read-only access to what wasmtime needs: its binary, `/usr`, `/lib` and `/lib64` where
+  they exist, and the module (see the next entry for why these began as the binary's and the
+  module's directories). A guest's write under a read-only rule
   fails with WASI's EACCES. On a kernel without landlock nothing holds it, as on the process
   backend, and the guest still sees only the rules' directories, read-write.
 - A confined run passes `-C cache=n`. Under the ruleset wasmtime cannot find its cache
@@ -146,12 +147,55 @@ and created a file in it.
   It gains them (a rule allowing `/data` read-only now gives the guest `/data`), and it loses the
   workdir unless a rule names it; a deny-all guest loses the workdir too.
 
-Found on the way, not fixed here: `security_apply_landlock` gives a rule naming a regular file the
-directory rights as well (`READ_DIR` is in the read-only mask), and `landlock_add_rule` refuses
-that with EINVAL. So a rule naming a file fails the exec closed on every backend that applies
-landlock. On the process backend, `/bin/cat` of a file that a rule names exits 124, and the same
-rule on the file's directory reads it. That is why the WASM backend grants wasmtime the module's
-directory rather than the module.
+Found on the way, and fixed in the next entry: a landlock rule naming a file failed the exec
+closed on every backend that applies landlock. So this entry first granted wasmtime the
+directories of its binary and its module rather than the files. With file rules fixed, wasmtime
+gets its binary and its module, each alone, and a rule naming a file gets no preopen.
+
+### Fixed — a landlock rule naming a file failed every exec
+
+`policy_landlock_add` accepts any path, and its doc said a rule allows "`path`, and everything
+beneath it". But `security_apply_landlock` gave every rule the directory rights of its access
+level: `READ_DIR` in the read-only mask, and the `MAKE_*`, `REMOVE_*` and `REFER` rights in the
+read-write one. `landlock_add_rule` refuses rights that apply only to directories on a path that
+is not one, with EINVAL. The child could not install the ruleset, so any policy naming a file
+failed its exec closed (exit 124, `SPAWN_EXIT_LANDLOCK`). That held on the process backend,
+`sandbox_spawn` and persistent guests from 3.11.3, when a rule could first be named, through
+3.13.0, and on the WASM backend once the entry above gave wasmtime a ruleset.
+
+Measured before the change on kernel 7.2.6 (landlock ABI 10). `security_apply_landlock` with one
+rule on `/etc/hostname` returned "landlock_add_rule failed", errno 22, for both access levels;
+the same rule on `/etc` applied. Through `sandbox_exec`, a policy allowing `/usr`, `/bin`, `/lib`
+and `/lib64` and one file, all read-only, ran `/bin/cat` of that file to exit 124 and no output;
+with the rule on the file's directory, cat read it. `/bin/cp` into a file a read-write rule named
+exited 124 too, and so did a WASM guest whose policy named a file.
+
+- **A rule naming a file now allows that file alone, with the rights a file can hold.** Having
+  opened the rule's path, `security_apply_landlock` fstats it. For anything but a directory (the
+  open follows a symlink) it masks the rule's rights with `_landlock_file_rights()`: EXECUTE,
+  READ_FILE, WRITE_FILE and TRUNCATE. `FS_READ_ONLY` on a file is read and execute;
+  `FS_READ_WRITE` adds write and, from ABI v3, truncate. Creating, removing or renaming the file
+  takes a rule on its directory. Directory rules are unchanged.
+- **The set is the kernel's.** Checked one right at a time on 7.2.6: a file takes EXECUTE,
+  WRITE_FILE, READ_FILE and TRUNCATE, and refuses READ_DIR, the `MAKE_*` and `REMOVE_*` rights and
+  REFER. That is the kernel's `ACCESS_FILE`, less `IOCTL_DEV` (ABI v5). `IOCTL_DEV` is a file
+  right too, but kavach does not handle it (`_landlock_handled_access` stops at ABI v3), and a
+  rule may grant only handled rights: on kavach's ruleset the kernel refused it.
+- After the change, through `sandbox_exec`: `cat` of a file a read-only rule names prints it
+  (exit 0), and a file beside it stays shut. `cp` into a file a read-write rule names writes it.
+  Under a read-only rule on that file cp fails, leaving it unchanged, and a read-write rule on a
+  file does not let cp create one beside it.
+- `policy_landlock_add`'s doc says what a file rule allows.
+- **The WASM backend.** wasmtime's host ruleset names its binary and its module, each alone,
+  instead of their directories, which it named only because a file rule could not be applied. A
+  rule naming a file gets no preopen, so the guest cannot reach that file: `--dir` takes only a
+  directory (wasmtime refuses a file with "Not a directory"), and preopening the file's directory
+  would hand the guest its siblings. A path that does not exist is still passed on and fails
+  closed. With the security fix alone, wasmtime's refusal of `--dir` would have failed the exec
+  instead of the 124.
+- ⚠ **A policy naming a file now runs its payload with that file allowed.** Through 3.13.0 it
+  failed every exec with 124: narrower than the rule asked for, and nothing ran.
+- `docs/architecture/overview.md`: a rule names a directory or a file.
 
 ### Tests
 
@@ -222,10 +266,11 @@ wasmtime unconfined.
   it counts, and a count above it nothing. A path holding `::` is refused, as a rule or as the
   workdir.
 - `wasm_host_policy_confines_wasmtime`, which needs no wasmtime: the ruleset holds the policy's
-  rules with their access, wasmtime's directory, `/usr` and the module's directory, and is not
-  deny-all; the policy itself is left as it was. For a deny-all policy it keeps wasmtime's paths
-  and names none of the policy's. A rule past the count is left out. A module under the root gives
-  `/`, and a bare name the working directory.
+  rules with their access, wasmtime's binary, `/usr` and the module, and is not deny-all; the
+  policy itself is left as it was. For a deny-all policy it keeps wasmtime's paths and names none
+  of the policy's. A rule past the count is left out. As first written the test expected the
+  binary's and the module's directories (`/` for a module under the root, the working directory
+  for a bare name); the file-rule fix narrowed each to the file.
 - `wasm_guest_sees_the_policys_paths`, with wasmtime: runs the probe in `tests/wasm_fs_probe.wat`,
   carried in the suite as 818 hand-assembled bytes. With no landlock the guest has its workdir and
   reads it. A deny-all guest runs with no directory. A guest under a read-only rule and a
@@ -240,7 +285,29 @@ Eight mutants of the fix, each failing the suite at the assertions written for i
 falling back to the workdir (3 assertions), rules also preopening the workdir (3), no `::` check
 (4), wasmtime left unconfined (1: the read-only write, which needs wasmtime and landlock), the
 host ruleset without the module's directory (11), no `-C cache=n` (7), the host ruleset taking
-rules past the count (1), and a deny-all host ruleset (3).
+rules past the count (1), and a deny-all host ruleset (3). These counts were taken before the
+file-rule fix changed `_wasm_host_policy` and these tests.
+
+Two tests for the file-rule fix, and additions to the three WASM tests, all failing against the
+code before it: 13 assertions, built against this tree's previous `src/` (nothing new to stand
+in for).
+
+- `landlock_rule_on_a_file_allows_reading_it`: where landlock is present, `/bin/cat` of a file a
+  read-only rule names exits 0 and prints it, and a file beside it stays shut.
+- `landlock_rw_rule_on_a_file_allows_writing_it`: where landlock is present, `/bin/cp` writes into
+  a file a read-write rule names (its source named by a read-only file rule). Under a read-only
+  rule on the destination cp fails and the file is unchanged. A read-write rule on a file cannot
+  create one beside it, and a read-write rule on the directory can.
+- The WASM tests: a rule naming a file is not preopened, while a missing path still is.
+  wasmtime's ruleset holds its binary and the module, each alone and not its directory, for a
+  module under the root (not `/`) and a bare name (not the working directory) alike. A guest
+  whose policy names a file runs, has the directory rule's path, and cannot reach the file.
+
+Seven mutants of the fix, each failing the suite at the assertions written for it: no file mask
+(13 assertions), the mask on directory rules too (3), file rights without TRUNCATE (2) or
+without WRITE_FILE (2), the WASM backend preopening a file rule (3), its host ruleset naming a
+directory for the module (4), and its host ruleset without the binary (1). The mask on directory
+rules was caught only by the WASM test until the read-write test gained its directory case.
 
 ### Verified
 
@@ -269,6 +336,15 @@ rules past the count (1), and a deny-all host ruleset (3).
 - With the WASM fix, on aarch64: cross-built, and the suite 997 → **1033** under qemu-aarch64
   11.1.1. The WASM tests run there, since qemu execs the host's wasmtime, and the one assertion
   that needs landlock skips. The agnos build links.
+- With the file-rule fix, on x86-64 (kernel 7.2.6, landlock ABI 10): the suite, 1074 →
+  **1092**; fmt `--check` with no drift, lint with 0 warnings, vet, `check-symbols.py`, the
+  security scan, fuzz (500), the bench harness and the smoke build. `cyrius distlib --all`
+  changes both bundles, since `security.cyr` and `policy.cyr` are in both profiles; every module
+  section of both bundles matches its source, and `check-bundles.py` passes, so the confine
+  bundle compiles with the new `fstat`. The `duplicate fn` set is unchanged (130 names).
+- With the file-rule fix, on aarch64: cross-built, and the suite 1033 → **1038** under
+  qemu-aarch64 11.1.1. The process-backend file-rule assertions need landlock and skip there; the
+  WASM additions run. The agnos build links.
 
 ### Performance
 
@@ -323,6 +399,17 @@ merges.
   `ct_streq_64` 205 → 198 ns (−3.4%), `http_allowlist_hit` 70 → 75 ns (+7.1%) and
   `http_allowlist_miss` 79 → 81 ns (+2.5%). `backend_wasm.cyr` is the only source file changed;
   code placement again, not isolated.
+
+The file-rule fix adds one `fstat` per rule in the child, before the ruleset is applied: 455 ns on
+an `O_PATH` descriptor (200,000 calls, three rounds, pinned), against an exec of about 2.7 ms. No
+benchmark applies a landlock rule (`process_exec_confined` runs `policy_strict()`, which names
+none), so the harness cannot see it. Against the WASM fix (HEAD), `scripts/bench-ab.py`'s method:
+**28 of 29 show no measured change**, among them the exec paths (`process_exec_confined` 2.698 →
+2.747 ms, ranges overlapping).
+
+- ⚠ **`http_allowlist_miss` has separate ranges, 82 → 88 ns (+7.3%)**, on a function no source
+  file this change touches reaches. Its neighbour `http_allowlist_hit` had separate ranges in
+  the WASM fix's A/B and overlaps here; code placement, not isolated.
 
 ## [3.13.0] — 2026-09-25
 

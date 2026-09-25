@@ -68,6 +68,28 @@ fn _wasm_push_dir(args, path) {
     return 0;
 }
 
+# Whether `path` names something that exists and is not a directory, following
+# a symlink as `--dir` and landlock do. 0 on agnos, where this backend cannot
+# run a guest.
+fn _wasm_names_a_file(path) {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    var fd = file_open(path, 0x200000 | O_CLOEXEC, 0);    # O_PATH; the stdlib names none
+    if (fd < 0) { return 0; }
+    # SAFETY: `st` is 144 bytes, no smaller than struct stat on x86-64 (144) or
+    # aarch64 (128), and STAT_MODE is the stdlib's per-arch offset of the 32-bit
+    # st_mode inside it.
+    var st[144];
+    var r = sys_fstat(fd, &st);
+    sys_close(fd);
+    if (r < 0) { return 0; }
+    if ((load32(&st + STAT_MODE) & 61440) == 16384) { return 0; }   # S_IFDIR
+    return 1;
+    #endif
+}
+
 # The directories the guest may reach, as `--dir` preopens. Returns 0, or -1
 # for a path `--dir` cannot express.
 #
@@ -78,6 +100,11 @@ fn _wasm_push_dir(args, path) {
 # form (wasmtime 49 takes `--dir X::/a::ro` and ignores the `::ro`), so an
 # `FS_READ_ONLY` rule is held read-only by landlock on the wasmtime process
 # (`_wasm_host_policy`).
+#
+# A rule naming a file gets no preopen, so the guest cannot reach that file.
+# `--dir` takes only a directory (wasmtime refuses a file: "Not a directory"),
+# and preopening the file's directory would hand the guest its siblings as
+# well. A path that does not exist is passed on, and fails the exec closed.
 #
 # With no landlock the workdir, if set, is preopened, as before. That preopen
 # is read-write: the comment here called it read-only through 3.13.0, and a
@@ -95,8 +122,9 @@ fn _wasm_append_preopens(args, sandbox) {
         var n = SandboxPolicy_landlock_rules_len(policy);
         var i = 0;
         while (i < n) {
-            if (_wasm_push_dir(args, security_fs_rule_path(vec_get(rules, i))) != 0) {
-                return 0 - 1;
+            var path = security_fs_rule_path(vec_get(rules, i));
+            if (_wasm_names_a_file(path) == 0) {
+                if (_wasm_push_dir(args, path) != 0) { return 0 - 1; }
             }
             i = i + 1;
         }
@@ -109,43 +137,24 @@ fn _wasm_append_preopens(args, sandbox) {
     return 0;
 }
 
-# The directory holding `path`: the text before its last `/`, `/` for a path
-# directly under the root, and `.` for a bare name.
-fn _wasm_dir_of(path) {
-    var n = strlen(path);
-    var last = 0 - 1;
-    var i = 0;
-    while (i < n) {
-        if (load8(path + i) == 47) { last = i; }
-        i = i + 1;
-    }
-    if (last < 0) { return "."; }
-    if (last == 0) { return "/"; }
-    var out = alloc(last + 1);
-    memcpy(out, path, last);
-    store8(out + last, 0);
-    return out;
-}
-
 # The landlock ruleset for the wasmtime process, when the policy asks for
 # landlock. The guest reaches only its preopens either way; this ruleset is what
 # makes an `FS_READ_ONLY` rule read-only inside its preopen, since `--dir`
 # cannot, and it holds wasmtime itself to these paths.
 #
 # The policy's applied rules, with their access, and read-only access to what
-# wasmtime needs to start and load the module: its binary's directory, `/usr`,
-# `/lib` and `/lib64` where they exist, and the module's directory. A deny-all
-# policy contributes no rule, so only wasmtime's own paths remain, and the
-# guest has no preopen to reach them. The module's directory rather than the
-# module: `security_apply_landlock` grants a file rule directory rights, which
-# landlock refuses, so a rule naming a file fails the exec closed on every path.
+# wasmtime needs to start and load the module: its binary, `/usr`, `/lib` and
+# `/lib64` where they exist, and the module. A deny-all policy contributes no
+# rule, so only wasmtime's own paths remain, and the guest has no preopen to
+# reach them. The binary and the module are files, each granted alone: until a
+# rule naming a file could be applied, this named their directories.
 fn _wasm_host_policy(policy, wasmtime, module) {
     var host = policy_new();
-    policy_landlock_add(host, _wasm_dir_of(wasmtime), FS_READ_ONLY);
+    policy_landlock_add(host, wasmtime, FS_READ_ONLY);
     policy_landlock_add(host, "/usr", FS_READ_ONLY);
     if (kavach_path_exists("/lib") == 1) { policy_landlock_add(host, "/lib", FS_READ_ONLY); }
     if (kavach_path_exists("/lib64") == 1) { policy_landlock_add(host, "/lib64", FS_READ_ONLY); }
-    policy_landlock_add(host, _wasm_dir_of(module), FS_READ_ONLY);
+    policy_landlock_add(host, module, FS_READ_ONLY);
     if (policy_landlock_is_deny_all(policy) == 1) { return host; }
     var rules = policy_landlock_rules(policy);
     var n = SandboxPolicy_landlock_rules_len(policy);
