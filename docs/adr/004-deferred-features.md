@@ -180,16 +180,16 @@ which are TODO.
 4. **Rollouts are per-feature**, not per-module. Adding real seccomp support
    is a v3.0 unblock, not a v3.0 rewrite.
 
-## Status update (v3.12.9, 2026-09-25)
+## Status update (v3.13.0, 2026-09-25)
 
 This ADR is a record of what v3.0 deferred; it is not rewritten. Each item's
-state, checked against the source at 3.12.9 (the pinned roadmap schedules what
+state, checked against the source at 3.13.0 (the pinned roadmap schedules what
 remains):
 
-| § | Item | State at 3.12.9 |
+| § | Item | State at 3.13.0 |
 |---|---|---|
 | 1 | Async exec | **Still deferred.** Every backend's exec is a synchronous fork + wait. |
-| 2 | 8 remaining backends | **Shipped:** gVisor, Firecracker, OCI, WASM, SGX, SEV, TDX and SyAgnos are all registered (`src/backend_*.cyr`). **Still open** from this item: quote verification for SGX / TDX / SEV. `src/attestation.cyr` stores a report's shape only; sigil 3.12.18 now has the verifiers, and the roadmap pins them to 3.13.x and 3.14.x. |
+| 2 | 8 remaining backends | **Shipped:** gVisor, Firecracker, OCI, WASM, SGX, SEV, TDX and SyAgnos are all registered (`src/backend_*.cyr`). **SGX and TDX quote verification shipped in 3.13.0**: `kavach_attest_quote` in `src/attestation.cyr`, on sigil's verifiers, with a measurement allowlist in `SandboxPolicy` that `sandbox_exec` enforces. **Still open** from this item: fetching the quote from a running guest, and SEV-SNP verification (3.14.x). kavach's SGX launcher writes a manifest template it never renders or signs, and its TDX launcher passes no TDVF firmware and looks for the guest's `/dev/tdx_guest` on the host; neither can produce a quote, so both refuse a policy that requires attestation. |
 | 3 | Seccomp / Landlock / cgroups | **Shipped:** cgroups v2 (3.2.0); seccomp in the exec child (3.9.0; architecture-checked since 3.12.8); Landlock's full filesystem right set (3.11.1). **Not enforced:** Landlock's network rules and scopes (ABI v4 and later), which exist as policy fields only. The jailer's `setresuid` is 3.15.x. |
 | 4 | HTTP credential proxy | **Shipped** as the loopback `GET /v1/secret/<name>` proxy (3.2.0). **Still open:** HTTPS `CONNECT` tunnelling. The mitigation above ("host allowlisting via Landlock TCP port rules … at the policy level") holds only at the policy level: those rules are not applied (row 3). |
 | 5 | OffenderTracker | **Shipped** in the v3.0 closeout (`src/scanning_threat.cyr`). |

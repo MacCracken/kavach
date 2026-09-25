@@ -9,6 +9,7 @@ one and is tested against the in-tree test suite.
 | 2 | [Process backend + HMAC audit chain](02-process-with-audit.md) | `audit_chain_open`, `audit_entry_verify`, `audit_chain_close` |
 | 3 | [Scanner verdicts + redaction](03-scanner-verdicts.md) | `gate_apply`, verdict routing, WARN-verdict in-place redaction |
 | 4 | [Offender tracking across execs](04-offender-tracking.md) | `offender_tracker_record`, `should_escalate`, decay tuning |
+| 5 | [TEE attestation](05-tee-attestation.md) | `policy_attest_allow`, `kavach_attest_quote`, the `sandbox_exec` attestation gate |
 
 ## Running examples
 

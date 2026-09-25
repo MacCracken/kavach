@@ -31,6 +31,7 @@ Single-layer isolation is usually enough. Reach for composites when:
 | `max_pids` | min (non-zero) | Smaller = tighter |
 | `landlock_abstract_unix` | OR | Either enables = enabled |
 | `landlock_signal` | OR | Either enables = enabled |
+| attestation (`attest_*`, v3.13.0) | required if either requires it; allowlists intersected; debug allowed only if both allow it | A guest must satisfy both. Two different roots, or allowlists with nothing in common, admit no guest: the merge keeps the requirement and every attestation fails |
 
 ## Example
 
@@ -75,6 +76,10 @@ sandbox_transition(sb, SandboxState.RUNNING);
 var result = composite_exec(outer_backend, inner_backend, sb,
                             "echo hello", inner_policy);
 ```
+
+`composite_exec` dispatches straight to the outer backend, past the
+attestation gate in `sandbox_exec`, so it refuses (returns 0) when either
+policy requires attestation (v3.13.0).
 
 ## Caveat: fail-closed on unavailable outer
 

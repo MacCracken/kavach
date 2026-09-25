@@ -52,8 +52,9 @@ var PERSISTENT_GUEST_SIZE = 32;
 # genuinely want an unconfined child still have it, now by naming it rather
 # than by default. Its doc says so.
 #
-# Returns 0 if the command is refused, the fork fails, or the policy asks for
-# confinement that could not be applied.
+# Returns 0 if the command is refused, the fork fails, the policy asks for
+# confinement that could not be applied, or it requires attestation (a local
+# process has no quote).
 fn persistent_spawn_confined(command, policy) {
     return persistent_spawn_confined_ns(command, policy, 0);
 }
@@ -77,6 +78,8 @@ fn persistent_spawn_confined(command, policy) {
 # and nothing acted on it.
 fn persistent_spawn_confined_ns(command, policy, require_ns) {
     if (policy == 0) { return persistent_spawn(command); }
+    # 3.13.0: a persistent guest is a local process, with no quote to verify.
+    if (policy_wants_attestation(policy) == 1) { return 0; }
     if (policy_wants_confinement(policy) == 0 && require_ns == 0) {
         return persistent_spawn(command);
     }

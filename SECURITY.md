@@ -19,6 +19,10 @@ point. Security-relevant areas:
 
 - **Isolation integrity** — any path that lets sandboxed code escape its
   backend boundary (process, gVisor, Firecracker, SGX, SEV, TDX, etc.).
+- **Attestation** — a quote that passes `kavach_attest_quote` without a valid
+  chain to the policy's root, the policy's measurement, or the exec's nonce; a
+  path that runs a payload under a policy requiring attestation without
+  checking a quote.
 - **Audit chain** — HMAC-SHA256 linked log tampering, verification bypass,
   key-extraction side channels.
 - **Credential proxy** — secrets leaking from `CredentialProxy` to sandboxed
@@ -39,8 +43,8 @@ with residual risk, see [ADR-005](docs/adr/005-v2-hardening-pass.md).
 
 | Version | Supported |
 |---------|-----------|
-| 3.12.x (Cyrius) | **Yes — active.** Fixes land in the next 3.12.x release; nothing is backported. |
-| < 3.12 (Cyrius) | No — upgrade to the latest 3.12.x. |
+| 3.13.x (Cyrius) | **Yes — active.** Fixes land in the next 3.13.x release; nothing is backported. |
+| < 3.13 (Cyrius) | No — upgrade to the latest 3.13.x. |
 | 1.x, 2.x (Rust) | End-of-life; archived in git history. |
 
 ## Response
@@ -58,9 +62,17 @@ and unblocking conditions:
 - **HTTP credential proxy** — direct env/file/stdin injection and the
   loopback HTTP proxy (`GET /v1/secret/<name>`) ship; HTTPS `CONNECT`
   tunnelling is not implemented
+- **Attestation limits (v3.13.0)** — quote verification does not evaluate
+  Intel's TCB level, QE identity or revocation collateral, so a genuine
+  platform with an out-of-date or revoked TCB passes. For TDX only MRTD is
+  checked, not the RTMRs that measure the kernel. kavach's own SGX and TDX
+  launchers cannot fetch a quote and refuse a policy that requires attestation.
 
 Resolved since earlier releases:
 
+- **v3.13.0:** `kavach_attestation_result_new` allocated 48 bytes for a
+  56-byte struct, so setting `details` overwrote the first word of the next
+  allocation. See CHANGELOG 3.13.0.
 - **v3.12.9:**
   - a stdin credential could be routed as an env var in a consumer
     (`InjectionMethod.STDIN` taken over by the stdlib's `STDIN`);

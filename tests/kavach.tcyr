@@ -43,6 +43,7 @@ include "src/composite.cyr"
 include "src/observability.cyr"
 include "src/attestation.cyr"
 include "src/sandbox_exec.cyr"
+include "tests/attest_vectors.cyr"
 
 fn test_backend_parse() {
     test_group("backend_parse");
@@ -4774,6 +4775,334 @@ were APPLIED, not carried and ignored");
     return 0;
 }
 
+# --- 3.13.0: SGX and TDX quote verification ------------------------------
+#
+# The vectors, sigil's, are in tests/attest_vectors.cyr.
+
+
+fn _t_att_bytes(hex, len) { return hex_decode(hex, 2 * len); }
+
+fn _t_att_fill(n, byte) {
+    var b = alloc(n);
+    memset(b, byte, n);
+    return b;
+}
+
+# A policy anchored on the fixture root that allows `measurement` (0 = none).
+fn _t_att_policy(measurement) {
+    var p = policy_new();
+    policy_attest_root(p, _t_att_bytes(ATT_ROOT_HEX, ATT_ROOT_LEN), ATT_ROOT_LEN);
+    if (measurement != 0) { policy_attest_allow(p, measurement); }
+    return p;
+}
+
+# Null-safe, so an exec that stops before its check fails an assertion instead
+# of crashing the suite.
+fn _t_att_trust(r) {
+    if (r == 0) { return 0 - 1; }
+    return AttestationResult_trust(r);
+}
+
+fn _t_att_why(r, want) {
+    if (r == 0) { return 0; }
+    return streq(AttestationResult_details(r), want);
+}
+
+# Whether an ExecResult's stdout (fd 1) or stderr (fd 2) is `want`; 0 for none.
+fn _t_att_out_is(r, fd, want) {
+    if (r == 0) { return 0; }
+    if (fd == 1) { return streq(ExecResult_stdout(r), want); }
+    return streq(ExecResult_stderr(r), want);
+}
+
+fn _t_att_exit(r) {
+    if (r == 0) { return 0 - 1; }
+    return ExecResult_exit_code(r);
+}
+
+fn test_attest_sgx_accepts_the_fixture() {
+    test_group("attest_sgx_accepts_the_fixture");
+    var q = _t_att_bytes(ATT_SGX_HEX, ATT_SGX_LEN);
+    var p = _t_att_policy(ATT_SGX_MRENCLAVE);
+    var r = kavach_attest_sgx_quote(q, ATT_SGX_LEN, p, _t_att_fill(32, 0xcc), 32, ATT_NOW);
+    assert_eq(_t_att_trust(r), KAVACH_TRUST_AFFIRMING, "a genuine quote with an allowed MRENCLAVE is affirmed");
+    assert_eq(streq(AttestationResult_measurement_hex(r), ATT_SGX_MRENCLAVE), 1, "MRENCLAVE reported");
+    assert_eq(streq(AttestationResult_signer_hex(r), ATT_SGX_MRSIGNER), 1, "MRSIGNER reported");
+    assert_eq(AttestationResult_svn(r), 7, "ISVSVN reported");
+    assert_eq(AttestationResult_fresh_at(r), ATT_NOW, "verification time reported");
+    assert_eq(AttestationResult_backend(r), KavachBackend.SGX, "backend reported");
+    assert_eq(kavach_attest_passes(r, p), 1, "an affirmed result passes");
+    assert_eq(_t_att_why(r, ATTEST_PASSED), 1, "and says what was not evaluated");
+    r = kavach_attest_sgx_quote(q, ATT_SGX_LEN, p, _t_att_fill(64, 0xcc), 64, ATT_NOW);
+    assert_eq(_t_att_trust(r), KAVACH_TRUST_AFFIRMING, "a 64-byte nonce covers all of the report data");
+    var upper = _t_att_policy("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+    r = kavach_attest_sgx_quote(q, ATT_SGX_LEN, upper, _t_att_fill(32, 0xcc), 32, ATT_NOW);
+    assert_eq(_t_att_trust(r), KAVACH_TRUST_AFFIRMING, "an upper-case allowlist entry is folded");
+    r = kavach_attest_quote(KavachBackend.SGX, q, ATT_SGX_LEN, p, _t_att_fill(32, 0xcc), 32, ATT_NOW);
+    assert_eq(_t_att_trust(r), KAVACH_TRUST_AFFIRMING, "the dispatcher routes SGX");
+    var pq = &_attest_parsed;
+    assert_eq(_attest_sgx_debug(pq), 0, "the fixture enclave is not a debug enclave");
+    return 0;
+}
+
+fn test_attest_sgx_rejects() {
+    test_group("attest_sgx_rejects");
+    var q = _t_att_bytes(ATT_SGX_HEX, ATT_SGX_LEN);
+    var p = _t_att_policy(ATT_SGX_MRENCLAVE);
+    var n32 = _t_att_fill(32, 0xcc);
+    var wrong = policy_new();
+    policy_attest_root(wrong, _t_att_bytes(ATT_WRONG_ROOT_HEX, ATT_WRONG_ROOT_LEN), ATT_WRONG_ROOT_LEN);
+    policy_attest_allow(wrong, ATT_SGX_MRENCLAVE);
+    var r = kavach_attest_sgx_quote(q, ATT_SGX_LEN, wrong, n32, 32, ATT_NOW);
+    assert_eq(_t_att_trust(r), KAVACH_TRUST_CONTRAINDICATED, "an unrelated root is refused");
+    assert_eq(_t_att_why(r, "the quote does not verify to the policy's root"), 1, "and says so");
+    assert_eq(kavach_attest_passes(r, wrong), 0, "a contraindicated result does not pass");
+    r = kavach_attest_sgx_quote(q, ATT_SGX_LEN, p, n32, 32, ATT_NOW_EARLY);
+    assert_eq(_t_att_trust(r), KAVACH_TRUST_CONTRAINDICATED, "before the certificates are valid");
+    r = kavach_attest_sgx_quote(q, ATT_SGX_LEN, p, n32, 32, ATT_NOW_LATE);
+    assert_eq(_t_att_trust(r), KAVACH_TRUST_CONTRAINDICATED, "after the leaf expires");
+    r = kavach_attest_sgx_quote(q, ATT_SGX_LEN, p, n32, 32, 0);
+    assert_eq(_t_att_why(r, "no verification time"), 1, "time 0 would skip the validity dates, so it is refused");
+
+    var t = alloc(ATT_SGX_LEN);
+    memcpy(t, q, ATT_SGX_LEN);
+    store8(t + 48 + 64, (load8(t + 48 + 64) & 0xFF) ^ 1);
+    r = kavach_attest_sgx_quote(t, ATT_SGX_LEN, p, n32, 32, ATT_NOW);
+    assert_eq(_t_att_trust(r), KAVACH_TRUST_CONTRAINDICATED, "a changed MRENCLAVE breaks the signature");
+    assert_eq(streq(AttestationResult_measurement_hex(r), ""), 1, "an unverified quote's measurement is not reported");
+    var d = alloc(ATT_SGX_LEN);
+    memcpy(d, q, ATT_SGX_LEN);
+    store8(d + 48 + 48, load8(d + 48 + 48) | 2);
+    r = kavach_attest_sgx_quote(d, ATT_SGX_LEN, p, n32, 32, ATT_NOW);
+    assert_eq(_t_att_trust(r), KAVACH_TRUST_CONTRAINDICATED, "setting DEBUG breaks the signature");
+    assert_eq(_attest_sgx_debug(&_attest_parsed), 1, "the DEBUG bit is read from ATTRIBUTES");
+
+    r = kavach_attest_sgx_quote(q, ATT_SGX_LEN, _t_att_policy(ATT_OTHER), n32, 32, ATT_NOW);
+    assert_eq(_t_att_why(r, "measurement not in the allowlist"), 1, "an MRENCLAVE off the allowlist is refused");
+    assert_eq(streq(AttestationResult_measurement_hex(r), ATT_SGX_MRENCLAVE), 1, "and the verified MRENCLAVE is reported");
+    r = kavach_attest_sgx_quote(q, ATT_SGX_LEN, p, _t_att_fill(32, 0xcd), 32, ATT_NOW);
+    assert_eq(_t_att_why(r, "the report data does not carry the nonce"), 1, "another exec's nonce is refused");
+    r = kavach_attest_sgx_quote(q, ATT_SGX_LEN, p, _t_att_fill(65, 0xcc), 65, ATT_NOW);
+    assert_eq(_t_att_why(r, "no nonce"), 1, "a nonce longer than the report data is refused");
+    r = kavach_attest_sgx_quote(q, ATT_SGX_LEN, p, n32, 0, ATT_NOW);
+    assert_eq(_t_att_why(r, "no nonce"), 1, "an empty nonce is refused");
+
+    var noroot = policy_new();
+    policy_attest_allow(noroot, ATT_SGX_MRENCLAVE);
+    r = kavach_attest_sgx_quote(q, ATT_SGX_LEN, noroot, n32, 32, ATT_NOW);
+    assert_eq(_t_att_why(r, "the policy names no root"), 1, "no root, no attestation");
+    r = kavach_attest_sgx_quote(q, ATT_SGX_LEN, _t_att_policy(0), n32, 32, ATT_NOW);
+    assert_eq(_t_att_why(r, "the policy allows no measurement"), 1, "no allowlist, no attestation");
+    r = kavach_attest_sgx_quote(q, 100, p, n32, 32, ATT_NOW);
+    assert_eq(_t_att_why(r, "the quote does not parse"), 1, "a truncated quote is refused");
+    r = kavach_attest_sgx_quote(_t_att_bytes(ATT_TDX_P256_HEX, ATT_TDX_P256_LEN), ATT_TDX_P256_LEN, p, n32, 32, ATT_NOW);
+    assert_eq(_t_att_why(r, "the quote does not parse"), 1, "a TDX quote is not an SGX quote");
+    r = kavach_attest_quote(KavachBackend.PROCESS, q, ATT_SGX_LEN, p, n32, 32, ATT_NOW);
+    assert_eq(_t_att_why(r, "this backend cannot attest"), 1, "the process backend has no quote format");
+    return 0;
+}
+
+# The TDX fixtures are debug TDs, which is what the default policy refuses.
+fn test_attest_tdx_fixtures() {
+    test_group("attest_tdx_fixtures");
+    var n32 = _t_att_fill(32, 0xcc);
+    var q2 = _t_att_bytes(ATT_TDX_P256_HEX, ATT_TDX_P256_LEN);
+    var q3 = _t_att_bytes(ATT_TDX_P384_HEX, ATT_TDX_P384_LEN);
+    var p = _t_att_policy(ATT_TDX_MRTD);
+    var r = kavach_attest_tdx_quote(q2, ATT_TDX_P256_LEN, p, n32, 32, ATT_NOW);
+    assert_eq(_t_att_why(r, "debug guest"), 1, "a debug TD is refused by default");
+    assert_eq(_attest_tdx_debug(&_attest_parsed), 1, "the DEBUG bit is read from TD_ATTRIBUTES");
+    assert_eq(streq(AttestationResult_measurement_hex(r), ATT_TDX_MRTD), 1, "MRTD reported once verified");
+    var dbg = _t_att_policy(ATT_TDX_MRTD);
+    policy_attest_allow_debug(dbg, 1);
+    r = kavach_attest_tdx_quote(q2, ATT_TDX_P256_LEN, dbg, n32, 32, ATT_NOW);
+    assert_eq(_t_att_trust(r), KAVACH_TRUST_WARNING, "an allowed debug TD is a warning, not affirmed (P-256)");
+    assert_eq(kavach_attest_passes(r, dbg), 1, "and passes the policy that allowed it");
+    assert_eq(_t_att_why(r, ATTEST_PASSED_DEBUG), 1, "saying the debug guest was allowed");
+    assert_eq(kavach_attest_passes(r, p), 0, "but not one that did not");
+    r = kavach_attest_tdx_quote(q3, ATT_TDX_P384_LEN, dbg, n32, 32, ATT_NOW);
+    assert_eq(_t_att_trust(r), KAVACH_TRUST_WARNING, "an allowed debug TD is a warning (P-384)");
+    r = kavach_attest_quote(KavachBackend.TDX, q3, ATT_TDX_P384_LEN, dbg, n32, 32, ATT_NOW);
+    assert_eq(_t_att_trust(r), KAVACH_TRUST_WARNING, "the dispatcher routes TDX");
+
+    var wrong = policy_new();
+    policy_attest_root(wrong, _t_att_bytes(ATT_WRONG_ROOT_HEX, ATT_WRONG_ROOT_LEN), ATT_WRONG_ROOT_LEN);
+    policy_attest_allow(wrong, ATT_TDX_MRTD);
+    policy_attest_allow_debug(wrong, 1);
+    r = kavach_attest_tdx_quote(q3, ATT_TDX_P384_LEN, wrong, n32, 32, ATT_NOW);
+    assert_eq(_t_att_why(r, "the quote does not verify to the policy's root"), 1, "an unrelated root is refused");
+    var t = alloc(ATT_TDX_P384_LEN);
+    memcpy(t, q3, ATT_TDX_P384_LEN);
+    store8(t + 48 + 136, (load8(t + 48 + 136) & 0xFF) ^ 1);
+    r = kavach_attest_tdx_quote(t, ATT_TDX_P384_LEN, dbg, n32, 32, ATT_NOW);
+    assert_eq(_t_att_trust(r), KAVACH_TRUST_CONTRAINDICATED, "a changed MRTD breaks the signature");
+    var other = _t_att_policy(ATT_SGX_MRENCLAVE);
+    policy_attest_allow_debug(other, 1);
+    r = kavach_attest_tdx_quote(q2, ATT_TDX_P256_LEN, other, n32, 32, ATT_NOW);
+    assert_eq(_t_att_why(r, "measurement not in the allowlist"), 1, "an MRTD off the allowlist is refused");
+    r = kavach_attest_tdx_quote(q2, ATT_TDX_P256_LEN, dbg, _t_att_fill(32, 0), 32, ATT_NOW);
+    assert_eq(_t_att_why(r, "the report data does not carry the nonce"), 1, "another exec's nonce is refused");
+    r = kavach_attest_tdx_quote(_t_att_bytes(ATT_SGX_HEX, ATT_SGX_LEN), ATT_SGX_LEN, dbg, n32, 32, ATT_NOW);
+    assert_eq(_t_att_why(r, "the quote does not parse"), 1, "an SGX quote is not a TDX quote");
+    return 0;
+}
+
+fn test_attest_policy_fields() {
+    test_group("attest_policy_fields");
+    var p = policy_new();
+    assert_eq(policy_wants_attestation(p), 0, "a new policy does not require attestation");
+    assert_eq(policy_wants_attestation(policy_strict()), 0, "nor does the strict preset");
+    assert_eq(policy_attest_allow(p, "aa"), 0 - 1, "a short measurement is refused");
+    assert_eq(policy_attest_allow(p, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), 0 - 1, "63 digits are refused");
+    assert_eq(policy_attest_allow(p, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), 0 - 1, "65 digits are refused");
+    assert_eq(policy_attest_allow(p, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaag"), 0 - 1, "a non-hex digit is refused");
+    assert_eq(policy_wants_attestation(p), 0, "refused entries add nothing");
+    assert_eq(policy_attest_allow(p, ATT_TDX_MRTD), 0, "96 digits are an MRTD");
+    assert_eq(policy_attest_allow(p, ATT_SGX_MRENCLAVE), 0, "64 digits are an MRENCLAVE");
+    assert_eq(policy_wants_attestation(p), 1, "an allowed measurement requires attestation");
+    var der = _t_att_bytes(ATT_ROOT_HEX, ATT_ROOT_LEN);
+    assert_eq(policy_attest_root(p, der, ATT_ROOT_LEN), 0, "a root is set");
+    store8(der, 0);
+    assert_eq(load8(SandboxPolicy_attest_root(p)), 0x30, "the policy keeps its own copy of the root");
+    assert_eq(policy_attest_root(p, der, 0), 0 - 1, "an empty root is refused");
+    return 0;
+}
+
+# 3.13.0: the constructor allocated 48 bytes for a 56-byte struct.
+fn test_attestation_result_fits_its_allocation() {
+    test_group("attestation_result_fits_its_allocation");
+    var r = kavach_attestation_result_new(KavachBackend.SGX);
+    var next = alloc(8);
+    store64(next, 0x1122334455667788);
+    AttestationResult_set_details(r, "x");
+    assert_eq(load64(next), 0x1122334455667788, "setting details leaves the next allocation alone");
+    return 0;
+}
+
+var _t_att_quote = 0;
+var _t_att_quote_len = 0;
+var _t_att_runs = 0;
+
+# Stands in for a TEE backend that can fetch a quote: it attaches whatever quote
+# the test put in `_t_att_quote` and returns output for the gate to release or
+# withhold.
+fn _t_att_backend(sandbox, command) {
+    _t_att_runs = _t_att_runs + 1;
+    if (_t_att_quote != 0) { backend_attach_quote(_t_att_quote, _t_att_quote_len); }
+    var r = exec_result_new();
+    ExecResult_set_exit_code(r, 0);
+    ExecResult_set_stdout(r, "enclave output");
+    ExecResult_set_stdout_len(r, 14);
+    ExecResult_set_stderr(r, "");
+    return r;
+}
+
+# Built directly: `sandbox_create` refuses SGX and TDX on a host without their
+# devices, and the gate, not creation, is under test.
+fn _t_att_sandbox(backend, policy) {
+    var cfg = config_new();
+    config_backend(cfg, backend);
+    config_policy(cfg, policy);
+    var sb = alloc(SANDBOX_SIZE);
+    Sandbox_set_id(sb, rand_u64());
+    Sandbox_set_config(sb, cfg);
+    Sandbox_set_state(sb, SandboxState.RUNNING);
+    return sb;
+}
+
+fn test_attest_gate_decides_the_exec() {
+    test_group("attest_gate_decides_the_exec");
+    kavach_init();
+    backend_register_exec(KavachBackend.SGX, &_t_att_backend);
+    sandbox_exec_set_attest_time(ATT_NOW);
+    _t_att_quote = _t_att_bytes(ATT_SGX_HEX, ATT_SGX_LEN);
+    _t_att_quote_len = ATT_SGX_LEN;
+    var sb = _t_att_sandbox(KavachBackend.SGX, _t_att_policy(ATT_SGX_MRENCLAVE));
+
+    sandbox_exec_set_attest_nonce(_t_att_fill(32, 0xcc), 32);
+    var r = sandbox_exec(sb, "echo hi");
+    assert(r != 0, "an affirmed guest's output is released");
+    assert_eq(_t_att_out_is(r, 1, "enclave output"), 1, "the guest's own output");
+    assert_eq(_t_att_trust(sandbox_exec_last_attestation()), KAVACH_TRUST_AFFIRMING, "the result is kept");
+
+    var runs = _t_att_runs;
+    r = sandbox_exec(sb, "echo hi");
+    assert_eq(r, 0, "the same quote on the next exec is a replay, and is refused");
+    assert_eq(_t_att_runs, runs + 1, "(the caller's nonce was used once; this exec drew its own)");
+    assert_eq(_t_att_why(sandbox_exec_last_attestation(), "the report data does not carry the nonce"), 1, "the reason is kept");
+
+    _t_att_quote = 0;
+    sandbox_exec_set_attest_nonce(_t_att_fill(32, 0xcc), 32);
+    r = sandbox_exec(sb, "echo hi");
+    assert_eq(r, 0, "a guest that returns no quote fails the exec");
+    assert_eq(_t_att_why(sandbox_exec_last_attestation(), "no quote"), 1, "no quote is the reason");
+
+    _t_att_quote = _t_att_bytes(ATT_SGX_HEX, ATT_SGX_LEN);
+    var other = _t_att_sandbox(KavachBackend.SGX, _t_att_policy(ATT_OTHER));
+    sandbox_exec_set_attest_nonce(_t_att_fill(32, 0xcc), 32);
+    assert_eq(sandbox_exec(other, "echo hi"), 0, "a measurement off the allowlist fails the exec");
+
+    backend_register_exec(KavachBackend.NOOP, &_t_att_backend);
+    runs = _t_att_runs;
+    var nb = _t_att_sandbox(KavachBackend.NOOP, _t_att_policy(ATT_SGX_MRENCLAVE));
+    assert_eq(sandbox_exec(nb, "echo hi"), 0, "a backend that cannot attest is refused");
+    assert_eq(_t_att_runs, runs, "before anything runs");
+    assert_eq(sandbox_exec_last_attestation(), 0, "with no quote checked");
+
+    kavach_init();
+    var sg = _t_att_sandbox(KavachBackend.SGX, _t_att_policy(ATT_SGX_MRENCLAVE));
+    r = sandbox_exec(sg, "echo hi");
+    assert(r != 0, "kavach's own SGX launcher answers with a diagnostic");
+    assert_eq(_t_att_exit(r), 1, "that exits 1");
+    assert_eq(_t_att_out_is(r, 2, "sgx: the policy requires attestation, and this launcher cannot fetch a quote"), 1, "and says it cannot fetch a quote");
+    var td = _t_att_sandbox(KavachBackend.TDX, _t_att_policy(ATT_TDX_MRTD));
+    r = sandbox_exec(td, "echo hi");
+    assert_eq(_t_att_out_is(r, 2, "tdx: the policy requires attestation, and this launcher cannot fetch a quote"), 1, "so does the TDX launcher");
+    assert_eq(backend_attest_nonce_len(), 0, "a diagnostic leaves no nonce behind for the next dispatch");
+
+    var plain = _t_att_sandbox(KavachBackend.NOOP, policy_new());
+    assert(sandbox_exec(plain, "echo hi") != 0, "a policy without an allowlist runs as before");
+    assert_eq(sandbox_exec_last_attestation(), 0, "and checks no quote");
+    sandbox_exec_set_attest_time(0);
+    return 0;
+}
+
+fn test_attest_other_paths_refuse() {
+    test_group("attest_other_paths_refuse");
+    kavach_init();
+    var p = _t_att_policy(ATT_SGX_MRENCLAVE);
+    var sb = _t_att_sandbox(KavachBackend.PROCESS, p);
+    assert_eq(sandbox_spawn(sb, "/bin/true", 0), 0, "sandbox_spawn refuses a policy that requires attestation");
+    assert_eq(persistent_spawn_confined("/bin/cat", p), 0, "so does a persistent guest");
+    var cb = _t_att_sandbox(KavachBackend.PROCESS, policy_new());
+    assert_eq(composite_exec(KavachBackend.SGX, KavachBackend.PROCESS, cb, "echo hi", p), 0, "and composite_exec");
+
+    var m = merge_policies(p, policy_basic());
+    assert_eq(policy_wants_attestation(m), 1, "a merge keeps the requirement");
+    assert_eq(_attest_listed(m, ATT_SGX_MRENCLAVE), 1, "and the allowlist");
+    assert_eq(SandboxPolicy_attest_root_len(m), ATT_ROOT_LEN, "and the root");
+    m = merge_policies(policy_basic(), p);
+    assert_eq(_attest_listed(m, ATT_SGX_MRENCLAVE), 1, "from either side");
+    var both = _t_att_policy(ATT_SGX_MRENCLAVE);
+    policy_attest_allow(both, ATT_OTHER);
+    policy_attest_allow_debug(both, 1);
+    m = merge_policies(p, both);
+    assert_eq(_attest_listed(m, ATT_SGX_MRENCLAVE), 1, "both allow MRENCLAVE: kept");
+    assert_eq(_attest_listed(m, ATT_OTHER), 0, "only one allows the other: dropped");
+    assert_eq(SandboxPolicy_attest_allow_debug(m), 0, "debug only if both allow it");
+    m = merge_policies(p, _t_att_policy(ATT_OTHER));
+    assert_eq(policy_wants_attestation(m), 1, "disjoint allowlists still require attestation");
+    var r = kavach_attest_sgx_quote(_t_att_bytes(ATT_SGX_HEX, ATT_SGX_LEN), ATT_SGX_LEN, m, _t_att_fill(32, 0xcc), 32, ATT_NOW);
+    assert_eq(_t_att_trust(r), KAVACH_TRUST_CONTRAINDICATED, "and admit no guest");
+    var w = policy_new();
+    policy_attest_root(w, _t_att_bytes(ATT_WRONG_ROOT_HEX, ATT_WRONG_ROOT_LEN), ATT_WRONG_ROOT_LEN);
+    policy_attest_allow(w, ATT_SGX_MRENCLAVE);
+    m = merge_policies(p, w);
+    r = kavach_attest_sgx_quote(_t_att_bytes(ATT_SGX_HEX, ATT_SGX_LEN), ATT_SGX_LEN, m, _t_att_fill(32, 0xcc), 32, ATT_NOW);
+    assert_eq(_t_att_trust(r), KAVACH_TRUST_CONTRAINDICATED, "two roots admit no guest");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_backend_parse();
@@ -4995,6 +5324,13 @@ fn main() {
     test_stdout_and_stderr_both_large_do_not_deadlock();
     test_require_namespaces_is_opt_in();
     test_persistent_namespaces_are_opt_in_and_fail_closed();
+    test_attest_sgx_accepts_the_fixture();
+    test_attest_sgx_rejects();
+    test_attest_tdx_fixtures();
+    test_attest_policy_fields();
+    test_attestation_result_fits_its_allocation();
+    test_attest_gate_decides_the_exec();
+    test_attest_other_paths_refuse();
     return assert_summary();
 }
 

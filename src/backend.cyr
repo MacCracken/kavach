@@ -184,6 +184,40 @@ fn backend_result_is_diagnostic() { return _backend_diag_only; }
 # diagnostic, the next exec's real output skipped the gate, secrets and all.
 fn backend_diagnostic_reset() { _backend_diag_only = 0; return 0; }
 
+# ---- Attestation evidence (3.13.0) ----------------------------------------
+# When the sandbox policy requires attestation, `sandbox_exec` sets a nonce
+# before the dispatch. A backend that can attest has its guest put the nonce in
+# the quote's report data and hands the quote back with `backend_attach_quote`.
+# The backend does not judge its own evidence: `sandbox_exec` verifies the quote
+# against the policy once the dispatch returns. A nonce length of 0 means the
+# policy did not ask for attestation.
+var _backend_nonce = 0;
+var _backend_nonce_len = 0;
+var _backend_quote = 0;
+var _backend_quote_len = 0;
+
+fn backend_attest_nonce() { return _backend_nonce; }
+fn backend_attest_nonce_len() { return _backend_nonce_len; }
+fn backend_quote() { return _backend_quote; }
+fn backend_quote_len() { return _backend_quote_len; }
+
+fn backend_attach_quote(buf, len) {
+    _backend_quote = buf;
+    _backend_quote_len = len;
+    return 0;
+}
+
+# Set the nonce for the next dispatch and drop the last dispatch's quote, which
+# must not stand in for this one's (the same reasoning as
+# `backend_diagnostic_reset`).
+fn backend_attest_reset(nonce, len) {
+    _backend_nonce = nonce;
+    _backend_nonce_len = len;
+    _backend_quote = 0;
+    _backend_quote_len = 0;
+    return 0;
+}
+
 # Simple failure result: exit 1, no stdout, caller-supplied stderr, zero
 # duration. Replaces the per-backend `_X_error` helpers.
 fn backend_error_result(msg) {

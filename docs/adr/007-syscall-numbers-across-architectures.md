@@ -112,6 +112,9 @@ CI (3.12.8) enforces this in two places:
   `security_create_namespace` returns not-supported there, and `_spawn_enter_rootfs` returns -1.
   A confined child that needs either exits 123, as it already did through 3.12.7 when `kcmp`
   failed. The difference is that the refusal is now deliberate and named.
+  With those two exceptions, aarch64 is recorded as supported from 3.13.0. The evidence is the
+  `aarch64 (native)` CI job on GitHub's arm64 runner, blocking since 3.12.9: 853 of 853 with
+  seccomp loaded on the 3.12.9 run (docs/architecture/overview.md, Platforms).
 
 **Neutral**
 

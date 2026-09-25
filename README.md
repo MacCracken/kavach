@@ -12,6 +12,21 @@ classification, credential proxy, HMAC-SHA256 audit chain — all in pure Cyrius
 
 ## Status
 
+**v3.13.0 — SGX and TDX quote verification.** A `SandboxPolicy` can now
+require attestation: `policy_attest_allow` names the measurements it accepts
+(MRENCLAVE for SGX, MRTD for TDX) and `policy_attest_root` the root CA. Under
+such a policy `sandbox_exec` runs only on the SGX or TDX backend, binds a
+fresh nonce into the guest's quote, verifies it with sigil against the root,
+and withholds the output unless it passes (`kavach_attest_quote`). A debug
+guest is refused unless the policy allows one. Not evaluated: Intel's TCB,
+QE identity and revocation collateral, and TDX's RTMRs. ⚠ kavach's own SGX and
+TDX launchers cannot fetch a quote yet, so they refuse a policy that requires
+attestation; a launcher that can hands its quote over with
+`backend_attach_quote` ([example 5](docs/examples/05-tee-attestation.md)).
+Also: a heap overflow in `kavach_attestation_result_new`, and aarch64 is now
+recorded as supported, apart from namespaces and rootfs entry. **971**
+assertions green on x86-64, **942** on aarch64 under qemu.
+
 **v3.12.9 — P(-1) closeout.** A credential-routing fix: `InjectionMethod`'s
 `STDIN` could resolve to the stdlib's `var STDIN = 0` in a consumer, so a stdin
 secret was returned as an env var. Its members are now `KAVACH_INJECT_*`, and a
@@ -241,10 +256,10 @@ cyrius deps
 cyrius build src/main.cyr build/kavach
 ./build/kavach
 
-# Run the test suite (879 assertions).
+# Run the test suite (971 assertions).
 cyrius test tests/kavach.tcyr
 
-# Run the bench harness (25 benches).
+# Run the bench harness (27 benches).
 cyrius bench tests/kavach.bcyr
 
 # Cleanliness gates. Run these individually — `cyrius audit` is the
@@ -253,8 +268,10 @@ cyrius fmt <file> --check  # exit 1 on drift; without --check it rewrites in pla
 cyrius lint src/main.cyr
 cyrius vet src/main.cyr
 
-# Regenerate the library bundles (dist/kavach.cyr + every [lib.X] profile).
+# Regenerate the library bundles (dist/kavach.cyr + every [lib.X] profile),
+# then check that each compiles with only its sidecar's stdlib.
 cyrius distlib --all
+python3 scripts/check-bundles.py
 ```
 
 Dependencies (declared in [`cyrius.cyml`](cyrius.cyml)):
@@ -412,10 +429,10 @@ fn app() {
 | OCI | 55 | standard | **registered** (`runc`/`crun` shell-out via shared OCI spec) |
 | WASM | 65 | standard | **registered** (`wasmtime` CLI with fuel + memory + preopens) |
 | gVisor | 70 | hardened | **registered** (OCI bundle + `runsc run` + auto-cleanup) |
-| SGX | 80 | hardened | **registered** (`gramine-sgx` + auto-generated manifest) |
+| SGX | 80 | hardened | **registered** (`gramine-sgx` + a manifest template it never renders or signs, so no enclave starts yet; quotes are verified since v3.13.0) |
 | SEV | 82 | hardened | **registered** (`qemu-system-x86_64` with SEV-SNP object) |
 | SyAgnos | 80 | hardened | **registered** (docker/podman + hardened AGNOS image + Phylax) |
-| TDX | 85 | fortress | **registered** (`qemu-system-x86_64` with TDX object) |
+| TDX | 85 | fortress | **registered** (`qemu-system-x86_64` with TDX object; no TDVF firmware, and availability looks for the guest's `/dev/tdx_guest`; quotes are verified since v3.13.0) |
 | Firecracker | 90 | fortress | **registered** (microVM config.json + `firecracker --no-api`) |
 
 Adding a backend is a single-file extension: see

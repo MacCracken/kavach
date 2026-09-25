@@ -4,12 +4,14 @@
 #
 #   1. Verify sandbox is in RUNNING state
 #   2. Backend dispatch (backend.exec)
-#   3. Externalization gate (secrets + code + data + verdict)
-#   4. Threat classification (intent score + kill chain)
-#   5. Audit record (HMAC-SHA256 chain)
+#   3. Attestation gate, when the policy requires it (3.13.0)
+#   4. Externalization gate (secrets + code + data + verdict)
+#   5. Threat classification (intent score + kill chain)
+#   6. Audit record (HMAC-SHA256 chain)
 #
 # On BLOCK/QUARANTINE verdicts, returns 0 and logs via audit; caller
-# inspects the sandbox's last_scan_result for details.
+# inspects the sandbox's last_scan_result for details. A failed attestation
+# also returns 0; `sandbox_exec_last_attestation` says why.
 
 # ---- Sandbox runtime wrapper ---------------------------------------------
 # We extend the lifecycle Sandbox with post-exec observations:
@@ -31,6 +33,50 @@ fn sandbox_exec_set_ext_policy(p) { _default_ext_policy = p; return 0; }
 fn sandbox_exec_set_audit_chain(c) { _global_audit_chain = c; return 0; }
 fn sandbox_exec_last_scan_result() { return _last_scan_result; }
 fn sandbox_exec_last_assessment() { return _last_assessment; }
+
+# ---- Attestation (3.13.0) -------------------------------------------------
+var _last_attestation = 0;
+var _attest_time = 0;
+var _attest_next_nonce = 0;
+var _attest_next_nonce_len = 0;
+
+# The AttestationResult of the last exec whose quote was checked, or 0: the
+# policy did not require attestation, or the exec stopped before the check.
+fn sandbox_exec_last_attestation() { return _last_attestation; }
+
+# Verify quotes as of Unix time `t` rather than the wall clock; 0 returns to
+# the clock. For checking evidence at the time it was recorded, and for tests
+# whose fixture certificates expire.
+fn sandbox_exec_set_attest_time(t) { _attest_time = t; return 0; }
+
+# Bind the next exec's quote to `nonce` (1 to 64 bytes) instead of a random
+# one: a relying party's challenge, so the quote is fresh for that party. Used
+# once; the exec after it draws a random nonce again. Returns 0, or -1 for a
+# nonce of the wrong length.
+fn sandbox_exec_set_attest_nonce(nonce, len) {
+    if (nonce == 0 || len <= 0 || len > ATTEST_NONCE_MAX) { return 0 - 1; }
+    var copy = alloc(len);
+    memcpy(copy, nonce, len);
+    _attest_next_nonce = copy;
+    _attest_next_nonce_len = len;
+    return 0;
+}
+
+# The nonce for this exec: the caller's, once, or 32 bytes from the kernel
+# CSPRNG. Returns 0 if getrandom fails, which fails the exec.
+fn _attest_take_nonce() {
+    if (_attest_next_nonce_len > 0) {
+        var n = _attest_next_nonce;
+        backend_attest_reset(n, _attest_next_nonce_len);
+        _attest_next_nonce = 0;
+        _attest_next_nonce_len = 0;
+        return n;
+    }
+    var fresh = alloc(32);
+    if (fill_random(fresh, 32) != 32) { return 0; }
+    backend_attest_reset(fresh, 32);
+    return fresh;
+}
 
 fn _ensure_default_ext_policy() {
     if (_default_ext_policy == 0) {
@@ -61,39 +107,87 @@ fn sandbox_exec(sandbox, command) {
 
     _audit_record_if(audit, "exec_begin", command);
 
+    # Attestation is decided before anything runs. A policy that requires it
+    # runs only on a backend that can produce a quote, with a nonce for the
+    # guest to bind into it.
+    var cfg = Sandbox_config(sandbox);
+    var sp = SandboxConfig_policy(cfg);
+    var attest = policy_wants_attestation(sp);
+    _last_attestation = 0;
+    backend_attest_reset(0, 0);
+    if (attest == 1) {
+        var bid = SandboxConfig_backend(cfg);
+        if (kavach_attest_backend_supported(bid) == 0) {
+            kavach_err_print(KAVACH_ERR_POLICY_VIOLATION, "attestation required; this backend cannot attest");
+            _audit_record_if(audit, "exec_error", "attestation required; backend cannot attest");
+            return 0;
+        }
+        if (_attest_take_nonce() == 0) {
+            kavach_err_print(KAVACH_ERR_POLICY_VIOLATION, "attestation required; no nonce");
+            _audit_record_if(audit, "exec_error", "attestation required; no nonce");
+            return 0;
+        }
+    }
+
     # 1. Backend dispatch. The diagnostic flag is cleared first, so it can only
     # describe this dispatch's result (see backend_diagnostic_reset).
     backend_diagnostic_reset();
     var result = backend_dispatch_exec(sandbox, command);
+    # Taken and cleared on every path out of the dispatch, so none of them
+    # leaves a nonce or quote for whatever dispatches next.
+    var quote = backend_quote();
+    var quote_len = backend_quote_len();
+    var nonce = backend_attest_nonce();
+    var nonce_len = backend_attest_nonce_len();
+    backend_attest_reset(0, 0);
     if (result == 0) {
         _audit_record_if(audit, "exec_error", "backend dispatch failed");
         return 0;
     }
 
-    # 2. Externalization gate
-    #
-    # Skipped when the backend returned a DIAGNOSTIC rather than captured output
-    # (no runtime found, bad bundle, runtime-guard violation). The gate polices
-    # what the payload externalizes; a diagnostic is kavach explaining why there
-    # was no payload, and scanning it lets kavach censor its own error messages
-    # — see backend_result_is_diagnostic. The result still flows back to the
-    # caller carrying its non-zero exit code and its reason.
+    # Both gates are skipped when the backend returned a DIAGNOSTIC rather than
+    # captured output (no runtime found, bad bundle, runtime-guard violation).
+    # The externalization gate polices what the payload externalizes; a
+    # diagnostic is kavach explaining why there was no payload, and scanning it
+    # lets kavach censor its own error messages — see
+    # backend_result_is_diagnostic. With no payload there is no guest to attest
+    # either. The result still flows back to the caller carrying its non-zero
+    # exit code and its reason.
     if (backend_result_is_diagnostic() == 1) {
         _last_scan_result = 0;
         _last_assessment = 0;
         _audit_record_if(audit, "exec_complete", "diagnostic");
         return result;
     }
+
+    # 2. Attestation gate. The guest's quote is verified against the policy
+    # before any of its output leaves; a guest that cannot show an allowed
+    # measurement on a genuine platform, bound to this exec's nonce, fails the
+    # exec. The clock is read here, after the run.
+    if (attest == 1) {
+        var now = _attest_time;
+        if (now == 0) { now = clock_epoch_secs(); }
+        var ar = kavach_attest_quote(SandboxConfig_backend(cfg), quote, quote_len, sp,
+          nonce, nonce_len, now);
+        _last_attestation = ar;
+        _audit_record_if(audit, "attestation", attestation_trust_name(AttestationResult_trust(ar)));
+        if (kavach_attest_passes(ar, sp) == 0) {
+            kavach_err_print(KAVACH_ERR_POLICY_VIOLATION, AttestationResult_details(ar));
+            return 0;
+        }
+    }
+
+    # 3. Externalization gate
     var scan = gate_apply(result, policy);
     _last_scan_result = scan;
 
-    # 3. Threat classification
+    # 4. Threat classification
     var assessment = classify_threat(ScanResult_findings(scan));
     _last_assessment = assessment;
 
     var verdict = ScanResult_verdict(scan);
 
-    # 4. Audit record — one entry per exec with verdict payload
+    # 5. Audit record — one entry per exec with verdict payload
     if (audit != 0) {
         var vname = verdict_name(verdict);
         audit_chain_record(audit, "exec_complete", vname);

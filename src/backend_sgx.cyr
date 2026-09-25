@@ -5,8 +5,12 @@
 # Requires /dev/sgx_enclave and the gramine-sgx binary.
 #
 # Deferred vs Rust:
-#   - Remote attestation (SgxAttestationReport + IAS quote fetch) —
-#     needs sigil HTTPS + IAS certificate handling
+#   - Quote fetch. kavach verifies DCAP quotes since 3.13.0
+#     (`kavach_attest_sgx_quote`), but this launcher cannot get one out of the
+#     enclave. It cannot start one yet either: the manifest it writes is a
+#     template that is never rendered (`gramine-manifest`) or signed
+#     (`gramine-sgx-sign`). A policy that requires attestation is refused here,
+#     before anything runs.
 #   - Sealing / unsealing (SealedData, SealKeyPolicy) — needs gramine-sgx-seal
 #     wrapper and AES-GCM support in sigil
 
@@ -88,6 +92,9 @@ fn _sgx_write_manifest(workdir, sandbox, command) {
 
 fn sgx_exec(sandbox, command) {
     var start_ns = mono_now_ns();
+    if (backend_attest_nonce_len() > 0) {
+        return backend_error_result("sgx: the policy requires attestation, and this launcher cannot fetch a quote");
+    }
     var gramine = _sgx_gramine_path();
     if (gramine == 0) {
         return backend_error_result("gramine-sgx not found in PATH");

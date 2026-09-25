@@ -2,7 +2,7 @@
 
 > **Principle**: Security correctness first, then backend breadth, then performance. Every sandbox gets a number.
 
-This roadmap is **future-facing only** — shipped work lives in [CHANGELOG.md](../../CHANGELOG.md). Current release: **v3.12.9**. Toolchain pin: cc `6.6.6`; sigil `3.12.18` (the snapshot's — see CLAUDE.md hazard 4), samay `1.1.5`, ai-hwaccel `2.4.0` (agnosys dropped at v3.5.0 — its security backends are internalized).
+This roadmap is **future-facing only** — shipped work lives in [CHANGELOG.md](../../CHANGELOG.md). Current release: **v3.13.0**. Toolchain pin: cc `6.6.6`; sigil `3.12.18` (the snapshot's — see CLAUDE.md hazard 4), samay `1.1.5`, ai-hwaccel `2.4.0` (agnosys dropped at v3.5.0 — its security backends are internalized).
 
 **Every release below is pinned.** Each names what ships in it, in the order the principle sets. To
 move an item, edit this file; do not let it drift. Every release runs the CLAUDE.md development
@@ -15,17 +15,32 @@ what it is.
 
 ## 3.13.x — TEE attestation I: SGX and TDX quote verification (ADR-004 §2)
 
-**Unblocked:** sigil 3.12.18 ships `sgx_quote_parse`, `sgx_quote_verify_full`, `tdx_quote_parse`
-and `tdx_quote_verify_full`.
+3.13.0 shipped the verification, the measurement allowlist in `SandboxPolicy`, the gate in
+`sandbox_exec` that fails the exec on a mismatch, accept and reject tests from sigil's vectors,
+and the aarch64 support record (CHANGELOG 3.13.0). Open:
 
-- [ ] **Record aarch64 as supported**, apart from namespaces and rootfs entry (ADR-007), once
-  the `aarch64 (native)` CI job's notice shows the full count with seccomp loaded. 3.12.9 made
-  the job blocking and added that notice; before it, a green run said only that nothing failed.
-- [ ] Fetch the quote from the running guest: Gramine for SGX, the TD quote for TDX.
-- [ ] Verify it with sigil against the vendor root, and report the result through
-  `src/attestation.cyr`, which today only stores the report's shape.
-- [ ] A measurement allowlist in `SandboxPolicy`; a mismatch fails the exec.
-- [ ] Accept and reject tests from sigil's test vectors.
+- [ ] **Fetch the quote from the running guest: Gramine for SGX, the TD quote for TDX.** Needs
+  SGX or TDX hardware to verify on; the development machine is AMD. kavach's side of the hand-off is in place (`backend_attest_nonce`, `backend_attach_quote`),
+  and until the launchers use it they refuse a policy that requires attestation. What each
+  launcher lacks first:
+  - **SGX**: `backend_sgx.cyr` writes a manifest template and never renders it
+    (`gramine-manifest`) or signs it (`gramine-sgx-sign`), so `gramine-sgx` has nothing to run.
+    Then `sgx.remote_attestation = "dcap"`, and inside the enclave: write the nonce to
+    `/dev/attestation/user_report_data`, read `/dev/attestation/quote`. The command is in the
+    manifest, so MRENCLAVE differs per command, and the nonce must come in through a file that
+    is not measured.
+  - **TDX**: `backend_tdx.cyr` passes QEMU no TDVF firmware, and it (and `backend_is_available`)
+    decides TDX is present from `/dev/tdx_guest`, the device inside a TD (the tdx-guest
+    driver). On the host, KVM's TDX support shows in `kvm_intel`'s `tdx` parameter. Changing only
+    the check would route execs to a launch not shown to boot, so it waits for the firmware. The
+    guest gets its quote through configfs-tsm and has to hand it out, over the serial console
+    or vsock.
+- [ ] **The TDX RTMRs.** The allowlist pins MRTD, which is the TD's firmware; the kernel and its
+  command line are measured into the RTMRs, which nothing checks yet. A nonce passed on the
+  kernel command line would change a measurement on every exec.
+- [ ] **Intel's collateral: TCB level, QE identity, revocation.** sigil verifies the signatures
+  and the chain to the root, not these. Without them, a genuine platform with an out-of-date or
+  revoked TCB passes, and the quoting enclave's identity and version go unchecked.
 
 ## 3.14.x — TEE attestation II: SEV-SNP, and SGX sealing
 

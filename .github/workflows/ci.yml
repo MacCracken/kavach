@@ -91,7 +91,7 @@ jobs:
         # Now blocking, and the drift it was tracking is cleared (3.11.15).
         run: |
           drift=0
-          for f in src/*.cyr tests/*.tcyr tests/*.bcyr tests/*.fcyr; do
+          for f in src/*.cyr tests/*.cyr tests/*.tcyr tests/*.bcyr tests/*.fcyr; do
             [ -f "$f" ] || continue
             if ! cyrius fmt "$f" --check > /dev/null 2>&1; then
               echo "needs fmt: $f"
@@ -158,6 +158,14 @@ jobs:
             exit 1
           fi
           echo "dist bundles are fresh"
+
+      - name: Dist bundles compile for a consumer
+        # 3.13.0. Fresh is not the same as compiling: a consumer vendors only
+        # the stdlib leaves a bundle's `.deps` sidecar lists, and a module can
+        # call a function that lives outside its profile. The confine bundle
+        # shipped 3.12.4 and 3.12.5 unable to compile, and a 3.13.0 draft called
+        # `is_digit_c`, which `[lib.confine]` does not carry. See the script.
+        run: python3 scripts/check-bundles.py
 
       - name: Smoke test
         run: |
@@ -245,7 +253,7 @@ jobs:
           qemu-aarch64 build/kavach-test-aarch64 > /tmp/kavach_tests.txt 2>&1 || rc=$?
           cat /tmp/kavach_tests.txt
           sum=$(grep -E '^[0-9]+ passed' /tmp/kavach_tests.txt | tail -1)
-          echo "::notice title=tests (aarch64, qemu)::${sum:-no summary line}"
+          echo "::notice title=tests (aarch64 / qemu)::${sum:-no summary line}"
           exit $rc
 
       - name: Upload the aarch64 test binary
@@ -280,7 +288,7 @@ jobs:
           sum=$(grep -E '^[0-9]+ passed' /tmp/kavach_tests.txt | tail -1)
           sec="seccomp loaded"
           grep -q "host refuses seccomp" /tmp/kavach_tests.txt && sec="seccomp refused by host"
-          echo "::notice title=tests (aarch64, native $(uname -m))::${sum:-no summary line} — ${sec}"
+          echo "::notice title=tests (aarch64 / native $(uname -m))::${sum:-no summary line} — ${sec}"
           exit $rc
 
   security:

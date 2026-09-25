@@ -3,8 +3,13 @@
 # backend shares the QEMU code path with SEV, differentiated by guest
 # object + CPU flags. Command is a guest-kernel path (bzImage).
 #
-# Deferred: TDX attestation (quote fetch + verify via sigil EAR), guest
-# measurement. Waits on sigil TDX helpers.
+# Deferred: quote fetch. kavach verifies TDX quotes since 3.13.0
+# (`kavach_attest_tdx_quote`), but this launcher cannot get one out of the
+# guest. It is not shown to boot one either: it passes no TDVF firmware, and it
+# (like `backend_is_available`) looks for /dev/tdx_guest, the device inside a TD
+# (the tdx-guest driver), so a TDX host reports the backend unavailable. That
+# check stays until the launch is shown to boot. A policy that requires
+# attestation is refused here, before anything runs.
 
 fn _tdx_qemu_path() {
     if (kavach_path_exists("/usr/local/bin/qemu-system-x86_64") == 1) { return "/usr/local/bin/qemu-system-x86_64"; }
@@ -18,6 +23,9 @@ fn _tdx_device_present() {
 
 fn tdx_exec(sandbox, command) {
     var start_ns = mono_now_ns();
+    if (backend_attest_nonce_len() > 0) {
+        return backend_error_result("tdx: the policy requires attestation, and this launcher cannot fetch a quote");
+    }
     var qemu = _tdx_qemu_path();
     if (qemu == 0) {
         return backend_error_result("qemu-system-x86_64 not found in PATH");

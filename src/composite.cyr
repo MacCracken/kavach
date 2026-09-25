@@ -99,7 +99,48 @@ fn merge_policies(base, overlay) {
     SandboxPolicy_set_network_tcp_connect_len(out,
       _max(SandboxPolicy_network_tcp_connect_len(base),
         SandboxPolicy_network_tcp_connect_len(overlay)));
+    _merge_attestation(out, base, overlay);
     return out;
+}
+
+fn _attest_same_root(a, b) {
+    var n = SandboxPolicy_attest_root_len(a);
+    if (n != SandboxPolicy_attest_root_len(b)) { return 0; }
+    return memeq(SandboxPolicy_attest_root(a), SandboxPolicy_attest_root(b), n);
+}
+
+# Attestation (3.13.0). The merged policy requires attestation if either input
+# does, and admits only a guest both would. When both do, the allowlists are
+# intersected and debug is allowed only if both allow it. Two different roots
+# admit no quote in common, since a quote chains to one root, and two allowlists
+# may share no measurement. In either case the merged list holds one entry that
+# matches no measurement: the policy still requires attestation, and every
+# attempt fails. An empty list would instead stop requiring it.
+fn _merge_attestation(out, base, overlay) {
+    var a = policy_wants_attestation(base);
+    var b = policy_wants_attestation(overlay);
+    if (a == 0 && b == 0) { return 0; }
+    var src = base;
+    if (a == 0) { src = overlay; }
+    var from = SandboxPolicy_attest_measurements(src);
+    var list = vec_new();
+    var i = 0;
+    while (i < vec_len(from)) {
+        var m = vec_get(from, i);
+        if (a == 0 || b == 0 || _attest_listed(overlay, m) == 1) { vec_push(list, m); }
+        i = i + 1;
+    }
+    var debug = SandboxPolicy_attest_allow_debug(src);
+    if (a == 1 && b == 1) {
+        if (_attest_same_root(base, overlay) == 0) { list = vec_new(); }
+        debug = _and_bool(debug, SandboxPolicy_attest_allow_debug(overlay));
+    }
+    if (vec_len(list) == 0) { vec_push(list, "none"); }
+    SandboxPolicy_set_attest_measurements(out, list);
+    SandboxPolicy_set_attest_root(out, SandboxPolicy_attest_root(src));
+    SandboxPolicy_set_attest_root_len(out, SandboxPolicy_attest_root_len(src));
+    SandboxPolicy_set_attest_allow_debug(out, debug);
+    return 0;
 }
 
 # Score a composite = max(outer_base, inner_base) + 5, clamped to 100.
@@ -126,9 +167,17 @@ fn score_composite(outer, inner, policy) {
 #   # swap policy on config for the dispatch, preserving the original
 #   SandboxConfig_set_policy(config, merged_policy);
 #   var result = backend_dispatch_exec_as(outer_backend, sandbox, cmd);
+#
+# Refuses a policy that requires attestation (3.13.0): this path dispatches
+# straight to the backend, past `sandbox_exec`'s attestation gate, so nothing
+# would check the guest's quote.
 fn composite_exec(outer_backend, inner_backend, sandbox, command, inner_policy) {
     var config = Sandbox_config(sandbox);
     var caller_policy = SandboxConfig_policy(config);
+    if (policy_wants_attestation(caller_policy) == 1 || policy_wants_attestation(inner_policy) == 1) {
+        kavach_err_print(KAVACH_ERR_POLICY_VIOLATION, "attestation required; composite_exec does not verify quotes");
+        return 0;
+    }
     var merged = merge_policies(caller_policy, inner_policy);
     var saved = caller_policy;
     SandboxConfig_set_policy(config, merged);

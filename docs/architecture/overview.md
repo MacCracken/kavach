@@ -93,8 +93,8 @@ src/
 ├── backend_firecracker.cyr Firecracker microVM with config.json + `--no-api`
 ├── composite.cyr          Defense-in-depth policy merging + composite score
 ├── observability.cyr      HealthStatus, SandboxMetrics, SpawnedProcess types
-├── attestation.cyr        AttestationResult + AttestationTrust + SGX report
-└── sandbox_exec.cyr       End-to-end: dispatch → gate → threat → audit
+├── attestation.cyr        AttestationResult + AttestationTrust; SGX/TDX quote verification (v3.13.0)
+└── sandbox_exec.cyr       End-to-end: dispatch → attestation → gate → threat → audit
 ```
 
 ---
@@ -113,6 +113,8 @@ policy_strict() ─► SandboxPolicy{ seccomp_enabled=1, seccomp_profile="strict
 
 The `memory_limit_mb` / `cpu_limit_tenths` / `max_pids` fields are honored by `src/cgroup.cyr` (v3.2.0+). `seccomp_enabled` and the Landlock filesystem rules are applied in the exec child on the process backend and `sandbox_spawn` (by `confine_child`) and for persistent guests (by their own sequence in `persistent.cyr`): seccomp since v3.9.0 (on the process backend without a rootfs, since v3.11.3), with the architecture check since v3.12.8 ([ADR-007](../adr/007-syscall-numbers-across-architectures.md)), and the full Landlock right set since v3.11.1. The OCI-family backends leave syscall filtering to their runtime. The Landlock network and scope fields are not enforced yet.
 
+The attestation fields (v3.13.0) are set with `policy_attest_allow` (a measurement: MRENCLAVE for SGX, MRTD for TDX), `policy_attest_root` (the root CA, DER) and `policy_attest_allow_debug`. One allowed measurement makes the policy require attestation: `sandbox_exec` then runs only on the SGX or TDX backend and verifies the guest's quote before releasing output, and `sandbox_spawn`, persistent guests and `composite_exec` refuse the policy. `merge_policies` keeps the requirement, intersecting two allowlists.
+
 ### Backend selection
 
 ```
@@ -126,9 +128,16 @@ resolve_best_backend(policy) walks Backend enum by index,
 
 ```
 sandbox_exec(sb, "echo hi")
+  ├─ attestation required? (the policy allows a measurement)
+  │     refuse a backend that cannot attest; draw a 32-byte nonce
   ├─ backend_dispatch_exec(sb, "echo hi")
   │     looks up fnptr at _backend_table + backend_id * 32
   │     fncall2(fp, sandbox, command)  →  ExecResult*
+  │     (an attesting backend binds the nonce into its guest's quote
+  │      and hands it back with backend_attach_quote)
+  ├─ kavach_attest_quote(backend, quote, policy, nonce, now)
+  │     sigil verify to the policy's root, debug bit, nonce, allowlist;
+  │     anything but AFFIRMING (or an allowed debug WARNING) returns 0
   ├─ gate_apply(result, policy)
   │     concatenates stdout + "\n" + stderr
   │     runs secrets_scan, code_scan, data_scan
@@ -235,6 +244,14 @@ Each backend is a plug into the dispatch table. To add `<name>`:
 
 ---
 
+## Platforms
+
+| Platform | State | Evidence |
+|---|---|---|
+| Linux x86-64 | Supported | The full suite in CI, with seccomp loaded. |
+| Linux aarch64 | Supported (v3.13.0), apart from namespaces and rootfs entry, which are refused until the stdlib names `unshare` and `chroot` ([ADR-007](../adr/007-syscall-numbers-across-architectures.md)) | The `aarch64 (native)` CI job, blocking since v3.12.9, on GitHub's arm64 runner: 853 of 853 with seccomp loaded on the 3.12.9 run. Also cross-built and run under qemu. |
+| agnos | Builds (`cyrius build --agnos`); the Linux confinement primitives return not-supported | Confinement there is the capability layer's (v3.5.1). |
+
 ## External dependencies
 
 | Dep | Version | Purpose |
@@ -279,18 +296,19 @@ Each backend is a plug into the dispatch table. To add `<name>`:
 
 See [ADR-004](../adr/004-deferred-features.md) for rationale; [`development/roadmap.md`](../development/roadmap.md) pins each open item to a release.
 
-What's still deferred at v3.12.8 (each row checked against the source; see the roadmap for the release each is pinned to):
+What's still deferred at v3.13.0 (each row checked against the source; see the roadmap for the release each is pinned to):
 
 | Feature | Blocking dep | Trigger condition |
 |---------|--------------|-------------------|
-| **SGX / SEV-SNP / TDX attestation + sealing** | None upstream: sigil 3.12.18 ships `sgx_quote_verify_full`, `tdx_quote_verify_full` and the `snp_report_*` family | kavach-side work: fetch evidence per backend, verify, measurement allowlist, SGX sealing |
+| **SGX / TDX quote fetch** | SGX or TDX hardware to verify on | Verification, the allowlist and the gate shipped in v3.13.0. kavach's launchers cannot produce a quote (the SGX manifest is never rendered or signed; the TDX launch passes no TDVF firmware), so they refuse a policy that requires attestation |
+| **SEV-SNP verification, SGX sealing** | None upstream: sigil 3.12.18 ships the `snp_report_*` family | kavach-side work, roadmap 3.14.x |
 | **Firecracker jailer / vsock / snapshot** | None upstream: the stdlib has `sys_setresuid` / `sys_setresgid` | kavach-side work; lower priority, since the microVM boundary already isolates |
 | **Stiva OCI backend** | stiva's runc-compatible OCI-runtime CLI | Single-line addition to `_oci_runtime_path()` once stiva ships it |
 | **aarch64 namespaces + rootfs entry** | cyrius stdlib names for `unshare` / `chroot` (filed at v3.12.8) | Refused on aarch64 until then; call `sys_unshare` / `sys_chroot` once the pin carries them |
 | **async exec** | Cyrius async story still maturing | Synchronous fork+wait remains correct for sandbox-runtime semantics |
 | **Full regex in pattern matchers** | PCRE engine in Cyrius | hand-rolled literal-prefix + char-class matchers cover the v3.x surface |
 
-Shipped since the v3.4.0 version of this table: OCI spec resource limits (3.3.1), seccomp (3.9.0) and Landlock (3.11.1) in the exec child, and exec by pinned fd for the H4 TOCTOU (3.12.7).
+Shipped since the v3.4.0 version of this table: OCI spec resource limits (3.3.1), seccomp (3.9.0) and Landlock (3.11.1) in the exec child, exec by pinned fd for the H4 TOCTOU (3.12.7), and SGX / TDX quote verification (3.13.0).
 
 What was deferred in v3.0 but has since shipped: UUID v4 IDs, WARN-verdict secret redaction, OffenderTracker, sandbox integrity monitoring (all v3.0 closeout); `FileInjection.mode` honoring (v3.1.1); cgroups v2 + HTTP credential proxy (v3.2.0).
 

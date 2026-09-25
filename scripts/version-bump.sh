@@ -92,6 +92,9 @@ if command -v cyrius >/dev/null 2>&1; then
     ( cd "$ROOT" && cyrius distlib --all >/dev/null 2>&1 ) \
         && echo "  Regenerated dist/ bundles (cyrius distlib --all)" \
         || echo "  WARN: 'cyrius distlib --all' failed — regenerate dist/ manually"
+    # 3.13.0: fresh bundles can still fail to compile for a consumer.
+    ( cd "$ROOT" && python3 scripts/check-bundles.py ) \
+        || echo "  WARN: a dist bundle does not compile for a consumer — see above"
 else
     echo "  SKIP: cyrius not on PATH — run 'cyrius distlib --all' to refresh dist/ before committing"
 fi

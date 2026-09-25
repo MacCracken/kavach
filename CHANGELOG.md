@@ -7,6 +7,204 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.13.0] — 2026-09-25
+
+TEE attestation I. kavach now verifies SGX and TDX quotes, and a `SandboxPolicy` can require
+attestation: `sandbox_exec` then releases a guest's output only if its quote verifies to the
+policy's root, carries the exec's nonce and names an allowed measurement. The cryptography is
+sigil's; kavach adds the policy, the nonce, the debug check and the gate. kavach's own SGX and TDX
+launchers cannot fetch a quote yet, so they refuse such a policy. The fetch stays open on the
+roadmap: it needs hardware to be verified on. Also: a heap overflow in
+`kavach_attestation_result_new`, a CI check that the dist bundles compile for a consumer (it
+caught a confine-bundle break in this release before it shipped), and aarch64 recorded as
+supported, apart from namespaces and rootfs entry. 879 → **971** assertions on x86-64; 850 →
+**942** on aarch64 under qemu.
+
+### Added — SGX and TDX quote verification (`src/attestation.cyr`)
+
+`kavach_attest_quote(backend, quote, quote_len, policy, nonce, nonce_len, now)`, over
+`kavach_attest_sgx_quote` and `kavach_attest_tdx_quote`, returns an `AttestationResult`. The first
+check that fails makes it `KAVACH_TRUST_CONTRAINDICATED`, with the reason in `details`:
+
+1. The policy names a root and a measurement, the nonce is 1 to 64 bytes, and `now` is not 0,
+   which sigil reads as "skip the certificates' validity dates".
+2. The quote parses: SGX DCAP v3 with a P-256 attestation key; TDX v4, P-256 or P-384.
+3. It verifies to the policy's root through sigil 3.12.18's `*_quote_verify_full_into`: the PCK
+   chain carried in the quote, walked to the root with each certificate's validity dates; the
+   PCK's signature over the Quoting Enclave's report; that report's binding of the attestation
+   key; and the attestation key's signature over the quote header and body.
+4. The guest is not a debug guest, unless the policy allows one. SGX `ATTRIBUTES.DEBUG` is bit 1
+   (Linux's `SGX_ATTR_DEBUG`), TDX `TD_ATTRIBUTES.DEBUG` bit 0 (`TDX_TD_ATTR_DEBUG`).
+5. The report data starts with the nonce.
+6. The measurement is allowed: MRENCLAVE for SGX, MRTD for TDX.
+
+A pass is `KAVACH_TRUST_AFFIRMING`, or `KAVACH_TRUST_WARNING` for a debug guest the policy allowed.
+`kavach_attest_passes(result, policy)` says whether a result lets output through;
+`attestation_is_acceptable` cannot, because `NONE` (no attestation done) sits above `WARNING` in its
+order. The measurement, MRSIGNER and ISVSVN are reported only once step 3 has passed. sigil's
+verifier works in a 64 KiB arena that kavach resets for each quote, so repeated verification does
+not grow the heap.
+
+**Not evaluated**, and `details` says so on every pass: Intel's TCB level, QE identity and
+revocation. They need collateral sigil does not evaluate, so a genuine platform with an
+out-of-date or revoked TCB passes. For TDX, the RTMRs, which measure the kernel and its command
+line, are not checked; the allowlist pins MRTD, the TD's firmware.
+
+### Added — the measurement allowlist in `SandboxPolicy`, and the gate in `sandbox_exec`
+
+- `policy_attest_allow(p, hex)` allows a measurement: 64 hex digits for MRENCLAVE, 96 for MRTD,
+  upper case folded, -1 for anything else. One entry makes the policy require attestation
+  (`policy_wants_attestation`).
+- `policy_attest_root(p, der, len)` sets the root; the bytes are copied. kavach ships no root. In
+  production it is Intel's SGX root CA, which TDX quotes chain to as well.
+- `policy_attest_allow_debug(p, on)`, off by default.
+- `SANDBOX_POLICY_SIZE` 104 → 136. The four fields are appended, so no existing offset moves.
+  `policy_new` zeroes them.
+
+Under a policy that requires attestation, `sandbox_exec`:
+
+1. refuses a backend that cannot attest (anything but SGX and TDX), before anything runs;
+2. draws a 32-byte nonce from `getrandom`, or takes the caller's: `sandbox_exec_set_attest_nonce`
+   carries a relying party's challenge and is used once;
+3. dispatches. The backend has its guest put `backend_attest_nonce()` at the start of the quote's
+   report data, and hands the quote back with `backend_attach_quote(buf, len)`;
+4. verifies the quote as of the wall clock (`sandbox_exec_set_attest_time` overrides it, for
+   recorded evidence and fixtures), records the trust level in the audit chain, and returns 0,
+   withholding the output, unless the result passes. `sandbox_exec_last_attestation()` keeps it.
+
+The nonce and quote are cleared on every path out of the dispatch, so none is left for the next.
+The paths that cannot check a quote refuse a policy that requires one: `sandbox_spawn`,
+`persistent_spawn_confined[_ns]` and `composite_exec`. `merge_policies` keeps the requirement: if
+either input requires attestation the merge does, the allowlists are intersected, and debug is
+allowed only if both allow it. Two different roots, or allowlists with nothing in common, leave a
+single entry that matches no measurement, so the merged policy still requires attestation and
+admits no guest.
+
+### Not done — fetching the quote from the running guest
+
+The roadmap's other 3.13.x item. It needs SGX or TDX hardware to be verified on; the development
+machine is AMD. kavach's side of the hand-off is in place, and both launchers refuse a policy that
+requires attestation, with a diagnostic, before they run anything. What each lacks first (roadmap
+3.13.x):
+
+- **SGX**: `backend_sgx.cyr` writes a manifest template and never renders it (`gramine-manifest`)
+  or signs it (`gramine-sgx-sign`), so `gramine-sgx` has no enclave to start.
+- **TDX**: `backend_tdx.cyr` passes QEMU no TDVF firmware. It and `backend_is_available` decide
+  TDX is present from `/dev/tdx_guest`; `modinfo tdx_guest` on the development host reads "TDX
+  Guest Driver", `drivers/virt/coco/tdx-guest`, the device inside a TD. So a TDX host reports the
+  backend unavailable. The check stays until the launch is shown to boot: fixing only the check
+  would send execs to a launch not shown to work.
+
+A consumer with a launcher that works can register it at the SGX or TDX slot and get the gate
+([example 5](docs/examples/05-tee-attestation.md)).
+
+### Fixed — `kavach_attestation_result_new` wrote past its allocation
+
+`AttestationResult` has seven fields, 56 bytes; the constructor allocated 48. `details`, at offset
+48, went over the first word of whatever was allocated next. At construction that word was
+overwritten in turn, but a later `AttestationResult_set_details` corrupted the next object. Writing
+the verifier found it: `details` is set after the measurement's hex string is allocated, and the
+string lost its first eight bytes. `ATTESTATION_RESULT_SIZE` is 56;
+`attestation_result_fits_its_allocation` plants a word after a result and checks that it survives.
+
+### Added — `scripts/check-bundles.py`, a CI step and a `version-bump.sh` step
+
+For each `dist/*.cyr` it builds a throwaway consumer that vendors only the stdlib leaves the
+bundle's `.deps` sidecar lists, and fails on a failed build or on any `undefined function`,
+reachable or not. The freshness gate proves the bundles match the source, not that they compile:
+the confine bundle shipped 3.12.4 and 3.12.5 unable to (CHANGELOG 3.12.6). This release's first
+`policy_attest_allow` called `is_digit_c`, which lives in `scanning_secrets.cyr` and is not in
+`[lib.confine]`. The in-tree build and every test passed, and a consumer of
+`dist/kavach-confine.cyr` failed to compile. The digit check is inline now; with `is_digit_c`
+restored, the script names it and fails.
+
+### Platforms — aarch64 recorded as supported
+
+Apart from namespaces and rootfs entry, which stay refused until the stdlib names `unshare` and
+`chroot` (ADR-007). The evidence the roadmap asked for: the `aarch64 (native)` CI job, blocking
+since 3.12.9, reported `853 passed, 0 failed (853 total) — seccomp loaded` for the 3.12.9 commit
+(its check-run annotation, re-read for this entry). `overview.md` has a Platforms table.
+
+### CI
+
+- The aarch64 notices' titles had a comma, and a workflow command's title ends at the first comma:
+  the 3.12.9 annotations are titled `tests (aarch64`. They are `tests (aarch64 / qemu)` and
+  `tests (aarch64 / native …)` now.
+- "Dist bundles compile for a consumer", after the freshness check.
+
+### Tests
+
+The vectors are sigil's (`tests/attest_vectors.cyr`, copied from its `sgx_verify_full.tcyr` and
+`tdx_verify_full.tcyr`): an SGX DCAP v3 quote and two TDX v4 quotes (P-256, P-384), each carrying a
+PEM PCK chain up to sigil's test root, and an unrelated root. The TDX quotes are debug TDs
+(`TD_ATTRIBUTES` 0x0101010101010101), which makes them the default policy's reject case and the
+allowed-debug `WARNING` case. The tests verify as of a fixed time inside the certificates' window,
+never the clock.
+
+- **Accept:** the SGX quote, affirmed, with its MRENCLAVE, MRSIGNER and ISVSVN; with a 64-byte
+  nonce; with an upper-case allowlist entry; through the dispatcher. The TDX quotes on both curves,
+  at `WARNING` with debug allowed.
+- **Reject:** an unrelated root; before and after the validity window; time 0; a changed MRENCLAVE
+  or MRTD; the DEBUG bit set (which breaks the signature); a measurement off the allowlist;
+  another exec's nonce; nonces of 0 and 65 bytes; no root; no allowlist; a truncated quote; each
+  format given to the other's verifier; a backend with no quote format; a debug TD under the
+  default policy.
+- **The gate**, through a stand-in SGX backend: a fresh quote is released; the same quote on the
+  next exec is refused, the caller's nonce having been used once; a guest with no quote; a
+  measurement off the allowlist; a backend that cannot attest, refused before it runs; kavach's SGX
+  and TDX launchers answering with their diagnostic; a diagnostic leaving no nonce behind; a
+  policy without an allowlist running as before.
+- The three refusing paths, `merge_policies`' rules, the policy helpers' validation, the root copy,
+  and the result's allocation.
+
+Twenty mutants, each disabling one check: the debug, nonce, allowlist and time checks; the SGX
+DEBUG offset; a debug guest reported `AFFIRMING`; the gate; the pre-dispatch backend check; nonce
+reuse; the post-dispatch reset; the SGX and TDX refusals; the three refusing paths; the merge and
+its root rule; case folding; the root copy; the result size. Each fails the suite at the assertion
+written for it.
+
+### Verified
+
+- x86-64: the suite, 971/971; the bench harness; fuzz (500); fmt `--check`; lint, 0 warnings;
+  vet; `check-symbols.py`; the security scan; `check-bundles.py`. `cyrius distlib --all`
+  regenerated both bundles.
+- aarch64: cross-built, and the suite 942/942 under qemu-aarch64; the agnos build links.
+- Both bundles, each consumed with only its sidecar's stdlib: the full bundle verified the SGX
+  vector (`AFFIRMING`); the confine bundle refused `sandbox_spawn` under a policy that requires
+  attestation.
+- The DEBUG bits, against Linux's `arch/x86/include/asm/sgx.h` (`SGX_ATTR_DEBUG = BIT(1)`) and
+  `arch/x86/include/asm/shared/tdx.h` (`TDX_TD_ATTR_DEBUG_BIT 0`).
+- Example 5 built against `dist/kavach.cyr`; its output is copied from the run.
+
+### Performance
+
+`bench-history.csv` gains a **3.13.0** row, pinned, with two new benchmarks: `attest_sgx_quote`
+**50.7 ms** and `attest_tdx_quote_p384` **47.8 ms**, the whole of `kavach_attest_*` on the
+vectors. Almost all of it is sigil's ECDSA; a TEE launch takes far longer. The comparison is
+`scripts/bench-ab.py 3.12.9 .`: 6 interleaved rounds per build, pinned.
+
+| bench | 3.12.9 | 3.13.0 | Δ |
+|---|---|---|---|
+| `process_exec_echo` | 2.763 ms | 2.704 ms | −2.1% (ranges overlap) |
+| `process_exec_confined` | 2.711 ms | 2.701 ms | −0.4% (ranges overlap) |
+| `process_exec_large_output` | 126.844 ms | 128.085 ms | +1.0% (ranges overlap) |
+| `policy_strict_create` | 38 ns | 45 ns | +18.4% (separate) |
+| `config_builder_full` | 96 ns | 104 ns | +8.9% (separate) |
+| `gate_clean_output` | 334.50 µs | 352.63 µs | +5.4% (separate) |
+| `code_scan_large_ac` | 506.01 µs | 526.79 µs | +4.1% (separate) |
+
+- **`sandbox_exec` shows no measured change.** The row-against-row +8.9% on `process_exec_echo`
+  is gone in the interleaved runs.
+- **`policy_strict_create` and `config_builder_full`** are the policy growing from 13 words to 17:
+  `policy_new` zeroes four more, about 7 ns.
+- ⚠ **`gate_clean_output` and `code_scan_large_ac` have separate ranges on a path this release does
+  not touch.** Not the 16 KB of vectors in the bench program: built with and without them, it
+  measured 351.31 and 350.99 µs. So the change is in `src/`, where no function they call changed,
+  but functions and globals added ahead of the scanners move where theirs land. 3.12.9's A/B saw
+  the same on `http_path_extract`, whose function had not changed either. Code placement is the
+  likely cause; it was not isolated.
+
+
 ## [3.12.9] — 2026-09-25
 
 The P(-1) closeout before 3.13 feature work. It fixes a credential-routing defect filed from

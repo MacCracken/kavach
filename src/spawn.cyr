@@ -62,13 +62,19 @@ var SPAWNED_PROCESS_SIZE = 40;
 # Spawn `command` detached under `sandbox`'s policy, with stdout+stderr appended
 # to `log_path` (0 → /dev/null). Returns SpawnedProcess*, or 0.
 #
-# Refuses when: the sandbox is not RUNNING, the command carries control
-# characters or trips the runtime guard, the policy asks for an isolation
-# primitive that cannot be applied (see _spawn_seccomp_supported), or the fork
-# fails. A refusal prints through kavach_err_print and leaves nothing running.
+# Refuses when: the sandbox is not RUNNING, the policy requires attestation,
+# the command carries control characters or trips the runtime guard, the policy
+# asks for an isolation primitive that cannot be applied (see
+# _spawn_seccomp_supported), or the fork fails. A refusal prints through
+# kavach_err_print and leaves nothing running.
 fn sandbox_spawn(sandbox, command, log_path) {
     if (Sandbox_state(sandbox) != SandboxState.RUNNING) {
         kavach_err_print(KAVACH_ERR_EXEC_FAILED, "sandbox not running");
+        return 0;
+    }
+    # 3.13.0: a spawned payload is a local process, with no quote to verify.
+    if (policy_wants_attestation(SandboxConfig_policy(Sandbox_config(sandbox))) == 1) {
+        kavach_err_print(KAVACH_ERR_POLICY_VIOLATION, "attestation required; a spawned process cannot attest");
         return 0;
     }
     # Same two pre-checks the exec path runs, for the same reason: a control

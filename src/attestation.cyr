@@ -1,7 +1,7 @@
-# kavach — unified attestation types
-# Ported from rust-old/src/backend/attestation.rs (types only; EAR
-# serialization + IAS / AMD-SEV / Intel-TDX quote verification are
-# deferred to v3.1, gated on sigil EAR helpers — see ADR-004 §2).
+# kavach — attestation results and quote verification
+# The types are ported from rust-old/src/backend/attestation.rs. SGX and TDX
+# quote verification landed in 3.13.0 on sigil's verifiers (ADR-004 §2);
+# SEV-SNP and EAR serialization have not.
 #
 # The AttestationResult struct is backend-agnostic: callers evaluate
 # trust via `trust` + `backend` without hardware-specific parsing.
@@ -45,10 +45,15 @@ struct AttestationResult {
     details;
 }
 
+# Seven fields. The constructor allocated 48 bytes until 3.13.0, so `details`
+# at offset 48 was written past the end of the result, over the first word of
+# whatever was allocated next.
+var ATTESTATION_RESULT_SIZE = 56;
+
 # Named `kavach_` because sigil defines its own `attestation_result_new`, and
 # under last-definition-wins only one of the two survives in a consumer.
 fn kavach_attestation_result_new(backend) {
-    var a = alloc(48);
+    var a = alloc(ATTESTATION_RESULT_SIZE);
     AttestationResult_set_backend(a, backend);
     AttestationResult_set_trust(a, KAVACH_TRUST_NONE);
     AttestationResult_set_measurement_hex(a, "");
@@ -63,6 +68,208 @@ fn kavach_attestation_result_new(backend) {
 # Returns 1 if `result.trust >= minimum`, 0 otherwise.
 fn attestation_is_acceptable(result, minimum_trust) {
     if (AttestationResult_trust(result) >= minimum_trust) { return 1; }
+    return 0;
+}
+
+# ---- SGX and TDX quote verification (3.13.0) -----------------------------
+#
+# `kavach_attest_quote` checks a quote in this order; the first failure makes
+# the result `KAVACH_TRUST_CONTRAINDICATED`, with the reason in `details`:
+#
+#   1. The policy names a root and at least one measurement, the nonce is 1 to
+#      64 bytes, and `now` is a real time (sigil reads 0 as "skip the
+#      certificates' validity dates").
+#   2. The quote parses (sigil `sgx_quote_parse` / `tdx_quote_parse`).
+#   3. It verifies to the policy's root at `now`, through sigil
+#      `*_quote_verify_full_into`: the PCK certificate chain carried in the
+#      quote, walked up to the root with each certificate's validity dates; the
+#      PCK's signature over the Quoting Enclave's report; that report's binding
+#      of the attestation key (SHA-256 of the key and the QE auth data); and the
+#      attestation key's signature over the quote header and body.
+#   4. The guest is not a debug enclave or debug TD, unless the policy allows
+#      one (SGX ATTRIBUTES.DEBUG, TDX TD_ATTRIBUTES.DEBUG).
+#   5. The report data starts with the nonce, so the quote was made for this
+#      exec and is not a replay.
+#   6. The measurement is in the policy's allowlist: MRENCLAVE for SGX, MRTD
+#      for TDX.
+#
+# A result that passes is `KAVACH_TRUST_AFFIRMING`, or `KAVACH_TRUST_WARNING`
+# for a debug guest the policy allowed. The measurement, signer and SVN are
+# filled in only once step 3 has passed; before that they are whatever the
+# quote's sender wrote.
+#
+# **Not evaluated**: the platform's TCB level, the Quoting Enclave's identity,
+# and revocation. Those need Intel's collateral (TCB info, QE identity, CRLs),
+# which sigil does not evaluate. A genuine platform with an out-of-date or
+# revoked TCB passes. For TDX, only MRTD, the TD's initial memory (its
+# firmware), is checked against the allowlist; the RTMRs, which record the
+# kernel and its command line, are not.
+
+# The DEBUG bits are Linux's `SGX_ATTR_DEBUG` (BIT(1), arch/x86/include/asm/
+# sgx.h: the enclave allows EDBGRD and EDBGWR, debug reads and writes of its
+# memory) and `TDX_TD_ATTR_DEBUG` (bit 0, arch/x86/include/asm/shared/tdx.h).
+# ATTRIBUTES sits at offset 48 of the SGX report body.
+var SGX_REPORT_OFF_ATTRIBUTES = 48;
+var SGX_FLAGS_DEBUG = 2;
+var TDX_TD_ATTR_DEBUG = 1;
+var ATTEST_NONCE_MAX = 64;
+
+# `details` of a result that passed. It names what was not checked.
+var ATTEST_PASSED = "verified; TCB, QE identity and revocation not evaluated";
+var ATTEST_PASSED_DEBUG = "verified, debug guest allowed; TCB, QE identity and revocation not evaluated";
+
+# Scratch for sigil's verifier, reset before each quote, so repeated
+# verification does not grow the heap. 64 KiB holds a real PCK chain several
+# times over; a quote whose certificate data does not fit fails verification.
+var _attest_arena = 0;
+var _attest_parsed[256];
+
+fn _attest_scratch() {
+    if (_attest_arena == 0) {
+        _attest_arena = arena_new(65536);
+    } else {
+        arena_reset(_attest_arena);
+    }
+    return _attest_arena;
+}
+
+fn _attest_fail(r, why) {
+    AttestationResult_set_trust(r, KAVACH_TRUST_CONTRAINDICATED);
+    AttestationResult_set_details(r, why);
+    return r;
+}
+
+fn _attest_hex(ptr, len) {
+    var s = alloc(len * 2 + 1);
+    hex_encode_bytes(ptr, len, s);
+    return s;
+}
+
+fn _attest_listed(policy, hex) {
+    var list = SandboxPolicy_attest_measurements(policy);
+    if (list == 0) { return 0; }
+    var n = vec_len(list);
+    var i = 0;
+    while (i < n) {
+        if (streq(vec_get(list, i), hex) == 1) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Step 1. Returns 0, or the reason the quote cannot be checked.
+fn _attest_precheck(policy, quote, quote_len, nonce, nonce_len, now) {
+    if (policy_wants_attestation(policy) == 0) { return "the policy allows no measurement"; }
+    if (SandboxPolicy_attest_root(policy) == 0) { return "the policy names no root"; }
+    if (nonce == 0 || nonce_len <= 0 || nonce_len > ATTEST_NONCE_MAX) { return "no nonce"; }
+    if (now <= 0) { return "no verification time"; }
+    if (quote == 0 || quote_len <= 0) { return "no quote"; }
+    return 0;
+}
+
+# Steps 4 to 6.
+fn _attest_finish(r, policy, debug, report_data, nonce, nonce_len) {
+    if (debug != 0 && SandboxPolicy_attest_allow_debug(policy) == 0) {
+        return _attest_fail(r, "debug guest");
+    }
+    if (memeq(report_data, nonce, nonce_len) == 0) {
+        return _attest_fail(r, "the report data does not carry the nonce");
+    }
+    if (_attest_listed(policy, AttestationResult_measurement_hex(r)) == 0) {
+        return _attest_fail(r, "measurement not in the allowlist");
+    }
+    if (debug != 0) {
+        AttestationResult_set_trust(r, KAVACH_TRUST_WARNING);
+        AttestationResult_set_details(r, ATTEST_PASSED_DEBUG);
+        return r;
+    }
+    AttestationResult_set_trust(r, KAVACH_TRUST_AFFIRMING);
+    AttestationResult_set_details(r, ATTEST_PASSED);
+    return r;
+}
+
+# Whether a parsed quote is from a debug guest. Meaningful only once the quote
+# has verified: the attribute bits are covered by the signature.
+fn _attest_sgx_debug(q) {
+    if ((load8(sgx_quote_report_body_ptr(q) + SGX_REPORT_OFF_ATTRIBUTES) & SGX_FLAGS_DEBUG) != 0) { return 1; }
+    return 0;
+}
+
+fn _attest_tdx_debug(q) {
+    if ((load8(tdx_quote_td_attributes_ptr(q)) & TDX_TD_ATTR_DEBUG) != 0) { return 1; }
+    return 0;
+}
+
+# Verify an SGX DCAP v3 quote against `policy`. Returns an AttestationResult.
+fn kavach_attest_sgx_quote(quote, quote_len, policy, nonce, nonce_len, now) {
+    var r = kavach_attestation_result_new(KavachBackend.SGX);
+    AttestationResult_set_trust(r, KAVACH_TRUST_CONTRAINDICATED);
+    AttestationResult_set_fresh_at(r, now);
+    var why = _attest_precheck(policy, quote, quote_len, nonce, nonce_len, now);
+    if (why != 0) { return _attest_fail(r, why); }
+    var q = &_attest_parsed;
+    memset(q, 0, 256);
+    if (sgx_quote_parse(quote, quote_len, q) != 1) { return _attest_fail(r, "the quote does not parse"); }
+    if (sgx_quote_verify_full_into(q, SandboxPolicy_attest_root(policy),
+        SandboxPolicy_attest_root_len(policy), now, _attest_scratch()) != 1) {
+        return _attest_fail(r, "the quote does not verify to the policy's root");
+    }
+    AttestationResult_set_measurement_hex(r, _attest_hex(sgx_quote_mr_enclave_ptr(q), 32));
+    AttestationResult_set_signer_hex(r, _attest_hex(sgx_quote_mr_signer_ptr(q), 32));
+    AttestationResult_set_svn(r, sgx_quote_isv_svn(q));
+    return _attest_finish(r, policy, _attest_sgx_debug(q), sgx_quote_report_data_ptr(q), nonce, nonce_len);
+}
+
+# Verify a TDX v4 quote against `policy`. Returns an AttestationResult. The
+# measurement is MRTD; there is no signer, and `svn` stays 0 (the TDX module's
+# TEE_TCB_SVN is 16 bytes, not one number).
+fn kavach_attest_tdx_quote(quote, quote_len, policy, nonce, nonce_len, now) {
+    var r = kavach_attestation_result_new(KavachBackend.TDX);
+    AttestationResult_set_trust(r, KAVACH_TRUST_CONTRAINDICATED);
+    AttestationResult_set_fresh_at(r, now);
+    var why = _attest_precheck(policy, quote, quote_len, nonce, nonce_len, now);
+    if (why != 0) { return _attest_fail(r, why); }
+    var q = &_attest_parsed;
+    memset(q, 0, 256);
+    if (tdx_quote_parse(quote, quote_len, q) != 1) { return _attest_fail(r, "the quote does not parse"); }
+    if (tdx_quote_verify_full_into(q, SandboxPolicy_attest_root(policy),
+        SandboxPolicy_attest_root_len(policy), now, _attest_scratch()) != 1) {
+        return _attest_fail(r, "the quote does not verify to the policy's root");
+    }
+    AttestationResult_set_measurement_hex(r, _attest_hex(tdx_quote_mrtd_ptr(q), 48));
+    return _attest_finish(r, policy, _attest_tdx_debug(q), tdx_quote_report_data_ptr(q), nonce, nonce_len);
+}
+
+# Verify a quote from `backend` (SGX or TDX). Any other backend has no quote
+# format kavach can check, and gets a CONTRAINDICATED result.
+fn kavach_attest_quote(backend, quote, quote_len, policy, nonce, nonce_len, now) {
+    if (backend == KavachBackend.SGX) {
+        return kavach_attest_sgx_quote(quote, quote_len, policy, nonce, nonce_len, now);
+    }
+    if (backend == KavachBackend.TDX) {
+        return kavach_attest_tdx_quote(quote, quote_len, policy, nonce, nonce_len, now);
+    }
+    var r = kavach_attestation_result_new(backend);
+    AttestationResult_set_fresh_at(r, now);
+    return _attest_fail(r, "this backend cannot attest");
+}
+
+# Whether `backend` can produce a quote kavach verifies.
+fn kavach_attest_backend_supported(backend) {
+    if (backend == KavachBackend.SGX) { return 1; }
+    if (backend == KavachBackend.TDX) { return 1; }
+    return 0;
+}
+
+# Whether a result lets the exec's output through under `policy`: AFFIRMING, or
+# WARNING when the policy allows a debug guest. `attestation_is_acceptable`
+# cannot say this: NONE sits above WARNING in its order, and NONE means no
+# attestation was done.
+fn kavach_attest_passes(result, policy) {
+    if (result == 0) { return 0; }
+    var t = AttestationResult_trust(result);
+    if (t == KAVACH_TRUST_AFFIRMING) { return 1; }
+    if (t == KAVACH_TRUST_WARNING && SandboxPolicy_attest_allow_debug(policy) == 1) { return 1; }
     return 0;
 }
 

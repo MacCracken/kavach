@@ -42,6 +42,7 @@ include "src/composite.cyr"
 include "src/observability.cyr"
 include "src/attestation.cyr"
 include "src/sandbox_exec.cyr"
+include "tests/attest_vectors.cyr"
 
 var _strict_policy = 0;
 
@@ -293,6 +294,47 @@ fn bench_backend_parse() {
     return 0;
 }
 
+# ---- 3.13.0: quote verification -------------------------------------------
+#
+# The whole of `kavach_attest_quote` on sigil's vectors: the PCK chain to the
+# root, three ECDSA verifications, and the policy checks. TDX is timed on its
+# P-384 quote, so the two rows cover both curves. The TDX quote is a debug TD,
+# which the policy allows here so the run goes through every check.
+var _bench_att_sgx = 0;
+var _bench_att_tdx = 0;
+var _bench_att_sgx_policy = 0;
+var _bench_att_tdx_policy = 0;
+var _bench_att_nonce = 0;
+
+fn _setup_attest() {
+    if (_bench_att_sgx != 0) { return 0; }
+    _bench_att_sgx = hex_decode(ATT_SGX_HEX, 2 * ATT_SGX_LEN);
+    _bench_att_tdx = hex_decode(ATT_TDX_P384_HEX, 2 * ATT_TDX_P384_LEN);
+    var root = hex_decode(ATT_ROOT_HEX, 2 * ATT_ROOT_LEN);
+    _bench_att_sgx_policy = policy_new();
+    policy_attest_root(_bench_att_sgx_policy, root, ATT_ROOT_LEN);
+    policy_attest_allow(_bench_att_sgx_policy, ATT_SGX_MRENCLAVE);
+    _bench_att_tdx_policy = policy_new();
+    policy_attest_root(_bench_att_tdx_policy, root, ATT_ROOT_LEN);
+    policy_attest_allow(_bench_att_tdx_policy, ATT_TDX_MRTD);
+    policy_attest_allow_debug(_bench_att_tdx_policy, 1);
+    _bench_att_nonce = alloc(32);
+    memset(_bench_att_nonce, 0xcc, 32);
+    return 0;
+}
+
+fn bench_attest_sgx_quote() {
+    kavach_attest_sgx_quote(_bench_att_sgx, ATT_SGX_LEN, _bench_att_sgx_policy,
+      _bench_att_nonce, 32, ATT_NOW);
+    return 0;
+}
+
+fn bench_attest_tdx_quote_p384() {
+    kavach_attest_tdx_quote(_bench_att_tdx, ATT_TDX_P384_LEN, _bench_att_tdx_policy,
+      _bench_att_nonce, 32, ATT_NOW);
+    return 0;
+}
+
 # ---- 3.2.0 modules -------------------------------------------------------
 
 fn bench_cgroup_wrap_argv() {
@@ -457,6 +499,16 @@ fn main() {
     var b22 = bench_new("code_scan_large_naive");
     bench_run(b22, &bench_code_scan_naive, 2000);
     vec_push(benches, b22);
+
+    # 3.13.0 — quote verification. Milliseconds each, so few iterations.
+    _setup_attest();
+    var b26 = bench_new("attest_sgx_quote");
+    bench_run(b26, &bench_attest_sgx_quote, 20);
+    vec_push(benches, b26);
+
+    var b27 = bench_new("attest_tdx_quote_p384");
+    bench_run(b27, &bench_attest_tdx_quote_p384, 20);
+    vec_push(benches, b27);
 
     bench_report_all(benches);
     return 0;
