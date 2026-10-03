@@ -5,10 +5,10 @@ string
 fmt
 alloc
 vec
+tagged
 syscalls
 hashmap
 args
-assert
 ct
 fnptr
 io
@@ -17,4 +17,4 @@ random
 result
 slice
 str
-thread
+sync

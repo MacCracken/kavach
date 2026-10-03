@@ -113,15 +113,29 @@ jobs:
         # v3.0 cut (37 across scanning_code / scanning_data / backend_sgx
         # / oci_spec / scanning_runtime) were rewrapped without any
         # semantic change. Hard-fail gate restored.
+        #
+        # 3.13.2: cyrlint compiles a file before linting it, and under the
+        # workflow's CYRIUS_DCE=1 cyrius 6.6.14's DCE refuses
+        # backend_oci.cyr and backend_sy_agnos.cyr ("dead-code elimination
+        # corrupted 3 live function body/bodies; refusing to emit"). cyrlint
+        # then reports it did NOT lint the file, which counted no warning,
+        # so the gate passed without linting either file. Lint without DCE,
+        # and fail on a file cyrlint skips.
         run: |
           total=0
+          skipped=0
           for f in src/*.cyr; do
             [ -f "$f" ] || continue
-            out=$(cyrius lint "$f" 2>&1 || true)
+            out=$(env -u CYRIUS_DCE cyrius lint "$f" 2>&1 || true)
             echo "$out"
             n=$(echo "$out" | grep -cE '^\s*warn ' || true)
             total=$((total + n))
+            if echo "$out" | grep -q 'lint checks were NOT run'; then skipped=$((skipped + 1)); fi
           done
+          if [ "$skipped" -gt 0 ]; then
+            echo "lint: $skipped file(s) in src/ were not linted"
+            exit 1
+          fi
           if [ "$total" -gt 0 ]; then
             echo "lint: $total warning(s) across src/"
             exit 1

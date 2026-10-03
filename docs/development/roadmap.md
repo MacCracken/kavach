@@ -2,7 +2,7 @@
 
 > **Principle**: Security correctness first, then backend breadth, then performance. Every sandbox gets a number.
 
-This roadmap is **future-facing only** — shipped work lives in [CHANGELOG.md](../../CHANGELOG.md). Current release: **v3.13.1**. Toolchain pin: cc `6.6.6`; sigil `3.12.18` (the snapshot's — see CLAUDE.md hazard 4), samay `1.1.5`, ai-hwaccel `2.4.0` (agnosys dropped at v3.5.0 — its security backends are internalized).
+This roadmap is **future-facing only** — shipped work lives in [CHANGELOG.md](../../CHANGELOG.md). Current release: **v3.13.2**. Toolchain pin: cc `6.6.14`; sigil `3.13.7` (the snapshot's — see CLAUDE.md hazard 4), samay `1.1.6`, ai-hwaccel `2.4.1` (agnosys dropped at v3.5.0 — its security backends are internalized).
 
 **Every release below is pinned.** Each names what ships in it, in the order the principle sets. To
 move an item, edit this file; do not let it drift. **An arc also takes the open fixes in the code it
@@ -15,26 +15,6 @@ work in 3.20) can be pulled forward; items with one say what it is.
 ---
 
 ## 3.13.x — TEE attestation I, continued, and fixes (ADR-004 §2)
-
-### 3.13.2 — score honesty and exec parity (next)
-
-Done in the tree and described in the CHANGELOG's [Unreleased] section; this section goes when
-3.13.2 is cut. Each item was something kavach accepted, scored or documented and did not apply.
-
-- [x] **The shell-out backends' capture.** gVisor, OCI and SY-agnos run their runtime through
-  `backend_run_capture`, the process backend's capture: the runtime's exit status, its stderr,
-  the config's deadline, and the config's stdin as the runtime's. SY-agnos names its container
-  and removes it after every run. SGX, TDX, SEV and Firecracker take the same change in the arcs
-  that rebuild their launchers, below.
-- [x] **What an unset `config_stdin` means:** an empty stdin. `config_stdin_inherit` opts in to
-  kavach's own.
-- [x] **`IOCTL_DEV` (landlock ABI v5):** handled from v5, and granted by read-write rules only.
-- [x] **Seccomp on the WASM backend:** applied to wasmtime, and the policy's scopes with it.
-- [x] **Landlock network rules and scopes:** the scopes (ABI v6) are applied; the TCP port counts
-  are no longer scored. Port rules need a list and a setter, unpinned below.
-- [x] Found on the way: the capture hung on a payload that filled its buffer, a result's stderr
-  changed when the next exec ran, a payload outlived a kavach killed mid-capture, and a payload
-  inherited kavach's SIGPIPE ignore.
 
 ### Later in 3.13.x
 

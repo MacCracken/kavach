@@ -36,4 +36,3 @@ slice
 thread
 thread_local
 tls
-sys

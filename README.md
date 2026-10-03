@@ -12,6 +12,17 @@ classification, credential proxy, HMAC-SHA256 audit chain — all in pure Cyrius
 
 ## Status
 
+**v3.13.2 — score honesty and exec parity, on cyrius 6.6.14.** What kavach accepted, scored or
+documented and did not apply now applies. The gVisor, OCI and SY-agnos backends report their
+runtime's exit status and stderr, honour the config's deadline and pass the config's stdin. An
+unset `config_stdin` is an empty stdin. Landlock scopes and `IOCTL_DEV` are enforced. The WASM
+backend runs wasmtime under the policy's seccomp and scopes. TCP port counts no longer add to
+the score. Four capture defects are fixed with them: a full buffer hung the capture, a result's
+stderr changed on the next exec, a payload outlived a killed kavach, and a payload inherited
+kavach's SIGPIPE ignore. The toolchain moves to cyrius 6.6.14 (sigil 3.13.7, ai-hwaccel 2.4.1,
+samay 1.1.6), which removes the 130 `duplicate fn` warnings every build printed. **1230**
+assertions green on x86-64, **1158** on aarch64 under qemu.
+
 **v3.13.1 — landlock rules enforced as documented, and a payload's own stdin.**
 Four landlock fixes. `merge_policies` carries the union of both policies' rules;
 it summed the counts and carried no list, so any merge with a rule denied every
@@ -258,12 +269,12 @@ for what's intentionally deferred.
 ## Build
 
 ```sh
-# Requires Cyrius 6.6.6 (pinned in cyrius.cyml). The pin matches the
+# Requires Cyrius 6.6.14 (pinned in cyrius.cyml). The pin matches the
 # installed cycc; if cycc later drifts ahead, skip local fmt writes to
 # avoid minor-version drift.
 
-# 1. Resolve deps — populates lib/ (gitignored) with the cc 6.6.6
-#    stdlib snapshot, which is also where sigil 3.12.18 comes from.
+# 1. Resolve deps — populates lib/ (gitignored) with the cc 6.6.14
+#    stdlib snapshot, which is also where sigil 3.13.7 comes from.
 cyrius deps
 
 # 2. Build the binary.

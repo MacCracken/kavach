@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.13.2] — 2026-10-03
+
 The roadmap's 3.13.2 items: what kavach accepted, scored or documented and did not apply, each
 measured before its change. The gVisor, OCI and SY-agnos backends now report their runtime's run;
 an unset `config_stdin` is an empty stdin; landlock scopes and `IOCTL_DEV` are applied; the WASM
@@ -14,7 +16,34 @@ backend runs wasmtime under the policy's seccomp and scopes; TCP port counts are
 scored. Four defects found on the way are fixed with them: the capture hung on a payload that
 filled its buffer, a result's stderr changed when the next exec ran, a payload outlived a kavach
 killed mid-capture, and a payload inherited kavach's SIGPIPE ignore. Every behaviour change is
-marked ⚠.
+marked ⚠. The release also moves the toolchain from cyrius 6.6.6 to 6.6.14.
+
+### Changed — cyrius 6.6.6 → 6.6.14, with sigil 3.13.7, ai-hwaccel 2.4.1 and samay 1.1.6
+
+- **The 130 `duplicate fn` warnings are gone.** On 6.6.6 every build of `src/main.cyr` and of the
+  suite printed them: 129 because samay's `dist/bayan-json.cyr` and the stdlib's `lib/bayan.cyr`
+  were both vendored, and 1 because the snapshot's sigil and `lib/sys.cyr` both defined
+  `uname_release`. On 6.6.14 the resolver keeps the stdlib's bayan and does not vendor samay's
+  sublib, and sigil 3.13.x no longer defines `uname_release`. No `undefined` name appeared. The
+  remaining deprecation warnings came from ai-hwaccel 2.4.0's and samay 1.1.5's bundles (3 and
+  18), and their new releases remove them.
+- **`[deps.sigil]` 3.12.18 → 3.13.7**, the 6.6.14 snapshot's sigil. Per hazard (4) in
+  `CLAUDE.md` the tag is inert: the snapshot's `lib/sigil.cyr` is what builds.
+- **ai-hwaccel 2.4.0 → 2.4.1 and samay 1.1.5 → 1.1.6**, both moved to 6.6.14 with their
+  deprecated bayan getter calls renamed.
+- **The three `path` overrides are commented out** (`# path = "../sigil"` and the same for
+  ai-hwaccel and samay), not removed. While they were active, a local `cyrius deps` resolved from
+  sibling checkouts and wrote no commit pin for those deps. The lock now matches what CI
+  resolves.
+- **`dist/*.deps` regenerated** with the stdlib sets 6.6.14 computes: `kavach-confine.deps` gains
+  `tagged` and `sync` and loses `assert` and `thread`, and `kavach.deps` loses `sys`.
+  `scripts/check-bundles.py` passes: both bundles compile with only their sidecar's stdlib.
+- **CI's lint step lints every file again.** cyrlint compiles a file before linting it. Under the
+  workflow's `CYRIUS_DCE=1`, 6.6.14's DCE refuses `src/backend_oci.cyr` and
+  `src/backend_sy_agnos.cyr` ("dead-code elimination corrupted 3 live function body/bodies;
+  refusing to emit"), so cyrlint reported that it had not linted them. The step counted only
+  warnings, so it passed with both files unlinted. It now lints without DCE (both files are
+  clean, as they were on 6.6.6) and fails on any file cyrlint skips.
 
 ### Fixed — the gVisor, OCI and SY-agnos backends did not report their runtime's run
 
@@ -260,22 +289,48 @@ parent-death guard (1); and the SIGPIPE reset at each of its three call sites (1
 
 ### Verified
 
-- The suite: 1230 of 1230 on x86-64 (kernel 7.2.6, landlock ABI 10, wasmtime 49), and 1158 of
-  1158 on aarch64 under qemu-aarch64 11.1.1, where seccomp and landlock are unavailable and their
-  assertions take the refusal branches. Both again under `trap '' PIPE`, as the GitHub Actions
-  runner starts its steps.
-- `cyrius fmt --check` over `src/` and `tests/`, `cyrius lint` (0 warnings in 47 files),
-  `cyrius vet src/main.cyr`, `scripts/check-symbols.py`, `cyrius distlib --all` with
-  `scripts/check-bundles.py` (both bundles compile with only their sidecar's stdlib), the CI
-  security scan, the fuzz harness, and the `--agnos` and `--aarch64` builds of `src/main.cyr`
-  (no raw-number warning).
-- The `duplicate fn` warning sets of `src/main.cyr` and the suite are the same as 3.13.1's.
-  `src/main.cyr`'s static data grows by 4144 bytes, the stderr sink.
+- **The release tree (cyrius 6.6.14, ai-hwaccel 2.4.1, samay 1.1.6):** 1230 of 1230 on x86-64
+  (seccomp loaded) and 1158 of 1158 on aarch64 under qemu-aarch64, with every step of the CI
+  jobs (build and test, aarch64, security scan, docs) run in a clone with no sibling checkouts
+  and an empty dependency cache. `cyrius.lock` was reproduced there byte for byte. The lint
+  step covers all 47 files with 0 warnings.
+- **Natively on aarch64** (a Raspberry Pi with Ubuntu 26.04 and kernel 7.0): 1108 of 1152. The 44
+  failures are the same 44 that 3.13.1, built on cyrius 6.6.6, fails on that host. The host's
+  coreutils are uutils, which refuse kavach's pinned exec; see
+  `docs/development/issues/2026-10-03-pinned-exec-breaks-uutils-coreutils.md`. CI's
+  `ubuntu-24.04-arm` runner has GNU coreutils.
+- **The 3.13.2 work alone, on cyrius 6.6.6, before the toolchain move:**
+  - The suite: 1230 of 1230 on x86-64 (kernel 7.2.6, landlock ABI 10, wasmtime 49), and 1158 of
+    1158 on aarch64 under qemu-aarch64 11.1.1, where seccomp and landlock are unavailable and their
+    assertions take the refusal branches. Both again under `trap '' PIPE`, as the GitHub Actions
+    runner starts its steps.
+  - `cyrius fmt --check` over `src/` and `tests/`, `cyrius lint` (0 warnings in 47 files),
+    `cyrius vet src/main.cyr`, `scripts/check-symbols.py`, `cyrius distlib --all` with
+    `scripts/check-bundles.py` (both bundles compile with only their sidecar's stdlib), the CI
+    security scan, the fuzz harness, and the `--agnos` and `--aarch64` builds of `src/main.cyr`
+    (no raw-number warning).
+  - The `duplicate fn` warning sets of `src/main.cyr` and the suite are the same as 3.13.1's.
+    `src/main.cyr`'s static data grows by 4144 bytes, the stderr sink.
 
 ### Performance
 
-`scripts/bench-ab.py`'s method against the 3.13.1 tag: 7 interleaved rounds per side, pinned to
-one CPU, on the tree with every change above.
+**The release tree on cyrius 6.6.14 against 3.13.1 on 6.6.6:** `scripts/bench-ab.py 3.13.1 .`,
+7 interleaved rounds per side, pinned to one CPU, on a host other sessions held at a load of
+about 5.
+
+- **All 29 benchmarks overlap**: no measured change by this repo's reading. The medians lean
+  faster. The three `secrets_*` rows are 10–12% down, the 8–12% the roadmap's 3.20 item records
+  them losing to the cyrius 6.6.5 / 6.6.6 codegen. `process_exec_large_output` is
+  137.6 → 125.4 ms, and `score_all_backends_strict` is 174 → 146 ns, the port branches gone as
+  below.
+- **`http_path_extract` is the one median that rose in both measurements**: 89 → 102 ns here,
+  and 86 → 102 ns between the 3.13.1 and 3.13.2 rows of `benches/bench-history.csv`. This
+  release did not change its code. Not traced.
+- The `3.13.2` rows in `benches/bench-history.csv` are the release run
+  (`scripts/bench-history.sh 3.13.2`, pinned).
+
+**The 3.13.2 work alone, on cyrius 6.6.6:** `scripts/bench-ab.py`'s method against the 3.13.1
+tag, 7 interleaved rounds per side, pinned to one CPU, on the tree with every change above.
 
 - **26 of the 29 benchmarks show no measured change**, the exec paths among them:
   `process_exec_echo` 2.717 → 2.691 ms, `process_exec_confined` 2.714 → 2.701 ms and
