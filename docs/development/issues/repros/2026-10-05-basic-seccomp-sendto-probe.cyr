@@ -1,0 +1,156 @@
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/string.cyr"
+include "lib/str.cyr"
+include "lib/vec.cyr"
+include "lib/tagged.cyr"
+include "lib/fmt.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/net.cyr"
+include "lib/chrono.cyr"
+include "lib/args.cyr"
+include "lib/tls_native.cyr"
+
+var _st_cert = 0;
+var _st_cert_len = 406;
+var _st_key = 0;
+var _st_key_len = 138;
+fn _st_creds(): i64 {
+    _st_cert = hex_decode("3082019230820139a003020102021437416048df98b49fd5b278db00ebd0e1f87b6d40300a06082a8648ce3d04030230143112301006035504030c096c6f63616c686f7374301e170d3236303130313030303030305a170d3336303130313030303030305a30143112301006035504030c096c6f63616c686f73743059301306072a8648ce3d020106082a8648ce3d030107034200040d7a46bc307511f24a53dcf973e0dfe2058db48d7db8b3941fa80176641ad78da12b801a12494d49312bf5b0ac312f3d50bca2282126fddd03652013bf8b49c5a3693067301d0603551d0e041604143bdd6c2d487f854851f408356e66880375bd6743301f0603551d230418301680143bdd6c2d487f854851f408356e66880375bd6743300f0603551d130101ff040530030101ff30140603551d11040d300b82096c6f63616c686f7374300a06082a8648ce3d04030203470030440220365bd112f9b8faec50c9b4a2cf7ec487cc424901870b8156b349dba15e1cde8102200c1ec7f6eefec5bc9976f55a70608b07d669c78183fa08e9a863370d17e39df3", 812);
+    _st_key = hex_decode("308187020100301306072a8648ce3d020106082a8648ce3d030107046d306b0201010420666340f5e33734c31438ae0abd2370b72da193b44565625051bbc79a344535dda144034200040d7a46bc307511f24a53dcf973e0dfe2058db48d7db8b3941fa80176641ad78da12b801a12494d49312bf5b0ac312f3d50bca2282126fddd03652013bf8b49c5", 276);
+    return 0;
+}
+
+var F = 0;
+var FN = 0;
+fn ins(code, jt, jf, k): i64 {
+    var o = F + FN * 8;
+    store16(o, code); store8(o + 2, jt); store8(o + 3, jf); store32(o + 4, k);
+    FN = FN + 1;
+    return FN - 1;
+}
+
+# mode 0 = kavach 3.13.2 basic; 1 = proposed basic. x86_64 numbers.
+fn build(mode): i64 {
+    F = alloc(8 * 128); FN = 0;
+    var plain = vec_new();
+    vec_push(plain, 0);
+    vec_push(plain, 1);
+    vec_push(plain, 3);
+    vec_push(plain, 5);
+    vec_push(plain, 9);
+    vec_push(plain, 10);
+    vec_push(plain, 11);
+    vec_push(plain, 12);
+    vec_push(plain, 15);
+    vec_push(plain, 60);
+    vec_push(plain, 131);
+    vec_push(plain, 158);
+    vec_push(plain, 186);
+    vec_push(plain, 202);
+    vec_push(plain, 218);
+    vec_push(plain, 231);
+    vec_push(plain, 273);
+    vec_push(plain, 318);
+    vec_push(plain, 228);
+    vec_push(plain, 334);
+    var i = 0;
+    if (mode == 1) { vec_push(plain, 7); vec_push(plain, 271); }
+    if (mode == 3) { vec_push(plain, 7); vec_push(plain, 271); }
+    var n = vec_len(plain);
+    # prologue (5)
+    ins(0x20, 0, 0, 4);
+    ins(0x15, 1, 0, 0xC000003E);
+    ins(0x06, 0, 0, 0x80000000);
+    ins(0x20, 0, 0, 0);
+    var extra = 0;
+    if (mode >= 1) { extra = 11; }
+    var kill = 5 + n + extra;
+    var allow = kill + 1;
+    ins(0x35, kill - 5, 0, 0x40000000);
+    i = 0;
+    while (i < n) { var at = 5 + i; ins(0x15, allow - at - 1, 0, vec_get(plain, i)); i = i + 1; }
+    if (mode >= 1) {
+        var c0 = FN;                         # JEQ sendto -> s0 (c0+2) else c1
+        ins(0x15, 1, 0, 44);
+        ins(0x15, 6, kill - (c0 + 1) - 1, 72); # JEQ fcntl -> f0 (c0+8) else KILL
+        var s0 = FN;
+        ins(0x20, 0, 0, 48);
+        ins(0x15, 0, kill - (s0 + 1) - 1, 0);
+        ins(0x20, 0, 0, 52);
+        ins(0x15, 0, kill - (s0 + 3) - 1, 0);
+        ins(0x20, 0, 0, 56);
+        ins(0x15, allow - (s0 + 5) - 1, kill - (s0 + 5) - 1, 0);
+        var f0 = FN;
+        ins(0x20, 0, 0, 24);
+        ins(0x15, allow - (f0 + 1) - 1, 0, 3);
+        ins(0x15, allow - (f0 + 2) - 1, kill - (f0 + 2) - 1, 4);
+    }
+    ins(0x06, 0, 0, 0x80000000);
+    ins(0x06, 0, 0, 0x7FFF0000);
+    return FN;
+}
+
+fn load_filter(): i64 {
+    var prog[16];
+    store64(&prog, FN);
+    store64(&prog + 8, F);
+    if (sys_prctl(38, 1, 0, 0, 0) != 0) { return 0 - 1; }
+    return sys_prctl(22, 2, &prog, 0, 0);
+}
+
+fn main(): i64 {
+    alloc_init();
+    args_init();
+    var mode = atoi(argv(1));
+    var probe = atoi(argv(2));    # 0 = TLS client; 1 = sock_send_all; 2 = sendto with dest; 3 = fcntl F_DUPFD
+    _st_creds();
+    var sv[16];
+    if (sys_socketpair(1, 1, 0, &sv) != 0) { return 90; }
+    var a = load32(&sv);
+    var b = load32(&sv + 4);
+    build(mode);
+    var pid = sys_fork();
+    if (pid == 0) {
+        signal_default(SIGPIPE);
+        var c = tls_native_new_client("localhost", 9);
+        tls_native_set_ca_bundle(c, _st_cert, _st_cert_len, 1);
+        tls_native_set_version_range(c, TLS_VERSION_1_3, TLS_VERSION_1_3);
+        tls_native_set_deadline(c, clock_now_ns() + 20000000000);
+        var out = alloc(40000);
+        var back = alloc(40000);
+        memset(out, 0x5A, 40000);
+        if (load_filter() != 0) { sys_exit(60); }
+        if (probe == 1) { if (sock_send_all(b, "abc", 3) != 3) { sys_exit(70); } sys_exit(0); }
+        if (probe == 2) { var sa = sockaddr_in(0x0100007F, 9); sys_sendto(b, "abc", 3, 0x4000, sa, 16); sys_exit(0); }
+        if (probe == 3) { sys_fcntl(b, 0, 10); sys_exit(0); }
+        if (tls_native_connect(c, b) != TLS_OK) { sys_exit(3); }
+        var off = 0;
+        while (off < 40000) { var k = 40000 - off; if (k > 16384) { k = 16384; } if (tls_native_write(c, out + off, k) != k) { sys_exit(5); } off = off + k; }
+        var got = 0;
+        while (got < 40000) { var r = tls_native_read(c, back + got, 40000 - got); if (r <= 0) { sys_exit(6); } got = got + r; }
+        if (memeq(out, back, 40000) != 1) { sys_exit(7); }
+        tls_native_close(c);
+        sys_exit(0);
+    }
+    if (probe == 0) {
+        var s = tls_native_new_server(_st_cert, _st_cert_len, _st_key, _st_key_len);
+        tls_native_server_load_creds(s);
+        tls_native_set_version_range(s, TLS_VERSION_1_3, TLS_VERSION_1_3);
+        tls_native_set_deadline(s, clock_now_ns() + 20000000000);
+        var ar = tls_native_accept(s, a);
+        if (ar == TLS_OK) {
+            var buf = alloc(40000);
+            var g = 0;
+            while (g < 40000) { var rr = tls_native_read(s, buf + g, 40000 - g); if (rr <= 0) { g = 40000 + 1; } else { g = g + rr; } }
+            if (g == 40000) { var o2 = 0; while (o2 < 40000) { var k2 = 40000 - o2; if (k2 > 16384) { k2 = 16384; } tls_native_write(s, buf + o2, k2); o2 = o2 + k2; } }
+        }
+    }
+    var st[8];
+    store64(&st, 0);
+    sys_waitpid(pid, &st, 0);
+    var stv = load32(&st);
+    sys_write(1, "status sig=", 11); fmt_int(stv & 127); sys_write(1, " code=", 6); fmt_int((stv >> 8) & 255); sys_write(1, "\n", 1);
+    return 0;
+}
