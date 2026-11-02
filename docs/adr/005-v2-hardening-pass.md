@@ -75,6 +75,18 @@ scope.
 > Many system binaries are symlinks (`/bin/sh` → `dash`), and the fd pins the
 > final file either way, which is what closes the swap. See CHANGELOG 3.12.7.
 
+> **Amended — v3.14.0: the pinned exec goes through `/proc/self/fd/N`.**
+> `execveat(fd, "", …, AT_EMPTY_PATH)` makes the kernel record the program as
+> `/dev/fd/N`. uutils coreutils (Ubuntu's since 25.10) picks its utility from
+> that name, so every pinned uutils payload exited 1. `kv_exec_pinned` now first
+> runs `execve("/proc/self/fd/N")`. A procfs fd entry is a magic link to the open
+> file, so the pinned inode runs and the swap stays closed, and the recorded name
+> starts with `/proc/`, for which uutils uses argv[0]. It does so only when
+> `/proc/self/fd` is a real procfs (`statfs` magic) and the link opens to the
+> pinned inode, and not for `#!` scripts, which keep the fd exec and its dup
+> retry. Anything else falls back to `execveat` as before. The by-path cases
+> above are unchanged. See CHANGELOG 3.14.0.
+
 ## Consequences
 
 **Positive**

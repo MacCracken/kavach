@@ -7,6 +7,176 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.14.0] — 2026-11-02
+
+kavach runs uutils coreutils, and CI runs on the current Ubuntu LTS. Since 3.12.7 a pinned exec
+named its program `/dev/fd/N`. uutils, Ubuntu's coreutils since 25.10, then refused to run
+(`coreutils: unknown program 'N'`, or with Ubuntu's own patch "Requested utility `N` does not
+match executable name"). So every uutils payload, `/bin/echo` and `/bin/cat` among them, exited 1.
+The pinned exec now goes through `/proc/self/fd/N`, which runs the same file. 3.13.3 worked around
+the CI failure by moving CI back to Ubuntu 24.04; 3.14.0 removes that pin and puts every job on
+`ubuntu-26.04` / `ubuntu-26.04-arm`. Two tests that passed on uutils without testing what they
+claimed now test it. The toolchain moves from cyrius 6.6.20 to 6.7.9, with sigil 3.13.11 and
+samay 1.2.0. Results:
+
+| | x86-64 | aarch64 under qemu |
+|---|---|---|
+| Arch host (GNU coreutils) | 1230 → **1242** of 1242 | 1158 → **1170** of 1170 |
+| Ubuntu 26.04 rootfs, uutils 0.8.0 and 0.10.0 | 44 failed → **1197** of 1197 | 35 failed → **1130** of 1130 |
+
+### Fixed — a pinned exec could not run uutils coreutils (Ubuntu 25.10 and later) ⚠
+
+ADR-005 §H4 (3.12.7) pins a payload's binary in the parent as an `O_PATH` fd, and the child ran
+`execveat(fd, "", argv, envp, AT_EMPTY_PATH)`. The kernel records that program as `/dev/fd/N` in
+`AT_EXECFN`. uutils' multicall binary (`src/common/validation.rs`, `binary_path`, 0.8.0 and 0.10.0)
+takes its utility name from `AT_EXECFN`. It falls back to argv[0] only when the two basenames
+match, when `AT_EXECFN` starts with `/proc/`, or when the file is a `#!` script. So a pinned
+`/bin/echo` ran as utility `N`. Ubuntu's 0.10.0 build adds a patch
+(`require-utility-to-be-invoked-at-matching-path.patch`): that name must also equal the basename
+of `readlink /proc/self/exe`.
+
+- **`kv_exec_pinned` first runs `execve("/proc/self/fd/N", argv, envp)`.** A procfs fd entry is a
+  magic link to the open file, not to a path, so the same inode runs and the H4 guarantee holds.
+  The kernel records a `/proc/` name, so uutils takes argv[0] (`/bin/echo` → `echo`), which is
+  also `/proc/self/exe`'s basename.
+- **It goes through `/proc` only when that is safe.** `/proc/self/fd` must be a real procfs
+  (`statfs` magic `0x9fa0`), and the link must open to the pinned inode (`st_dev` and `st_ino`).
+  `#!` scripts stay on the fd exec, because their interpreter has to reopen the name after the
+  close-on-exec fd is gone; uutils accepts an interpreter run for a `#!` file. When `/proc` is
+  missing, is not procfs, or the `execve` fails, the child falls back to the `execveat` path
+  unchanged. The new code makes only syscalls, as the child must, and is compiled out on agnos.
+- **A child that enters a rootfs already execs by path (ADR-005),** so a planted
+  `/proc/self/fd/N` in a rootfs never reaches this code. The procfs and inode checks are there
+  regardless.
+- **Measured in an Ubuntu 26.04.1 base rootfs** (`ubuntu-base-26.04.1-base-amd64`, sha256
+  `a496a960…`). The suite ran as a non-root uid with a user namespace and chroot, the image's
+  dash, no wasmtime, and both uutils builds. 0.8.0 is the image's own; 0.10.0-1ubuntu2~26.04.1,
+  from 26.04's updates, carries Ubuntu's patch.
+
+  | run | before (3.13.3's exec) | after |
+  |---|---|---|
+  | x86-64, uutils 0.8.0 | 1117 of 1161 (44 failed) | 1197 of 1197 |
+  | x86-64, uutils 0.10.0 | 1117 of 1161 (44 failed) | 1197 of 1197 |
+  | aarch64 under 26.04's qemu 10.2.1, uutils 0.8.0 | 1075 of 1110 (35 failed) | 1130 of 1130 |
+  | aarch64 under qemu 10.2.1, uutils 0.10.0 | — | 1130 of 1130 |
+
+  The before failures are CI's: the same 44 assertions, by message, as the x86-64 job on
+  `ubuntu-26.04`, and the 35 of its qemu job.
+- **Both bundles run against uutils too.** Each sidecar-only consumer, built on 6.7.9 (the base
+  bundle's audit chain and `confine_capture` of `/bin/echo`, and the confine bundle's capture),
+  gives the same output on the host and in the 26.04 rootfs.
+
+### Changed — CI runs on Ubuntu 26.04, every job
+
+- **`ubuntu-26.04` for the four x86-64 jobs and `release.yml`'s release job; `ubuntu-26.04-arm`
+  for the native aarch64 job.** 3.13.3 had moved CI back to `ubuntu-24.04` instead of fixing the
+  exec, and the native job was already on `ubuntu-24.04-arm`. The labels are named, not
+  `ubuntu-latest`: GitHub moves that label from 24.04 to 26.04 between 2026-10-19 and 2026-11-19,
+  so during the move it hands out either image.
+- **The lock check is real.** CI ran `cyrius deps`, which rewrites `cyrius.lock`, and then
+  `cyrius deps --verify`, so it verified the lock it had just written. A new first step,
+  `cyrius deps --locked` (cyrius 6.7.6), resolves the pinned tags and compares them with the
+  committed lock, writes nothing, and fails on any difference. On a copy of the tree it passed,
+  and it failed with exit 1 on one altered hash. `release.yml`, which publishes the lock, runs it
+  too.
+- The qemu job's note names 26.04's qemu, 10.2.1.
+
+### Changed — cyrius 6.6.20 → 6.7.9, with sigil 3.13.11 and samay 1.2.0
+
+- **`cyrius = "6.7.9"`; `[deps.sigil]` 3.13.10 → 3.13.11**, the 6.7.9 snapshot's sigil (hazard 4).
+- **samay 1.1.7 → 1.2.0**, the release pinned to 6.7.9. It pins bayan 1.5.13 and ai-hwaccel
+  2.4.2. **ai-hwaccel stays 2.4.2**: no ai-hwaccel release is pinned to 6.7.9 (2.4.2 is 6.6.20's;
+  2.5.x are 6.7.18's), and 2.4.2 is the one samay 1.2.0 itself uses.
+- **`cyrius.lock`:** 76 stdlib files, the same set. The four commit pins move to the new tags.
+  The 6.7.9 snapshot adds and removes no module, so `[deps]` is unchanged.
+- **No new warning:** 0 `duplicate fn` and no `undefined` in `src/main.cyr`, the suite, the
+  benchmarks, the fuzz harness and the aarch64 and agnos builds. The same three warnings as
+  before. `cyrius fmt --check` finds no drift on 6.7.9. `cyrius lint` gives 0 warnings in 47
+  files. `scripts/check-symbols.py` passes.
+- **What 6.6.21–6.7.9 changes, read from cyrius's changelog and checked by diffing the two
+  snapshots:**
+  - new reserved words: `trait`, `const`, `true`/`false`, `do`, `dyn` (kavach uses none as a name);
+  - `!` is an operator;
+  - stricter arity and type checks, which kavach's code passes;
+  - from 6.7.9 the stdlib's `_proc_child_guard`, which `kv_exec_capture` calls, also resets
+    SIGXFSZ and the signal mask in the child;
+  - `cyrius deps --locked` (above);
+  - sigil 3.13.11 wipes its decoded PEM and its SHA-2 contexts.
+- **Binary sizes** of `src/main.cyr`: x86-64 3,380,944 → 3,386,808 bytes, aarch64 3,872,064 →
+  3,869,728, agnos 3,336,632 → 3,342,520.
+
+### Tests
+
+Twelve assertions are new. Two tests changed because they passed on a uutils host without
+testing what they claimed.
+
+- **`exec_pin_names_the_program_through_proc` (new):**
+  - `/proc/self/fd/N` is built correctly (fd 9, 1023 and 0);
+  - an ELF runs through `/proc/self/fd`;
+  - the procfs exec declines a `#!` script, which the pinned exec still runs;
+  - `/bin/sh` run under `LD_SHOW_AUXV=1` shows glibc's loader reporting a `/proc/self/fd/` name
+    for `AT_EXECFN`, not `/dev/fd/`. On a host whose loader prints no auxv (not glibc) that part
+    says so and skips; on the Arch host and in the 26.04 rootfs it ran.
+- **`exec_pin_survives_a_binary_swap`:**
+  - Before: it copied `/bin/true` and `/bin/false` to random names. On a uutils host both copies
+    are the multicall binary, which picks its utility by name. The control, which expects exit 1
+    from `false`, got exit 1 from uutils refusing the random name
+    (`coreutils: unknown program 'kavach-h4-bin-…'`) and passed without running `false`.
+  - Now: the stand-in is `/bin/true` under its own name, `true`, in a directory of its own, and
+    the replacement is a `#!` script that exits 1. On a uutils host the pinned exec runs a real
+    uutils binary, so the test covers this release's fix.
+- **`capture_ends_a_full_stream`:**
+  - Before: it read `head -c 300000 /dev/zero` and expected exit 141 (SIGPIPE). uutils 0.10's
+    `head` exits 0 when its reader closes mid-stream, in a plain shell pipeline too
+    (`head … | gnuhead -c 65535`). GNU's exits 141.
+  - Now: the payload is the shell writing in an endless loop. Its reaction to a closed pipe is
+    fixed (SIGPIPE at its default, which kavach restores), and only the capture closing the pipe
+    can end it, so a capture that failed to close would now hit the 20 s deadline.
+- **Mutants, each caught:**
+  - the procfs exec removed: 2 assertions on the host, 44 in the 26.04 rootfs;
+  - the `#!` guard removed: 41;
+  - the fd digits reversed: 1.
+
+  The procfs-magic and inode checks need a planted `/proc` to fail, and the suite has no such
+  test.
+
+### Known issue — the `basic` seccomp filter kills a socket write ⚠
+
+Unchanged from 3.13.3. Since cyrius 6.6.16 the stdlib writes sockets with `sendto`, which
+`security_create_basic_seccomp_filter()`'s allowlist lacks. No spawn path loads that filter. See
+`docs/development/issues/2026-10-02-basic-seccomp-kills-native-tls-writes.md` and the roadmap.
+
+### Verified
+
+- **The release tree (cyrius 6.7.9):**
+  - the Arch host: 1242 of 1242 on x86-64 with seccomp loaded, and 1170 of 1170 on aarch64 under
+    qemu-aarch64 11.1.3;
+  - the Ubuntu 26.04 rootfs: 1197 of 1197 on x86-64 and 1130 of 1130 on aarch64 under 26.04's
+    qemu 10.2.1, each with uutils 0.8.0 and 0.10.0;
+  - also: `tests/samay_integration.tcyr` (12 of 12), the fuzz harness, the smoke banner on x86-64
+    and aarch64, `cyrius distlib --all` (both sidecars unchanged, both bundles compile with only
+    their sidecar's stdlib), and the CI security scan.
+- **Not run:** the native aarch64 job on `ubuntu-26.04-arm` (no arm64 host here). Its code path
+  is the one the qemu runs execute; the `struct stat` and `statfs` offsets it reads are the same
+  on both architectures.
+
+### Performance
+
+**The release tree on cyrius 6.7.9 against 3.13.3 on 6.6.20:** `scripts/bench-ab.py 3.13.3 .`, 7
+interleaved rounds per side, pinned to one CPU.
+
+- **All 29 benchmarks overlap: no measured change** by this repo's reading.
+- **The exec rows do not show the procfs exec's extra child syscalls** (a `statfs`, two opens, two
+  `fstat`s, a 2-byte read): `process_exec_echo` 2.826 → 2.807 ms, `process_exec_confined` 2.918 →
+  2.780 ms, `process_exec_large_output` 123.1 → 125.7 ms.
+- **The two medians 3.13.3 lost are back,** though inside the ranges here: `http_path_extract`
+  121 → 103 ns and `merge_policies_plain` 238 → 202 ns.
+- **The `secrets_*` rows and `gate_clean_output` lean 3–5% slower,** ranges overlapping.
+- The `3.14.0` rows in `benches/bench-history.csv` are the release run
+  (`scripts/bench-history.sh 3.14.0`, pinned). Against the `3.13.3` rows: `http_path_extract`
+  −15.6%, `merge_policies_plain` −17.0%, the `secrets_*` rows and `gate_clean_output` +4 to +5%,
+  and `process_exec_echo` −4.9%, which the A/B reads as −0.7%.
+
 ## [3.13.3] — 2026-11-02
 
 A toolchain release. cyrius moves from 6.6.14 to 6.6.20, with sigil 3.13.10, ai-hwaccel 2.4.2 and

@@ -266,15 +266,113 @@ fn kv_exec_pin(path) {
     #endif
 }
 
+# ---- the name a pinned exec gives its program (3.14.0) --------------------
+# execveat(fd, "", AT_EMPTY_PATH) makes the kernel record the program as
+# /dev/fd/N (AT_EXECFN). uutils coreutils, Ubuntu's default since 25.10, picks
+# its utility from AT_EXECFN unless that starts with /proc/ (then argv[0]), and
+# Ubuntu's build also requires that name to be /proc/self/exe's basename. So a
+# pinned /bin/echo ran as utility "N" and exited 1 ("unknown program 'N'";
+# "Requested utility `N` does not match executable name"), on every uutils host.
+# execve("/proc/self/fd/N") runs the same open file, because a procfs fd entry
+# is a magic link to the file object, not to a path. The name it records starts
+# with /proc/, so uutils takes argv[0]. Only through a genuine procfs, checked
+# with statfs, and only when the link resolves to the pinned inode, so a rootfs
+# that plants its own /proc/self/fd/N cannot redirect the exec.
+var KV_PROC_SUPER_MAGIC = 0x9fa0;   # include/uapi/linux/magic.h
+var KV_STATFS_TYPE = 0;             # f_type, first in struct statfs on x86_64 and aarch64
+var KV_STAT_DEV = 0;                # st_dev and st_ino lead struct stat on x86_64
+var KV_STAT_INO = 8;                # (asm/stat.h) and aarch64 (asm-generic/stat.h) alike
+
+# "/proc/self/fd/<fd>" into `buf` (at least 40 bytes), NUL-terminated. In the
+# CHILD, so no heap.
+fn _kv_proc_fd_path(fd, buf) {
+    var pre = "/proc/self/fd/";
+    var n = 0;
+    while (load8(pre + n) != 0) {
+        store8(buf + n, load8(pre + n));
+        n = n + 1;
+    }
+    var digits[24];
+    var k = 0;
+    var v = fd;
+    if (v == 0) {
+        store8(&digits, 48);
+        k = 1;
+    }
+    while (v > 0) {
+        store8(&digits + k, 48 + v % 10);
+        v = v / 10;
+        k = k + 1;
+    }
+    while (k > 0) {
+        k = k - 1;
+        store8(buf + n, load8(&digits + k));
+        n = n + 1;
+    }
+    store8(buf + n, 0);
+    return n;
+}
+
+# Exec pinned `fd` through /proc/self/fd/N. In the CHILD, so only syscalls.
+# Returns only when it did not exec: 1 where it does not apply (no genuine
+# procfs, a link that is not the pinned file, a #! script), else execve's error.
+# A script stays on the fd exec: its interpreter must open the name after the
+# close-on-exec fd is gone, which kv_exec_pinned's dup retry provides, and
+# uutils accepts an interpreter run for a #! file.
+fn _kv_exec_via_proc(fd, argv, envp): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 1;   # no fd exec on agnos (kv_exec_pin execs by path there)
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    var path[40];
+    _kv_proc_fd_path(fd, &path);
+    var sfs[2176];   # STATFS_BUFSZ, the stdlib's statfs buffer contract
+    if (sys_statfs("/proc/self/fd", &sfs) < 0) { return 1; }
+    if (load64(&sfs + KV_STATFS_TYPE) != KV_PROC_SUPER_MAGIC) { return 1; }
+    # O_PATH (0x200000, as kv_exec_pin): resolves the link with no read right.
+    var lfd = file_open(&path, 0x200000 | O_CLOEXEC, 0);
+    if (lfd < 0) { return 1; }
+    var a[144];
+    var b[144];
+    var same = 0;
+    if (sys_fstat(lfd, &a) == 0) {
+        if (sys_fstat(fd, &b) == 0) {
+            if (load64(&a + KV_STAT_DEV) == load64(&b + KV_STAT_DEV)) {
+                if (load64(&a + KV_STAT_INO) == load64(&b + KV_STAT_INO)) { same = 1; }
+            }
+        }
+    }
+    sys_close(lfd);
+    if (same == 0) { return 1; }
+    # An unreadable file cannot be a script: an interpreter could not read it.
+    var rfd = file_open(&path, O_RDONLY | O_CLOEXEC, 0);
+    if (rfd >= 0) {
+        var hdr[8];
+        store64(&hdr, 0);
+        var got = sys_read(rfd, &hdr, 2);
+        sys_close(rfd);
+        if (got == 2) {
+            if (load8(&hdr) == 35) {
+                if (load8(&hdr + 1) == 33) { return 1; }   # "#!"
+            }
+        }
+    }
+    return kv_execve(&path, argv, envp);
+    #endif
+}
+
 # Exec the pinned fd. In the CHILD, so only syscalls. Returns only on failure.
-# ENOENT on a valid fd means a #! script: the kernel hands the interpreter
-# /dev/fd/N, and a close-on-exec fd is gone by the time it opens that. A dup
-# has FD_CLOEXEC clear, so the retry lets the interpreter read the same file.
+# Through /proc/self/fd first (above); where that does not apply or fails, the
+# fd itself. ENOENT on a valid fd means a #! script: the kernel hands the
+# interpreter /dev/fd/N, and a close-on-exec fd is gone by the time it opens
+# that. A dup has FD_CLOEXEC clear, so the retry lets the interpreter read the
+# same file.
 fn kv_exec_pinned(fd, argv, envp): i64 {
     #ifdef CYRIUS_TARGET_AGNOS
     return 0 - 1;
     #endif
     #ifndef CYRIUS_TARGET_AGNOS
+    _kv_exec_via_proc(fd, argv, envp);
     var r = sys_execveat(fd, "", argv, envp, AT_EMPTY_PATH);
     if (r == 0 - 2) {
         var fd2 = syscall(SYS_DUP, fd);

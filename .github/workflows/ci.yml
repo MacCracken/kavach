@@ -26,13 +26,11 @@ env:
 jobs:
   build-and-test:
     name: Build & Test
-    # 3.13.3: pinned, not ubuntu-latest. The label moved to Ubuntu 26.04 from
-    # 2026-10-19. 26.04's coreutils are uutils, which refuse kavach's pinned
-    # exec (`execveat` by fd), so 44 assertions failed here and 35 under qemu
-    # on unchanged code. See
-    # docs/development/issues/2026-10-03-pinned-exec-breaks-uutils-coreutils.md.
-    # 24.04 ships GNU coreutils. Every job below uses the same image.
-    runs-on: ubuntu-24.04
+    # 3.14.0: the current LTS, named, on every job. `ubuntu-latest` is mid-move
+    # to 26.04 (2026-10-19 to 11-19), so it hands out either image. 26.04's
+    # coreutils are uutils, which the suite's payloads (/bin/cat, /bin/echo, …)
+    # are, and which kavach's pinned exec must run (CHANGELOG 3.14.0).
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
 
@@ -55,6 +53,13 @@ jobs:
           curl -sSf https://raw.githubusercontent.com/MacCracken/cyrius/main/scripts/install.sh | \
             CYRIUS_VERSION="$CYRIUS_VERSION" sh
           echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
+
+      - name: Check the committed lock
+        # 3.14.0. `cyrius deps` below rewrites cyrius.lock, so the hash check
+        # after it verified the lock it had just written, never the committed
+        # one. `--locked` (cyrius 6.7.6) resolves the pinned tags, compares them
+        # with the committed lock, writes nothing, and fails on any difference.
+        run: cyrius deps --locked
 
       - name: Resolve dependencies
         # Populates ./lib/ from cyrius.cyml [deps] stdlib + [deps.sigil]
@@ -225,7 +230,7 @@ jobs:
     # the build on any of that instead. The agnos build rides along because
     # agnos compiles a different arm of every `#ifdef CYRIUS_TARGET_AGNOS`.
     name: aarch64 (cross-build + qemu)
-    runs-on: ubuntu-24.04   # pinned: see build-and-test
+    runs-on: ubuntu-26.04   # see build-and-test
     steps:
       - uses: actions/checkout@v7
 
@@ -241,7 +246,8 @@ jobs:
           echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
 
       - name: Install qemu-user
-        # Verified locally against Ubuntu 24.04's qemu-aarch64 8.2.2 and 11.1.1.
+        # Ubuntu 26.04's is qemu-aarch64 10.2.1. 3.14.0 ran this job's suite
+        # under that binary inside a 26.04 rootfs, and under qemu 11.1.3.
         # qemu-user answers PR_SET_SECCOMP with EINVAL, so the seccomp tests
         # take their fail-closed arm here; the native job below loads filters.
         run: |
@@ -290,7 +296,7 @@ jobs:
     # release gate).
     name: aarch64 (native)
     needs: aarch64
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-26.04-arm   # see build-and-test
     steps:
       - uses: actions/checkout@v7
 
@@ -313,7 +319,7 @@ jobs:
 
   security:
     name: Security Scan
-    runs-on: ubuntu-24.04   # pinned: see build-and-test
+    runs-on: ubuntu-26.04   # see build-and-test
     steps:
       - uses: actions/checkout@v7
       - name: Scan for dangerous patterns
@@ -381,7 +387,7 @@ jobs:
 
   docs:
     name: Documentation
-    runs-on: ubuntu-24.04   # pinned: see build-and-test
+    runs-on: ubuntu-26.04   # see build-and-test
     steps:
       - uses: actions/checkout@v7
       - name: Check required docs

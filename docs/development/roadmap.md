@@ -2,7 +2,7 @@
 
 > **Principle**: Security correctness first, then backend breadth, then performance. Every sandbox gets a number.
 
-This roadmap is **future-facing only** — shipped work lives in [CHANGELOG.md](../../CHANGELOG.md). Current release: **v3.13.3**. Toolchain pin: cc `6.6.20`; sigil `3.13.10` (the snapshot's — see CLAUDE.md hazard 4), samay `1.1.7`, ai-hwaccel `2.4.2` (agnosys dropped at v3.5.0 — its security backends are internalized).
+This roadmap is **future-facing only** — shipped work lives in [CHANGELOG.md](../../CHANGELOG.md). Current release: **v3.14.0**. Toolchain pin: cc `6.7.9`; sigil `3.13.11` (the snapshot's — see CLAUDE.md hazard 4), samay `1.2.0`, ai-hwaccel `2.4.2` (no ai-hwaccel release is pinned to 6.7.9; samay 1.2.0 uses 2.4.2) (agnosys dropped at v3.5.0 — its security backends are internalized). 3.14.0 went to the uutils exec fix and the cyrius 6.7.9 move, ahead of the SEV-SNP arc pinned as 3.14.x below; the arcs keep their numbers until they are re-pinned.
 
 **Every release below is pinned.** Each names what ships in it, in the order the principle sets. To
 move an item, edit this file; do not let it drift. **An arc also takes the open fixes in the code it
@@ -14,18 +14,10 @@ work in 3.20) can be pulled forward; items with one say what it is.
 
 ---
 
-## 3.13.x — TEE attestation I, continued, and fixes (ADR-004 §2)
+## Open now — fixes, and TEE attestation I continued (ADR-004 §2)
 
-### Later in 3.13.x
+### Open
 
-- [ ] **A pinned exec cannot run uutils coreutils (Ubuntu 25.10 and later).** Every uutils payload
-  (`/bin/echo`, `/bin/cat`, …) exits 1: `execveat` by fd names the program `/dev/fd/<fd>`, and the
-  multicall binary refuses a name that is not its own. This now reaches the current Ubuntu LTS
-  and GitHub's `ubuntu-latest`, so CI has been pinned to `ubuntu-24.04` since 3.13.3. Decide
-  between the two options in
-  [the issue](issues/2026-10-03-pinned-exec-breaks-uutils-coreutils.md): exec through a pinned
-  directory with an identity check, or document the limit and make the suite host-aware. Then
-  move CI back to the current image.
 - [ ] **The `basic` seccomp filter kills a socket write (cyrius ≥ 6.6.16).** Live from 3.13.3: the
   stdlib writes sockets with `sendto(…, MSG_NOSIGNAL, NULL, 0)` and the allowlist has no `sendto`, so
   a process that loads the filter on itself dies of SIGSYS on its first `sock_send_all` (measured on

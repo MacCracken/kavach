@@ -5,7 +5,7 @@ description = "Sandbox execution framework — 10 backends, strength scoring (0-
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/kavach"
 language = "cyrius"
-cyrius = "6.6.20"
+cyrius = "6.7.9"
 
 [build]
 entry = "src/main.cyr"
@@ -102,7 +102,7 @@ stdlib = [
 [deps.sigil]
 git = "https://github.com/MacCracken/sigil.git"
 # path = "../sigil"
-tag = "3.13.10"
+tag = "3.13.11"
 modules = ["dist/sigil.cyr"]
 
 [features]
@@ -119,7 +119,7 @@ optional = true
 [deps.samay]
 git = "https://github.com/MacCracken/samay.git"
 # path = "../samay"
-tag = "1.1.7"
+tag = "1.2.0"
 modules = ["dist/samay.cyr"]
 optional = true
 

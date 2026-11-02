@@ -4456,19 +4456,35 @@ fn test_exec_pin_classifies_paths() {
 # The TOCTOU itself: pin a binary, swap another into its path, exec. The pinned
 # exec runs the ORIGINAL; the control exec by path runs the swapped-in file,
 # which proves the swap happened.
+#
+# 3.14.0: the stand-in is /bin/true under its own name, in a directory of its
+# own, and the replacement a #! script that exits 1. Through 3.13.3 they were
+# /bin/true and /bin/false copied to random names, which on a uutils host are
+# one multicall binary that picks its utility by name. The copy refused its
+# random name with exit 1 ("coreutils: unknown program"), the exit the control
+# expected, so the control passed without running false. Now the pinned exec
+# also runs a uutils binary on such a host, which is what 3.14.0 fixed.
 fn test_exec_pin_survives_a_binary_swap() {
     test_group("exec_pin_survives_a_binary_swap");
-    var path = _t_unique_tmp_path("/tmp/kavach-h4-bin-");
+    var dir = _t_unique_tmp_path("/tmp/kavach-h4-bin-");
+    assert_eq(kv_mkdir(dir, 448), 0, "a directory for the stand-in");
+    var dlen = strlen(dir);
+    var path = alloc(dlen + 6);
+    memcpy(path, dir, dlen);
+    memcpy(path + dlen, "/true", 5);
+    store8(path + dlen + 5, 0);
     var next = _t_unique_tmp_path("/tmp/kavach-h4-next-");
-    assert_eq(_t_copy_exec("/bin/true", path), 0, "stand-in for the discovered binary (true)");
+    assert_eq(_t_copy_exec("/bin/true", path), 0, "stand-in for the discovered binary (true, under its name)");
     var pin = kv_exec_pin(path);
     assert(pin >= 0, "pinned");
-    assert_eq(_t_copy_exec("/bin/false", next), 0, "replacement staged (false)");
+    file_write_all(next, "#!/bin/sh\nexit 1\n", 17);
+    sys_chmod(next, 493);
     assert_eq(sys_rename(next, path), 0, "replacement swapped into the path");
     assert_eq(_t_exec_status(pin, path), 0, "the pinned exec runs the binary that was pinned");
-    assert_eq(_t_exec_status(KV_EXEC_BY_PATH, path), 1, "control: by path runs the swapped-in binary");
+    assert_eq(_t_exec_status(KV_EXEC_BY_PATH, path), 1, "control: by path runs the swapped-in script");
     if (pin >= 0) { sys_close(pin); }
     kv_unlink(path);
+    kv_rmdir(dir);
     return 0;
 }
 
@@ -4489,6 +4505,71 @@ fn test_exec_pin_survives_a_script_swap() {
     assert_eq(_t_exec_status(KV_EXEC_BY_PATH, path), 4, "control: by path runs the swapped-in script");
     if (pin >= 0) { sys_close(pin); }
     kv_unlink(path);
+    return 0;
+}
+
+# 3.14.0: a pinned exec names its program /proc/self/fd/N, not /dev/fd/N. uutils
+# picks its utility from that name (AT_EXECFN), and only a /proc/ name lets it
+# take argv[0] instead. glibc's loader prints AT_EXECFN under LD_SHOW_AUXV=1, so
+# a pinned /bin/sh shows the name the kernel recorded for it.
+fn _t_via_proc_status(pin, path) {
+    var argv[16];
+    store64(&argv, path);
+    store64(&argv + 8, 0);
+    var envp[8];
+    store64(&envp, 0);
+    var pid = kv_fork();
+    if (pid == 0) {
+        var r = _kv_exec_via_proc(pin, &argv, &envp);
+        sys_exit(10 + r);
+    }
+    var st[8];
+    store64(&st, 0);
+    kv_waitpid(pid, &st, 0);
+    return (load32(&st) >> 8) & 255;
+}
+
+fn test_exec_pin_names_the_program_through_proc() {
+    test_group("exec_pin_names_the_program_through_proc");
+    var p = alloc(40);
+    assert_eq(_kv_proc_fd_path(9, p), 15, "the link for fd 9 is 15 bytes");
+    assert_eq(memeq(p, "/proc/self/fd/9", 16), 1, "...and is /proc/self/fd/9, terminated");
+    _kv_proc_fd_path(1023, p);
+    assert_eq(memeq(p, "/proc/self/fd/1023", 19), 1, "fd 1023's digits in order");
+    _kv_proc_fd_path(0, p);
+    assert_eq(memeq(p, "/proc/self/fd/0", 16), 1, "fd 0 is a digit, not an empty name");
+
+    # An ELF is exec'd through /proc; a #! script is declined (1), for the fd
+    # exec's dup retry.
+    var pin = kv_exec_pin("/bin/true");
+    assert(pin >= 0, "/bin/true pins");
+    assert_eq(_t_via_proc_status(pin, "/bin/true"), 0, "an ELF runs through /proc/self/fd");
+    if (pin >= 0) { sys_close(pin); }
+    var sp = _t_unique_tmp_path("/tmp/kavach-h4-procsh-");
+    file_write_all(sp, "#!/bin/sh\nexit 3\n", 17);
+    sys_chmod(sp, 493);
+    var spin = kv_exec_pin(sp);
+    assert(spin >= 0, "a script pins");
+    assert_eq(_t_via_proc_status(spin, sp), 11, "the procfs exec declines a #! script");
+    assert_eq(_t_exec_status(spin, sp), 3, "and the pinned exec still runs it");
+    if (spin >= 0) { sys_close(spin); }
+    kv_unlink(sp);
+
+    var buf = alloc(8192);
+    var args = vec_new();
+    vec_push(args, "/bin/sh");
+    vec_push(args, "-c");
+    vec_push(args, "exit 0");
+    var env = vec_new();
+    vec_push(env, "LD_SHOW_AUXV=1");
+    confine_capture_input_env(args, 0, 0, 0, 0, buf, 8192, 0, 5000, 0, "", 0, env);
+    if (cstr_contains(buf, "AT_EXECFN") == 0) {
+        println("  (skipped: this host's /bin/sh loader prints no auxv, so not glibc)");
+        return 0;
+    }
+    assert_eq(cstr_contains(buf, "AT_EXECFN:"), 1, "the loader reports AT_EXECFN");
+    assert_eq(cstr_contains(buf, "/proc/self/fd/"), 1, "a pinned exec records a /proc/self/fd/ name");
+    assert_eq(cstr_contains(buf, "/dev/fd/"), 0, "not the /dev/fd/ name execveat records");
     return 0;
 }
 
@@ -6150,11 +6231,15 @@ fn test_capture_ends_a_full_stream() {
     # fails, SIGPIPE, as under `exec_capture`. Run with this process ignoring
     # SIGPIPE, as the GitHub Actions runner starts its steps: the payload must
     # still die of the signal (see `test_payloads_start_with_default_sigpipe`).
+    #
+    # 3.14.0: the payload is the shell writing forever, which only a closed pipe
+    # ends. It was `head -c 300000 /dev/zero`, whose reaction to the close is the
+    # implementation's: GNU's dies of SIGPIPE, but uutils 0.10 (Ubuntu 26.04)
+    # exits 0 when its reader closes mid-stream, in a plain shell pipeline too.
     var oargs = vec_new();
-    vec_push(oargs, "/usr/bin/head");
+    vec_push(oargs, "/bin/sh");
     vec_push(oargs, "-c");
-    vec_push(oargs, "300000");
-    vec_push(oargs, "/dev/zero");
+    vec_push(oargs, "while :; do echo 0000000000000000000000000000000000000000000000000000000000000000; done");
     var was = _t_ignore_sigpipe();
     var t0 = mono_now_ns();
     var n = confine_capture_input(oargs, 0, 0, 0, 0, buf, 65536, 0, 20000, 0, "", 0);
@@ -6938,6 +7023,7 @@ fn main() {
     test_exec_pin_classifies_paths();
     test_exec_pin_survives_a_binary_swap();
     test_exec_pin_survives_a_script_swap();
+    test_exec_pin_names_the_program_through_proc();
     test_exec_capture_pinned_captures_stdout();
     test_oci_log_path_is_uid_scoped();
     test_landlock_handled_access_covers_the_abi();
