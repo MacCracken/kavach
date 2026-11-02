@@ -18,6 +18,14 @@ work in 3.20) can be pulled forward; items with one say what it is.
 
 ### Later in 3.13.x
 
+- [ ] **A pinned exec cannot run uutils coreutils (Ubuntu 25.10 and later).** Every uutils payload
+  (`/bin/echo`, `/bin/cat`, …) exits 1: `execveat` by fd names the program `/dev/fd/<fd>`, and the
+  multicall binary refuses a name that is not its own. This now reaches the current Ubuntu LTS
+  and GitHub's `ubuntu-latest`, so CI has been pinned to `ubuntu-24.04` since 3.13.3. Decide
+  between the two options in
+  [the issue](issues/2026-10-03-pinned-exec-breaks-uutils-coreutils.md): exec through a pinned
+  directory with an identity check, or document the limit and make the suite host-aware. Then
+  move CI back to the current image.
 - [ ] **The `basic` seccomp filter kills a socket write (cyrius ≥ 6.6.16).** Live from 3.13.3: the
   stdlib writes sockets with `sendto(…, MSG_NOSIGNAL, NULL, 0)` and the allowlist has no `sendto`, so
   a process that loads the filter on itself dies of SIGSYS on its first `sock_send_all` (measured on

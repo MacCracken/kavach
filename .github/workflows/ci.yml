@@ -26,7 +26,13 @@ env:
 jobs:
   build-and-test:
     name: Build & Test
-    runs-on: ubuntu-latest
+    # 3.13.3: pinned, not ubuntu-latest. The label moved to Ubuntu 26.04 from
+    # 2026-10-19. 26.04's coreutils are uutils, which refuse kavach's pinned
+    # exec (`execveat` by fd), so 44 assertions failed here and 35 under qemu
+    # on unchanged code. See
+    # docs/development/issues/2026-10-03-pinned-exec-breaks-uutils-coreutils.md.
+    # 24.04 ships GNU coreutils. Every job below uses the same image.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
 
@@ -219,7 +225,7 @@ jobs:
     # the build on any of that instead. The agnos build rides along because
     # agnos compiles a different arm of every `#ifdef CYRIUS_TARGET_AGNOS`.
     name: aarch64 (cross-build + qemu)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04   # pinned: see build-and-test
     steps:
       - uses: actions/checkout@v7
 
@@ -307,7 +313,7 @@ jobs:
 
   security:
     name: Security Scan
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04   # pinned: see build-and-test
     steps:
       - uses: actions/checkout@v7
       - name: Scan for dangerous patterns
@@ -375,7 +381,7 @@ jobs:
 
   docs:
     name: Documentation
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04   # pinned: see build-and-test
     steps:
       - uses: actions/checkout@v7
       - name: Check required docs

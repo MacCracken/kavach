@@ -1,6 +1,6 @@
 # 2026-10-03 — a pinned exec cannot run uutils coreutils: Ubuntu 25.10+ payloads such as `/bin/echo` exit 1
 
-**Status:** 🟡 **OPEN** — found while certifying 3.13.2 natively on aarch64.
+**Status:** 🟡 **OPEN** — found while certifying 3.13.2 natively on aarch64. Since 2026-11-02 it also fails GitHub's `ubuntu-latest` (Ubuntu 26.04); CI is pinned to `ubuntu-24.04` from 3.13.3.
 **Checked against:** kavach **3.13.1** (built with cyrius 6.6.6) and the 3.13.2 candidate (cyrius 6.6.14), both
 the same. `src/util.cyr` `kv_exec_pin` (:228) and `kv_exec_pinned` (:260), in place since 3.12.7 (ADR-005 §H4).
 **Severity:** every payload that is a uutils coreutils binary exits 1 without running: `echo`, `cat`, `printf`,
@@ -94,3 +94,24 @@ What H4 pins is the file. The ways to keep that while giving the payload a name 
   kavach refuses up front with an error that names the cause.
 - The native aarch64 suite passes on that host, or skips with a reason the way the qemu run does for
   seccomp.
+
+## Update 2026-11-02 — `ubuntu-latest` is Ubuntu 26.04, and CI failed on it
+
+GitHub moves the `ubuntu-latest` label to Ubuntu 26.04 from 2026-10-19. The first pushes after that ran on image
+`ubuntu-26.04` 20261025.179.1 (Ubuntu 26.04.1 LTS). Both runs failed the same way:
+- `237098d`, still at cyrius 6.6.14 with a docs-only change;
+- 3.13.3's first commit, at cyrius 6.6.20.
+
+| job | 3.13.2, Ubuntu 24.04 (2026-10-03) | Ubuntu 26.04 (2026-11-02, both commits) |
+|---|---|---|
+| Build & Test (x86-64) | 1183 of 1183 | 1115 of 1159, **44 failed** |
+| aarch64 under qemu | 1116 of 1116 | 1073 of 1108, **35 failed** |
+
+The x86-64 failures are the groups listed above. One line of the job log shows a second uutils refusal, distinct from
+the `/dev/fd` name check: `coreutils: unknown program 'kavach-h4-bin-814af573099ba4f1'`. The H4 test copies a
+coreutils binary under a temporary name, and uutils' multicall dispatches on that name. A host-aware suite has to
+skip or rewrite that test as well.
+
+3.13.3 pins every `ubuntu-latest` job (`ci.yml`'s four, `release.yml`'s release job) to `ubuntu-24.04`, which ships GNU
+coreutils. That keeps CI testing what it tested; it does not change what a 26.04 host gets. The decision above is
+still open, and the roadmap pins it in 3.13.x.

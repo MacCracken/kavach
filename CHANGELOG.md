@@ -15,7 +15,9 @@ suite's output is byte-identical to 3.13.2's: 1230 of 1230 assertions on x86-64 
 on aarch64 under qemu. The move brings two things with it. cyrius 6.6.18's distlib left four
 stdlib leaves out of `dist/kavach-confine.deps`, so the confine bundle no longer compiled for a
 consumer without sigil; that is fixed here. And from 6.6.16 the stdlib writes sockets with
-`sendto`, which the `basic` seccomp filter kills; that is a known issue, below.
+`sendto`, which the `basic` seccomp filter kills; that is a known issue, below. CI is now pinned
+to Ubuntu 24.04. GitHub's `ubuntu-latest` moved to 26.04, whose uutils coreutils refuse kavach's
+pinned exec. That is the second known issue.
 
 ### Changed — cyrius 6.6.14 → 6.6.20, with sigil 3.13.10, ai-hwaccel 2.4.2 and samay 1.1.7
 
@@ -40,6 +42,29 @@ consumer without sigil; that is fixed here. And from 6.6.16 the stdlib writes so
 - **CI's lint step still lints without DCE.** Measured on 6.6.20: under `CYRIUS_DCE=1`, the
   compiler still refuses `src/backend_oci.cyr` and `src/backend_sy_agnos.cyr` on their own, as
   6.6.14 did. The workflow's comment names both versions.
+
+### Changed — CI runs on Ubuntu 24.04, not `ubuntu-latest`
+
+GitHub moves the `ubuntu-latest` label to Ubuntu 26.04 from 2026-10-19 (its own annotation on
+every job). 26.04's coreutils are uutils. On that image the suite fails the same assertions it
+fails on a uutils host, on unchanged code:
+
+| run | image | x86-64 | aarch64 under qemu |
+|---|---|---|---|
+| 3.13.2 (`88dc85d`, 2026-10-03) | 24.04 | 1183 of 1183 | 1116 of 1116 |
+| `237098d` (cyrius 6.6.14, docs only), 2026-11-02 | 26.04 | 1115 of 1159 (44 failed) | 1073 of 1108 (35 failed) |
+| 3.13.3 (cyrius 6.6.20), 2026-11-02 | 26.04 | 1115 of 1159 (44 failed) | 1073 of 1108 (35 failed) |
+
+The 44 x86-64 failures are the groups the uutils issue lists. The job log names the cause in one
+line: `coreutils: unknown program 'kavach-h4-bin-…'`, uutils' multicall refusing a binary the H4
+test had copied under a new name.
+
+- **Every `ubuntu-latest` job in `ci.yml` (build and test, aarch64 cross-build and qemu, security
+  scan, docs) and `release.yml`'s release job run on `ubuntu-24.04`.** That image ships GNU
+  coreutils and qemu 8.2.2, the image 3.13.2 was certified on. The native aarch64 job was already
+  pinned (`ubuntu-24.04-arm`).
+- The pin keeps CI testing what it tested. It does not fix kavach on 26.04; see the known issue
+  below.
 
 ### Fixed — the confine bundle did not compile for a consumer without sigil
 
@@ -68,6 +93,18 @@ was not broken. But the sidecar is what tells a consumer what to vendor.
   - the base bundle's audit chain recorded two HMAC entries, verified one, and refused it under a
     wrong key;
   - both bundles' `confine_capture` ran `/bin/echo` and captured its output.
+
+### Known issue — a pinned exec cannot run uutils coreutils (Ubuntu 25.10 and later) ⚠
+
+Open since 3.13.2 and unchanged in this release. It now reaches the current Ubuntu LTS and
+GitHub's default runner image. Since 3.12.7 (ADR-005 §H4), kavach execs a payload's binary with
+`execveat(fd, "", …, AT_EMPTY_PATH)`. The kernel then records the program as `/dev/fd/<fd>`.
+uutils' multicall binary compares that name with its own and exits 1 without running ("Requested
+utility `9` does not match executable name"). Every uutils payload is affected: `/bin/echo`,
+`/bin/cat`, `printf`, `env` and the rest. GNU coreutils run normally. The options (exec through a
+pinned directory, or document the limit and make the suite host-aware) are in
+`docs/development/issues/2026-10-03-pinned-exec-breaks-uutils-coreutils.md`, and the roadmap pins
+the decision in 3.13.x.
 
 ### Known issue — the `basic` seccomp filter kills a socket write ⚠
 
@@ -108,6 +145,9 @@ Measured with a probe that forks, loads the basic filter and writes 3 bytes to a
   - The security scan passed.
   - Unlike 3.13.2, this run kept the existing dependency cache.
 - **Not rerun natively on aarch64.**
+- **GitHub Actions:** the runs on `237098d` and on this release's first commit failed on the
+  Ubuntu 26.04 image (above). The run on the pinned workflow had not happened when this entry was
+  written.
 - **The roadmap's aarch64 namespace blocker is lifted.** The stdlib has named `sys_unshare` and
   `sys_chroot` in both Linux peers since the 6.6.14 pin at the latest. An aarch64 build run under
   `qemu-aarch64 -strace` issues `unshare(0)` and `chroot(…)`. The roadmap entry now says so; the

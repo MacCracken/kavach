@@ -20,6 +20,9 @@ confine bundle's sidecar, so `src/util.cyr` now includes them. ⚠ Known issue: 
 the stdlib writes sockets with `sendto`, so a process that loads the `basic` seccomp filter on itself
 is killed on its first socket write. No spawn path loads that filter
 ([issue](docs/development/issues/2026-10-02-basic-seccomp-kills-native-tls-writes.md)).
+⚠ CI is pinned to Ubuntu 24.04. From Ubuntu 25.10 the coreutils are uutils, which refuse kavach's
+pinned exec, so a uutils payload such as `/bin/echo` exits 1 there
+([issue](docs/development/issues/2026-10-03-pinned-exec-breaks-uutils-coreutils.md)).
 
 **v3.13.2 — score honesty and exec parity, on cyrius 6.6.14.** What kavach accepted, scored or
 documented and did not apply now applies. The gVisor, OCI and SY-agnos backends report their
