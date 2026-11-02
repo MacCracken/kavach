@@ -7,6 +7,140 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.13.3] — 2026-11-02
+
+A toolchain release. cyrius moves from 6.6.14 to 6.6.20, with sigil 3.13.10, ai-hwaccel 2.4.2 and
+samay 1.1.7, the last releases of each pinned to 6.6.20. kavach's behaviour does not change. The
+suite's output is byte-identical to 3.13.2's: 1230 of 1230 assertions on x86-64 and 1158 of 1158
+on aarch64 under qemu. The move brings two things with it. cyrius 6.6.18's distlib left four
+stdlib leaves out of `dist/kavach-confine.deps`, so the confine bundle no longer compiled for a
+consumer without sigil; that is fixed here. And from 6.6.16 the stdlib writes sockets with
+`sendto`, which the `basic` seccomp filter kills; that is a known issue, below.
+
+### Changed — cyrius 6.6.14 → 6.6.20, with sigil 3.13.10, ai-hwaccel 2.4.2 and samay 1.1.7
+
+- **`cyrius = "6.6.20"`; `[deps.sigil]` 3.13.7 → 3.13.10**, the 6.6.20 snapshot's sigil. Per
+  hazard (4) in `CLAUDE.md` the tag is inert: the snapshot's `lib/sigil.cyr` is what builds.
+- **ai-hwaccel 2.4.1 → 2.4.2 and samay 1.1.6 → 1.1.7.** Both are the last releases pinned to
+  6.6.20; their next releases move to cyrius 6.7. samay 1.1.7 pins ai-hwaccel 2.4.2 and bayan
+  1.5.12, the same versions kavach resolves.
+- **`cyrius.lock`: 75 → 76 stdlib files.** `lib/poison.cyr` is new. It is 6.6.18's shared poison
+  core, which `lib/freelist.cyr` now includes; its poison paths compile only under
+  `CYRIUS_POISON`. `[deps]` is unchanged, because nothing in 6.6.15–6.6.20 retires, renames or
+  makes opt-in a module kavach declares. The four commit pins move to the new tags, and the lock
+  now sorts them by name.
+- **No new warning.** `src/main.cyr` and the suite still build with 0 `duplicate fn` and no
+  `undefined`, and with the same three warnings: the sigil stdlib-leaf note, sigil's static array
+  and the static-data size. `cyrius fmt --check` finds no drift. `cyrius lint` gives 0 warnings in
+  47 files. `scripts/check-symbols.py` passes: no name the new stdlib adds is one kavach defines.
+- **Binary sizes** of `src/main.cyr`: x86-64 3,301,256 → 3,380,944 bytes (+2.4%), agnos
+  3,252,736 → 3,336,632 (+2.6%), aarch64 4,197,880 → 3,872,064 (−7.8%). The vendored
+  `lib/sigil.cyr` grows from 31,172 to 31,912 lines; sigil 3.13.9 added constant-time ECDH. The
+  sizes were not traced further.
+- **CI's lint step still lints without DCE.** Measured on 6.6.20: under `CYRIUS_DCE=1`, the
+  compiler still refuses `src/backend_oci.cyr` and `src/backend_sy_agnos.cyr` on their own, as
+  6.6.14 did. The workflow's comment names both versions.
+
+### Fixed — the confine bundle did not compile for a consumer without sigil
+
+Since cyrius 6.6.18, `distlib` writes a sidecar of only the stdlib leaves its compile-verify still
+needs after it has spliced in the producer's named deps. It also opens each bundle with a
+`# Requires` include block of those leaves. 6.6.20's `lib/sigil.cyr` includes `io`, `ct`, `slice`
+and `random` itself, so the verify credited all four to sigil and left them out of
+`dist/kavach-confine.deps`. The confine modules call `file_open`, `getenv`, `ct_eq_bytes_lens` and
+`random_bytes`, and subscript `[u8]` slices. `scripts/check-bundles.py` caught it. Built with only
+the sidecar's 9 leaves, the bundle had 12 undefined names, 5 of them reachable, and cyrius refused
+to emit it. thoth, the confine bundle's consumer, declares all four and sigil as well, so its build
+was not broken. But the sidecar is what tells a consumer what to vendor.
+
+- **`src/util.cyr`, first in both profiles, includes `lib/io.cyr`, `lib/ct.cyr`, `lib/slice.cyr`
+  and `lib/random.cyr`**, next to its explicit chrono include and for the same reason. distlib's
+  include scan carries an `include` into the sidecar, whatever a named dep happens to include.
+  Include-once makes them no-ops in the in-tree build: `src/main.cyr` and the suite are the same
+  size to the byte with and without them.
+- **The sidecars are now the compile-verified sets:** `dist/kavach.deps` goes from 36 leaves to
+  16, and `dist/kavach-confine.deps` from 18 to 13. The base sidecar no longer lists `tls`,
+  `keccak`, `thread`, `thread_local` or the rest of kavach's `[deps]`. They arrive through
+  `sandhi`, whose requires block includes `tls`, `sigil`, `thread`, `thread_local` and `async`.
+- **Both bundles also run from their sidecars alone.** Hazard (1) fails as a runtime SIGILL,
+  which the check's empty `main` cannot see. So each bundle was built into a consumer that
+  vendors only its sidecar's leaves, and that consumer was run:
+  - the base bundle's audit chain recorded two HMAC entries, verified one, and refused it under a
+    wrong key;
+  - both bundles' `confine_capture` ran `/bin/echo` and captured its output.
+
+### Known issue — the `basic` seccomp filter kills a socket write ⚠
+
+Since cyrius 6.6.16 (its CVE-74 fix), every stdlib socket write is
+`sendto(fd, buf, n, MSG_NOSIGNAL, NULL, 0)` on Linux. That covers `sock_send`, `sock_send_all`,
+`async_send`, and sandhi, http and TLS through them. `write(2)` is left only for an fd that is not
+a socket. The allowlist of `security_create_basic_seccomp_filter()` has no `sendto`, and the
+filter kills the process on a miss.
+
+Measured with a probe that forks, loads the basic filter and writes 3 bytes to an inherited
+`socketpair`. On 3.13.2 (cyrius 6.6.14), both `write(2)` and `sock_send_all` return 3. On 3.13.3,
+`write(2)` returns 3 and `sock_send_all` dies of SIGSYS.
+
+- **What it reaches:** only a process that loads the basic filter on itself
+  (`security_create_basic_seccomp_filter` + `security_load_seccomp`). No spawn path loads it. The
+  process backend, `sandbox_spawn`, persistent guests, `confine` and the WASM backend load the exec
+  filter, a deny-list that allows `sendto`. No first-party project calls kavach's basic filter.
+  The `lib/agnosys.cyr` copies in other repos define their own function of that name.
+- **The fix is designed but not in this release.** It allows `sendto` only with no destination,
+  which on a connected socket is exactly `write(2)`, plus `poll`/`ppoll` and
+  `fcntl(F_GETFL/F_SETFL)`. The design is measured in
+  `docs/development/issues/2026-10-02-basic-seccomp-kills-native-tls-writes.md`, and the
+  roadmap pins it in 3.13.x.
+
+### Verified
+
+- **The release tree (cyrius 6.6.20):**
+  - 1230 of 1230 on x86-64 (seccomp loaded) and 1158 of 1158 on aarch64 under qemu-aarch64. The
+    suite's output is byte-identical to 3.13.2's on 6.6.14.
+  - Also: `tests/samay_integration.tcyr` (12 of 12), the fuzz harness, the `--agnos` and
+    `--aarch64` builds of `src/main.cyr` (no raw-number warning), and the smoke banner on x86-64
+    and aarch64.
+- **CI's build-and-test, security-scan and docs steps, run in a copy of the tracked files with
+  an empty `lib/`:**
+  - `cyrius.lock` was reproduced byte for byte, and `cyrius deps --verify` passed 76 of 76.
+  - `cyrius distlib --all` left `dist/` unchanged, and both bundles compiled with only their
+    sidecars.
+  - The security scan passed.
+  - Unlike 3.13.2, this run kept the existing dependency cache.
+- **Not rerun natively on aarch64.**
+- **The roadmap's aarch64 namespace blocker is lifted.** The stdlib has named `sys_unshare` and
+  `sys_chroot` in both Linux peers since the 6.6.14 pin at the latest. An aarch64 build run under
+  `qemu-aarch64 -strace` issues `unshare(0)` and `chroot(…)`. The roadmap entry now says so; the
+  work itself is not done.
+
+### Performance
+
+**The release tree on cyrius 6.6.20 against 3.13.2 on 6.6.14:** `scripts/bench-ab.py 3.13.2 .`,
+7 interleaved rounds per side, pinned to one CPU. kavach's code did not change, so every delta
+comes from the toolchain.
+
+- **18 of the 29 benchmarks overlap: no measured change.** Those include `process_exec_echo`
+  (2.852 → 2.806 ms), `process_exec_confined` (2.838 → 2.844 ms) and both attestation rows.
+- **Seven are faster, with separate ranges:**
+  - `ct_streq_64` 212 → 200 ns (−5.7%);
+  - `secrets_scan_clean_text`, `secrets_scan_with_secrets` and `secrets_redact` −1.8 to −2.3%;
+  - `gate_clean_output` 340.6 → 331.6 µs (−2.6%);
+  - `process_exec_large_output` 125.7 → 123.0 ms (−2.2%);
+  - `code_scan_large_ac` 521.3 → 510.1 µs (−2.1%).
+- **Four are slower, with separate ranges:**
+  - **`http_path_extract` 102 → 121 ns (+18.6%).** It also rose at 3.13.2's toolchain move,
+    86 → 102 ns.
+  - **`merge_policies_plain` 208 → 237 ns (+13.9%).**
+  - `http_allowlist_miss` 78 → 83 ns (+6.4%).
+  - `merge_policies_landlock` 343 → 352 ns (+2.6%).
+
+  The first two are a short byte loop plus one `alloc`. The `lib/alloc.cyr` changes in this
+  range are in its `CYRIUS_POISON` arms. Not traced.
+- The `3.13.3` rows in `benches/bench-history.csv` are the release run
+  (`scripts/bench-history.sh 3.13.3`, pinned). Compared with the `3.13.2` rows, the same four
+  rise: +19.6%, +11.1%, +5.1% and +3.4%. `process_exec_echo` reads +4.3% row against row, which
+  the A/B does not reproduce (−1.6%, ranges overlapping).
+
 ## [3.13.2] — 2026-10-03
 
 The roadmap's 3.13.2 items: what kavach accepted, scored or documented and did not apply, each

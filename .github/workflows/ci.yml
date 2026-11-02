@@ -115,7 +115,7 @@ jobs:
         # semantic change. Hard-fail gate restored.
         #
         # 3.13.2: cyrlint compiles a file before linting it, and under the
-        # workflow's CYRIUS_DCE=1 cyrius 6.6.14's DCE refuses
+        # workflow's CYRIUS_DCE=1 cyrius 6.6.14's DCE (and still 6.6.20's) refuses
         # backend_oci.cyr and backend_sy_agnos.cyr ("dead-code elimination
         # corrupted 3 live function body/bodies; refusing to emit"). cyrlint
         # then reports it did NOT lint the file, which counted no warning,

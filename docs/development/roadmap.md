@@ -2,7 +2,7 @@
 
 > **Principle**: Security correctness first, then backend breadth, then performance. Every sandbox gets a number.
 
-This roadmap is **future-facing only** — shipped work lives in [CHANGELOG.md](../../CHANGELOG.md). Current release: **v3.13.2**. Toolchain pin: cc `6.6.14`; sigil `3.13.7` (the snapshot's — see CLAUDE.md hazard 4), samay `1.1.6`, ai-hwaccel `2.4.1` (agnosys dropped at v3.5.0 — its security backends are internalized).
+This roadmap is **future-facing only** — shipped work lives in [CHANGELOG.md](../../CHANGELOG.md). Current release: **v3.13.3**. Toolchain pin: cc `6.6.20`; sigil `3.13.10` (the snapshot's — see CLAUDE.md hazard 4), samay `1.1.7`, ai-hwaccel `2.4.2` (agnosys dropped at v3.5.0 — its security backends are internalized).
 
 **Every release below is pinned.** Each names what ships in it, in the order the principle sets. To
 move an item, edit this file; do not let it drift. **An arc also takes the open fixes in the code it
@@ -18,6 +18,13 @@ work in 3.20) can be pulled forward; items with one say what it is.
 
 ### Later in 3.13.x
 
+- [ ] **The `basic` seccomp filter kills a socket write (cyrius ≥ 6.6.16).** Live from 3.13.3: the
+  stdlib writes sockets with `sendto(…, MSG_NOSIGNAL, NULL, 0)` and the allowlist has no `sendto`, so
+  a process that loads the filter on itself dies of SIGSYS on its first `sock_send_all` (measured on
+  3.13.3; 3.13.2 on 6.6.14 lived). No spawn path loads it. The argument-pinned design and its
+  acceptance tests are in
+  [the issue](issues/2026-10-02-basic-seccomp-kills-native-tls-writes.md); the alternative is to
+  document `basic` as compute-only.
 - [ ] **Fetch the quote from the running guest: Gramine for SGX, the TD quote for TDX.** Needs
   SGX or TDX hardware to verify on; the development machine is AMD. kavach's side of the hand-off
   is in place (`backend_attest_nonce`, `backend_attach_quote`), and until the launchers use it
@@ -144,13 +151,15 @@ Each entry carries **what it means**, **who owns the upstream work**, and **trig
   `_spawn_enter_rootfs` returns -1 there, so an aarch64 sandbox gets no namespaces and no rootfs.
   kavach's x86-64 numbers for `unshare` (272) and `chroot` (161) run `kcmp` and `sethostname` on
   aarch64. The native numbers are not an option: cyrius renumbers 51 to `getsockname`, and a
-  native number under an aarch64 `#ifdef` is what ADR-007 and the cyrius guide rule out. Still
-  blocked at the 6.6.6 pin: its stdlib names neither call.
+  native number under an aarch64 `#ifdef` is what ADR-007 and the cyrius guide rule out.
+  **Unblocked, not yet done:** the stdlib names both by the 6.6.14 pin, in both Linux peers
+  (`sys_unshare`, `sys_chroot`). Checked at 3.13.3 on 6.6.20: an aarch64 build run under
+  `qemu-aarch64 -strace` issues `unshare(0)` and `chroot(…)`.
 - **Who owns it.** Upstream: cyrius, filed as
   `cyrius/docs/development/issues/2026-09-25-kavach-unshare-chroot-unnamed-aarch64-chroot-unreachable.md`.
   It asks for `SYS_UNSHARE` and `SYS_CHROOT` in both Linux peers with `ESYSXLAT` rows `272→97` and
   `161→51`. The `161→51` row has to sit below the `51→204` getsockname row.
-- **Trigger condition.** A cyrius release declaring both names. Then move the pin, call
+- **Trigger condition.** A cyrius release declaring both names (met). Then call
   `sys_unshare` / `sys_chroot`, delete the two constants in `src/sys_security_syscalls.cyr` and the
   aarch64 refusals, and run the namespace and rootfs tests on the `aarch64-native` CI job.
 

@@ -26,6 +26,19 @@
 # include-once, so this is a no-op wherever the auto-prepend works.
 include "lib/chrono.cyr"
 
+# ⛔ EXPLICIT io / ct / slice / random INCLUDES — the same protection, a different resolver path.
+# The `[lib.confine]` modules call `file_open`, `getenv`, `file_read_all`, `ct_eq_bytes_lens`,
+# `random_bytes` and subscript `[u8]` slices. Since cyrius 6.6.18 distlib writes a sidecar of only the
+# leaves its compile-verify still needs AFTER splicing in the producer's named deps, and 6.6.20's
+# `lib/sigil.cyr` includes io, ct, slice and random itself. All four were credited to sigil and left out
+# of `dist/kavach-confine.deps`, so the confine bundle (thoth) no longer compiled for a consumer
+# without sigil (`scripts/check-bundles.py`, CHANGELOG 3.13.3). Includes here put them in both
+# sidecars from the include scan, whatever a named dep happens to carry.
+include "lib/io.cyr"
+include "lib/ct.cyr"
+include "lib/slice.cyr"
+include "lib/random.cyr"
+
 # ---- portable filesystem-removal shims -----------------------------------
 # ⛔ THE AGNOS AND LINUX SYSCALL WRAPPERS HAVE DIFFERENT ARITIES, and kavach called the Linux form
 # unguarded in eight files. On Linux `sys_unlink(path)` / `sys_rmdir(path)` take one argument; on

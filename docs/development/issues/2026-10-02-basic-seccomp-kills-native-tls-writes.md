@@ -1,6 +1,6 @@
 # 2026-10-02 — the `basic` seccomp profile kills a sandboxed native-TLS writer: cyrius 6.6.14 writes sockets with `sendto`
 
-**Status:** 🟡 **OPEN** — filed from cyrius **6.6.14** (the TLS follow-ups; CVE-66).
+**Status:** 🟡 **OPEN, live from kavach 3.13.3** (cyrius pin 6.6.20) — filed from cyrius **6.6.14** (the TLS follow-ups; CVE-66).
 **Checked against:** kavach **3.13.1** — `src/security.cyr` (`_seccomp_allow_list` ~544, `security_create_basic_seccomp_filter`
 ~743, miss action `SECCOMP_RET_KILL_PROCESS`), `src/policy.cyr` (`policy_basic` :46).
 **Severity:** a crash (SIGSYS) of a sandboxed process that does TLS over a socket it inherited. Read from the
@@ -116,3 +116,24 @@ arguments:
 
 The "declare it out of scope" option above stays open; if chosen, the documentation should now say that any
 socket write through the cyrius stdlib (not only TLS) needs a profile other than `basic` from cyrius 6.6.16.
+
+## Update 2026-11-02 — live in kavach 3.13.3 (cyrius pin 6.6.14 → 6.6.20)
+
+kavach 3.13.3 moves its pin to cyrius 6.6.20, so a self-confined process built against it now hits the 6.6.16 path.
+Measured with a probe built from `tests/kavach.tcyr`'s includes. It forks, loads
+`security_create_basic_seccomp_filter()` with `security_load_seccomp`, and writes 3 bytes to an inherited
+`AF_UNIX` socketpair:
+
+| child does | kavach 3.13.2, cyrius 6.6.14 | kavach 3.13.3, cyrius 6.6.20 |
+|---|---|---|
+| `sys_write(fd, "abc", 3)` | exits 7 (wrote 3) | exits 7 (wrote 3) |
+| `sock_send_all(fd, "abc", 3)` | exits 7 (wrote 3) | **killed by signal 31 (SIGSYS)** |
+
+The reach is unchanged:
+- The five spawn paths still load `security_create_exec_seccomp_filter()`: `src/confine.cyr:480`,
+  `src/persistent.cyr:89`, `src/backend_process.cyr:113`, `src/spawn.cyr:121` and `src/backend_wasm.cyr:185`.
+- Nothing in `src/` calls the basic filter.
+- A `grep` over `~/Repos` found no caller of kavach's function outside kavach. The `lib/agnosys.cyr` copies elsewhere
+  define their own function of the same name.
+
+The roadmap pins the fix under 3.13.x. 3.13.3's CHANGELOG lists it as a known issue.
