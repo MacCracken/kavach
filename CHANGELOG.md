@@ -7,6 +7,250 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.14.2] — 2026-11-02
+
+The roadmap's open items, as far as this machine can take them. A TDX or SGX quote now has to
+clear Intel's collateral: the platform's TCB level, the Quoting Enclave's identity, and the PCK
+and root CRLs. A TDX quote also has to clear its RTMRs, so the TD's kernel and command line are
+checked, not only its firmware. Checking TDX against real Intel data found that sigil 3.13.15
+cannot parse a quote in Intel's layout at all, so kavach's TDX verification had never accepted a
+real quote. kavach now parses those quotes itself, and it accepts Intel's sample from a real
+platform as UpToDate. Against Intel's collateral sixteen months later, the same quote is refused
+as OutOfDate; through 3.14.1 it would have passed. gVisor's and docker's own failures are now
+diagnostics rather than the payload's stderr. On aarch64 a sandbox gets namespaces and a rootfs,
+because the stdlib names `unshare` and `chroot`. Fetching the quote from a running guest (Gramine,
+the TD quote) still needs SGX or TDX hardware and stays open. Results:
+
+| | x86-64 | aarch64 under qemu |
+|---|---|---|
+| Arch host | 1284 → **1415** of 1415 | 1195 → **1324** of 1324 |
+| Ubuntu 26.04 rootfs (uutils) | 1239 → **1356** of 1356 | 1155 → **1270** of 1270 |
+
+### Breaking — a quote passes only with Intel's collateral, and a TD only with its RTMRs pinned
+
+Through 3.14.1 `kavach_attest_quote` checked the signatures, the nonce and the measurement. A
+genuine platform that Intel had since rated out of date, or whose PCK key it had revoked, passed.
+For TDX only MRTD, the TD's firmware, was checked, so any kernel with any command line passed.
+Both now fail closed:
+
+- **`"the policy carries no collateral"`** for a policy without all five parts of
+  `kavach_collateral_new()`.
+- **`"the policy pins no RTMR0"`** (or 1, or 2) for a TDX quote under a policy that does not pin
+  all three.
+
+**Migration:**
+
+1. Fetch the collateral from Intel's PCS (`api.trustedservices.intel.com`, the v4 `tcb`,
+   `qe/identity` and `pckcrl` endpoints, under `/sgx/` or `/tdx/`) or from a PCCS. Pass each part
+   as served:
+
+   ```cyrius
+   var c = kavach_collateral_new();
+   kavach_collateral_tcb_info(c, tcb_body, tcb_len);          # {"tcbInfo":…,"signature":"…"}
+   kavach_collateral_qe_identity(c, qe_body, qe_len);         # {"enclaveIdentity":…,"signature":"…"}
+   kavach_collateral_signer_chain(c, chain_pem, chain_len);   # TCB-Info-Issuer-Chain, URL-decoded
+   kavach_collateral_pck_crl(c, pck_crl_der, pck_crl_len);    # pckcrl?ca=platform|processor&encoding=der
+   kavach_collateral_root_crl(c, root_crl_der, root_crl_len); # IntelSGXRootCA.der
+   policy_attest_collateral(policy, c);
+   ```
+
+   Collateral expires: Intel's CRLs and TCB info carry a `nextUpdate` about 30 days out, and kavach
+   refuses any part that is past it. kavach makes no network call.
+2. For TDX, pin RTMR0 (TDVF's configuration), RTMR1 (the kernel) and RTMR2 (the command line and
+   initrd) with `policy_attest_rtmr(policy, i, hex)`. RTMR3 is checked once pinned.
+3. To pass a platform that is not UpToDate, name its status:
+   `policy_attest_accept_tcb(policy, KAVACH_TCB_SW_HARDENING_NEEDED | …)`. Revoked is never
+   accepted.
+
+`AttestationResult` gains `tcb_status`, the platform's status (64 bytes, was 56). On a pass,
+`details` names the statuses, for example
+`"verified; TCB UpToDate, TDX module UpToDate, QE UpToDate"`. `ATTEST_PASSED` and
+`ATTEST_PASSED_DEBUG`, which said what was not evaluated, are gone. `SandboxPolicy` is 160 bytes,
+up from 136, with the three new fields appended. kavach's own SGX and TDX launchers still refuse a
+policy that requires attestation, so no exec that ran through 3.14.1 is affected.
+
+### Added — Intel's collateral: TCB level, QE identity, revocation (`src/attest_collateral.cyr`)
+
+After the quote verifies to the policy's root, `kavach_collateral_check` checks the following, in
+the order of Intel's QVL and google/go-tdx-guest:
+
+- **The signing chain and its bodies.** The TCB Signing certificate chains to the policy's root.
+  It signed the exact bytes of the TCB info's `tcbInfo` member and of the QE identity's
+  `enclaveIdentity`. kavach evaluates only what it parses from those signed bytes, and refuses an
+  envelope that carries a member twice. Each body must be current at `now` (`issueDate` ≤ now <
+  `nextUpdate`) and be TCB info v3 or QE identity v2, for the right kind (`SGX`/`TDX`,
+  `QE`/`TD_QE`).
+- **The CRLs.** Each CRL's issuer name and ECDSA signature belong to its issuer: the PCK CA from
+  the quote's chain, or the root. Each must be current. Neither may list the PCK certificate, its
+  CA or the TCB Signing certificate.
+- **The platform's TCB level.** The PCK certificate's SGX extension (OID 1.2.840.113741.1.13.1,
+  read from its DER) gives the FMSPC, PCE-ID, 16 component SVNs and PCESVN. The FMSPC and PCE-ID
+  must be the TCB info's, and the first level the platform meets gives its status. For TDX that
+  level's TDX components must be met by the TEE_TCB_SVN, from byte 2 when the module's major
+  version (TEE_TCB_SVN[1]) is above 0.
+- **The TDX module.** With a major version above 0, the identity `TDX_<major>` must exist, its
+  MRSIGNER must be MRSIGNERSEAM, and its masked attributes must match SEAMATTRIBUTES. The minor SVN
+  selects its status. With major version 0, `tdxModule` applies.
+- **The Quoting Enclave.** Its masked MISCSELECT and ATTRIBUTES, MRSIGNER and ISVPRODID must
+  match the QE identity, and its ISVSVN selects its status.
+- **The statuses.** The platform's, the module's and the QE's must each be accepted. Revoked
+  never is.
+
+The JSON is parsed with bayan into a growable arena that is reset per check. The certificates use
+the attestation arena, now 128 KiB, so repeated verification does not grow the heap.
+
+### Added — the TDX RTMRs
+
+`policy_attest_rtmr(p, index, hex)` pins an RTMR to a list of 96-hex-digit values, and
+`policy_attest_rtmr_list` reads one back. A TDX quote passes only when RTMR0, RTMR1 and RTMR2 are
+pinned and each is on its list. RTMR3, which the guest extends at run time, is checked when pinned
+(`"RTMR3 not in the allowlist"`). `merge_policies` pins any index either side pins, to the values
+both allow. It keeps the accepted TCB statuses both sides accept, and either side's collateral.
+
+### Fixed — kavach's TDX verification could not parse a real TDX quote
+
+Intel's v4 quote puts the QE report, its signature, the QE auth data and the PCK chain inside
+certification data of type 6, after the attestation key. sigil 3.13.15's `tdx_quote_parse` reads
+the QE report straight after the key, so it returns 0 for every quote a real TD produces. This
+was measured on Intel's sample from a real platform: sigil parses and verifies the matching SGX v3
+sample, and refuses the TDX one. sigil's own TDX fixtures are synthesized without the wrapper,
+which is why its tests pass.
+
+`_attest_tdx_parse` tries sigil's parse first. When that fails, the quote is v4, and the type-6
+data runs exactly to the end, kavach parses a copy without the 6-byte header. No signature covers
+those bytes. The real sample then verifies to Intel's root and clears Intel's collateral. The
+issue is filed for sigil, with a request for v5 quotes too:
+`docs/development/issues/2026-11-02-sigil-tdx-quote-type6-wrapper.md`.
+
+### Fixed — runsc's and docker's own failures read as the payload's
+
+Since 3.13.2 these runtimes' stderr reached the result, and through it the externalization gate.
+A runtime error could then read as a finding and fail the exec as "externalization blocked", as
+runc's did before OCI took `--log` (3.9.2).
+
+- **gVisor.** runsc now runs with `--log <file>`, a file in the OCI state directory. runsc reports
+  each failure of its own through `util.Errorf`/`Fatalf` (runsc/cmd/util/util.go): the message
+  goes to stderr, a JSON line goes to the `--log` file, and Fatalf exits 128. runsc's internal
+  logs go nowhere unless `--debug-log` asks (runsc/cli/cli.go). So a non-empty log means runsc
+  failed, and the exec returns `"gVisor runtime run failed: <msg>"` as a diagnostic. This is read
+  from runsc's source: there is no runsc on this machine, and running a downloaded one was refused.
+  The tests drive a stand-in that does what the source does.
+- **SY-agnos (docker, podman).** `docker run` prints its own errors (`docker: Error response from
+  daemon: …`) on the stderr the container's goes to, and exits 125, 126 or 127. Measured on docker
+  29.9.2, a missing image, a refused `--memory 1m` and a missing entrypoint each reached the result
+  as the payload's stderr. A payload that exits 127 itself looks the same. The run is now
+  `create`, then `start -a -i` with the payload's stdin and the rest of the deadline, then
+  `inspect --format {{.State.Error}}`, then `rm --force`:
+  - a failed create is `"sy-agnos: container create failed: …"`;
+  - a container that never started (`.State.Error` set) is `"sy-agnos: container start failed:
+    …"`;
+  - a payload's own 127 stays the payload's.
+
+  An inspect that fails is a diagnostic too, since the stderr cannot then be shown to be the
+  payload's.
+- **`sy_agnos_set_image(name)` / `sy_agnos_image()`** (new) run another image: a mirror, a pinned
+  digest or a local build. The default stays `ghcr.io/maccracken/agnos:latest`.
+
+### Changed — aarch64 gets namespaces and a rootfs
+
+`security_create_namespace` calls `sys_unshare`, and `_spawn_enter_rootfs` calls `sys_chroot`.
+The stdlib has named both in both Linux peers since the 6.6.14 pin. Through 3.14.1 both refused
+on aarch64: kavach's x86-64 272 and 161 run as `kcmp` and `sethostname` there, and the native
+numbers are not kavach's to write (ADR-007). `src/sys_security_syscalls.cyr`, which held those two
+x86-64 numbers, is deleted. That takes `SYS_UNSHARE` and `SYS_CHROOT_NR` out of the bundle;
+`SYS_UNSHARE` is the stdlib's. The CI security scan now allows a `SYS_*` declaration only in
+`src/kernel_audit.cyr`. An aarch64 build traced under `qemu-aarch64 -strace` issues `chroot(…)` and
+`unshare(…)`. qemu-user refuses `unshare(CLONE_NEWUSER)` in its multi-threaded process (EINVAL),
+so the namespace and rootfs tests run fully only on the native `ubuntu-26.04-arm` job.
+
+### Tests
+
+131 more assertions (1284 → 1415 on x86-64).
+
+- **The collateral, on generated vectors.** `scripts/gen-collateral-vectors.py` writes
+  `tests/attest_collateral_vectors.cyr`: SGX v3 and TDX v4 quotes in Intel's layout under a test
+  root, with TCB info, QE identity and CRLs. There is one quote per branch: each TCB status, a
+  platform below every level, a PCESVN that alone drops a level, a QE out of date, a revoked PCK
+  certificate, a TDX module out of date, a missing or foreign TDX module identity, and a debug
+  guest. The collateral variants cover forged, edited, stale, wrong-kind, wrong-version,
+  duplicate-member, foreign-root and foreign-issuer cases.
+- **Real Intel data** (`tests/data/`, from dcap-qvl's MIT-licensed samples, with provenance and
+  checksums):
+  - the SGX quote is ConfigurationAndSWHardeningNeeded on 2025-06-20, refused by default and
+    affirmed when that status is accepted;
+  - the TDX quote is UpToDate throughout on 2025-06-20, and OutOfDate against the 2026-10-08
+    collateral;
+  - another FMSPC's collateral is refused, and so is the test root;
+  - the TDX sample file has 70 bytes of capture padding after the quote, and the padded file is
+    refused.
+- **The RTMRs and merges:** each unpinned and off-list index, and RTMR3.
+- **The runtime diagnostics:** stand-ins for runsc's failure and for each docker failure, and the
+  real docker on this host. The real-docker test imports an empty image, so nothing is pulled,
+  and checks a failed start and a refused create; when `ubuntu:24.04` is present it also checks a
+  payload's own exit 7 and 127. Without docker the test says so and stops.
+- **aarch64:** `rootfs_entry_confines_to_the_root` replaces `aarch64_refuses_unnamed_calls`. In a
+  child it makes a user and mount namespace, enters a one-file root, and sees the marker at `/`
+  and no `/etc`. A host that refuses namespaces must refuse cleanly.
+- **Mutants of the collateral check, each caught (20):** CRL revocation ignored, FMSPC unchecked,
+  every status accepted, a body's signature unchecked, TDX components compared from byte 0, RTMRs
+  unchecked, the module signer unchecked, QE attributes unchecked, a CRL's window unchecked, the
+  signing chain unchecked, duplicate members accepted, the TCB info's window unchecked, a CRL's
+  issuer unchecked, any certification type unwrapped, RTMR pins not required, the first QE level
+  always taken, PCESVN unchecked, the root CRL's second serial ignored, collateral not required,
+  and the QE identity's kind unchecked. The first pass left five standing. They exposed a test bug
+  of mine: an early return compared the TDX quote's length after it had been corrected, so the
+  real TDX checks never ran. The other gaps were a duplicate-member body that was not
+  NUL-terminated and two missing vectors (QE attributes, PCESVN). All five are caught now.
+- The sigil fixtures (`tests/attest_vectors.cyr`) stay for the signature paths, P-384 among them,
+  and for the refusals before the collateral.
+
+### Verified
+
+- **The release tree (cyrius 6.7.18):**
+  - the Arch host: 1415 of 1415 on x86-64 with seccomp loaded and the real docker, and 1324 of
+    1324 on aarch64 under qemu-aarch64 11.1.3;
+  - the Ubuntu 26.04.1 rootfs (non-root, user namespace and chroot): 1356 of 1356 on x86-64 with
+    uutils 0.8.0, and again with Ubuntu's uutils 0.10.0; 1270 of 1270 on aarch64 under 26.04's
+    qemu 10.2.1;
+  - also: `tests/samay_integration.tcyr` (12 of 12), the fuzz harness, the smoke banner on x86-64
+    and aarch64, the agnos build, `cyrius fmt --check` (no drift), `cyrius lint` (0 warnings),
+    `cyrius vet`, `scripts/check-symbols.py`, and the CI security scan.
+- **The bundles:** `cyrius distlib --all` is idempotent and leaves both sidecars as they were (16
+  and 13 leaves). Both compile with only their sidecar's stdlib. The sidecar-only consumer and the
+  README's consumer build and run.
+- **`cyrius deps --locked`** passes; `cyrius.lock` is unchanged.
+- **Not yet run:** this release on GitHub Actions, including the namespace and rootfs tests on the
+  native `ubuntu-26.04-arm` job, which is their first native aarch64 run.
+
+### Performance
+
+**The release tree against 3.14.1, both on cyrius 6.7.18:** `scripts/bench-ab.py 3.14.1 .`, 5
+interleaved rounds per side, pinned to one CPU.
+
+- **19 of the 29 shared benchmarks overlap: no measured change.** That includes every exec row
+  (`process_exec_echo` 2.683 → 2.708 ms, `process_exec_confined` 2.722 → 2.708 ms,
+  `process_exec_large_output` 124.74 → 124.76 ms), the scanners and the gate.
+- **`attest_sgx_quote` 52.76 → 116.60 ms (+121%), the cost of the collateral.** On top of
+  sigil's three verifications come five more ECDSA P-256 verifications: the signing chain, the
+  two signed bodies and the two CRLs. The root CRL is verified once for both of its serials; a
+  first version that verified it twice ran at about 125 ms. The JSON parse and the TCB-level
+  walk are small beside those. The new `attest_tdx_quote`, in Intel's layout through every check,
+  is 96.4 ms. `attest_tdx_quote_p384` overlaps (49.24 → 49.31 ms): it verifies as before, then
+  stops at the collateral.
+- **The policy grew from 136 to 160 bytes, and `policy_new` zeroes it:** `policy_strict_create`
+  45 → 51 ns (+13.3%), `merge_policies_plain` and `merge_policies_landlock` +5.9% (204 → 216 ns,
+  340 → 360 ns), `config_builder_full` 104 → 108 ns (+3.8%).
+- **Faster, in code this release does not touch:** `http_allowlist_hit` 76 → 70 ns (−7.9%),
+  `http_path_extract` 108 → 101 ns (−6.5%), `http_allowlist_miss` 85 → 82 ns (−3.5%) and
+  `ct_streq_64` −1.5%. `cgroup_wrap_argv` is +1.7%. These are layout, not a change.
+- The `3.14.2` rows in `benches/bench-history.csv` are the release run
+  (`scripts/bench-history.sh 3.14.2`, pinned). Against the `3.14.1` rows they agree:
+  `attest_sgx_quote` +118%, `policy_strict_create` +11%, the `http_*` rows −6.5% and −7.9%, and
+  `audit_chain_record_to_tmpfs` +6.2%, which overlaps in the A/B (−2.2%).
+- **Binary sizes** of `src/main.cyr` with `CYRIUS_DCE=1`: x86-64 2,162,552 → 2,239,480 (+3.6%);
+  agnos 2,118,320 → 2,195,248 (+3.6%); aarch64 4,353,480 → 4,356,760 (+0.1%). Without DCE, x86-64
+  is 3,792,760 → 3,841,016 (+1.3%).
+
 ## [3.14.1] — 2026-11-02
 
 The `basic` seccomp filter admits a socket write again, and the toolchain moves to cyrius 6.7.18

@@ -81,6 +81,14 @@ itself.
    - aarch64 `chroot` (51) is already unreachable, because the getsockname row turns 51 into 204;
    - takumi's native `ppoll` (73) runs as `flock` since cyrius 6.6.4 added a `73→32` row.
 
+**Amended — v3.14.2.** Case 2 no longer occurs. The stdlib names `unshare` and `chroot` in both
+Linux peers (`SYS_UNSHARE` with ESYSXLAT 272→97, `SYS_CHROOT` with 161→51 below the 51→204
+getsockname row; present by the 6.6.14 pin), so `security_create_namespace` calls `sys_unshare`
+and `_spawn_enter_rootfs` calls `sys_chroot`, on aarch64 too. `src/sys_security_syscalls.cyr` is
+deleted, and the security scan allows a `SYS_*` declaration only in `src/kernel_audit.cyr`. Traced
+under `qemu-aarch64 -strace`, an aarch64 build issues `chroot(…)` and `unshare(…)`. The rule
+stands for any call the stdlib does not name.
+
 **Inline-asm `svc` was also considered.** The stdlib's `thread.cyr` issues `clone` that way, and it
 bypasses the chain. But it needs hand-encoded instructions and a frame slot for the result. A slip
 there reports a failed `unshare` as success (fail open), on a platform kavach does not yet claim.
@@ -108,7 +116,8 @@ CI (3.12.8) enforces this in two places:
 
 - A 32-bit payload (i386 on x86-64, AArch32 on aarch64) is killed at its first syscall under any
   kavach filter. Running one needs a policy with `seccomp_enabled = 0`.
-- aarch64 has no namespaces and no rootfs entry until the stdlib names `unshare` and `chroot`.
+- aarch64 has no namespaces and no rootfs entry until the stdlib names `unshare` and `chroot`
+  (lifted in v3.14.2; see the amendment under §3).
   `security_create_namespace` returns not-supported there, and `_spawn_enter_rootfs` returns -1.
   A confined child that needs either exits 123, as it already did through 3.12.7 when `kcmp`
   failed. The difference is that the refusal is now deliberate and named.

@@ -22,12 +22,17 @@ struct SandboxPolicy {
     attest_root;
     attest_root_len;
     attest_allow_debug;
+    attest_rtmrs;
+    attest_collateral;
+    attest_tcb_accept;
 }
 
 # 104 (3.11.3): `landlock_rules` is appended, so no existing field offset moves
 # and a consumer holding a policy built by an older release keeps working.
 # 136 (3.13.0): the four attestation fields are appended the same way.
-var SANDBOX_POLICY_SIZE = 136;
+# 160 (3.14.2): the TDX RTMR allowlists, the collateral and the accepted TCB
+# statuses, appended the same way.
+var SANDBOX_POLICY_SIZE = 160;
 
 fn policy_new() {
     var p = alloc(SANDBOX_POLICY_SIZE);
@@ -227,6 +232,76 @@ fn policy_attest_root(p, der, len) {
 fn policy_attest_allow_debug(p, on) {
     if (p == 0) { return 0 - 1; }
     SandboxPolicy_set_attest_allow_debug(p, on);
+    return 0;
+}
+
+# Allow `hex` (96 hex digits) as the value of TDX runtime measurement register
+# `index` (0 to 3). Upper-case digits are folded. Returns 0, or -1.
+#
+# MRTD measures only the TD's initial memory, its firmware (TDVF). TDVF extends
+# what it loads into the RTMRs: RTMR0 the TD's configuration (the TD HOB, the
+# ACPI tables, the boot variables), RTMR1 the OS loader and kernel, RTMR2 the
+# kernel command line and initrd, and RTMR3 is left to the guest (Intel TDX
+# Virtual Firmware Design Guide §11). Since 3.14.2 a TDX quote passes only when
+# the policy pins RTMR0, RTMR1 and RTMR2 and each is on its list, so the kernel
+# and command line are checked as well as the firmware. RTMR3 is checked when
+# pinned. A nonce on the kernel command line would change RTMR2 on every exec.
+fn policy_attest_rtmr(p, index, hex) {
+    if (p == 0 || hex == 0 || index < 0 || index > 3) { return 0 - 1; }
+    if (strlen(hex) != 96) { return 0 - 1; }
+    var m = alloc(97);
+    var i = 0;
+    while (i < 96) {
+        var c = load8(hex + i);
+        if (c >= 65 && c <= 70) { c = c + 32; }
+        if ((c < 48 || c > 57) && (c < 97 || c > 102)) { return 0 - 1; }
+        store8(m + i, c);
+        i = i + 1;
+    }
+    store8(m + 96, 0);
+    var lists = SandboxPolicy_attest_rtmrs(p);
+    if (lists == 0) {
+        lists = alloc(32);
+        memset(lists, 0, 32);
+        SandboxPolicy_set_attest_rtmrs(p, lists);
+    }
+    var list = load64(lists + index * 8);
+    if (list == 0) {
+        list = vec_new();
+        store64(lists + index * 8, list);
+    }
+    vec_push(list, m);
+    return 0;
+}
+
+# The allowlist for RTMR `index`, or 0 when the policy pins none.
+fn policy_attest_rtmr_list(p, index) {
+    if (p == 0 || index < 0 || index > 3) { return 0; }
+    var lists = SandboxPolicy_attest_rtmrs(p);
+    if (lists == 0) { return 0; }
+    var list = load64(lists + index * 8);
+    if (list == 0) { return 0; }
+    if (vec_len(list) == 0) { return 0; }
+    return list;
+}
+
+# The collateral a quote's platform is checked against (`kavach_collateral_new`
+# and its setters, in src/attest_collateral.cyr): Intel's TCB info, QE identity,
+# their signing chain, the PCK CRL and the root CRL. Since 3.14.2 a quote passes
+# only with all five: without them a genuine platform whose TCB is out of date,
+# or whose PCK key is revoked, passes. The collateral is held, not copied.
+fn policy_attest_collateral(p, c) {
+    if (p == 0 || c == 0) { return 0 - 1; }
+    SandboxPolicy_set_attest_collateral(p, c);
+    return 0;
+}
+
+# The TCB statuses (KAVACH_TCB_* bits) a passing quote may have, besides
+# UpToDate, which is always accepted. 0, the default, accepts UpToDate only.
+# KAVACH_TCB_REVOKED is never accepted, whatever the mask says.
+fn policy_attest_accept_tcb(p, mask) {
+    if (p == 0 || mask < 0) { return 0 - 1; }
+    SandboxPolicy_set_attest_tcb_accept(p, mask);
     return 0;
 }
 

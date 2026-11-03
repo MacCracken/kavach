@@ -7,10 +7,9 @@ include "src/util.cyr"
 include "src/error.cyr"
 # Internalized agnosys (agnodrm) Linux security backends (Landlock/seccomp = security.cyr,
 # SELinux/AppArmor = mac.cyr, Linux audit = kernel_audit.cyr) + sys_error/sys_util
-# support + the 6 agnos-only security syscall consts — the agnosys → agnodrm
-# decomposition (kavach owns the LSM/MAC/audit backends it already consumed; the
-# landlock/prctl numbers come from cyrius's lib/syscalls). Before their users.
-include "src/sys_security_syscalls.cyr"
+# support — the agnosys → agnodrm decomposition (kavach owns the LSM/MAC/audit
+# backends it already consumed; the landlock/prctl/unshare/chroot numbers come
+# from cyrius's lib/syscalls). Before their users.
 include "src/sys_error.cyr"
 include "src/sys_util.cyr"
 include "src/security.cyr"
@@ -50,11 +49,12 @@ include "src/persistent.cyr"
 include "src/spawn.cyr"
 include "src/composite.cyr"
 include "src/observability.cyr"
+include "src/attest_collateral.cyr"
 include "src/attestation.cyr"
 include "src/sandbox_exec.cyr"
 
 fn _print_banner() {
-    var banner = "kavach v3.14.1 — Cyrius port\n";
+    var banner = "kavach v3.14.2 — Cyrius port\n";
     sys_write(1, banner, strlen(banner));
     return 0;
 }

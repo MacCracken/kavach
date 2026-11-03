@@ -801,8 +801,6 @@ enum NsFlag {
     NS_USER = 8;
 }
 
-# SYS_UNSHARE is kavach's own x86-64 number, from src/sys_security_syscalls.cyr.
-
 # Create new namespace(s) with specified flags.
 # flags: bitwise OR of NS_NETWORK, NS_MOUNT, NS_PID, NS_USER
 # Returns Result.
@@ -815,26 +813,19 @@ fn security_create_namespace(flags): i64 {
     # isolation primitives, at which point this branch calls those instead.
     return kavach_err_not_supported("NAMESPACES");
     #endif
-    #ifdef CYRIUS_ARCH_AARCH64
-    # **Refused on aarch64 until the stdlib names unshare(2).** Through 3.12.7 this
-    # issued x86-64 272, which cyrius does not renumber, so aarch64 ran kcmp(2)
-    # with the clone flags as a pid; it failed, closed, but no namespace was ever
-    # made. The native number (97) cannot be written here: cyrius's rule is never
-    # to put an aarch64-native number under an aarch64 #ifdef, because its
-    # x86-number translation matches on the number alone and a row added later
-    # silently takes it over. The call returns when the stdlib declares SYS_UNSHARE
-    # (filed upstream at 3.12.8).
-    return kavach_err_not_supported("NAMESPACES");
-    #endif
+    # sys_unshare since 3.14.2. Through 3.14.1 this was kavach's own x86-64 272,
+    # x86-only, and aarch64 refused: cyrius did not renumber 272, so aarch64 ran
+    # kcmp(2) through 3.12.7, and the native 97 is not a number kavach may write
+    # (ADR-007). The stdlib names SYS_UNSHARE in both Linux peers (ESYSXLAT
+    # 272→97), so aarch64 gets namespaces.
     #ifndef CYRIUS_TARGET_AGNOS
-    #ifndef CYRIUS_ARCH_AARCH64
     var sflags = 0;
     if ((flags & NS_NETWORK) != 0) { sflags = sflags | CLONE_NEWNET; }
     if ((flags & NS_MOUNT) != 0) { sflags = sflags | CLONE_NEWNS; }
     if ((flags & NS_PID) != 0) { sflags = sflags | CLONE_NEWPID; }
     if ((flags & NS_USER) != 0) { sflags = sflags | CLONE_NEWUSER; }
 
-    var ret = syscall(SYS_UNSHARE, sflags);
+    var ret = sys_unshare(sflags);
     if (ret < 0) {
         var errno = 0 - ret;
         if (errno == EPERM) { return kavach_err_permission_denied("security_create_namespace"); }
@@ -843,7 +834,6 @@ fn security_create_namespace(flags): i64 {
     }
 
     return Ok(0);
-    #endif
     #endif
 }
 

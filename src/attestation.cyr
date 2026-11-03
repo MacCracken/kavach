@@ -43,12 +43,14 @@ struct AttestationResult {
     svn;
     fresh_at;
     details;
+    tcb_status;
 }
 
-# Seven fields. The constructor allocated 48 bytes until 3.13.0, so `details`
+# Eight fields. The constructor allocated 48 bytes until 3.13.0, so `details`
 # at offset 48 was written past the end of the result, over the first word of
-# whatever was allocated next.
-var ATTESTATION_RESULT_SIZE = 56;
+# whatever was allocated next. 3.14.2 appended `tcb_status`, the platform's TCB
+# status (a KAVACH_TCB_* bit) once the collateral has been evaluated, else 0.
+var ATTESTATION_RESULT_SIZE = 64;
 
 # Named `kavach_` because sigil defines its own `attestation_result_new`, and
 # under last-definition-wins only one of the two survives in a consumer.
@@ -61,6 +63,7 @@ fn kavach_attestation_result_new(backend) {
     AttestationResult_set_svn(a, 0);
     AttestationResult_set_fresh_at(a, clock_epoch_secs());
     AttestationResult_set_details(a, "");
+    AttestationResult_set_tcb_status(a, 0);
     return a;
 }
 
@@ -76,9 +79,10 @@ fn attestation_is_acceptable(result, minimum_trust) {
 # `kavach_attest_quote` checks a quote in this order; the first failure makes
 # the result `KAVACH_TRUST_CONTRAINDICATED`, with the reason in `details`:
 #
-#   1. The policy names a root and at least one measurement, the nonce is 1 to
-#      64 bytes, and `now` is a real time (sigil reads 0 as "skip the
-#      certificates' validity dates").
+#   1. The policy names a root, at least one measurement and its collateral,
+#      the nonce is 1 to 64 bytes, and `now` is a real time (sigil reads 0 as
+#      "skip the certificates' validity dates"). For TDX it also pins RTMR0,
+#      RTMR1 and RTMR2.
 #   2. The quote parses (sigil `sgx_quote_parse` / `tdx_quote_parse`).
 #   3. It verifies to the policy's root at `now`, through sigil
 #      `*_quote_verify_full_into`: the PCK certificate chain carried in the
@@ -86,24 +90,27 @@ fn attestation_is_acceptable(result, minimum_trust) {
 #      PCK's signature over the Quoting Enclave's report; that report's binding
 #      of the attestation key (SHA-256 of the key and the QE auth data); and the
 #      attestation key's signature over the quote header and body.
-#   4. The guest is not a debug enclave or debug TD, unless the policy allows
+#   4. Intel's collateral clears the platform (3.14.2,
+#      `kavach_collateral_check` in src/attest_collateral.cyr): the TCB info and
+#      QE identity are signed by a TCB Signing certificate under the root and
+#      current; neither the PCK certificate, its CA nor the signing certificate
+#      is revoked; the platform's TCB level, the TDX module's and the QE's are
+#      statuses the policy accepts (UpToDate only, by default).
+#   5. The guest is not a debug enclave or debug TD, unless the policy allows
 #      one (SGX ATTRIBUTES.DEBUG, TDX TD_ATTRIBUTES.DEBUG).
-#   5. The report data starts with the nonce, so the quote was made for this
+#   6. The report data starts with the nonce, so the quote was made for this
 #      exec and is not a replay.
-#   6. The measurement is in the policy's allowlist: MRENCLAVE for SGX, MRTD
-#      for TDX.
+#   7. The measurement is in the policy's allowlist: MRENCLAVE for SGX, MRTD
+#      for TDX. For TDX each pinned RTMR is on its list (3.14.2).
 #
 # A result that passes is `KAVACH_TRUST_AFFIRMING`, or `KAVACH_TRUST_WARNING`
-# for a debug guest the policy allowed. The measurement, signer and SVN are
-# filled in only once step 3 has passed; before that they are whatever the
-# quote's sender wrote.
+# for a debug guest the policy allowed; `details` names the TCB statuses. The
+# measurement, signer and SVN are filled in only once step 3 has passed; before
+# that they are whatever the quote's sender wrote.
 #
-# **Not evaluated**: the platform's TCB level, the Quoting Enclave's identity,
-# and revocation. Those need Intel's collateral (TCB info, QE identity, CRLs),
-# which sigil does not evaluate. A genuine platform with an out-of-date or
-# revoked TCB passes. For TDX, only MRTD, the TD's initial memory (its
-# firmware), is checked against the allowlist; the RTMRs, which record the
-# kernel and its command line, are not.
+# Through 3.14.1 step 4 did not exist, and neither did the RTMRs: a genuine
+# platform with an out-of-date or revoked TCB passed, and for TDX only MRTD,
+# the TD's firmware, was checked, not the kernel or its command line.
 
 # The DEBUG bits are Linux's `SGX_ATTR_DEBUG` (BIT(1), arch/x86/include/asm/
 # sgx.h: the enclave allows EDBGRD and EDBGWR, debug reads and writes of its
@@ -114,19 +121,16 @@ var SGX_FLAGS_DEBUG = 2;
 var TDX_TD_ATTR_DEBUG = 1;
 var ATTEST_NONCE_MAX = 64;
 
-# `details` of a result that passed. It names what was not checked.
-var ATTEST_PASSED = "verified; TCB, QE identity and revocation not evaluated";
-var ATTEST_PASSED_DEBUG = "verified, debug guest allowed; TCB, QE identity and revocation not evaluated";
-
-# Scratch for sigil's verifier, reset before each quote, so repeated
-# verification does not grow the heap. 64 KiB holds a real PCK chain several
+# Scratch for sigil's verifier and the collateral's certificates, reset before
+# each quote, so repeated verification does not grow the heap. 128 KiB holds a
+# real PCK chain, the signing chain and a TDX quote's normalized copy several
 # times over; a quote whose certificate data does not fit fails verification.
 var _attest_arena = 0;
 var _attest_parsed[256];
 
 fn _attest_scratch() {
     if (_attest_arena == 0) {
-        _attest_arena = arena_new(65536);
+        _attest_arena = arena_new(131072);
     } else {
         arena_reset(_attest_arena);
     }
@@ -161,14 +165,59 @@ fn _attest_listed(policy, hex) {
 fn _attest_precheck(policy, quote, quote_len, nonce, nonce_len, now) {
     if (policy_wants_attestation(policy) == 0) { return "the policy allows no measurement"; }
     if (SandboxPolicy_attest_root(policy) == 0) { return "the policy names no root"; }
+    if (kavach_collateral_complete(SandboxPolicy_attest_collateral(policy)) == 0) {
+        return "the policy carries no collateral";
+    }
     if (nonce == 0 || nonce_len <= 0 || nonce_len > ATTEST_NONCE_MAX) { return "no nonce"; }
     if (now <= 0) { return "no verification time"; }
     if (quote == 0 || quote_len <= 0) { return "no quote"; }
     return 0;
 }
 
-# Steps 4 to 6.
-fn _attest_finish(r, policy, debug, report_data, nonce, nonce_len) {
+# "verified[, debug guest allowed]; TCB <s>[, TDX module <s>], QE <s>".
+fn _attest_passed_details(debug, tdx) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "verified");
+    if (debug != 0) { str_builder_add_cstr(sb, ", debug guest allowed"); }
+    str_builder_add_cstr(sb, "; TCB ");
+    str_builder_add_cstr(sb, kavach_tcb_status_name(kavach_collateral_platform_status()));
+    if (tdx == 1) {
+        str_builder_add_cstr(sb, ", TDX module ");
+        str_builder_add_cstr(sb, kavach_tcb_status_name(kavach_collateral_module_status()));
+    }
+    str_builder_add_cstr(sb, ", QE ");
+    str_builder_add_cstr(sb, kavach_tcb_status_name(kavach_collateral_qe_status()));
+    return str_data(str_builder_build(sb));
+}
+
+# "<prefix>RTMR<i><suffix>", as a fresh cstr.
+fn _attest_rtmr_msg(prefix, i, suffix) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, prefix);
+    str_builder_add_cstr(sb, "RTMR");
+    str_builder_add_int(sb, i);
+    str_builder_add_cstr(sb, suffix);
+    return str_data(str_builder_build(sb));
+}
+
+# For a TDX quote `tdxq` (0 for SGX): each RTMR the policy pins must be on its
+# list. Returns 0, or the reason.
+fn _attest_rtmrs_listed(policy, tdxq) {
+    if (tdxq == 0) { return 0; }
+    var i = 0;
+    while (i < 4) {
+        var list = policy_attest_rtmr_list(policy, i);
+        if (list != 0) {
+            var hex = _attest_hex(tdx_quote_rtmr0_ptr(tdxq) + i * 48, 48);
+            if (_merge_listed(list, hex) == 0) { return _attest_rtmr_msg("", i, " not in the allowlist"); }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Steps 5 to 7.
+fn _attest_finish(r, policy, debug, report_data, nonce, nonce_len, tdxq) {
     if (debug != 0 && SandboxPolicy_attest_allow_debug(policy) == 0) {
         return _attest_fail(r, "debug guest");
     }
@@ -178,14 +227,31 @@ fn _attest_finish(r, policy, debug, report_data, nonce, nonce_len) {
     if (_attest_listed(policy, AttestationResult_measurement_hex(r)) == 0) {
         return _attest_fail(r, "measurement not in the allowlist");
     }
+    var why = _attest_rtmrs_listed(policy, tdxq);
+    if (why != 0) { return _attest_fail(r, why); }
+    var tdx = 0;
+    if (tdxq != 0) { tdx = 1; }
+    AttestationResult_set_details(r, _attest_passed_details(debug, tdx));
     if (debug != 0) {
         AttestationResult_set_trust(r, KAVACH_TRUST_WARNING);
-        AttestationResult_set_details(r, ATTEST_PASSED_DEBUG);
         return r;
     }
     AttestationResult_set_trust(r, KAVACH_TRUST_AFFIRMING);
-    AttestationResult_set_details(r, ATTEST_PASSED);
     return r;
+}
+
+# Step 4: the collateral, for a quote that has verified. Returns 0, or the
+# reason. Records the platform's status in `r`.
+fn _attest_collateral(r, policy, tdx, pem, pem_len, qe_report, tee_tcb_svn, mrsignerseam, seamattr, now, arena) {
+    var root = x509_cert_alloc_into(arena);
+    if (root == 0) { return "out of attestation scratch"; }
+    var rder = SandboxPolicy_attest_root(policy);
+    var rlen = SandboxPolicy_attest_root_len(policy);
+    if (x509_parse_into(rder, rlen, root, arena) != 1) { return "the policy's root does not parse"; }
+    var why = kavach_collateral_check(SandboxPolicy_attest_collateral(policy), root, rder, rlen, tdx, pem, pem_len,
+      qe_report, tee_tcb_svn, mrsignerseam, seamattr, SandboxPolicy_attest_tcb_accept(policy), now, arena);
+    AttestationResult_set_tcb_status(r, kavach_collateral_platform_status());
+    return why;
 }
 
 # Whether a parsed quote is from a debug guest. Meaningful only once the quote
@@ -210,14 +276,56 @@ fn kavach_attest_sgx_quote(quote, quote_len, policy, nonce, nonce_len, now) {
     var q = &_attest_parsed;
     memset(q, 0, 256);
     if (sgx_quote_parse(quote, quote_len, q) != 1) { return _attest_fail(r, "the quote does not parse"); }
+    var arena = _attest_scratch();
     if (sgx_quote_verify_full_into(q, SandboxPolicy_attest_root(policy),
-        SandboxPolicy_attest_root_len(policy), now, _attest_scratch()) != 1) {
+        SandboxPolicy_attest_root_len(policy), now, arena) != 1) {
         return _attest_fail(r, "the quote does not verify to the policy's root");
     }
     AttestationResult_set_measurement_hex(r, _attest_hex(sgx_quote_mr_enclave_ptr(q), 32));
     AttestationResult_set_signer_hex(r, _attest_hex(sgx_quote_mr_signer_ptr(q), 32));
     AttestationResult_set_svn(r, sgx_quote_isv_svn(q));
-    return _attest_finish(r, policy, _attest_sgx_debug(q), sgx_quote_report_data_ptr(q), nonce, nonce_len);
+    why = _attest_collateral(r, policy, 0, sgx_quote_cert_data_ptr(q), sgx_quote_cert_data_len(q),
+      sgx_quote_qe_report_ptr(q), 0, 0, 0, now, arena);
+    if (why != 0) { return _attest_fail(r, why); }
+    return _attest_finish(r, policy, _attest_sgx_debug(q), sgx_quote_report_data_ptr(q), nonce, nonce_len, 0);
+}
+
+fn _attest_le16(p) { return (load8(p) & 255) | ((load8(p + 1) & 255) << 8); }
+fn _attest_le32(p) { return _attest_le16(p) | (_attest_le16(p + 2) << 16); }
+
+# Parse a TDX v4 quote into `q`. Intel's quotes put the QE report, its
+# signature, the QE auth data and the PCK chain inside certification data of
+# type 6 ("QE report certification data") after the attestation key; sigil
+# 3.13.15's `tdx_quote_parse` reads the QE report straight after the key, so it
+# refuses every quote a real TD produces (measured on an Intel-signed quote from
+# dcap-qvl's samples). When the plain parse fails and that wrapper is there,
+# kavach parses a copy without its 6-byte header. No signature covers those
+# bytes: the attestation key signs the header and body, the PCK key the QE
+# report. Lifts when sigil parses the wrapper (filed: docs/development/issues/
+# 2026-11-02-sigil-tdx-quote-type6-wrapper.md).
+fn _attest_tdx_parse(quote, quote_len, q, arena) {
+    if (tdx_quote_parse(quote, quote_len, q) == 1) { return 1; }
+    if (quote_len < 636) { return 0; }
+    if (_attest_le16(quote) != 4) { return 0; }
+    var w = 64;
+    if (_attest_le16(quote + 2) == 3) { w = 96; }
+    var sig_len = _attest_le32(quote + 632);
+    if (636 + sig_len != quote_len) { return 0; }
+    var cur = 636 + 2 * w;
+    if (cur + 6 > quote_len) { return 0; }
+    if (_attest_le16(quote + cur) != 6) { return 0; }
+    if (_attest_le32(quote + cur + 2) != quote_len - cur - 6) { return 0; }
+    var flat = arena_alloc(arena, quote_len - 6);
+    if (flat == 0) { return 0; }
+    memcpy(flat, quote, cur);
+    var n = sig_len - 6;
+    store8(flat + 632, n & 255);
+    store8(flat + 633, (n >> 8) & 255);
+    store8(flat + 634, (n >> 16) & 255);
+    store8(flat + 635, (n >> 24) & 255);
+    memcpy(flat + cur, quote + cur + 6, quote_len - cur - 6);
+    memset(q, 0, 256);
+    return tdx_quote_parse(flat, quote_len - 6, q);
 }
 
 # Verify a TDX v4 quote against `policy`. Returns an AttestationResult. The
@@ -229,15 +337,27 @@ fn kavach_attest_tdx_quote(quote, quote_len, policy, nonce, nonce_len, now) {
     AttestationResult_set_fresh_at(r, now);
     var why = _attest_precheck(policy, quote, quote_len, nonce, nonce_len, now);
     if (why != 0) { return _attest_fail(r, why); }
+    var i = 0;
+    while (i < 3) {
+        if (policy_attest_rtmr_list(policy, i) == 0) {
+            return _attest_fail(r, _attest_rtmr_msg("the policy pins no ", i, ""));
+        }
+        i = i + 1;
+    }
     var q = &_attest_parsed;
     memset(q, 0, 256);
-    if (tdx_quote_parse(quote, quote_len, q) != 1) { return _attest_fail(r, "the quote does not parse"); }
+    var arena = _attest_scratch();
+    if (_attest_tdx_parse(quote, quote_len, q, arena) != 1) { return _attest_fail(r, "the quote does not parse"); }
     if (tdx_quote_verify_full_into(q, SandboxPolicy_attest_root(policy),
-        SandboxPolicy_attest_root_len(policy), now, _attest_scratch()) != 1) {
+        SandboxPolicy_attest_root_len(policy), now, arena) != 1) {
         return _attest_fail(r, "the quote does not verify to the policy's root");
     }
     AttestationResult_set_measurement_hex(r, _attest_hex(tdx_quote_mrtd_ptr(q), 48));
-    return _attest_finish(r, policy, _attest_tdx_debug(q), tdx_quote_report_data_ptr(q), nonce, nonce_len);
+    why = _attest_collateral(r, policy, 1, tdx_quote_cert_data_ptr(q), tdx_quote_cert_data_len(q),
+      tdx_quote_qe_report_ptr(q), tdx_quote_tee_tcb_svn_ptr(q), tdx_quote_mrseamsigner_ptr(q),
+      tdx_quote_seam_attributes_ptr(q), now, arena);
+    if (why != 0) { return _attest_fail(r, why); }
+    return _attest_finish(r, policy, _attest_tdx_debug(q), tdx_quote_report_data_ptr(q), nonce, nonce_len, q);
 }
 
 # Verify a quote from `backend` (SGX or TDX). Any other backend has no quote

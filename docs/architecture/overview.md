@@ -83,17 +83,22 @@ src/
 ├── backend_dispatch.cyr   Function-pointer table keyed by Backend enum
 ├── backend_noop.cyr       Noop backend registration
 ├── backend_process.cyr    Process backend (fork+exec+capture + guard precheck)
-├── backend_gvisor.cyr     gVisor backend (shared oci_spec + `runsc run`)
+├── backend_gvisor.cyr     gVisor backend (shared oci_spec + `runsc --log … run`;
+│                          a non-empty log is runsc's own failure, v3.14.2)
 ├── backend_oci.cyr        OCI backend (shared oci_spec + `runc`/`crun`)
 ├── backend_wasm.cyr       WASM backend (`wasmtime` CLI shell-out)
-├── backend_sy_agnos.cyr   Hardened AGNOS image + Phylax scanner
+├── backend_sy_agnos.cyr   Hardened AGNOS image + Phylax scanner; docker/podman
+│                          create → start -a -i → inspect .State.Error (v3.14.2)
 ├── backend_sgx.cyr        Intel SGX via `gramine-sgx` + generated manifest
 ├── backend_sev.cyr        AMD SEV-SNP via QEMU with confidential-guest
 ├── backend_tdx.cyr        Intel TDX via QEMU with tdx-guest object
 ├── backend_firecracker.cyr Firecracker microVM with config.json + `--no-api`
 ├── composite.cyr          Defense-in-depth policy merging + composite score
 ├── observability.cyr      HealthStatus, SandboxMetrics, SpawnedProcess types
-├── attestation.cyr        AttestationResult + AttestationTrust; SGX/TDX quote verification (v3.13.0)
+├── attest_collateral.cyr  Intel DCAP collateral: TCB info v3, QE identity v2,
+│                          PCK + root CRLs, PCK cert SGX extension (v3.14.2)
+├── attestation.cyr        AttestationResult + AttestationTrust; SGX/TDX quote verification (v3.13.0);
+│                          collateral, TDX RTMRs, Intel's type-6 TDX layout (v3.14.2)
 └── sandbox_exec.cyr       End-to-end: dispatch → attestation → gate → threat → audit
 ```
 
@@ -184,7 +189,7 @@ still depends on the backend or the config, it says so:
 |----------|-------:|----------------------------|
 | seccomp enabled | +5 | **Yes** on the process backend, `sandbox_spawn` and persistent guests (v3.9.0; the rootfs-less process path since v3.11.3; architecture-checked since v3.12.8), and on the wasmtime process (v3.13.2); OCI-family backends leave it to their runtime |
 | landlock rules present | +3 | **Yes** on the same paths (v3.11.1). On the WASM backend too (v3.13.1): the rules are the guest's preopens, and landlock on the wasmtime process keeps a read-only rule read-only. Through v3.13.0 WASM ignored them, preopening the workdir read-write, and still scored them |
-| network disabled | +5 | microVM / OCI: yes. Process: yes with a rootfs, or with `config_require_namespaces(cfg, 1)` (v3.11.5), as a network namespace that is refused, not skipped, where the host denies one (and on aarch64 until cyrius names `unshare`, ADR-007); otherwise claim only |
+| network disabled | +5 | microVM / OCI: yes. Process: yes with a rootfs, or with `config_require_namespaces(cfg, 1)` (v3.11.5), as a network namespace that is refused, not skipped, where the host denies one (on aarch64 too since v3.14.2, ADR-007); otherwise claim only |
 | read-only rootfs | +3 | Backend-dependent (OCI/gVisor/microVM yes) |
 | memory OR cpu limit set | +2 | **Yes** (v3.2.0 via cgroups v2 on process backend) |
 | TCP bind/connect port allowlist | 0 | No. The fields are counts with no port list and no setter, so no Landlock network rule (ABI v4) is built from them. Not scored since v3.13.2; through v3.13.1 they added 3 |
@@ -252,7 +257,7 @@ Each backend is a plug into the dispatch table. To add `<name>`:
 | Platform | State | Evidence |
 |---|---|---|
 | Linux x86-64 | Supported | The full suite in CI, with seccomp loaded. |
-| Linux aarch64 | Supported (v3.13.0), apart from namespaces and rootfs entry, which are refused until the stdlib names `unshare` and `chroot` ([ADR-007](../adr/007-syscall-numbers-across-architectures.md)) | The `aarch64 (native)` CI job, blocking since v3.12.9, on GitHub's arm64 runner: 853 of 853 with seccomp loaded on the 3.12.9 run. Also cross-built and run under qemu. |
+| Linux aarch64 | Supported (v3.13.0); namespaces and rootfs entry since v3.14.2, through the stdlib's `sys_unshare` and `sys_chroot` ([ADR-007](../adr/007-syscall-numbers-across-architectures.md)) | The `aarch64 (native)` CI job, blocking since v3.12.9, on GitHub's arm64 runner: 1186 of 1186 with seccomp loaded on the 3.14.0 run. Also cross-built and run under qemu, which refuses user namespaces in its multi-threaded process, so the namespace and rootfs tests run fully only on the native job. |
 | agnos | Builds (`cyrius build --agnos`); the Linux confinement primitives return not-supported | Confinement there is the capability layer's (v3.5.1). |
 
 ## External dependencies
@@ -299,19 +304,19 @@ Each backend is a plug into the dispatch table. To add `<name>`:
 
 See [ADR-004](../adr/004-deferred-features.md) for rationale; [`development/roadmap.md`](../development/roadmap.md) pins each open item to a release.
 
-What's still deferred at v3.13.0 (each row checked against the source; see the roadmap for the release each is pinned to):
+What's still deferred at v3.14.2 (each row checked against the source; see the roadmap for the release each is pinned to):
 
 | Feature | Blocking dep | Trigger condition |
 |---------|--------------|-------------------|
-| **SGX / TDX quote fetch** | SGX or TDX hardware to verify on | Verification, the allowlist and the gate shipped in v3.13.0. kavach's launchers cannot produce a quote (the SGX manifest is never rendered or signed; the TDX launch passes no TDVF firmware), so they refuse a policy that requires attestation |
+| **SGX / TDX quote fetch** | SGX or TDX hardware to verify on | Verification, the allowlist and the gate shipped in v3.13.0; Intel's collateral, the RTMRs and the real TDX layout in v3.14.2. kavach's launchers cannot produce a quote (the SGX manifest is never rendered or signed; the TDX launch passes no TDVF firmware), so they refuse a policy that requires attestation |
+| **TDX quote v5** | sigil's `tdx_quote_parse` (v4 only; filed with the type-6 issue) | TD 1.5 quotes from newer QGS releases are refused until sigil parses them |
 | **SEV-SNP verification, SGX sealing** | None upstream: sigil 3.13.15 ships the `snp_report_*` family | kavach-side work, roadmap 3.14.x |
 | **Firecracker jailer / vsock / snapshot** | None upstream: the stdlib has `sys_setresuid` / `sys_setresgid` | kavach-side work; lower priority, since the microVM boundary already isolates |
 | **Stiva OCI backend** | stiva's runc-compatible OCI-runtime CLI | Single-line addition to `_oci_runtime_path()` once stiva ships it |
-| **aarch64 namespaces + rootfs entry** | cyrius stdlib names for `unshare` / `chroot` (filed at v3.12.8) | Refused on aarch64 until then; call `sys_unshare` / `sys_chroot` once the pin carries them |
 | **async exec** | Cyrius async story still maturing | Synchronous fork+wait remains correct for sandbox-runtime semantics |
 | **Full regex in pattern matchers** | PCRE engine in Cyrius | hand-rolled literal-prefix + char-class matchers cover the v3.x surface |
 
-Shipped since the v3.4.0 version of this table: OCI spec resource limits (3.3.1), seccomp (3.9.0) and Landlock (3.11.1) in the exec child, exec by pinned fd for the H4 TOCTOU (3.12.7), and SGX / TDX quote verification (3.13.0).
+Shipped since the v3.4.0 version of this table: OCI spec resource limits (3.3.1), seccomp (3.9.0) and Landlock (3.11.1) in the exec child, exec by pinned fd for the H4 TOCTOU (3.12.7), SGX / TDX quote verification (3.13.0), and Intel's collateral, the TDX RTMRs and aarch64 namespaces and rootfs entry (3.14.2).
 
 What was deferred in v3.0 but has since shipped: UUID v4 IDs, WARN-verdict secret redaction, OffenderTracker, sandbox integrity monitoring (all v3.0 closeout); `FileInjection.mode` honoring (v3.1.1); cgroups v2 + HTTP credential proxy (v3.2.0).
 

@@ -198,6 +198,16 @@ remains):
 | 8 | UUID v4 IDs | **Shipped** in the v3.0 closeout (`rand_uuid_hex`, `rand_hex_id` in `src/util.cyr`, from `getrandom`). |
 | 9 | Full regex | **Still deferred.** The scanners match literals (the code scanner through Aho-Corasick since 3.4.0) and hand-rolled character classes. |
 
+### Amended — v3.14.2
+
+Row 2: a quote now also has to clear Intel's collateral (TCB info, QE identity,
+the PCK and root CRLs; `src/attest_collateral.cyr`), and a TDX quote its RTMR0
+to RTMR2, so both fail closed where 3.13.0 passed on the signatures and MRTD
+alone. Checking against Intel's real data found that sigil 3.13.15 does not
+parse Intel's TDX v4 layout (type-6 certification data); kavach unwraps it
+until sigil does. Still open from this item: fetching the quote from a running
+guest, which needs SGX or TDX hardware, and SEV-SNP verification.
+
 Two things this ADR does not cover are recorded elsewhere. The stiva OCI runtime
 is not a deferral from the Rust port: the plan to prepend it is in
 `src/backend_oci.cyr`'s header, and the roadmap tracks it as blocked on stiva.

@@ -182,6 +182,60 @@ fn _merge_attestation(out, base, overlay) {
     SandboxPolicy_set_attest_root(out, SandboxPolicy_attest_root(src));
     SandboxPolicy_set_attest_root_len(out, SandboxPolicy_attest_root_len(src));
     SandboxPolicy_set_attest_allow_debug(out, debug);
+    # 3.14.2. The RTMR allowlists merge as the measurements do: when both
+    # require attestation, an index either pins is pinned, to the values both
+    # allow. The accepted TCB statuses are the ones both accept. The collateral
+    # is the source policy's, or the other's when it has none: any genuine copy
+    # describes the same platforms, and a quote must pass it.
+    var accept = SandboxPolicy_attest_tcb_accept(src);
+    var coll = SandboxPolicy_attest_collateral(src);
+    var lists = alloc(32);
+    memset(lists, 0, 32);
+    var k = 0;
+    while (k < 4) {
+        var mine = policy_attest_rtmr_list(src, k);
+        var theirs = 0;
+        if (a == 1 && b == 1) { theirs = policy_attest_rtmr_list(overlay, k); }
+        var r = vec_new();
+        if (mine != 0) {
+            var j = 0;
+            while (j < vec_len(mine)) {
+                var v = vec_get(mine, j);
+                if (theirs == 0 || _merge_listed(theirs, v) == 1) { vec_push(r, v); }
+                j = j + 1;
+            }
+            if (vec_len(r) == 0) { vec_push(r, "none"); }
+        } else {
+            if (theirs != 0) { _merge_copy_list(r, theirs); }
+        }
+        if (vec_len(r) > 0) { store64(lists + k * 8, r); }
+        k = k + 1;
+    }
+    if (a == 1 && b == 1) {
+        accept = accept & SandboxPolicy_attest_tcb_accept(overlay);
+        if (coll == 0) { coll = SandboxPolicy_attest_collateral(overlay); }
+    }
+    SandboxPolicy_set_attest_rtmrs(out, lists);
+    SandboxPolicy_set_attest_tcb_accept(out, accept);
+    SandboxPolicy_set_attest_collateral(out, coll);
+    return 0;
+}
+
+fn _merge_listed(list, v) {
+    var i = 0;
+    while (i < vec_len(list)) {
+        if (streq(vec_get(list, i), v) == 1) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn _merge_copy_list(dst, src) {
+    var i = 0;
+    while (i < vec_len(src)) {
+        vec_push(dst, vec_get(src, i));
+        i = i + 1;
+    }
     return 0;
 }
 

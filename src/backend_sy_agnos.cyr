@@ -14,6 +14,25 @@
 #   - AttestationReport + PCR verify — wait for sigil TPM helpers
 
 var SY_AGNOS_DEFAULT_IMAGE = "ghcr.io/maccracken/agnos:latest";
+var _sy_agnos_image = 0;
+
+# The image `sy_agnos_exec` runs: SY_AGNOS_DEFAULT_IMAGE unless
+# `sy_agnos_set_image` named another (3.14.2), for a mirror, a pinned digest
+# (`…@sha256:…`) or a local build. The name is copied. Returns the previous one.
+fn sy_agnos_set_image(name) {
+    var prev = sy_agnos_image();
+    if (name == 0) { _sy_agnos_image = 0; return prev; }
+    var n = strlen(name);
+    var c = alloc(n + 1);
+    memcpy(c, name, n + 1);
+    _sy_agnos_image = c;
+    return prev;
+}
+
+fn sy_agnos_image() {
+    if (_sy_agnos_image != 0) { return _sy_agnos_image; }
+    return SY_AGNOS_DEFAULT_IMAGE;
+}
 
 enum SyAgnosTier {
     MINIMAL = 0;
@@ -132,7 +151,7 @@ fn _sy_agnos_append_int_flag(args, flag, value, suffix) {
 
 # `<runtime> rm --force <name>` after every run, as gVisor and OCI delete
 # theirs: a deadline kills the client, and killing the client does not stop the
-# container. For a container `--rm` already removed it is a harmless failure.
+# container. For a container `create` never made it is a harmless failure.
 fn _sy_agnos_remove(runtime, name) {
     var args = vec_new();
     vec_push(args, runtime);
@@ -160,23 +179,67 @@ fn sy_agnos_exec(sandbox, command) {
     return _sy_agnos_exec_with(runtime, sandbox, command, start_ns);
 }
 
-# Run `command` in the image under the container runtime `runtime`, through
-# `backend_run_capture` (3.13.2): the container's stdout, the runtime's exit
-# status (the container's, when it ran; docker and podman use 125 to 127 for
-# their own failures), its stderr, the config's deadline and the config's stdin
-# (`-i` attaches it). ⚠ Through 3.13.1 this was `kv_exec_capture`: exit 0 for any
-# container that ran, stderr sent to /dev/null, no deadline, and no `-i`, so the
-# container's stdin was empty whatever the config held.
+# Run a runtime command that is not the payload (`create`, `inspect`): no
+# stdin, its own deadline, stdout into `buf`. Returns the byte count, or -1; its
+# stderr and exit status are `confine_last_*`.
+fn _sy_agnos_tool(args, timeout_ms, buf, cap) {
+    return confine_capture_input_env_wd(args, 0, 0, 0, 0, buf, cap, 0, timeout_ms, 0, "", 0, 0, 0);
+}
+
+# "<prefix><the last capture's stderr>", trimmed of trailing newlines.
+fn _sy_agnos_diag(prefix) {
+    var n = confine_last_stderr_len();
+    var e = alloc(n + 1);
+    memcpy(e, confine_last_stderr(), n);
+    store8(e + n, 0);
+    return _oci_diag(prefix, e);
+}
+
+# Milliseconds of `timeout_ms` left since `start_ns`; 0 when there was no
+# deadline, and at least 1 when there was one.
+fn _sy_agnos_left(timeout_ms, start_ns) {
+    if (timeout_ms <= 0) { return 0; }
+    var left = timeout_ms - (mono_now_ns() - start_ns) / 1000000;
+    if (left < 1) { left = 1; }
+    return left;
+}
+
+# Run `command` in the image under the container runtime `runtime`.
+#
+# 3.14.2: as `create`, then `start`, then `inspect`, so the runtime's own
+# failures are told apart from the payload's. `docker run` prints its errors on
+# the stderr the container's stderr goes to ("docker: Error response from
+# daemon: …") and exits 125, 126 or 127, the statuses a shell payload uses too
+# (127 for a command it cannot find). Measured on docker 29.9.2: a missing
+# image, a refused `--memory 1m` and a missing entrypoint each reached the
+# result as the payload's stderr, and through it the externalization gate,
+# where a runtime error can read as a finding and fail the exec as
+# "externalization blocked".
+#
+#   1. `<rt> create -i --name <n> … <image> -c <command>` pulls the image and
+#      makes the container. Its stderr (pull progress, "No such image", a refused
+#      flag) is the runtime's; a failure is a diagnostic.
+#   2. `<rt> start -a -i <n>` runs it attached, with the payload's stdin and
+#      what is left of the deadline (`backend_run_capture`'s contract): its
+#      stdout, stderr and exit status are the payload's…
+#   3. …unless it never started. Then `start` exits 1 with the daemon's message,
+#      and `<rt> inspect --format {{.State.Error}} <n>` prints it; a payload that
+#      exits 127 itself leaves it empty. A non-empty `.State.Error` is a
+#      diagnostic. An inspect that fails says nothing either way, so it is one
+#      too: the stderr cannot be shown to be the payload's.
+#   4. `<rt> rm --force <n>`, after every run.
+#
+# podman has the same verbs and the same `.State.Error`.
 fn _sy_agnos_exec_with(runtime, sandbox, command, start_ns) {
     var config = Sandbox_config(sandbox);
     var policy = SandboxConfig_policy(config);
-    # Named, so `_sy_agnos_remove` can find it.
+    var timeout_ms = SandboxConfig_timeout_ms(config);
+    # Named, so `start`, `inspect` and `_sy_agnos_remove` can find it.
     var name = oci_container_id("kavach-sy");
 
     var args = vec_new();
     vec_push(args, runtime);
-    vec_push(args, "run");
-    vec_push(args, "--rm");
+    vec_push(args, "create");
     vec_push(args, "-i");
     vec_push(args, "--name");
     vec_push(args, name);
@@ -211,15 +274,57 @@ fn _sy_agnos_exec_with(runtime, sandbox, command, start_ns) {
 
     vec_push(args, "--entrypoint");
     vec_push(args, "/bin/sh");
-    vec_push(args, SY_AGNOS_DEFAULT_IMAGE);
+    vec_push(args, sy_agnos_image());
     vec_push(args, "-c");
     vec_push(args, command);
 
+    var idbuf[128];
+    var cn = _sy_agnos_tool(args, timeout_ms, &idbuf, 128);
+    if (cn < 0 || confine_last_exit() != 0 || confine_last_timed_out() == 1) {
+        var why = "sy-agnos: container create failed: ";
+        if (confine_last_timed_out() == 1) { why = "sy-agnos: container create ran past the deadline: "; }
+        var d = _sy_agnos_diag(why);
+        _sy_agnos_remove(runtime, name);
+        return backend_error_result(d);
+    }
+
+    var sargs = vec_new();
+    vec_push(sargs, runtime);
+    vec_push(sargs, "start");
+    vec_push(sargs, "-a");
+    vec_push(sargs, "-i");
+    vec_push(sargs, name);
     var out_cap = 1048576;
     var out_buf = alloc(out_cap);
-    var n = backend_run_capture(args, config, out_buf, out_cap);
+    var n = confine_capture_input_env_wd(sargs, 0, 0, 0, 0, out_buf, out_cap, 0,
+      _sy_agnos_left(timeout_ms, start_ns), 0, _config_payload_stdin(config), _config_payload_stdin_len(config), 0, 0);
     var end_ns = mono_now_ns();
+    var timed_out = confine_last_timed_out();
     var r = backend_run_finish(out_buf, n, out_cap, "sy-agnos container run failed", start_ns, end_ns);
+
+    if (n >= 0 && timed_out == 0) {
+        var iargs = vec_new();
+        vec_push(iargs, runtime);
+        vec_push(iargs, "inspect");
+        vec_push(iargs, "--format");
+        vec_push(iargs, "{{.State.Error}}");
+        vec_push(iargs, name);
+        var ecap = 4096;
+        var ebuf = alloc(ecap + 1);
+        var en = _sy_agnos_tool(iargs, 10000, ebuf, ecap);
+        if (en < 0 || confine_last_exit() != 0) {
+            var idiag = _sy_agnos_diag(
+              "sy-agnos: cannot inspect the container, so its stderr cannot be shown to be the payload's: ");
+            _sy_agnos_remove(runtime, name);
+            return backend_error_result(idiag);
+        }
+        store8(ebuf + en, 0);
+        var state_err = _oci_diag("", ebuf);
+        if (strlen(state_err) > 0) {
+            _sy_agnos_remove(runtime, name);
+            return backend_error_result(_oci_diag("sy-agnos: container start failed: ", state_err));
+        }
+    }
     _sy_agnos_remove(runtime, name);
     return r;
 }

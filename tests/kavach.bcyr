@@ -4,7 +4,6 @@
 
 include "src/util.cyr"
 include "src/error.cyr"
-include "src/sys_security_syscalls.cyr"
 include "src/sys_error.cyr"
 include "src/sys_util.cyr"
 include "src/security.cyr"
@@ -40,9 +39,11 @@ include "src/backend_tdx.cyr"
 include "src/backend_firecracker.cyr"
 include "src/composite.cyr"
 include "src/observability.cyr"
+include "src/attest_collateral.cyr"
 include "src/attestation.cyr"
 include "src/sandbox_exec.cyr"
 include "tests/attest_vectors.cyr"
+include "tests/attest_collateral_vectors.cyr"
 
 var _strict_policy = 0;
 
@@ -294,43 +295,86 @@ fn bench_backend_parse() {
     return 0;
 }
 
-# ---- 3.13.0: quote verification -------------------------------------------
+# ---- 3.13.0: quote verification; 3.14.2: with Intel's collateral -----------
 #
-# The whole of `kavach_attest_quote` on sigil's vectors: the PCK chain to the
-# root, three ECDSA verifications, and the policy checks. TDX is timed on its
-# P-384 quote, so the two rows cover both curves. The TDX quote is a debug TD,
-# which the policy allows here so the run goes through every check.
+# The whole of `kavach_attest_quote`: the PCK chain to the root, three ECDSA
+# verifications, and since 3.14.2 the collateral (the TCB Signing chain, two
+# signed JSON bodies, two CRLs, the TCB level and QE identity) and the RTMRs.
+# SGX and TDX are timed on the generated vectors (tests/attest_collateral_
+# vectors.cyr), which pass every check. `attest_tdx_quote_p384` is sigil's
+# P-384 fixture: since 3.14.2 it verifies and then stops at the collateral, its
+# PCK certificate having no SGX extension, so it times sigil's P-384 path plus
+# the chain re-parse.
 var _bench_att_sgx = 0;
 var _bench_att_tdx = 0;
+var _bench_att_p384 = 0;
 var _bench_att_sgx_policy = 0;
 var _bench_att_tdx_policy = 0;
+var _bench_att_p384_policy = 0;
 var _bench_att_nonce = 0;
+
+fn _bench_att_coll(tdx) {
+    var c = kavach_collateral_new();
+    if (tdx == 1) {
+        kavach_collateral_tcb_info(c, hex_decode(KC_TDX_TCB_INFO_HEX, 2 * KC_TDX_TCB_INFO_LEN), KC_TDX_TCB_INFO_LEN);
+        kavach_collateral_qe_identity(c, hex_decode(KC_TD_QE_IDENTITY_HEX, 2 * KC_TD_QE_IDENTITY_LEN), KC_TD_QE_IDENTITY_LEN);
+    } else {
+        kavach_collateral_tcb_info(c, hex_decode(KC_SGX_TCB_INFO_HEX, 2 * KC_SGX_TCB_INFO_LEN), KC_SGX_TCB_INFO_LEN);
+        kavach_collateral_qe_identity(c, hex_decode(KC_QE_IDENTITY_HEX, 2 * KC_QE_IDENTITY_LEN), KC_QE_IDENTITY_LEN);
+    }
+    kavach_collateral_signer_chain(c, hex_decode(KC_SIGNER_CHAIN_HEX, 2 * KC_SIGNER_CHAIN_LEN), KC_SIGNER_CHAIN_LEN);
+    kavach_collateral_pck_crl(c, hex_decode(KC_PCK_CRL_HEX, 2 * KC_PCK_CRL_LEN), KC_PCK_CRL_LEN);
+    kavach_collateral_root_crl(c, hex_decode(KC_ROOT_CRL_HEX, 2 * KC_ROOT_CRL_LEN), KC_ROOT_CRL_LEN);
+    return c;
+}
+
+fn _bench_att_pin(p) {
+    policy_attest_rtmr(p, 0, KC_RTMR0);
+    policy_attest_rtmr(p, 1, KC_RTMR1);
+    policy_attest_rtmr(p, 2, KC_RTMR2);
+    return 0;
+}
 
 fn _setup_attest() {
     if (_bench_att_sgx != 0) { return 0; }
-    _bench_att_sgx = hex_decode(ATT_SGX_HEX, 2 * ATT_SGX_LEN);
-    _bench_att_tdx = hex_decode(ATT_TDX_P384_HEX, 2 * ATT_TDX_P384_LEN);
-    var root = hex_decode(ATT_ROOT_HEX, 2 * ATT_ROOT_LEN);
+    _bench_att_sgx = hex_decode(KC_SGX_HEX, 2 * KC_SGX_LEN);
+    _bench_att_tdx = hex_decode(KC_TDX_HEX, 2 * KC_TDX_LEN);
+    _bench_att_p384 = hex_decode(ATT_TDX_P384_HEX, 2 * ATT_TDX_P384_LEN);
+    var root = hex_decode(KC_ROOT_HEX, 2 * KC_ROOT_LEN);
     _bench_att_sgx_policy = policy_new();
-    policy_attest_root(_bench_att_sgx_policy, root, ATT_ROOT_LEN);
-    policy_attest_allow(_bench_att_sgx_policy, ATT_SGX_MRENCLAVE);
+    policy_attest_root(_bench_att_sgx_policy, root, KC_ROOT_LEN);
+    policy_attest_allow(_bench_att_sgx_policy, KC_MRENCLAVE);
+    policy_attest_collateral(_bench_att_sgx_policy, _bench_att_coll(0));
     _bench_att_tdx_policy = policy_new();
-    policy_attest_root(_bench_att_tdx_policy, root, ATT_ROOT_LEN);
-    policy_attest_allow(_bench_att_tdx_policy, ATT_TDX_MRTD);
-    policy_attest_allow_debug(_bench_att_tdx_policy, 1);
-    _bench_att_nonce = alloc(32);
-    memset(_bench_att_nonce, 0xcc, 32);
+    policy_attest_root(_bench_att_tdx_policy, root, KC_ROOT_LEN);
+    policy_attest_allow(_bench_att_tdx_policy, KC_MRTD);
+    policy_attest_collateral(_bench_att_tdx_policy, _bench_att_coll(1));
+    _bench_att_pin(_bench_att_tdx_policy);
+    _bench_att_p384_policy = policy_new();
+    policy_attest_root(_bench_att_p384_policy, hex_decode(ATT_ROOT_HEX, 2 * ATT_ROOT_LEN), ATT_ROOT_LEN);
+    policy_attest_allow(_bench_att_p384_policy, ATT_TDX_MRTD);
+    policy_attest_allow_debug(_bench_att_p384_policy, 1);
+    policy_attest_collateral(_bench_att_p384_policy, _bench_att_coll(1));
+    _bench_att_pin(_bench_att_p384_policy);
+    _bench_att_nonce = alloc(64);
+    memset(_bench_att_nonce, 0xcc, 64);
     return 0;
 }
 
 fn bench_attest_sgx_quote() {
-    kavach_attest_sgx_quote(_bench_att_sgx, ATT_SGX_LEN, _bench_att_sgx_policy,
-      _bench_att_nonce, 32, ATT_NOW);
+    kavach_attest_sgx_quote(_bench_att_sgx, KC_SGX_LEN, _bench_att_sgx_policy,
+      _bench_att_nonce, 64, KC_NOW);
+    return 0;
+}
+
+fn bench_attest_tdx_quote() {
+    kavach_attest_tdx_quote(_bench_att_tdx, KC_TDX_LEN, _bench_att_tdx_policy,
+      _bench_att_nonce, 64, KC_NOW);
     return 0;
 }
 
 fn bench_attest_tdx_quote_p384() {
-    kavach_attest_tdx_quote(_bench_att_tdx, ATT_TDX_P384_LEN, _bench_att_tdx_policy,
+    kavach_attest_tdx_quote(_bench_att_p384, ATT_TDX_P384_LEN, _bench_att_p384_policy,
       _bench_att_nonce, 32, ATT_NOW);
     return 0;
 }
@@ -540,6 +584,11 @@ fn main() {
     var b27 = bench_new("attest_tdx_quote_p384");
     bench_run(b27, &bench_attest_tdx_quote_p384, 20);
     vec_push(benches, b27);
+
+    # 3.14.2 — a TDX quote in Intel's layout through every check.
+    var b35 = bench_new("attest_tdx_quote");
+    bench_run(b35, &bench_attest_tdx_quote, 20);
+    vec_push(benches, b35);
 
     # merge_policies, without landlock rules and with them. Last, so their
     # allocations come after every other bench has run.

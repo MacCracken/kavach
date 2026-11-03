@@ -12,6 +12,19 @@ classification, credential proxy, HMAC-SHA256 audit chain — all in pure Cyrius
 
 ## Status
 
+**v3.14.2 — Intel's collateral, the TDX RTMRs, and runtime errors kept from the gate.** A TDX or
+SGX quote now has to clear Intel's collateral: the platform's TCB level, the Quoting Enclave's
+identity and the PCK and root CRLs (`policy_attest_collateral`). A TD also has to clear its RTMRs,
+so its kernel and command line are checked as well as its firmware (`policy_attest_rtmr`). Intel's
+sample from a real TDX platform is affirmed as UpToDate, and refused as OutOfDate against Intel's
+collateral sixteen months later. Through 3.14.1 kavach did not parse a real TDX quote at all:
+sigil 3.13.15 misses the type-6 certification data
+([issue](docs/development/issues/2026-11-02-sigil-tdx-quote-type6-wrapper.md)), so kavach now
+unwraps it. ⚠ **Breaking:** a policy that requires attestation needs the collateral, and for TDX
+RTMR0 to RTMR2 pinned. runsc's and docker's own failures are diagnostics now rather than the
+payload's stderr. aarch64 gets namespaces and rootfs entry. **1415** assertions green on x86-64
+and **1324** on aarch64 under qemu; in an Ubuntu 26.04 rootfs, **1356** and **1270**.
+
 **v3.14.1 — the `basic` seccomp filter admits a socket write; cyrius 6.7.18 and the latest deps.**
 Since cyrius 6.6.16 every stdlib socket write is a `sendto`, and a process that loaded the `basic`
 filter on itself died of SIGSYS on its first one. The filter now admits `sendto` with no
@@ -78,12 +91,14 @@ such a policy `sandbox_exec` runs only on the SGX or TDX backend, binds a
 fresh nonce into the guest's quote, verifies it with sigil against the root,
 and withholds the output unless it passes (`kavach_attest_quote`). A debug
 guest is refused unless the policy allows one. Not evaluated: Intel's TCB,
-QE identity and revocation collateral, and TDX's RTMRs. ⚠ kavach's own SGX and
+QE identity and revocation collateral, and TDX's RTMRs (all evaluated since
+v3.14.2, which also found that a real TDX quote did not parse). ⚠ kavach's own SGX and
 TDX launchers cannot fetch a quote yet, so they refuse a policy that requires
 attestation; a launcher that can hands its quote over with
 `backend_attach_quote` ([example 5](docs/examples/05-tee-attestation.md)).
 Also: a heap overflow in `kavach_attestation_result_new`, and aarch64 is now
-recorded as supported, apart from namespaces and rootfs entry. **971**
+recorded as supported, apart from namespaces and rootfs entry (both since
+v3.14.2). **971**
 assertions green on x86-64, **942** on aarch64 under qemu.
 
 **v3.12.9 — P(-1) closeout.** A credential-routing fix: `InjectionMethod`'s
@@ -316,10 +331,11 @@ cyrius deps
 cyrius build src/main.cyr build/kavach
 ./build/kavach
 
-# Run the test suite (1284 assertions).
+# Run the test suite (1415 assertions; run from the repository root,
+# since the real-Intel attestation vectors are read from tests/data/).
 cyrius test tests/kavach.tcyr
 
-# Run the bench harness (29 benches).
+# Run the bench harness (30 benches).
 cyrius bench tests/kavach.bcyr
 
 # Cleanliness gates. Run these individually — `cyrius audit` is the
@@ -350,14 +366,14 @@ consumer's `cyrius.cyml`:
 [deps.kavach]
 git     = "https://github.com/MacCracken/kavach.git"
 path    = "../kavach"          # local sibling checkout (optional)
-tag     = "3.14.1"
+tag     = "3.14.2"
 modules = ["dist/kavach.cyr"]
 
 # OPTIONAL since 3.13.3 (cyrius 6.6.20): dist/kavach.deps is now the
 # compile-verified stdlib set, and `cyrius deps` vendors it and what it
 # includes, so a project that declares only [deps.kavach] builds and runs
-# the example below (checked at 3.13.3, at 3.14.0 on 6.7.9 and at 3.14.1
-# on 6.7.18, also in an Ubuntu 26.04 rootfs). Earlier releases needed kavach's
+# the example below (checked at 3.13.3, at 3.14.0 on 6.7.9, and at 3.14.1
+# and 3.14.2 on 6.7.18, also in an Ubuntu 26.04 rootfs). Earlier releases needed kavach's
 # transitive stdlib declared by hand, or cyrius refused to emit a binary
 # over undefined sakshi_span_* / thread_local_* / sandhi_server_* / async_*
 # / fdlopen_*. That list (kavach's [deps].stdlib minus the test-only
@@ -486,11 +502,11 @@ fn app() {
 | Process | 50 | standard | **registered** (fork+exec+capture + guard precheck) |
 | OCI | 55 | standard | **registered** (`runc`/`crun` shell-out via shared OCI spec) |
 | WASM | 65 | standard | **registered** (`wasmtime` CLI with fuel + memory + preopens) |
-| gVisor | 70 | hardened | **registered** (OCI bundle + `runsc run` + auto-cleanup) |
-| SGX | 80 | hardened | **registered** (`gramine-sgx` + a manifest template it never renders or signs, so no enclave starts yet; quotes are verified since v3.13.0) |
+| gVisor | 70 | hardened | **registered** (OCI bundle + `runsc --log … run` + auto-cleanup; runsc's own failure is a diagnostic since v3.14.2) |
+| SGX | 80 | hardened | **registered** (`gramine-sgx` + a manifest template it never renders or signs, so no enclave starts yet; quotes are verified since v3.13.0, against Intel's collateral since v3.14.2) |
 | SEV | 82 | hardened | **registered** (`qemu-system-x86_64` with SEV-SNP object) |
-| SyAgnos | 80 | hardened | **registered** (docker/podman + hardened AGNOS image + Phylax) |
-| TDX | 85 | fortress | **registered** (`qemu-system-x86_64` with TDX object; no TDVF firmware, and availability looks for the guest's `/dev/tdx_guest`; quotes are verified since v3.13.0) |
+| SyAgnos | 80 | hardened | **registered** (docker/podman `create` + `start` + `inspect`, so the runtime's own failure is a diagnostic (v3.14.2); hardened AGNOS image + Phylax) |
+| TDX | 85 | fortress | **registered** (`qemu-system-x86_64` with TDX object; no TDVF firmware, and availability looks for the guest's `/dev/tdx_guest`; quotes are verified since v3.13.0, Intel's real layout, collateral and RTMRs since v3.14.2) |
 | Firecracker | 90 | fortress | **registered** (microVM config.json + `firecracker --no-api`) |
 
 Adding a backend is a single-file extension: see

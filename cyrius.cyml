@@ -15,7 +15,6 @@ output = "build/kavach"
 modules = [
     "src/util.cyr",
     "src/error.cyr",
-    "src/sys_security_syscalls.cyr",
     "src/sys_error.cyr",
     "src/sys_util.cyr",
     "src/security.cyr",
@@ -55,6 +54,7 @@ modules = [
     "src/backend_firecracker.cyr",
     "src/composite.cyr",
     "src/observability.cyr",
+    "src/attest_collateral.cyr",
     "src/attestation.cyr",
     "src/sandbox_exec.cyr",
 ]
@@ -127,7 +127,6 @@ optional = true
 modules = [
     "src/util.cyr",
     "src/error.cyr",
-    "src/sys_security_syscalls.cyr",
     "src/sys_error.cyr",
     "src/sys_util.cyr",
     "src/security.cyr",

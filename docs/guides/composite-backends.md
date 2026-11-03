@@ -32,7 +32,7 @@ Single-layer isolation is usually enough. Reach for composites when:
 | `max_pids` | min (non-zero) | Smaller = tighter |
 | `landlock_abstract_unix` | OR | Either enables = enabled |
 | `landlock_signal` | OR | Either enables = enabled |
-| attestation (`attest_*`, v3.13.0) | required if either requires it; allowlists intersected; debug allowed only if both allow it | A guest must satisfy both. Two different roots, or allowlists with nothing in common, admit no guest: the merge keeps the requirement and every attestation fails |
+| attestation (`attest_*`, v3.13.0; RTMRs, collateral and TCB statuses v3.14.2) | required if either requires it; allowlists intersected; debug allowed only if both allow it; an RTMR index either pins is pinned, to the values both allow; the accepted TCB statuses are the ones both accept; the collateral is the base's, or the overlay's when the base has none | A guest must satisfy both. Two different roots, allowlists with nothing in common, or RTMR lists with nothing in common admit no guest: the merge keeps the requirement and every attestation fails |
 
 The landlock rules are the one field merged toward the looser side. The merged
 list holds both inputs' rules, so a path either side's rules allow stays

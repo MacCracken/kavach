@@ -16,16 +16,59 @@ fn _gvisor_runsc_path() {
 # it ran), its stderr, the config's deadline and the config's stdin, which runsc
 # hands the container (the bundle sets no terminal). A deadline kills runsc;
 # `_gvisor_delete` then stops the container.
+#
+# 3.14.2: with `--log <path>`, the global flag runc has too, so runsc's own
+# failures are told apart from the payload's. runsc reports every failure of
+# its own through `util.Errorf` / `util.Fatalf` (runsc/cmd/util/util.go): the
+# message goes to stderr, and as a JSON line (`{"msg":…,"level":"error"}`) to the
+# `--log` file, and Fatalf exits 128. Its internal logs go nowhere unless
+# `--debug-log` or `--alsologtostderr` asks (runsc/cli/cli.go). So the log file
+# is written only when runsc itself failed. Read from runsc's source: this
+# machine has no runsc to run it on, and the tests drive a stand-in that does
+# what the source does.
 fn _gvisor_run(runsc, bundle, container_id, network, cfg, out_buf, out_cap) {
+    var log_path = _oci_log_path(container_id);
+    if (log_path == 0) { return 0 - 1; }
     var args = vec_new();
     vec_push(args, runsc);
+    vec_push(args, "--log");
+    vec_push(args, log_path);
     vec_push(args, "--network");
     vec_push(args, network);
     vec_push(args, "run");
     vec_push(args, "--bundle");
     vec_push(args, bundle);
     vec_push(args, container_id);
+    # A leftover log would read as this run's failure (see _oci_run).
+    kv_unlink(log_path);
     return backend_run_capture(args, cfg, out_buf, out_cap);
+}
+
+# The message in runsc's log: the first `"msg"` of its JSON error lines, or the
+# log as it is when there is none.
+fn _gvisor_log_msg(log) {
+    var at = strstr(log, "\"msg\":\"");
+    if (at < 0) { return log; }
+    var p = log + at + 7;
+    var n = strlen(p);
+    var out = alloc(n + 1);
+    var i = 0;
+    var o = 0;
+    while (i < n) {
+        var c = load8(p + i) & 255;
+        if (c == 34) { break; }
+        if (c == 92 && i + 1 < n) {
+            i = i + 1;
+            c = load8(p + i) & 255;
+            if (c == 110) { c = 10; }
+            if (c == 116) { c = 9; }
+        }
+        store8(out + o, c);
+        o = o + 1;
+        i = i + 1;
+    }
+    store8(out + o, 0);
+    return out;
 }
 
 fn _gvisor_delete(runsc, container_id) {
@@ -70,10 +113,16 @@ fn _gvisor_exec_with(runsc, sandbox, command, start_ns) {
     var policy = SandboxConfig_policy(cfg);
     var network = oci_network_mode(policy);
 
+    if (_oci_state_root() == 0) {
+        oci_cleanup_bundle(bundle);
+        return backend_error_result(
+          "OCI state directory under /tmp is not a private directory owned by this user; refusing to run");
+    }
     var out_cap = 1048576;
     var out_buf = alloc(out_cap);
     var n = _gvisor_run(runsc, bundle, container_id, network, cfg, out_buf, out_cap);
     var end_ns = mono_now_ns();
+    var runsc_log = _oci_take_log(container_id);
     # ⚠ Through 3.13.1 this was `backend_capture_finish` over `kv_exec_capture`:
     # exit 0 for any container that ran (measured with a stand-in runsc exiting
     # 7), its stderr sent to /dev/null, no deadline and kavach's own stdin.
@@ -81,6 +130,14 @@ fn _gvisor_exec_with(runsc, sandbox, command, start_ns) {
 
     _gvisor_delete(runsc, container_id);
     oci_cleanup_bundle(bundle);
+    # runsc failed, not the payload: a diagnostic, kept out of the
+    # externalization gate. Through 3.14.1 runsc's message reached the gate as
+    # the payload's stderr, where `code_scan` can read a runtime error as a HIGH
+    # finding and the exec failed as "externalization blocked" (see
+    # _oci_log_path).
+    if (strlen(runsc_log) > 0) {
+        return backend_error_result(_oci_diag("gVisor runtime run failed: ", _gvisor_log_msg(runsc_log)));
+    }
     return r;
 }
 

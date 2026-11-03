@@ -62,14 +62,26 @@ and unblocking conditions:
 - **HTTP credential proxy** — direct env/file/stdin injection and the
   loopback HTTP proxy (`GET /v1/secret/<name>`) ship; HTTPS `CONNECT`
   tunnelling is not implemented
-- **Attestation limits (v3.13.0)** — quote verification does not evaluate
-  Intel's TCB level, QE identity or revocation collateral, so a genuine
-  platform with an out-of-date or revoked TCB passes. For TDX only MRTD is
-  checked, not the RTMRs that measure the kernel. kavach's own SGX and TDX
-  launchers cannot fetch a quote and refuse a policy that requires attestation.
+- **Attestation limits** — kavach's own SGX and TDX launchers cannot fetch a
+  quote and refuse a policy that requires attestation. The collateral is the
+  caller's to fetch and keep current: kavach makes no network call, and refuses
+  collateral past its `nextUpdate`. TDX quote format v5 is not parsed (sigil
+  3.13.15 refuses it). Quote verification itself evaluates Intel's collateral
+  and the TDX RTMRs since v3.14.2.
 
 Resolved since earlier releases:
 
+- **v3.14.2:**
+  - a quote passed on its signatures alone: Intel's TCB level, the QE identity and
+    the PCK/root CRLs were not evaluated, so a genuine platform with an out-of-date
+    or revoked TCB passed. For TDX only MRTD (the firmware) was checked, not the
+    RTMRs that measure the kernel and command line. Both now fail closed;
+  - TDX verification could not parse a real Intel quote (sigil reads no type-6
+    certification data), so it accepted only synthesized ones;
+  - runsc's and docker's own error messages reached the externalization gate as
+    the payload's stderr.
+
+  See CHANGELOG 3.14.2.
 - **v3.13.1:**
   - `policy_landlock_deny_all` on a policy that named paths left those rules in force, so the
     payload could open the paths deny-all was meant to deny;

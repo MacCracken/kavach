@@ -1,0 +1,995 @@
+# kavach — Intel DCAP collateral: the platform's TCB level, the Quoting
+# Enclave's identity, and revocation (3.14.2)
+#
+# A quote that verifies to Intel's root (sigil, `*_quote_verify_full_into`)
+# shows that a genuine platform made it. It does not show that the platform is
+# current: a platform whose microcode or TDX module Intel has since found
+# vulnerable, or whose PCK key Intel has revoked, still signs quotes that
+# verify. Intel publishes what decides that as collateral, signed by its TCB
+# Signing key, which chains to the same root:
+#
+#   * TCB info (v3): for the platform's FMSPC, the TCB levels in order, each
+#     a set of SVNs and a status (UpToDate, OutOfDate, Revoked, ...). For TDX
+#     also the TDX module identities.
+#   * QE identity (v2): what the Quoting Enclave must be (MRSIGNER, ISVPRODID,
+#     masked MISCSELECT and ATTRIBUTES) and its TCB levels by ISVSVN.
+#   * The PCK CRL, issued by the PCK CA that issued the quote's PCK
+#     certificate, and the root CA CRL, issued by the root.
+#
+# `kavach_collateral_check` evaluates them, after the quote has verified, in
+# the order of Intel's Quote Verification Library (QVL) and google/go-tdx-guest
+# `verify`: the TCB Signing certificate chains to the policy's root and is not
+# revoked; it signed the TCB info and the QE identity, both current at `now`;
+# both CRLs are signed by their issuers and current; neither the PCK
+# certificate nor its CA is revoked; the PCK certificate's FMSPC and PCE-ID
+# are the TCB info's; the platform's SVNs select a TCB level (for TDX, the
+# TEE_TCB_SVN too, and the TDX module's identity); the QE report matches the QE
+# identity and its ISVSVN selects a QE TCB level. Every status must be one the
+# policy accepts (`policy_attest_accept_tcb`; UpToDate only by default).
+# Revoked is never accepted.
+#
+# The collateral is the caller's to fetch: from Intel's PCS
+# (api.trustedservices.intel.com, `/sgx/certification/v4/tcb`, `/qe/identity`,
+# `/pckcrl`, and `/tdx/certification/v4/...` for TDX) or a PCCS cache, exactly
+# as served. kavach makes no network call.
+#
+# Formats: Intel PCS API v4; Intel SGX PCK Certificate and CRL Profile (the
+# SGX extension, OID 1.2.840.113741.1.13.1). See docs/sources.md.
+
+#derive(accessors)
+struct AttestCollateral {
+    tcb_info;
+    tcb_info_len;
+    qe_identity;
+    qe_identity_len;
+    signer_chain;
+    signer_chain_len;
+    pck_crl;
+    pck_crl_len;
+    root_crl;
+    root_crl_len;
+}
+
+var ATTEST_COLLATERAL_SIZE = 80;
+
+# A TCB status, as one bit, so a policy can accept a set of them. Prefixed, as
+# every kavach enum member is: cyrius hoists members to global names.
+enum KavachTcbStatus {
+    KAVACH_TCB_UP_TO_DATE = 1;
+    KAVACH_TCB_SW_HARDENING_NEEDED = 2;
+    KAVACH_TCB_CONFIGURATION_NEEDED = 4;
+    KAVACH_TCB_CONFIGURATION_AND_SW_HARDENING_NEEDED = 8;
+    KAVACH_TCB_OUT_OF_DATE = 16;
+    KAVACH_TCB_OUT_OF_DATE_CONFIGURATION_NEEDED = 32;
+    KAVACH_TCB_REVOKED = 64;
+}
+
+fn kavach_tcb_status_name(s) {
+    if (s == KAVACH_TCB_UP_TO_DATE) { return "UpToDate"; }
+    if (s == KAVACH_TCB_SW_HARDENING_NEEDED) { return "SWHardeningNeeded"; }
+    if (s == KAVACH_TCB_CONFIGURATION_NEEDED) { return "ConfigurationNeeded"; }
+    if (s == KAVACH_TCB_CONFIGURATION_AND_SW_HARDENING_NEEDED) { return "ConfigurationAndSWHardeningNeeded"; }
+    if (s == KAVACH_TCB_OUT_OF_DATE) { return "OutOfDate"; }
+    if (s == KAVACH_TCB_OUT_OF_DATE_CONFIGURATION_NEEDED) { return "OutOfDateConfigurationNeeded"; }
+    if (s == KAVACH_TCB_REVOKED) { return "Revoked"; }
+    return "unknown";
+}
+
+# ---- the collateral as the caller supplies it ------------------------------
+
+fn kavach_collateral_new() {
+    var c = alloc(ATTEST_COLLATERAL_SIZE);
+    memset(c, 0, ATTEST_COLLATERAL_SIZE);
+    return c;
+}
+
+fn _kc_copy(src, len) {
+    var d = alloc(len);
+    memcpy(d, src, len);
+    return d;
+}
+
+# The TCB info as Intel's PCS serves it: `{"tcbInfo":{...},"signature":"<hex>"}`.
+# The bytes are copied. Returns 0, or -1 for an empty body.
+fn kavach_collateral_tcb_info(c, body, len) {
+    if (c == 0 || body == 0 || len <= 0) { return 0 - 1; }
+    AttestCollateral_set_tcb_info(c, _kc_copy(body, len));
+    AttestCollateral_set_tcb_info_len(c, len);
+    return 0;
+}
+
+# The QE identity as served: `{"enclaveIdentity":{...},"signature":"<hex>"}`,
+# from `/sgx/.../qe/identity` for SGX quotes and `/tdx/.../qe/identity` (TD_QE)
+# for TDX quotes.
+fn kavach_collateral_qe_identity(c, body, len) {
+    if (c == 0 || body == 0 || len <= 0) { return 0 - 1; }
+    AttestCollateral_set_qe_identity(c, _kc_copy(body, len));
+    AttestCollateral_set_qe_identity_len(c, len);
+    return 0;
+}
+
+# The PEM chain PCS sends with both (`TCB-Info-Issuer-Chain`, URL-decoded): the
+# TCB Signing certificate, then the root. The root copy is ignored; the chain is
+# walked to the policy's root.
+fn kavach_collateral_signer_chain(c, pem, len) {
+    if (c == 0 || pem == 0 || len <= 0) { return 0 - 1; }
+    AttestCollateral_set_signer_chain(c, _kc_copy(pem, len));
+    AttestCollateral_set_signer_chain_len(c, len);
+    return 0;
+}
+
+# The PCK CRL, DER (`/pckcrl?ca=platform|processor&encoding=der`), from the CA
+# that issued the quote's PCK certificate.
+fn kavach_collateral_pck_crl(c, der, len) {
+    if (c == 0 || der == 0 || len <= 0) { return 0 - 1; }
+    AttestCollateral_set_pck_crl(c, _kc_copy(der, len));
+    AttestCollateral_set_pck_crl_len(c, len);
+    return 0;
+}
+
+# The root CA CRL, DER (Intel publishes it at
+# certificates.trustedservices.intel.com/IntelSGXRootCA.der).
+fn kavach_collateral_root_crl(c, der, len) {
+    if (c == 0 || der == 0 || len <= 0) { return 0 - 1; }
+    AttestCollateral_set_root_crl(c, _kc_copy(der, len));
+    AttestCollateral_set_root_crl_len(c, len);
+    return 0;
+}
+
+# 1 when all five parts are set.
+fn kavach_collateral_complete(c) {
+    if (c == 0) { return 0; }
+    if (AttestCollateral_tcb_info_len(c) <= 0) { return 0; }
+    if (AttestCollateral_qe_identity_len(c) <= 0) { return 0; }
+    if (AttestCollateral_signer_chain_len(c) <= 0) { return 0; }
+    if (AttestCollateral_pck_crl_len(c) <= 0) { return 0; }
+    if (AttestCollateral_root_crl_len(c) <= 0) { return 0; }
+    return 1;
+}
+
+# ---- DER, over a bounded buffer --------------------------------------------
+#
+# Read the TLV at `pos` in buf[0..end). Writes its content start to out[0] and
+# the position after it to out[8]; returns the tag, or -1 when it does not fit.
+# Definite lengths of up to 3 bytes only: nothing in a certificate or CRL kavach
+# reads is near 16 MiB.
+fn _kc_tlv(buf, end, pos, out) {
+    if (pos < 0 || pos + 2 > end) { return 0 - 1; }
+    var tag = load8(buf + pos) & 255;
+    var l = load8(buf + pos + 1) & 255;
+    var c = pos + 2;
+    if (l >= 128) {
+        var nb = l & 127;
+        if (nb == 0 || nb > 3) { return 0 - 1; }
+        if (c + nb > end) { return 0 - 1; }
+        l = 0;
+        var i = 0;
+        while (i < nb) {
+            l = (l << 8) | (load8(buf + c + i) & 255);
+            i = i + 1;
+        }
+        c = c + nb;
+    }
+    if (c + l > end) { return 0 - 1; }
+    store64(out, c);
+    store64(out + 8, c + l);
+    return tag;
+}
+
+# A DER INTEGER's content as an unsigned value up to 0xFFFF; -1 for anything
+# negative, empty or larger.
+fn _kc_uint(buf, off, len) {
+    if (len < 1 || len > 3) { return 0 - 1; }
+    if ((load8(buf + off) & 128) != 0) { return 0 - 1; }
+    var v = 0;
+    var i = 0;
+    while (i < len) {
+        v = (v << 8) | (load8(buf + off + i) & 255);
+        i = i + 1;
+    }
+    if (v > 65535) { return 0 - 1; }
+    return v;
+}
+
+# Days since 1970-01-01 of a proleptic Gregorian date (Howard Hinnant's
+# days_from_civil; docs/sources.md).
+fn _kc_days(y, m, d) {
+    if (m <= 2) { y = y - 1; }
+    var era = y / 400;
+    if (y < 0) { era = (y - 399) / 400; }
+    var yoe = y - era * 400;
+    var mp = m + 9;
+    if (m > 2) { mp = m - 3; }
+    var doy = (153 * mp + 2) / 5 + d - 1;
+    var doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + doe - 719468;
+}
+
+fn _kc_digits(p, n) {
+    var v = 0;
+    var i = 0;
+    while (i < n) {
+        var c = load8(p + i) & 255;
+        if (c < 48 || c > 57) { return 0 - 1; }
+        v = v * 10 + c - 48;
+        i = i + 1;
+    }
+    return v;
+}
+
+# Epoch seconds of y-m-d h:mi:s UTC, or -1 for a field out of range.
+fn _kc_epoch(y, mo, d, h, mi, s) {
+    if (y < 0 || mo < 0 || d < 0 || h < 0 || mi < 0 || s < 0) { return 0 - 1; }
+    if (mo < 1 || mo > 12 || d < 1 || d > 31 || h > 23 || mi > 59 || s > 59) { return 0 - 1; }
+    return _kc_days(y, mo, d) * 86400 + h * 3600 + mi * 60 + s;
+}
+
+# An X.509 Time (UTCTime "YYMMDDHHMMSSZ", or GeneralizedTime
+# "YYYYMMDDHHMMSSZ") as epoch seconds, or -1. UTCTime years 50-99 are 19xx
+# (RFC 5280 §4.1.2.5.1).
+fn _kc_der_time(buf, tag, off, len) {
+    if (tag == 23 && len == 13 && load8(buf + off + 12) == 90) {
+        var yy = _kc_digits(buf + off, 2);
+        if (yy < 0) { return 0 - 1; }
+        if (yy >= 50) { yy = yy + 1900; } else { yy = yy + 2000; }
+        return _kc_epoch(yy, _kc_digits(buf + off + 2, 2), _kc_digits(buf + off + 4, 2),
+          _kc_digits(buf + off + 6, 2), _kc_digits(buf + off + 8, 2), _kc_digits(buf + off + 10, 2));
+    }
+    if (tag == 24 && len == 15 && load8(buf + off + 14) == 90) {
+        return _kc_epoch(_kc_digits(buf + off, 4), _kc_digits(buf + off + 4, 2), _kc_digits(buf + off + 6, 2),
+          _kc_digits(buf + off + 8, 2), _kc_digits(buf + off + 10, 2), _kc_digits(buf + off + 12, 2));
+    }
+    return 0 - 1;
+}
+
+# Where the fields kavach reads sit in a certificate's DER: f[0], f[8] the
+# serial's content offset and length; f[16], f[24] the issuer Name's whole TLV;
+# f[32], f[40] the subject's; f[48], f[56] the extensions' SEQUENCE content
+# (0, 0 when absent). Returns 1, or 0 for a certificate that does not have the
+# RFC 5280 shape.
+fn _kc_cert_fields(der, len, f) {
+    memset(f, 0, 64);
+    var t[16];
+    if (_kc_tlv(der, len, 0, &t) != 48) { return 0; }
+    var cend = load64(&t + 8);
+    if (_kc_tlv(der, cend, load64(&t), &t) != 48) { return 0; }
+    var tend = load64(&t + 8);
+    var pos = load64(&t);
+    var tag = _kc_tlv(der, tend, pos, &t);
+    if (tag == 160) {
+        pos = load64(&t + 8);
+        tag = _kc_tlv(der, tend, pos, &t);
+    }
+    if (tag != 2) { return 0; }
+    store64(f, load64(&t));
+    store64(f + 8, load64(&t + 8) - load64(&t));
+    pos = load64(&t + 8);
+    if (_kc_tlv(der, tend, pos, &t) != 48) { return 0; }          # signature algorithm
+    pos = load64(&t + 8);
+    if (_kc_tlv(der, tend, pos, &t) != 48) { return 0; }          # issuer
+    store64(f + 16, pos);
+    store64(f + 24, load64(&t + 8) - pos);
+    pos = load64(&t + 8);
+    if (_kc_tlv(der, tend, pos, &t) != 48) { return 0; }          # validity
+    pos = load64(&t + 8);
+    if (_kc_tlv(der, tend, pos, &t) != 48) { return 0; }          # subject
+    store64(f + 32, pos);
+    store64(f + 40, load64(&t + 8) - pos);
+    pos = load64(&t + 8);
+    if (_kc_tlv(der, tend, pos, &t) != 48) { return 0; }          # subjectPublicKeyInfo
+    pos = load64(&t + 8);
+    while (pos < tend) {
+        tag = _kc_tlv(der, tend, pos, &t);
+        if (tag < 0) { return 0; }
+        if (tag == 163) {
+            var x[16];
+            if (_kc_tlv(der, load64(&t + 8), load64(&t), &x) != 48) { return 0; }
+            store64(f + 48, load64(&x));
+            store64(f + 56, load64(&x + 8));
+        }
+        pos = load64(&t + 8);
+    }
+    return 1;
+}
+
+fn _kc_self_issued(der, f) {
+    if (load64(f + 24) != load64(f + 40)) { return 0; }
+    return memeq(der + load64(f + 16), der + load64(f + 32), load64(f + 24));
+}
+
+# 1.2.840.113741.1.13.1, the SGX extension, as DER OID content.
+var _KC_SGX_OID = "\x2a\x86\x48\x86\xf8\x4d\x01\x0d\x01";
+var _KC_SGX_OID_LEN = 9;
+
+# The PCK certificate's TCB, decoded from its SGX extension:
+#   +0  FMSPC (6 bytes)    +8  PCE-ID (2 bytes)    +16  the 16 SGX TCB
+#   component SVNs (one byte each)    +32  PCESVN    +40  fields found (bits)
+var _kc_pck[48];
+
+# Decode one `SEQUENCE { OID <SGX>.<a>[.<b>], value }` from the extension.
+# Returns the suffix (a * 256 + b, b = 0 when absent) and leaves the value's
+# tag, content offset and end in v[0], v[8], v[16]; -1 for another OID.
+fn _kc_sgx_entry(der, pos, end, v) {
+    var t[16];
+    if (_kc_tlv(der, end, pos, &t) != 48) { return 0 - 1; }
+    var send = load64(&t + 8);
+    var o[16];
+    if (_kc_tlv(der, send, load64(&t), &o) != 6) { return 0 - 1; }
+    var ooff = load64(&o);
+    var olen = load64(&o + 8) - ooff;
+    if (olen < _KC_SGX_OID_LEN + 1 || olen > _KC_SGX_OID_LEN + 2) { return 0 - 1; }
+    if (memeq(der + ooff, _KC_SGX_OID, _KC_SGX_OID_LEN) == 0) { return 0 - 1; }
+    var a = load8(der + ooff + _KC_SGX_OID_LEN) & 255;
+    var b = 0;
+    if (olen == _KC_SGX_OID_LEN + 2) { b = load8(der + ooff + _KC_SGX_OID_LEN + 1) & 255; }
+    var w[16];
+    var tag = _kc_tlv(der, send, load64(&o + 8), &w);
+    if (tag < 0) { return 0 - 1; }
+    store64(v, tag);
+    store64(v + 8, load64(&w));
+    store64(v + 16, load64(&w + 8));
+    return a * 256 + b;
+}
+
+# Fill `_kc_pck` from a PCK certificate. Returns 1 when FMSPC, PCE-ID, all 16
+# components and PCESVN were found, 0 otherwise.
+fn _kc_pck_tcb(der, len) {
+    memset(&_kc_pck, 0, 48);
+    var f[64];
+    if (_kc_cert_fields(der, len, &f) == 0) { return 0; }
+    var pos = load64(&f + 48);
+    var xend = load64(&f + 56);
+    if (xend == 0) { return 0; }
+    var found = 0;
+    var t[16];
+    while (pos < xend) {
+        if (_kc_tlv(der, xend, pos, &t) != 48) { return 0; }
+        var eend = load64(&t + 8);
+        var o[16];
+        if (_kc_tlv(der, eend, load64(&t), &o) != 6) { return 0; }
+        var ooff = load64(&o);
+        if (load64(&o + 8) - ooff == _KC_SGX_OID_LEN && memeq(der + ooff, _KC_SGX_OID, _KC_SGX_OID_LEN) == 1) {
+            var vp = load64(&o + 8);
+            var tag = _kc_tlv(der, eend, vp, &o);
+            if (tag == 1) {                                  # critical BOOLEAN
+                vp = load64(&o + 8);
+                tag = _kc_tlv(der, eend, vp, &o);
+            }
+            if (tag != 4) { return 0; }
+            var s[16];
+            if (_kc_tlv(der, load64(&o + 8), load64(&o), &s) != 48) { return 0; }
+            var p = load64(&s);
+            var send = load64(&s + 8);
+            var v[24];
+            while (p < send) {
+                var e[16];
+                if (_kc_tlv(der, send, p, &e) != 48) { return 0; }
+                var k = _kc_sgx_entry(der, p, send, &v);
+                var vtag = load64(&v);
+                var voff = load64(&v + 8);
+                var vlen = load64(&v + 16) - voff;
+                if (k == 4 * 256 && vtag == 4 && vlen == 6) {
+                    memcpy(&_kc_pck, der + voff, 6);
+                    found = found | 1;
+                }
+                if (k == 3 * 256 && vtag == 4 && vlen == 2) {
+                    memcpy(&_kc_pck + 8, der + voff, 2);
+                    found = found | 2;
+                }
+                if (k == 2 * 256 && vtag == 48) {
+                    var q = voff;
+                    var qend = load64(&v + 16);
+                    var w[24];
+                    while (q < qend) {
+                        var e2[16];
+                        if (_kc_tlv(der, qend, q, &e2) != 48) { return 0; }
+                        var c = _kc_sgx_entry(der, q, qend, &w);
+                        var ci = c - 2 * 256;
+                        var wv = 0 - 1;
+                        if (load64(&w) == 2) { wv = _kc_uint(der, load64(&w + 8), load64(&w + 16) - load64(&w + 8)); }
+                        if (ci >= 1 && ci <= 16) {
+                            if (wv < 0 || wv > 255) { return 0; }
+                            store8(&_kc_pck + 16 + ci - 1, wv);
+                            found = found | (1 << (ci + 3));
+                        }
+                        if (ci == 17) {
+                            if (wv < 0) { return 0; }
+                            store64(&_kc_pck + 32, wv);
+                            found = found | 4;
+                        }
+                        q = load64(&e2 + 8);
+                    }
+                }
+                p = load64(&e + 8);
+            }
+        }
+        pos = eend;
+    }
+    store64(&_kc_pck + 40, found);
+    # FMSPC (bit 0), PCE-ID (1), PCESVN (2) and components 1..16 (bits 4..19).
+    if (found != 1048567) { return 0; }
+    return 1;
+}
+
+# ---- JSON ------------------------------------------------------------------
+#
+# The signatures cover the bytes of the `tcbInfo` / `enclaveIdentity` member
+# exactly as served, so kavach finds that member's span in the raw body, checks
+# the signature over it, and evaluates what it parses from those bytes, never
+# from the envelope around them.
+
+fn _kc_ws(c) {
+    if (c == 32 || c == 9 || c == 10 || c == 13) { return 1; }
+    return 0;
+}
+
+fn _kc_skip_ws(buf, len, i) {
+    while (i < len && _kc_ws(load8(buf + i) & 255) == 1) { i = i + 1; }
+    return i;
+}
+
+# The end of the JSON string starting at buf[i] == '"' (the index after its
+# closing quote), or -1.
+fn _kc_json_string_end(buf, len, i) {
+    i = i + 1;
+    while (i < len) {
+        var c = load8(buf + i) & 255;
+        if (c == 92) { i = i + 2; }
+        else {
+            if (c == 34) { return i + 1; }
+            i = i + 1;
+        }
+    }
+    return 0 - 1;
+}
+
+# The end of the JSON value starting at buf[i], or -1.
+fn _kc_json_value_end(buf, len, i) {
+    if (i >= len) { return 0 - 1; }
+    var c = load8(buf + i) & 255;
+    if (c == 34) { return _kc_json_string_end(buf, len, i); }
+    if (c == 123 || c == 91) {
+        var depth = 0;
+        while (i < len) {
+            c = load8(buf + i) & 255;
+            if (c == 34) {
+                i = _kc_json_string_end(buf, len, i);
+                if (i < 0) { return 0 - 1; }
+            } else {
+                if (c == 123 || c == 91) { depth = depth + 1; }
+                if (c == 125 || c == 93) {
+                    depth = depth - 1;
+                    if (depth == 0) { return i + 1; }
+                }
+                i = i + 1;
+            }
+        }
+        return 0 - 1;
+    }
+    while (i < len) {
+        c = load8(buf + i) & 255;
+        if (c == 44 || c == 125 || c == 93 || _kc_ws(c) == 1) { return i; }
+        i = i + 1;
+    }
+    return i;
+}
+
+# The span of member `key` of the top-level object in buf[0..len): out[0] its
+# value's offset, out[8] its length. Returns 1; 0 when absent, when the key
+# appears twice, or when the body is not one object.
+fn _kc_json_member(buf, len, key, out) {
+    var klen = strlen(key);
+    var i = _kc_skip_ws(buf, len, 0);
+    if (i >= len || (load8(buf + i) & 255) != 123) { return 0; }
+    i = _kc_skip_ws(buf, len, i + 1);
+    var hits = 0;
+    if (i < len && (load8(buf + i) & 255) == 125) { return 0; }
+    while (i < len) {
+        if ((load8(buf + i) & 255) != 34) { return 0; }
+        var kend = _kc_json_string_end(buf, len, i);
+        if (kend < 0) { return 0; }
+        var same = 0;
+        if (kend - i - 2 == klen) { same = memeq(buf + i + 1, key, klen); }
+        i = _kc_skip_ws(buf, len, kend);
+        if (i >= len || (load8(buf + i) & 255) != 58) { return 0; }
+        i = _kc_skip_ws(buf, len, i + 1);
+        var vend = _kc_json_value_end(buf, len, i);
+        if (vend < 0) { return 0; }
+        if (same == 1) {
+            hits = hits + 1;
+            store64(out, i);
+            store64(out + 8, vend - i);
+        }
+        i = _kc_skip_ws(buf, len, vend);
+        if (i >= len) { return 0; }
+        var c = load8(buf + i) & 255;
+        if (c == 125) {
+            if (_kc_skip_ws(buf, len, i + 1) != len) { return 0; }
+            if (hits == 1) { return 1; }
+            return 0;
+        }
+        if (c != 44) { return 0; }
+        i = _kc_skip_ws(buf, len, i + 1);
+    }
+    return 0;
+}
+
+# A growable arena for the parsed JSON trees, reset before each check.
+var _kc_json_alloc = 0;
+
+fn _kc_json_scratch() {
+    if (_kc_json_alloc == 0) {
+        _kc_json_alloc = arena_allocator_growable(65536);
+    } else {
+        reset_via(_kc_json_alloc);
+    }
+    return _kc_json_alloc;
+}
+
+fn _kc_get(obj, key) { return bayan_json_v_obj_get_by_cstr(obj, key); }
+
+# The integer at `obj.key`, or -1 when it is absent, not an integer, or negative.
+fn _kc_int(obj, key) {
+    var v = _kc_get(obj, key);
+    if (v == 0) { return 0 - 1; }
+    if (bayan_json_v_tag(v) != JTAG_INT) { return 0 - 1; }
+    var n = bayan_json_v_int(v);
+    if (n < 0) { return 0 - 1; }
+    return n;
+}
+
+# 1 when `obj.key` is the string `want`.
+fn _kc_is(obj, key, want) {
+    var v = _kc_get(obj, key);
+    if (v == 0 || bayan_json_v_tag(v) != JTAG_STR) { return 0; }
+    var s = bayan_json_v_str(v);
+    var n = strlen(want);
+    if (str_len(s) != n) { return 0; }
+    return memeq(str_data(s), want, n);
+}
+
+# Decode `obj.key`, a string of exactly 2n hex digits, into out[0..n). Returns
+# 1, or 0.
+fn _kc_hex(obj, key, out, n) {
+    var v = _kc_get(obj, key);
+    if (v == 0 || bayan_json_v_tag(v) != JTAG_STR) { return 0; }
+    var s = bayan_json_v_str(v);
+    if (str_len(s) != 2 * n) { return 0; }
+    return hex_decode_into(str_data(s), 2 * n, out);
+}
+
+# `obj.key`, "YYYY-MM-DDTHH:MM:SSZ", as epoch seconds; -1 otherwise.
+fn _kc_date(obj, key) {
+    var v = _kc_get(obj, key);
+    if (v == 0 || bayan_json_v_tag(v) != JTAG_STR) { return 0 - 1; }
+    var s = bayan_json_v_str(v);
+    if (str_len(s) != 20) { return 0 - 1; }
+    var p = str_data(s);
+    if (load8(p + 4) != 45 || load8(p + 7) != 45 || load8(p + 10) != 84) { return 0 - 1; }
+    if (load8(p + 13) != 58 || load8(p + 16) != 58 || load8(p + 19) != 90) { return 0 - 1; }
+    return _kc_epoch(_kc_digits(p, 4), _kc_digits(p + 5, 2), _kc_digits(p + 8, 2),
+      _kc_digits(p + 11, 2), _kc_digits(p + 14, 2), _kc_digits(p + 17, 2));
+}
+
+fn _kc_status(obj) {
+    if (_kc_is(obj, "tcbStatus", "UpToDate") == 1) { return KAVACH_TCB_UP_TO_DATE; }
+    if (_kc_is(obj, "tcbStatus", "SWHardeningNeeded") == 1) { return KAVACH_TCB_SW_HARDENING_NEEDED; }
+    if (_kc_is(obj, "tcbStatus", "ConfigurationNeeded") == 1) { return KAVACH_TCB_CONFIGURATION_NEEDED; }
+    if (_kc_is(obj, "tcbStatus", "ConfigurationAndSWHardeningNeeded") == 1) {
+        return KAVACH_TCB_CONFIGURATION_AND_SW_HARDENING_NEEDED;
+    }
+    if (_kc_is(obj, "tcbStatus", "OutOfDate") == 1) { return KAVACH_TCB_OUT_OF_DATE; }
+    if (_kc_is(obj, "tcbStatus", "OutOfDateConfigurationNeeded") == 1) {
+        return KAVACH_TCB_OUT_OF_DATE_CONFIGURATION_NEEDED;
+    }
+    if (_kc_is(obj, "tcbStatus", "Revoked") == 1) { return KAVACH_TCB_REVOKED; }
+    return 0;
+}
+
+# ---- signatures and certificates -------------------------------------------
+
+# Decode the PEM chain at `pem` and parse its certificates into `arena`:
+# certs[8 * i] the parsed X509Cert, ders[16 * i], ders[16 * i + 8] its DER.
+# Returns how many (at most 4), or 0.
+fn _kc_chain(pem, pem_len, certs, ders, arena) {
+    var pool = arena_alloc(arena, pem_len);
+    if (pool == 0) { return 0; }
+    var n = pem_decode_certs_into(pem, pem_len, ders, 4, pool, pem_len);
+    if (n < 1) { return 0; }
+    var i = 0;
+    while (i < n) {
+        var c = x509_cert_alloc_into(arena);
+        if (c == 0) { return 0; }
+        if (x509_parse_into(load64(ders + i * 16), load64(ders + i * 16 + 8), c, arena) != 1) { return 0; }
+        store64(certs + i * 8, c);
+        i = i + 1;
+    }
+    return n;
+}
+
+# Check a signed PCS body: find `member`, check `signature` (hex r || s) over
+# its bytes with the P-256 key `pk`, and return the parsed member, or 0.
+fn _kc_signed_member(body, len, member, pk, ja) {
+    var m[16];
+    if (_kc_json_member(body, len, member, &m) == 0) { return 0; }
+    var s[16];
+    if (_kc_json_member(body, len, "signature", &s) == 0) { return 0; }
+    if (load64(&s + 8) != 130) { return 0; }
+    var sig[64];
+    if (hex_decode_into(body + load64(&s) + 1, 128, &sig) == 0) { return 0; }
+    if (ecdsa_p256_verify(pk, body + load64(&m), load64(&m + 8), &sig) != 1) { return 0; }
+    var v = bayan_json_v_parse_buf_a(ja, body + load64(&m), load64(&m + 8));
+    if (v == 0 || bayan_json_v_tag(v) != JTAG_OBJ) { return 0; }
+    return v;
+}
+
+# Check a CRL issued by the certificate `issuer_der` (whose parsed form is
+# `issuer`) at `now`, and whether it lists the serial at ser[0..ser_len) or the
+# one at ser2[0..ser2_len) (ser2 0 for none): the root CRL is checked for two
+# certificates, and its signature verified once. Returns 0 when it is in force
+# and lists neither, "revoked" or "revoked2", or the reason.
+fn _kc_crl_verdict(crl, crl_len, issuer, issuer_der, issuer_len, now, ser, ser_len, ser2, ser2_len, what) {
+    var t[16];
+    if (_kc_tlv(crl, crl_len, 0, &t) != 48) { return "a CRL does not parse"; }
+    var cend = load64(&t + 8);
+    var tbs = load64(&t);
+    if (_kc_tlv(crl, cend, tbs, &t) != 48) { return "a CRL does not parse"; }
+    var tbs_end = load64(&t + 8);
+    var pos = load64(&t);
+    var tag = _kc_tlv(crl, tbs_end, pos, &t);
+    if (tag == 2) {                                             # version
+        pos = load64(&t + 8);
+        tag = _kc_tlv(crl, tbs_end, pos, &t);
+    }
+    if (tag != 48) { return "a CRL does not parse"; }           # signature algorithm
+    pos = load64(&t + 8);
+    if (_kc_tlv(crl, tbs_end, pos, &t) != 48) { return "a CRL does not parse"; }
+    var iss = pos;
+    var iss_len = load64(&t + 8) - pos;
+    pos = load64(&t + 8);
+    tag = _kc_tlv(crl, tbs_end, pos, &t);
+    var this_update = _kc_der_time(crl, tag, load64(&t), load64(&t + 8) - load64(&t));
+    pos = load64(&t + 8);
+    tag = _kc_tlv(crl, tbs_end, pos, &t);
+    var next_update = 0 - 1;
+    if (tag == 23 || tag == 24) {
+        next_update = _kc_der_time(crl, tag, load64(&t), load64(&t + 8) - load64(&t));
+        pos = load64(&t + 8);
+        tag = _kc_tlv(crl, tbs_end, pos, &t);
+    }
+    var rev = 0;
+    var rev_end = 0;
+    if (tag == 48) {
+        rev = load64(&t);
+        rev_end = load64(&t + 8);
+    }
+    # The signature over the TBS, ecdsa-with-SHA256 (1.2.840.10045.4.3.2).
+    pos = tbs_end;
+    if (_kc_tlv(crl, cend, pos, &t) != 48) { return "a CRL does not parse"; }
+    var a[16];
+    if (_kc_tlv(crl, load64(&t + 8), load64(&t), &a) != 6) { return "a CRL does not parse"; }
+    if (load64(&a + 8) - load64(&a) != 8 || memeq(crl + load64(&a), "\x2a\x86\x48\xce\x3d\x04\x03\x02", 8) == 0) {
+        return "a CRL is not signed with ECDSA P-256 and SHA-256";
+    }
+    pos = load64(&t + 8);
+    if (_kc_tlv(crl, cend, pos, &t) != 3) { return "a CRL does not parse"; }
+    var sig = load64(&t);
+    var sig_len = load64(&t + 8) - sig;
+    if (sig_len < 2 || load8(crl + sig) != 0) { return "a CRL does not parse"; }
+    var f[64];
+    if (_kc_cert_fields(issuer_der, issuer_len, &f) == 0) { return "a CRL issuer does not parse"; }
+    if (iss_len != load64(&f + 40) || memeq(crl + iss, issuer_der + load64(&f + 32), iss_len) == 0) {
+        return what;
+    }
+    if (x509_cert_curve(issuer) != X509_CURVE_P256) { return "a CRL issuer's key is not P-256"; }
+    if (ecdsa_p256_verify_der(x509_cert_pubkey(issuer), crl + tbs, tbs_end - tbs, crl + sig + 1, sig_len - 1) != 1) {
+        return "a CRL's signature does not verify";
+    }
+    if (this_update < 0 || next_update < 0) { return "a CRL has no validity window"; }
+    if (now < this_update || now >= next_update) { return "a CRL is not current"; }
+    var p = rev;
+    while (p < rev_end) {
+        if (_kc_tlv(crl, rev_end, p, &t) != 48) { return "a CRL does not parse"; }
+        var e[16];
+        if (_kc_tlv(crl, load64(&t + 8), load64(&t), &e) != 2) { return "a CRL does not parse"; }
+        var slen = load64(&e + 8) - load64(&e);
+        if (slen == ser_len && memeq(crl + load64(&e), ser, ser_len) == 1) { return "revoked"; }
+        if (ser2 != 0 && slen == ser2_len && memeq(crl + load64(&e), ser2, ser2_len) == 1) { return "revoked2"; }
+        p = load64(&t + 8);
+    }
+    return 0;
+}
+
+# ---- the TCB levels --------------------------------------------------------
+
+# Whether the 16 SVNs of `comps` (a JSON array of {"svn": n}) are each at most
+# have[i], from index `from`. -1 for a malformed array.
+fn _kc_svns_at_most(comps, have, from) {
+    if (comps == 0 || bayan_json_v_tag(comps) != JTAG_ARR || bayan_json_v_arr_len(comps) != 16) { return 0 - 1; }
+    var i = from;
+    while (i < 16) {
+        var svn = _kc_int(bayan_json_v_arr_get(comps, i), "svn");
+        if (svn < 0) { return 0 - 1; }
+        if ((load8(have + i) & 255) < svn) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# The platform's TCB status from `info.tcbLevels`: the first level whose SGX
+# components and PCESVN the PCK certificate meets, and for TDX whose TDX
+# components the TEE_TCB_SVN meets (from index 2 when the TDX module's major
+# version, TEE_TCB_SVN[1], is not 0; those two bytes are the module's, checked
+# against its identity). 0 when no level matches, -1 when malformed.
+fn _kc_platform_status(info, tdx, tee_tcb_svn) {
+    var levels = _kc_get(info, "tcbLevels");
+    if (levels == 0 || bayan_json_v_tag(levels) != JTAG_ARR) { return 0 - 1; }
+    var n = bayan_json_v_arr_len(levels);
+    var i = 0;
+    while (i < n) {
+        var lv = bayan_json_v_arr_get(levels, i);
+        var tcb = _kc_get(lv, "tcb");
+        if (tcb == 0) { return 0 - 1; }
+        var ok = _kc_svns_at_most(_kc_get(tcb, "sgxtcbcomponents"), &_kc_pck + 16, 0);
+        if (ok < 0) { return 0 - 1; }
+        var pcesvn = _kc_int(tcb, "pcesvn");
+        if (pcesvn < 0) { return 0 - 1; }
+        if (load64(&_kc_pck + 32) < pcesvn) { ok = 0; }
+        if (ok == 1 && tdx == 1) {
+            var from = 0;
+            if ((load8(tee_tcb_svn + 1) & 255) > 0) { from = 2; }
+            ok = _kc_svns_at_most(_kc_get(tcb, "tdxtcbcomponents"), tee_tcb_svn, from);
+            if (ok < 0) { return 0 - 1; }
+        }
+        if (ok == 1) {
+            var s = _kc_status(lv);
+            if (s == 0) { return 0 - 1; }
+            return s;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# The first of `levels` (`[{"tcb": {"isvsvn": n}, "tcbStatus": ...}]`) whose
+# ISVSVN is at most `svn`: its status, 0 when none is, -1 when malformed.
+fn _kc_isvsvn_status(levels, svn) {
+    if (levels == 0 || bayan_json_v_tag(levels) != JTAG_ARR) { return 0 - 1; }
+    var n = bayan_json_v_arr_len(levels);
+    var i = 0;
+    while (i < n) {
+        var lv = bayan_json_v_arr_get(levels, i);
+        var want = _kc_int(_kc_get(lv, "tcb"), "isvsvn");
+        if (want < 0) { return 0 - 1; }
+        if (svn >= want) {
+            var s = _kc_status(lv);
+            if (s == 0) { return 0 - 1; }
+            return s;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Whether buf[0..n) masked by `mask` equals `want`, byte by byte.
+fn _kc_masked_eq(buf, mask, want, n) {
+    var i = 0;
+    while (i < n) {
+        if (((load8(buf + i) & load8(mask + i)) & 255) != (load8(want + i) & 255)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# The TDX module's identity. With TEE_TCB_SVN[1] (the major version) above 0,
+# `tdxModuleIdentities` must hold "TDX_<major, two hex digits>": its MRSIGNER
+# must be MRSIGNERSEAM, its masked attributes SEAMATTRIBUTES', and
+# TEE_TCB_SVN[0] (the minor SVN) selects its status. With 0, `tdxModule`'s
+# MRSIGNER and attributes apply and there is no module status (UpToDate).
+# Returns the status (> 0), or a reason (a cstr pointer).
+var _KC_HEX = "0123456789ABCDEF";
+
+fn _kc_module_status(info, tee_tcb_svn, mrsignerseam, seamattr) {
+    var major = load8(tee_tcb_svn + 1) & 255;
+    var ident = 0;
+    if (major > 0) {
+        var want[8];
+        memcpy(&want, "TDX_", 4);
+        store8(&want + 4, load8(_KC_HEX + (major >> 4)));
+        store8(&want + 5, load8(_KC_HEX + (major & 15)));
+        store8(&want + 6, 0);
+        var ids = _kc_get(info, "tdxModuleIdentities");
+        if (ids == 0 || bayan_json_v_tag(ids) != JTAG_ARR) { return "the TCB info has no TDX module identities"; }
+        var i = 0;
+        while (i < bayan_json_v_arr_len(ids)) {
+            var m = bayan_json_v_arr_get(ids, i);
+            if (_kc_is(m, "id", &want) == 1) { ident = m; }
+            i = i + 1;
+        }
+        if (ident == 0) { return "the TCB info has no identity for this TDX module"; }
+    } else {
+        ident = _kc_get(info, "tdxModule");
+        if (ident == 0) { return "the TCB info has no TDX module"; }
+    }
+    var mrs[48];
+    var attr[8];
+    var mask[8];
+    if (_kc_hex(ident, "mrsigner", &mrs, 48) == 0) { return "the TDX module identity does not parse"; }
+    if (_kc_hex(ident, "attributes", &attr, 8) == 0) { return "the TDX module identity does not parse"; }
+    if (_kc_hex(ident, "attributesMask", &mask, 8) == 0) { return "the TDX module identity does not parse"; }
+    if (memeq(&mrs, mrsignerseam, 48) == 0) { return "the TDX module's signer is not Intel's"; }
+    if (_kc_masked_eq(seamattr, &mask, &attr, 8) == 0) { return "the TDX module's attributes do not match"; }
+    if (major == 0) { return KAVACH_TCB_UP_TO_DATE; }
+    var s = _kc_isvsvn_status(_kc_get(ident, "tcbLevels"), load8(tee_tcb_svn) & 255);
+    if (s < 0) { return "the TDX module identity does not parse"; }
+    if (s == 0) { return "the TDX module is below every TCB level"; }
+    return s;
+}
+
+# The QE report against the QE identity. Returns the QE's status (> 0), or a
+# reason.
+fn _kc_qe_status(ident, qe_report) {
+    var misc[4];
+    var misc_mask[4];
+    var attr[16];
+    var attr_mask[16];
+    var mrs[32];
+    if (_kc_hex(ident, "miscselect", &misc, 4) == 0) { return "the QE identity does not parse"; }
+    if (_kc_hex(ident, "miscselectMask", &misc_mask, 4) == 0) { return "the QE identity does not parse"; }
+    if (_kc_hex(ident, "attributes", &attr, 16) == 0) { return "the QE identity does not parse"; }
+    if (_kc_hex(ident, "attributesMask", &attr_mask, 16) == 0) { return "the QE identity does not parse"; }
+    if (_kc_hex(ident, "mrsigner", &mrs, 32) == 0) { return "the QE identity does not parse"; }
+    var prodid = _kc_int(ident, "isvprodid");
+    if (prodid < 0) { return "the QE identity does not parse"; }
+    # SGX report body: MISCSELECT +16, ATTRIBUTES +48, MRSIGNER +128,
+    # ISVPRODID +256, ISVSVN +258 (little-endian u16s).
+    if (_kc_masked_eq(qe_report + 16, &misc_mask, &misc, 4) == 0) { return "the QE does not match its identity"; }
+    if (_kc_masked_eq(qe_report + 48, &attr_mask, &attr, 16) == 0) { return "the QE does not match its identity"; }
+    if (memeq(qe_report + 128, &mrs, 32) == 0) { return "the QE does not match its identity"; }
+    var have_prodid = (load8(qe_report + 256) & 255) | ((load8(qe_report + 257) & 255) << 8);
+    if (have_prodid != prodid) { return "the QE does not match its identity"; }
+    var isvsvn = (load8(qe_report + 258) & 255) | ((load8(qe_report + 259) & 255) << 8);
+    var s = _kc_isvsvn_status(_kc_get(ident, "tcbLevels"), isvsvn);
+    if (s < 0) { return "the QE identity does not parse"; }
+    if (s == 0) { return "the QE is below every TCB level"; }
+    return s;
+}
+
+# ---- the check -------------------------------------------------------------
+
+# What `kavach_collateral_check` found, for the result's details:
+# +0 the platform's status, +8 the TDX module's (0 for SGX), +16 the QE's.
+var _kc_found[24];
+
+fn kavach_collateral_platform_status() { return load64(&_kc_found); }
+fn kavach_collateral_module_status() { return load64(&_kc_found + 8); }
+fn kavach_collateral_qe_status() { return load64(&_kc_found + 16); }
+
+# Evaluate collateral `c` for a quote that has verified to `root`. `tdx` is 1
+# for a TDX quote. `pem`, `pem_len` the quote's PCK chain; `qe_report` its QE
+# report; `tee_tcb_svn`, `mrsignerseam`, `seamattr` from a TD report (0 for
+# SGX). `accept` the statuses the policy accepts. Returns 0 when everything
+# passes, or the reason. `arena` is the attestation scratch.
+fn kavach_collateral_check(c, root, root_der, root_len, tdx, pem, pem_len, qe_report,
+  tee_tcb_svn, mrsignerseam, seamattr, accept, now, arena) {
+    memset(&_kc_found, 0, 24);
+    if (kavach_collateral_complete(c) == 0) { return "the policy carries no collateral"; }
+    # The quote's PCK chain: the leaf, then the CA that issued it.
+    var qcerts[32];
+    var qders[64];
+    var qn = _kc_chain(pem, pem_len, &qcerts, &qders, arena);
+    if (qn < 2) { return "the quote's PCK chain does not parse"; }
+    var leaf_der = load64(&qders);
+    var leaf_len = load64(&qders + 8);
+    var ca = load64(&qcerts + 8);
+    var ca_der = load64(&qders + 16);
+    var ca_len = load64(&qders + 24);
+    var lf[64];
+    var cf[64];
+    if (_kc_cert_fields(leaf_der, leaf_len, &lf) == 0) { return "the PCK certificate does not parse"; }
+    if (_kc_cert_fields(ca_der, ca_len, &cf) == 0) { return "the PCK CA certificate does not parse"; }
+    var iss_len = load64(&lf + 24);
+    if (iss_len != load64(&cf + 40) || memeq(leaf_der + load64(&lf + 16), ca_der + load64(&cf + 32), iss_len) == 0) {
+        return "the PCK certificate's issuer is not the next certificate";
+    }
+    if (_kc_pck_tcb(leaf_der, leaf_len) == 0) { return "the PCK certificate carries no SGX TCB"; }
+
+    # The TCB Signing certificate, to the policy's root.
+    var scerts[32];
+    var sders[64];
+    var sn = _kc_chain(AttestCollateral_signer_chain(c), AttestCollateral_signer_chain_len(c), &scerts, &sders, arena);
+    if (sn < 1) { return "the TCB signing chain does not parse"; }
+    var signer = load64(&scerts);
+    var signer_der = load64(&sders);
+    var signer_len = load64(&sders + 8);
+    var inters: i64[4];
+    memset(&inters, 0, 32);
+    var ni = 0;
+    var i = sn - 1;
+    while (i >= 1) {
+        var sf[64];
+        if (_kc_cert_fields(load64(&sders + i * 16), load64(&sders + i * 16 + 8), &sf) == 0) {
+            return "the TCB signing chain does not parse";
+        }
+        if (_kc_self_issued(load64(&sders + i * 16), &sf) == 0) {
+            store64(&inters + ni * 8, load64(&scerts + i * 8));
+            ni = ni + 1;
+        }
+        i = i - 1;
+    }
+    if (x509_verify_chain(signer, &inters, ni, root, now) != 1) {
+        return "the TCB signing certificate does not verify to the policy's root";
+    }
+    if (x509_cert_curve(signer) != X509_CURVE_P256) { return "the TCB signing key is not P-256"; }
+
+    # Revocation: the PCK certificate by its CA, the CA and the TCB Signing
+    # certificate by the root.
+    var why = _kc_crl_verdict(AttestCollateral_pck_crl(c), AttestCollateral_pck_crl_len(c), ca, ca_der, ca_len, now,
+      leaf_der + load64(&lf), load64(&lf + 8), 0, 0, "the PCK CRL is not the PCK CA's");
+    if (why != 0) {
+        if (streq(why, "revoked") == 1) { return "the PCK certificate is revoked"; }
+        return why;
+    }
+    var gf[64];
+    if (_kc_cert_fields(signer_der, signer_len, &gf) == 0) { return "the TCB signing certificate does not parse"; }
+    why = _kc_crl_verdict(AttestCollateral_root_crl(c), AttestCollateral_root_crl_len(c), root, root_der, root_len, now,
+      ca_der + load64(&cf), load64(&cf + 8), signer_der + load64(&gf), load64(&gf + 8),
+      "the root CRL is not the root's");
+    if (why != 0) {
+        if (streq(why, "revoked") == 1) { return "the PCK CA certificate is revoked"; }
+        if (streq(why, "revoked2") == 1) { return "the TCB signing certificate is revoked"; }
+        return why;
+    }
+
+    # The TCB info.
+    var ja = _kc_json_scratch();
+    var pk = x509_cert_pubkey(signer);
+    var info = _kc_signed_member(AttestCollateral_tcb_info(c), AttestCollateral_tcb_info_len(c), "tcbInfo", pk, ja);
+    if (info == 0) { return "the TCB info's signature does not verify"; }
+    var kind = "SGX";
+    if (tdx == 1) { kind = "TDX"; }
+    if (_kc_is(info, "id", kind) == 0) { return "the TCB info is not for this kind of quote"; }
+    if (_kc_int(info, "version") != 3) { return "the TCB info is not version 3"; }
+    var issued = _kc_date(info, "issueDate");
+    var next = _kc_date(info, "nextUpdate");
+    if (issued < 0 || next < 0) { return "the TCB info has no validity window"; }
+    if (now < issued || now >= next) { return "the TCB info is not current"; }
+    var fmspc[6];
+    var pceid[2];
+    if (_kc_hex(info, "fmspc", &fmspc, 6) == 0 || _kc_hex(info, "pceId", &pceid, 2) == 0) {
+        return "the TCB info does not parse";
+    }
+    if (memeq(&fmspc, &_kc_pck, 6) == 0) { return "the TCB info is for another platform (FMSPC)"; }
+    if (memeq(&pceid, &_kc_pck + 8, 2) == 0) { return "the TCB info is for another PCE"; }
+    if (tdx == 1) {
+        var ms = _kc_module_status(info, tee_tcb_svn, mrsignerseam, seamattr);
+        if (ms > 64) { return ms; }
+        store64(&_kc_found + 8, ms);
+    }
+    var ps = _kc_platform_status(info, tdx, tee_tcb_svn);
+    if (ps < 0) { return "the TCB info does not parse"; }
+    if (ps == 0) { return "the platform is below every TCB level"; }
+    store64(&_kc_found, ps);
+
+    # The QE identity.
+    var ident = _kc_signed_member(AttestCollateral_qe_identity(c), AttestCollateral_qe_identity_len(c),
+      "enclaveIdentity", pk, ja);
+    if (ident == 0) { return "the QE identity's signature does not verify"; }
+    var qkind = "QE";
+    if (tdx == 1) { qkind = "TD_QE"; }
+    if (_kc_is(ident, "id", qkind) == 0) { return "the QE identity is not for this kind of quote"; }
+    if (_kc_int(ident, "version") != 2) { return "the QE identity is not version 2"; }
+    issued = _kc_date(ident, "issueDate");
+    next = _kc_date(ident, "nextUpdate");
+    if (issued < 0 || next < 0) { return "the QE identity has no validity window"; }
+    if (now < issued || now >= next) { return "the QE identity is not current"; }
+    var qs = _kc_qe_status(ident, qe_report);
+    if (qs > 64) { return qs; }
+    store64(&_kc_found + 16, qs);
+
+    var ok = (accept | KAVACH_TCB_UP_TO_DATE) & (KAVACH_TCB_REVOKED - 1);
+    if ((ps & ok) == 0) { return "the platform's TCB status is not accepted"; }
+    if (tdx == 1 && (load64(&_kc_found + 8) & ok) == 0) { return "the TDX module's TCB status is not accepted"; }
+    if ((qs & ok) == 0) { return "the QE's TCB status is not accepted"; }
+    return 0;
+}

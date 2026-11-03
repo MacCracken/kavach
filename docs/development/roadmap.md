@@ -2,7 +2,7 @@
 
 > **Principle**: Security correctness first, then backend breadth, then performance. Every sandbox gets a number.
 
-This roadmap is **future-facing only** — shipped work lives in [CHANGELOG.md](../../CHANGELOG.md). Current release: **v3.14.1**. Toolchain pin: cc `6.7.18`; sigil `3.13.15` (the snapshot's — see CLAUDE.md hazard 4), samay `1.5.1`, ai-hwaccel `2.5.6` (agnosys dropped at v3.5.0 — its security backends are internalized). 3.14.0 and 3.14.1 went to the uutils exec fix, the `basic` filter's socket writes and the cyrius 6.7.9 and 6.7.18 moves, ahead of the SEV-SNP arc pinned as 3.14.x below; the arcs keep their numbers until they are re-pinned.
+This roadmap is **future-facing only** — shipped work lives in [CHANGELOG.md](../../CHANGELOG.md). Current release: **v3.14.2**. Toolchain pin: cc `6.7.18`; sigil `3.13.15` (the snapshot's — see CLAUDE.md hazard 4), samay `1.5.1`, ai-hwaccel `2.5.6` (agnosys dropped at v3.5.0 — its security backends are internalized). 3.14.0 to 3.14.2 went to the uutils exec fix, the `basic` filter's socket writes, the cyrius 6.7.9 and 6.7.18 moves, and the open fixes: Intel's attestation collateral, the TDX RTMRs, the runtimes' own diagnostics and aarch64 namespaces. They came ahead of the SEV-SNP arc pinned as 3.14.x below; the arcs keep their numbers until they are re-pinned.
 
 **Every release below is pinned.** Each names what ships in it, in the order the principle sets. To
 move an item, edit this file; do not let it drift. **An arc also takes the open fixes in the code it
@@ -13,41 +13,6 @@ a `bench-history.csv` row labeled with the version, a CHANGELOG entry with measu
 work in 3.20) can be pulled forward; items with one say what it is.
 
 ---
-
-## Open now — fixes, and TEE attestation I continued (ADR-004 §2)
-
-### Open
-
-- [ ] **Fetch the quote from the running guest: Gramine for SGX, the TD quote for TDX.** Needs
-  SGX or TDX hardware to verify on; the development machine is AMD. kavach's side of the hand-off
-  is in place (`backend_attest_nonce`, `backend_attach_quote`), and until the launchers use it
-  they refuse a policy that requires attestation. What each launcher lacks first:
-  - **SGX**: `backend_sgx.cyr` writes a manifest template and never renders it
-    (`gramine-manifest`) or signs it (`gramine-sgx-sign`), so `gramine-sgx` has nothing to run.
-    Then `sgx.remote_attestation = "dcap"`, and inside the enclave: write the nonce to
-    `/dev/attestation/user_report_data`, read `/dev/attestation/quote`. The command is in the
-    manifest, so MRENCLAVE differs per command, and the nonce must come in through a file that
-    is not measured.
-  - **TDX**: `backend_tdx.cyr` passes QEMU no TDVF firmware, and it (and `backend_is_available`)
-    decides TDX is present from `/dev/tdx_guest`, the device inside a TD (the tdx-guest
-    driver). On the host, KVM's TDX support shows in `kvm_intel`'s `tdx` parameter. Changing only
-    the check would route execs to a launch not shown to boot, so it waits for the firmware. The
-    guest gets its quote through configfs-tsm and has to hand it out, over the serial console
-    or vsock.
-  - **Takes along** the two launchers' capture, as in 3.13.2: stderr, the config's deadline and
-    stdin. The exit status to report is the payload's. For a TD it has to come out of the guest
-    with the quote, since QEMU's own status is not it; whether `gramine-sgx` passes the enclave's
-    through is to be checked on the hardware.
-- [ ] **The TDX RTMRs.** The allowlist pins MRTD, which is the TD's firmware; the kernel and its
-  command line are measured into the RTMRs, which nothing checks yet. A nonce passed on the
-  kernel command line would change a measurement on every exec.
-- [ ] **The runtime's own diagnostics on gVisor and SY-agnos.** Since 3.13.2 their stderr reaches
-  the result, and so the gate, with `runsc`'s or docker's own messages in it, so a runtime error
-  can read as "externalization blocked". OCI keeps runc's apart with `--log`. Finding the
-  equivalent needs `runsc` and docker to try it on; the development machine has neither.
-- [ ] **Intel's collateral: TCB level, QE identity, revocation.** sigil verifies the signatures
-  and the chain to the root, not these. Without them, a genuine platform with an out-of-date or
-  revoked TCB passes, and the quoting enclave's identity and version go unchecked.
 
 ## 3.14.x — TEE attestation II: SEV-SNP, and SGX sealing
 
@@ -134,27 +99,51 @@ release, with the payload's exit status brought out of the guest as 3.14 and 3.1
 - [Advanced Isolation](#advanced-isolation), [Cross-Platform Backend Porting](#cross-platform-backend-porting),
   [Polymorphic Defense Integration](#polymorphic-defense-integration) (waits on Cyrius Phase 13).
 
-### Blocked — awaiting upstream
+### Blocked — awaiting upstream or hardware
 
 Each entry carries **what it means**, **who owns the upstream work**, and **trigger condition**.
 
-### aarch64 namespaces and rootfs entry
+### SGX and TDX quote fetch — awaiting hardware
 
-- **What it means.** Since 3.12.8, `security_create_namespace` returns not-supported on aarch64 and
-  `_spawn_enter_rootfs` returns -1 there, so an aarch64 sandbox gets no namespaces and no rootfs.
-  kavach's x86-64 numbers for `unshare` (272) and `chroot` (161) run `kcmp` and `sethostname` on
-  aarch64. The native numbers are not an option: cyrius renumbers 51 to `getsockname`, and a
-  native number under an aarch64 `#ifdef` is what ADR-007 and the cyrius guide rule out.
-  **Unblocked, not yet done:** the stdlib names both by the 6.6.14 pin, in both Linux peers
-  (`sys_unshare`, `sys_chroot`). Checked at 3.13.3 on 6.6.20: an aarch64 build run under
-  `qemu-aarch64 -strace` issues `unshare(0)` and `chroot(…)`.
-- **Who owns it.** Upstream: cyrius, filed as
-  `cyrius/docs/development/issues/2026-09-25-kavach-unshare-chroot-unnamed-aarch64-chroot-unreachable.md`.
-  It asks for `SYS_UNSHARE` and `SYS_CHROOT` in both Linux peers with `ESYSXLAT` rows `272→97` and
-  `161→51`. The `161→51` row has to sit below the `51→204` getsockname row.
-- **Trigger condition.** A cyrius release declaring both names (met). Then call
-  `sys_unshare` / `sys_chroot`, delete the two constants in `src/sys_security_syscalls.cyr` and the
-  aarch64 refusals, and run the namespace and rootfs tests on the `aarch64-native` CI job.
+- **What it means.** kavach verifies a quote fully since 3.14.2: the signatures to Intel's root,
+  Intel's collateral, the nonce, the measurement and, for TDX, the RTMRs. Its own launchers cannot
+  get one out of a running guest, so they refuse a policy that requires attestation, and a
+  launcher that can must hand its quote over with `backend_attach_quote`. What each launcher lacks:
+  - **SGX**: `backend_sgx.cyr` writes a manifest template and never renders it
+    (`gramine-manifest`) or signs it (`gramine-sgx-sign`), so `gramine-sgx` has nothing to run.
+    Then `sgx.remote_attestation = "dcap"`, and inside the enclave: write the nonce to
+    `/dev/attestation/user_report_data`, read `/dev/attestation/quote`. The command is in the
+    manifest, so MRENCLAVE differs per command, and the nonce must come in through a file that is
+    not measured.
+  - **TDX**: `backend_tdx.cyr` passes QEMU no TDVF firmware (`-bios`), and it (and
+    `backend_is_available`) decides TDX is present from `/dev/tdx_guest`, the device inside a TD.
+    On the host, KVM's TDX support shows in `kvm_intel`'s `tdx` parameter. QEMU's `tdx-guest`
+    object takes `quote-generation-socket` for the host's QGS (QEMU 11.1 here parses it). The guest
+    gets its quote through configfs-tsm and has to hand it out, over the serial console or vsock;
+    a nonce on the kernel command line would change RTMR2 every exec, so it must come in another
+    way (fw_cfg, vsock).
+  - **Takes along** the two launchers' capture, as in 3.13.2: stderr, the config's deadline and
+    stdin. The exit status to report is the payload's; for a TD it has to come out of the guest
+    with the quote, since QEMU's own status is not it.
+- **Who owns it.** kavach. Nothing upstream blocks it; what blocks it is verification. The
+  development machine is AMD without SEV-SNP, and qemu emulates neither SGX nor TDX. At 3.14.2,
+  downloading Gramine or runsc to run here was refused as external code, which is right: a
+  launcher built against tools never run would be a claim, not a fix.
+- **Trigger condition.** Access to an SGX (DCAP) or TDX host, or a CI runner with one. Then render
+  and sign the manifest (SGX), boot a TD with TDVF and a QGS socket (TDX), and test both against
+  the attestation gate, collateral included.
+
+### sigil: TDX quotes in Intel's layout, and quote v5
+
+- **What it means.** sigil 3.13.15's `tdx_quote_parse` reads no type-6 certification data, so it
+  refuses every TDX v4 quote a real TD produces. kavach unwraps it itself since 3.14.2
+  (`_attest_tdx_parse`). sigil also refuses quote v5, which newer QGS releases emit for TD 1.5
+  (dcap-qvl's `tdx_quote_outdated` and `tdx_quote_td15ex` are v5); kavach cannot verify those.
+- **Who owns it.** Upstream: sigil. Written up in
+  `docs/development/issues/2026-11-02-sigil-tdx-quote-type6-wrapper.md`, to be filed in sigil.
+- **Trigger condition.** A sigil release, reaching kavach through a cyrius pin (hazard 4), that
+  parses type 6 (then delete the unwrap in `_attest_tdx_parse`) and v5 (then add a v5 vector to
+  `test_attest_real_intel_quotes`).
 
 ### Stiva OCI backend
 

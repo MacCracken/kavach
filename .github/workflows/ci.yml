@@ -373,12 +373,12 @@ jobs:
           # each Linux peer carries its own number, and aarch64 runs an
           # untranslated x86 number as a different call, silently.
           scan "raw syscall number (use the stdlib's SYS_* / sys_*)" '\bsyscall\(\s*[0-9]'
-          # A syscall number kavach declares itself. Only the two files that
-          # document why may: sys_security_syscalls.cyr (x86-64 unshare and
-          # chroot, which the stdlib does not name yet) and kernel_audit.cyr
-          # (the agnos audit call).
+          # A syscall number kavach declares itself. Only kernel_audit.cyr
+          # (the agnos audit call) documents why it may. Until 3.14.2
+          # sys_security_syscalls.cyr held x86-64 unshare and chroot too; the
+          # stdlib names both now.
           scan "SYS_* number declared in src/" '\bSYS_[A-Z0-9_]+\s*=\s*[0-9]' \
-            src/sys_security_syscalls.cyr src/kernel_audit.cyr
+            src/kernel_audit.cyr
           # Hardcoded /etc paths — kavach has no business writing to
           # system config; injection / mount escape territory.
           # Scanner modules carry pattern strings, not access calls.
