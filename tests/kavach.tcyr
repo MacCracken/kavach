@@ -3794,15 +3794,17 @@ fn test_basic_seccomp_filter_shape() {
     var len = security_seccomp_filter_len(info);
     var allow = _seccomp_allow_list();
     var m = vec_len(allow);
-    assert_eq(m, _t_nr(20, 19), "20 allowed calls on x86-64, 19 on aarch64 (no arch_prctl)");
+    assert_eq(m, _t_nr(22, 20), "22 plain calls on x86-64, 20 on aarch64 (no arch_prctl, no poll)");
     var p = _t_nr(5, 4);
-    assert_eq(len / 8, p + m + 2, "arch check + one JEQ per allowed call + RET KILL + RET ALLOW");
+    assert_eq(len / 8, p + m + 13, "arch check + one JEQ per plain call + 11 argument checks + RET KILL + RET ALLOW");
+    assert_eq(len / 8, _t_nr(40, 37), "40 instructions on x86-64, 37 on aarch64");
 
     # Here the fall-through is the KILL, so that is where the x32 branch must
     # land. The ALLOW sits one instruction later, where an off-by-one would
     # send every x32 call.
-    var kill_idx = p + m;
-    var allow_idx = p + m + 1;
+    var t = p + m;
+    var kill_idx = t + 11;
+    var allow_idx = t + 12;
     _t_check_seccomp_prologue(ptr, kill_idx);
     var i = 0;
     var ok = 1;
@@ -3811,13 +3813,280 @@ fn test_basic_seccomp_filter_shape() {
         if (_t_insn_code(ptr, at) != 21) { ok = 0; }
         if (_t_insn_k(ptr, at) != vec_get(allow, i)) { ok = 0; }
         if (at + 1 + _t_insn_jt(ptr, at) != allow_idx) { ok = 0; }
+        if (_t_insn_jf(ptr, at) != 0) { ok = 0; }
         i = i + 1;
     }
-    assert_eq(ok, 1, "every allowed syscall JEQs to the ALLOW instruction");
-    assert_eq(_t_insn_k(ptr, kill_idx), 2147483648, "falling through every JEQ is KILL_PROCESS");
+    assert_eq(ok, 1, "every plain call JEQs to the ALLOW instruction");
+    assert_eq(_t_insn_k(ptr, kill_idx), 2147483648, "falling through every check is KILL_PROCESS");
     assert_eq(_t_insn_k(ptr, allow_idx), 2147418112, "the jump target is ALLOW");
     assert_eq(_t_vec_has(allow, _t_nr(0, 63)), 1, "read is allowed (x86-64 0 / aarch64 63)");
     assert_eq(_t_vec_has(allow, _t_nr(231, 94)), 1, "exit_group is allowed (x86-64 231 / aarch64 94)");
+    assert_eq(_t_vec_has(allow, _t_nr(271, 73)), 1, "ppoll is allowed (x86-64 271 / aarch64 73)");
+    assert_eq(_t_vec_has(allow, _t_nr(44, 206)), 0, "sendto is not a plain call: only its argument check admits it");
+    assert_eq(_t_vec_has(allow, _t_nr(72, 25)), 0, "nor is fcntl");
+
+    # 3.14.1: the argument-pinned tail. A jump lands at idx + 1 + jt / jf.
+    assert_eq(_t_insn_code(ptr, t), 21, "tail: JEQ sendto");
+    assert_eq(_t_insn_k(ptr, t), _t_nr(44, 206), "... sendto is x86-64 44 / aarch64 206");
+    assert_eq(t + 1 + _t_insn_jt(ptr, t), t + 2, "... a match goes to its argument checks");
+    assert_eq(t + 1 + _t_insn_jf(ptr, t), t + 1, "... anything else to the fcntl check");
+    assert_eq(_t_insn_k(ptr, t + 1), _t_nr(72, 25), "JEQ fcntl, x86-64 72 / aarch64 25");
+    assert_eq(t + 2 + _t_insn_jt(ptr, t + 1), t + 8, "... a match goes to its command check");
+    assert_eq(t + 2 + _t_insn_jf(ptr, t + 1), kill_idx, "... anything else is killed");
+    # sendto's dest_addr (args[4], both words) and addrlen (args[5]) must be 0.
+    var loads = vec_new();
+    vec_push(loads, 48);
+    vec_push(loads, 52);
+    vec_push(loads, 56);
+    var j = 0;
+    var tail_ok = 1;
+    while (j < 3) {
+        var ld = t + 2 + j * 2;
+        if (_t_insn_code(ptr, ld) != 32) { tail_ok = 0; }
+        if (_t_insn_k(ptr, ld) != vec_get(loads, j)) { tail_ok = 0; }
+        if (_t_insn_code(ptr, ld + 1) != 21) { tail_ok = 0; }
+        if (_t_insn_k(ptr, ld + 1) != 0) { tail_ok = 0; }
+        if (ld + 2 + _t_insn_jf(ptr, ld + 1) != kill_idx) { tail_ok = 0; }
+        j = j + 1;
+    }
+    assert_eq(tail_ok, 1, "sendto: LD args[4] lo, hi and args[5], each JEQ 0 or KILL");
+    assert_eq(t + 3 + 1 + _t_insn_jt(ptr, t + 3), t + 4, "dest_addr's low word 0 goes on to its high word");
+    assert_eq(t + 5 + 1 + _t_insn_jt(ptr, t + 5), t + 6, "... then to addrlen");
+    assert_eq(t + 7 + 1 + _t_insn_jt(ptr, t + 7), allow_idx, "... and addrlen 0 is ALLOW");
+    assert_eq(_t_insn_code(ptr, t + 8), 32, "fcntl: LD");
+    assert_eq(_t_insn_k(ptr, t + 8), 24, "... args[1], the command (+24)");
+    assert_eq(_t_insn_k(ptr, t + 9), 3, "JEQ F_GETFL (3)");
+    assert_eq(t + 10 + _t_insn_jt(ptr, t + 9), allow_idx, "... is ALLOW");
+    assert_eq(t + 10 + _t_insn_jf(ptr, t + 9), t + 10, "... else the F_SETFL check");
+    assert_eq(_t_insn_k(ptr, t + 10), 4, "JEQ F_SETFL (4)");
+    assert_eq(t + 11 + _t_insn_jt(ptr, t + 10), allow_idx, "... is ALLOW");
+    assert_eq(t + 11 + _t_insn_jf(ptr, t + 10), kill_idx, "... any other command is KILL");
+    return 0;
+}
+
+# ---- the basic filter admits write-shaped socket calls (3.14.1) ------------
+#
+# Fork a child holding one end of a socketpair, load the basic filter when
+# `filtered`, make one call and exit 7 when it returned what that shape should.
+# The caller reads the wait status: exit 7 is "allowed and worked", signal 31
+# is SIGSYS. Through 3.14.0 ways 1, 2, 6 and 8 died of SIGSYS under the filter.
+#   1  sock_send_all(fd, "abc", 3)                the cyrius 6.6.16 transport
+#   2  sendto(fd, "abc", 3, MSG_NOSIGNAL, NULL, 0) write(2) on a connected socket
+#   3  sendto to an address (AF_INET, 16)          must die
+#   4  sendto with NULL but addrlen 16             must die; the kernel would send
+#   5  sendto with a pointer whose low word is 0   must die: the high word is read
+#   6  fcntl F_GETFL, then F_SETFL | O_NONBLOCK    allowed
+#   7  fcntl F_DUPFD                               must die
+#   8  ppoll for POLLOUT                           allowed, the socket is ready
+#   9  write(2) on the socket                      the control
+fn _t_basic_probe(way, filtered, info) {
+    var sv[16];
+    if (sys_socketpair(1, 1, 0, &sv) != 0) { return 0 - 1; }
+    var a = load32(&sv);
+    var b = load32(&sv + 4);
+    var pid = kv_fork();
+    if (pid == 0) {
+        _t_set_rlimit(4, 0);                        # RLIMIT_CORE
+        if (filtered == 1) {
+            var r_t, r_v = security_load_seccomp(security_seccomp_filter_ptr(info),
+              security_seccomp_filter_len(info));
+            if (is_ok(r_t) == 0) { sys_exit(60); }
+        }
+        var n = 0;
+        if (way == 1) { n = sock_send_all(b, "abc", 3); }
+        if (way == 2) { n = sys_sendto(b, "abc", 3, 16384, 0, 0); }
+        if (way == 3) {
+            var sa[16];
+            store64(&sa, 0);
+            store64(&sa + 8, 0);
+            store16(&sa, 2);                        # AF_INET
+            n = sys_sendto(b, "abc", 3, 16384, &sa, 16);
+        }
+        if (way == 4) { n = sys_sendto(b, "abc", 3, 16384, 0, 16); }
+        if (way == 5) { n = sys_sendto(b, "abc", 3, 16384, 4294967296, 0); }
+        if (way == 6) {
+            var fl = sys_fcntl(b, F_GETFL, 0);
+            if (fl < 0) { sys_exit(20); }
+            if (sys_fcntl(b, F_SETFL, fl | O_NONBLOCK) < 0) { sys_exit(21); }
+            if ((sys_fcntl(b, F_GETFL, 0) & O_NONBLOCK) == 0) { sys_exit(22); }
+            n = 3;
+        }
+        if (way == 7) {
+            var d = sys_fcntl(b, F_DUPFD, 10);
+            if (d >= 0) { n = 3; }
+        }
+        if (way == 8) {
+            var pfd[8];
+            store32(&pfd, b);
+            store16(&pfd + 4, 4);                   # POLLOUT
+            store16(&pfd + 6, 0);
+            var ts[16];
+            store64(&ts, 0);
+            store64(&ts + 8, 0);
+            if (sys_ppoll(&pfd, 1, &ts, 0, 8) != 1) { sys_exit(23); }
+            n = 3;
+        }
+        if (way == 9) { n = sys_write(b, "abc", 3); }
+        if (n == 3) { sys_exit(7); }
+        sys_exit(9);
+    }
+    sys_close(b);
+    var st[8];
+    store64(&st, 0);
+    kv_waitpid(pid, &st, 0);
+    sys_close(a);
+    return load32(&st);
+}
+
+fn _t_exited(st, code) {
+    if ((st & 127) != 0) { return 0; }
+    if (((st >> 8) & 255) == code) { return 1; }
+    return 0;
+}
+
+fn test_basic_seccomp_admits_write_shaped_calls() {
+    test_group("basic_seccomp_admits_write_shaped_calls");
+    if (_t_host_loads_seccomp() == 0) {
+        assert_eq(1, 1, "host refuses seccomp — the basic filter is not exercisable here");
+        return 0;
+    }
+    var r_t, r_v = security_create_basic_seccomp_filter();
+    var info = result_unwrap(r_t, r_v);
+    assert_eq(_t_exited(_t_basic_probe(9, 1, info), 7), 1, "control: write(2) on the socket runs under the filter");
+    assert_eq(_t_exited(_t_basic_probe(1, 1, info), 7), 1, "sock_send_all (sendto, MSG_NOSIGNAL) runs under the filter");
+    assert_eq(_t_exited(_t_basic_probe(2, 1, info), 7), 1, "sendto with no destination runs");
+    assert_eq(_t_exited(_t_basic_probe(6, 1, info), 7), 1, "fcntl F_GETFL and F_SETFL | O_NONBLOCK run");
+    assert_eq(_t_exited(_t_basic_probe(8, 1, info), 7), 1, "ppoll for POLLOUT runs");
+
+    assert_eq(_t_basic_probe(3, 0, info) & 127, 0, "unfiltered, sendto to an address returns");
+    assert_eq(_t_basic_probe(3, 1, info) & 127, 31, "filtered, sendto to an address dies by SIGSYS");
+    assert_eq(_t_exited(_t_basic_probe(4, 0, info), 7), 1, "unfiltered, NULL with addrlen 16 sends (the kernel ignores the length)");
+    assert_eq(_t_basic_probe(4, 1, info) & 127, 31, "filtered, a nonzero addrlen dies by SIGSYS");
+    assert_eq(_t_basic_probe(5, 0, info) & 127, 0, "unfiltered, a pointer with only its high word set returns (EFAULT)");
+    assert_eq(_t_basic_probe(5, 1, info) & 127, 31, "filtered, it dies by SIGSYS: dest_addr's high word is checked");
+    assert_eq(_t_exited(_t_basic_probe(7, 0, info), 7), 1, "unfiltered, fcntl F_DUPFD duplicates");
+    assert_eq(_t_basic_probe(7, 1, info) & 127, 31, "filtered, fcntl F_DUPFD dies by SIGSYS");
+    return 0;
+}
+
+# The issue's acceptance (docs/development/issues/2026-10-02): a cyrius native
+# TLS 1.3 client under the basic filter, over a socket it inherited, with a
+# deadline (O_NONBLOCK via fcntl, then poll), handshakes, writes 40000 bytes as
+# three records and reads them back from a server in the parent. Through 3.14.0
+# it died of SIGSYS. The certificate is a self-signed P-256 one for "localhost",
+# valid 2026-01-01 to 2036-01-01, from the issue's probe.
+fn _t_hex_into(dst, hex, n) {
+    var i = 0;
+    while (i < n) {
+        var hi = load8(hex + i);
+        var lo = load8(hex + i + 1);
+        if (hi >= 97) { hi = hi - 87; } else { hi = hi - 48; }
+        if (lo >= 97) { lo = lo - 87; } else { lo = lo - 48; }
+        store8(dst + i / 2, hi * 16 + lo);
+        i = i + 2;
+    }
+    return n / 2;
+}
+
+fn test_basic_seccomp_admits_a_tls_client() {
+    test_group("basic_seccomp_admits_a_tls_client");
+    if (_t_host_loads_seccomp() == 0) {
+        assert_eq(1, 1, "host refuses seccomp — the basic filter is not exercisable here");
+        return 0;
+    }
+    var cert = alloc(406);
+    var cert_off = 0;
+    cert_off = cert_off + _t_hex_into(cert + cert_off, "3082019230820139a003020102021437416048df98b49fd5b278db00ebd0e1f87b6d40300a06082a8648ce3d04030230", 96);
+    cert_off = cert_off + _t_hex_into(cert + cert_off, "143112301006035504030c096c6f63616c686f7374301e170d3236303130313030303030305a170d3336303130313030", 96);
+    cert_off = cert_off + _t_hex_into(cert + cert_off, "303030305a30143112301006035504030c096c6f63616c686f73743059301306072a8648ce3d020106082a8648ce3d03", 96);
+    cert_off = cert_off + _t_hex_into(cert + cert_off, "0107034200040d7a46bc307511f24a53dcf973e0dfe2058db48d7db8b3941fa80176641ad78da12b801a12494d49312b", 96);
+    cert_off = cert_off + _t_hex_into(cert + cert_off, "f5b0ac312f3d50bca2282126fddd03652013bf8b49c5a3693067301d0603551d0e041604143bdd6c2d487f854851f408", 96);
+    cert_off = cert_off + _t_hex_into(cert + cert_off, "356e66880375bd6743301f0603551d230418301680143bdd6c2d487f854851f408356e66880375bd6743300f0603551d", 96);
+    cert_off = cert_off + _t_hex_into(cert + cert_off, "130101ff040530030101ff30140603551d11040d300b82096c6f63616c686f7374300a06082a8648ce3d040302034700", 96);
+    cert_off = cert_off + _t_hex_into(cert + cert_off, "30440220365bd112f9b8faec50c9b4a2cf7ec487cc424901870b8156b349dba15e1cde8102200c1ec7f6eefec5bc9976", 96);
+    cert_off = cert_off + _t_hex_into(cert + cert_off, "f55a70608b07d669c78183fa08e9a863370d17e39df3", 44);
+    var key = alloc(138);
+    var key_off = 0;
+    key_off = key_off + _t_hex_into(key + key_off, "308187020100301306072a8648ce3d020106082a8648ce3d030107046d306b0201010420666340f5e33734c31438ae0a", 96);
+    key_off = key_off + _t_hex_into(key + key_off, "bd2370b72da193b44565625051bbc79a344535dda144034200040d7a46bc307511f24a53dcf973e0dfe2058db48d7db8", 96);
+    key_off = key_off + _t_hex_into(key + key_off, "b3941fa80176641ad78da12b801a12494d49312bf5b0ac312f3d50bca2282126fddd03652013bf8b49c5", 84);
+    assert_eq(cert_off, 406, "the certificate decodes to 406 bytes");
+    assert_eq(key_off, 138, "the key decodes to 138 bytes");
+    var r_t, r_v = security_create_basic_seccomp_filter();
+    var info = result_unwrap(r_t, r_v);
+    var sv[16];
+    assert_eq(sys_socketpair(1, 1, 0, &sv), 0, "a socketpair");
+    var a = load32(&sv);
+    var b = load32(&sv + 4);
+    var total = 40000;
+    var pid = kv_fork();
+    if (pid == 0) {
+        _t_set_rlimit(4, 0);
+        sys_close(a);
+        var c = tls_native_new_client("localhost", 9);
+        tls_native_set_ca_bundle(c, cert, cert_off, 1);
+        tls_native_set_version_range(c, TLS_VERSION_1_3, TLS_VERSION_1_3);
+        tls_native_set_deadline(c, clock_now_ns() + 20000000000);
+        var out = alloc(total);
+        var back = alloc(total);
+        memset(out, 90, total);
+        var l_t, l_v = security_load_seccomp(security_seccomp_filter_ptr(info),
+          security_seccomp_filter_len(info));
+        if (is_ok(l_t) == 0) { sys_exit(60); }
+        if (tls_native_connect(c, b) != TLS_OK) { sys_exit(3); }
+        var off = 0;
+        while (off < total) {
+            var k = total - off;
+            if (k > 16384) { k = 16384; }
+            if (tls_native_write(c, out + off, k) != k) { sys_exit(5); }
+            off = off + k;
+        }
+        var got = 0;
+        while (got < total) {
+            var rr = tls_native_read(c, back + got, total - got);
+            if (rr <= 0) { sys_exit(6); }
+            got = got + rr;
+        }
+        if (memeq(out, back, total) != 1) { sys_exit(7); }
+        tls_native_close(c);
+        sys_exit(0);
+    }
+    sys_close(b);
+    var s = tls_native_new_server(cert, cert_off, key, key_off);
+    tls_native_server_load_creds(s);
+    tls_native_set_version_range(s, TLS_VERSION_1_3, TLS_VERSION_1_3);
+    tls_native_set_deadline(s, clock_now_ns() + 20000000000);
+    var echoed = 0;
+    if (tls_native_accept(s, a) == TLS_OK) {
+        var buf = alloc(total);
+        var g = 0;
+        var more = 1;
+        while (more == 1) {
+            if (g >= total) { more = 0; }
+            if (more == 1) {
+                var r = tls_native_read(s, buf + g, total - g);
+                if (r <= 0) { more = 0; } else { g = g + r; }
+            }
+        }
+        if (g == total) {
+            var o2 = 0;
+            while (o2 < total) {
+                var k2 = total - o2;
+                if (k2 > 16384) { k2 = 16384; }
+                tls_native_write(s, buf + o2, k2);
+                o2 = o2 + k2;
+            }
+            echoed = 1;
+        }
+    }
+    var st[8];
+    store64(&st, 0);
+    kv_waitpid(pid, &st, 0);
+    sys_close(a);
+    var status = load32(&st);
+    assert_eq(status & 127, 0, "the TLS client under the basic filter is not killed (no SIGSYS)");
+    assert_eq((status >> 8) & 255, 0, "it handshakes, writes 40000 bytes and reads them back byte for byte");
+    assert_eq(echoed, 1, "the server received all 40000 bytes and echoed them");
     return 0;
 }
 
@@ -6999,6 +7268,8 @@ fn main() {
     test_seccomp_filter_actually_loads();
     test_exec_seccomp_filter_shape();
     test_basic_seccomp_filter_shape();
+    test_basic_seccomp_admits_write_shaped_calls();
+    test_basic_seccomp_admits_a_tls_client();
     test_seccomp_kills_what_it_denies();
     test_syscall_name_map_is_native();
     test_aarch64_refuses_unnamed_calls();

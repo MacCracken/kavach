@@ -217,7 +217,7 @@ fn kavach_syserr_print(e): i64 {
             sys_write(2, "resource temporarily unavailable", 32);
         }
         KAVACH_ERR_MODULE_NOT_LOADED => {
-            sys_write(2, "kernel module not loaded: ", 25);
+            sys_write(2, "kernel module not loaded: ", 26);
             sys_write(2, msg, msglen);
         }
         KAVACH_ERR_NOT_SUPPORTED => {

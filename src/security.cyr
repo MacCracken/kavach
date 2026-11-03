@@ -351,6 +351,10 @@ enum BpfConst {
     SECCOMP_DATA_NR = 0;
     SECCOMP_DATA_ARCH = 4;
     SECCOMP_DATA_ARG0 = 16;             # __u64 args[6]; the low word, little-endian
+    SECCOMP_DATA_ARG1 = 24;             # args[1], low word
+    SECCOMP_DATA_ARG4 = 48;             # args[4], low word
+    SECCOMP_DATA_ARG4_HI = 52;          # args[4], high word
+    SECCOMP_DATA_ARG5 = 56;             # args[5], low word
     # clone(2)'s CLONE_NEW* flags (linux/sched.h): NEWNS | NEWCGROUP | NEWUTS |
     # NEWIPC | NEWUSER | NEWPID | NEWNET. CLONE_NEWTIME (0x80) is left out: in
     # clone() that bit is part of the exit signal, and the kernel accepts
@@ -565,6 +569,11 @@ fn _seccomp_allow_list() {
     _seccomp_push(v, 318, 278);     # getrandom
     _seccomp_push(v, 228, 113);     # clock_gettime
     _seccomp_push(v, 334, 293);     # rseq
+    # 3.14.1: waiting on an fd the process already holds. Each reads and writes
+    # only the caller's own pollfd array. The stdlib polls for a deadline-bound
+    # socket read or write (cyrius 6.6.13 TLS deadlines, 6.6.20 async waits).
+    _seccomp_push(v, 7, 0 - 1);     # poll           — x86-64 only
+    _seccomp_push(v, 271, 73);      # ppoll
     _SECCOMP_ALLOW = v;
     return v;
 }
@@ -612,43 +621,6 @@ fn _seccomp_write_prologue(filter, kill_idx): i64 {
     security_bpf_write_insn(filter, 32, BPF_JMP_JGE_K, kill_idx - 5, 0, X32_SYSCALL_BIT);
     #endif
     return _seccomp_prologue_len();
-}
-
-# Build a filter: prologue, one JEQ per `nrs` entry jumping to `hit_action`,
-# then the fall-through action, then the hit action. `jt` is a u8 on the wire
-# (at most 255 instructions to skip); the tables above hold ~20 entries.
-#
-#   p .. p+n-1   JEQ nrs[i] -> hit        (jt = n - i)
-#   p+n          RET miss_action
-#   p+n+1        RET hit_action
-#
-# The architecture check needs a KILL to jump to. For the deny-list profile it
-# is the hit instruction (p+n+1); for the allowlist it is the miss (p+n).
-fn _seccomp_build(nrs, hit_action, miss_action): i64 {
-    var n = vec_len(nrs);
-    var p = _seccomp_prologue_len();
-    var miss_idx = p + n;
-    var hit_idx = p + n + 1;
-    var kill_idx = hit_idx;
-    if (miss_action == SECCOMP_RET_KILL_PROCESS) { kill_idx = miss_idx; }
-    var filter_size = (hit_idx + 1) * 8;
-    var filter = alloc(filter_size);
-
-    _seccomp_write_prologue(filter, kill_idx);
-    # From index p+i, the jump to hit_idx skips hit_idx - (p+i) - 1 = n - i.
-    var i = 0;
-    while (i < n) {
-        security_bpf_write_insn(filter, (p + i) * 8, BPF_JMP_JEQ_K,
-          n - i, 0, vec_get(nrs, i));
-        i = i + 1;
-    }
-    security_bpf_write_insn(filter, miss_idx * 8, BPF_RET_K, 0, 0, miss_action);
-    security_bpf_write_insn(filter, hit_idx * 8, BPF_RET_K, 0, 0, hit_action);
-
-    var info = alloc(16);
-    store64(info, filter);
-    store64(info + 8, filter_size);
-    return Ok(info);
 }
 
 # Create a seccomp filter that can be installed BEFORE execve.
@@ -736,13 +708,75 @@ fn security_create_exec_seccomp_filter(): i64 {
 # Returns Result: Ok(filter_ptr) where payload is {ptr, len}.
 # The caller must use the returned pointer and length with security_load_seccomp.
 #
-# Layout: the architecture check; one JEQ per allowed nr jumping to ALLOW;
-# RET KILL; RET ALLOW. 27 instructions on x86-64, 25 on aarch64 (which has no
-# arch_prctl). Until 3.12.8 this was 23 hand-written instructions of x86-64
-# numbers with no architecture check.
+# An allowlist, killing the process on a miss. Two calls are allowed only in
+# the shape that is a write or a flag change on an fd the process already holds
+# (3.14.1). Since cyrius 6.6.16 every stdlib socket write is
+# `sendto(fd, buf, n, MSG_NOSIGNAL, NULL, 0)`, and a deadline-bound one also
+# sets O_NONBLOCK with fcntl, so through 3.14.0 a process under this filter died
+# of SIGSYS on its first `sock_send_all` or TLS record.
+#
+#   - sendto only with no destination: `dest_addr` NULL in both words and
+#     `addrlen` 0. On a connected socket that is exactly write(2); it refuses a
+#     datagram to an address and MSG_FASTOPEN, which needs one. The flags are
+#     left free (MSG_NOSIGNAL, MSG_DONTWAIT and MSG_OOB reach nothing new).
+#   - fcntl only F_GETFL and F_SETFL, so no F_DUPFD, locks, leases or owners.
+#
+#   p .. p+m-1   JEQ allow[i] -> ALLOW
+#   p+m          JEQ sendto -> p+m+2, else next
+#   p+m+1        JEQ fcntl  -> p+m+8, else KILL
+#   p+m+2..+7    LD arg4 lo, JEQ 0; LD arg4 hi, JEQ 0; LD arg5 lo, JEQ 0 -> ALLOW
+#   p+m+8..+10   LD arg1 lo, JEQ F_GETFL -> ALLOW, JEQ F_SETFL -> ALLOW, else KILL
+#   p+m+11       RET KILL
+#   p+m+12       RET ALLOW
+#
+# 40 instructions on x86-64 (22 plain calls), 37 on aarch64 (20: no poll, no
+# arch_prctl). The pointer is checked in both words; `addrlen` (an int) and the
+# fcntl command (an unsigned int) in the low word only, which is all the kernel
+# reads. Until 3.12.8 this was 23 hand-written instructions of x86-64 numbers
+# with no architecture check.
 fn security_create_basic_seccomp_filter(): i64 {
-    return _seccomp_build(_seccomp_allow_list(), SECCOMP_RET_ALLOW,
-      SECCOMP_RET_KILL_PROCESS);
+    var allow = _seccomp_allow_list();
+    var m = vec_len(allow);
+    var p = _seccomp_prologue_len();
+    var t = p + m;
+    var kill_idx = t + 11;
+    var allow_idx = t + 12;
+    var filter_size = (allow_idx + 1) * 8;
+    var filter = alloc(filter_size);
+
+    _seccomp_write_prologue(filter, kill_idx);
+    # A BPF jump counts instructions to SKIP: from index i, target j is j - i - 1.
+    var i = 0;
+    while (i < m) {
+        security_bpf_write_insn(filter, (p + i) * 8, BPF_JMP_JEQ_K,
+          allow_idx - (p + i) - 1, 0, vec_get(allow, i));
+        i = i + 1;
+    }
+    security_bpf_write_insn(filter, t * 8, BPF_JMP_JEQ_K,
+      1, 0, _seccomp_native_nr(44, 206));                            # sendto
+    security_bpf_write_insn(filter, (t + 1) * 8, BPF_JMP_JEQ_K,
+      6, kill_idx - (t + 1) - 1, _seccomp_native_nr(72, 25));        # fcntl
+    security_bpf_write_insn(filter, (t + 2) * 8, BPF_LD_W_ABS, 0, 0, SECCOMP_DATA_ARG4);
+    security_bpf_write_insn(filter, (t + 3) * 8, BPF_JMP_JEQ_K,
+      0, kill_idx - (t + 3) - 1, 0);
+    security_bpf_write_insn(filter, (t + 4) * 8, BPF_LD_W_ABS, 0, 0, SECCOMP_DATA_ARG4_HI);
+    security_bpf_write_insn(filter, (t + 5) * 8, BPF_JMP_JEQ_K,
+      0, kill_idx - (t + 5) - 1, 0);
+    security_bpf_write_insn(filter, (t + 6) * 8, BPF_LD_W_ABS, 0, 0, SECCOMP_DATA_ARG5);
+    security_bpf_write_insn(filter, (t + 7) * 8, BPF_JMP_JEQ_K,
+      allow_idx - (t + 7) - 1, kill_idx - (t + 7) - 1, 0);
+    security_bpf_write_insn(filter, (t + 8) * 8, BPF_LD_W_ABS, 0, 0, SECCOMP_DATA_ARG1);
+    security_bpf_write_insn(filter, (t + 9) * 8, BPF_JMP_JEQ_K,
+      allow_idx - (t + 9) - 1, 0, F_GETFL);
+    security_bpf_write_insn(filter, (t + 10) * 8, BPF_JMP_JEQ_K,
+      allow_idx - (t + 10) - 1, kill_idx - (t + 10) - 1, F_SETFL);
+    security_bpf_write_insn(filter, kill_idx * 8, BPF_RET_K, 0, 0, SECCOMP_RET_KILL_PROCESS);
+    security_bpf_write_insn(filter, allow_idx * 8, BPF_RET_K, 0, 0, SECCOMP_RET_ALLOW);
+
+    var info = alloc(16);
+    store64(info, filter);
+    store64(info + 8, filter_size);
+    return Ok(info);
 }
 
 # Get filter pointer from security_create_basic_seccomp_filter result

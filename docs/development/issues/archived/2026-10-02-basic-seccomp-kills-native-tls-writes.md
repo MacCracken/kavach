@@ -1,6 +1,6 @@
-# 2026-10-02 — the `basic` seccomp profile kills a sandboxed native-TLS writer: cyrius 6.6.14 writes sockets with `sendto`
+# 2026-10-02 — the `basic` seccomp profile kills a sandboxed native-TLS writer: cyrius 6.6.14 writes sockets with `sendto` — RESOLVED
 
-**Status:** 🟡 **OPEN, live from kavach 3.13.3** (cyrius pin 6.6.20) — filed from cyrius **6.6.14** (the TLS follow-ups; CVE-66).
+**Status:** ✅ **RESOLVED in kavach 3.14.1** (cyrius pin 6.7.18): the suggested argument-pinned allowlist, as measured below. See the resolution at the end.
 **Checked against:** kavach **3.13.1** — `src/security.cyr` (`_seccomp_allow_list` ~544, `security_create_basic_seccomp_filter`
 ~743, miss action `SECCOMP_RET_KILL_PROCESS`), `src/policy.cyr` (`policy_basic` :46).
 **Severity:** a crash (SIGSYS) of a sandboxed process that does TLS over a socket it inherited. Read from the
@@ -137,3 +137,31 @@ The reach is unchanged:
   define their own function of the same name.
 
 The roadmap pins the fix under 3.13.x. 3.13.3's CHANGELOG lists it as a known issue.
+
+## Resolution — 3.14.1: the argument-pinned allowlist
+
+The SUGGESTION above, as designed:
+- `poll` (x86-64 only) and `ppoll` are allowed outright;
+- `sendto` is allowed only with `dest_addr` NULL in both words and `addrlen` 0;
+- `fcntl` is allowed only for `F_GETFL` / `F_SETFL`;
+- the miss action stays `KILL_PROCESS`.
+
+The filter is 40 instructions on x86-64 and 37 on aarch64. `security_create_basic_seccomp_filter` builds it directly,
+and `_seccomp_build` (its only use) is gone.
+
+The acceptance test is in the suite as `basic_seccomp_admits_a_tls_client`: a native TLS 1.3 client under the filter,
+over an inherited socketpair, with a deadline, handshakes and echoes 40000 bytes byte-exact against a server in the
+parent. `basic_seccomp_admits_write_shaped_calls` runs each row of the table above, with an unfiltered control for
+every shape it must refuse. One row is new: NULL with `addrlen` 16, which the kernel would send and the filter kills.
+`basic_seccomp_filter_shape` pins every instruction.
+
+Against 3.14.0's filter (unchanged since 3.12.8) the new tests fail 28 assertions. `sock_send_all`, a destination-less `sendto` and `ppoll` die
+of SIGSYS, and the TLS client is killed by signal 31. Each mutant of the tail is caught:
+- `dest_addr`'s high word unchecked;
+- `addrlen` unchecked;
+- any `fcntl` command;
+- `ppoll` dropped;
+- `sendto` unpinned.
+
+Measured on the Arch host (kernel 7.2) and in an Ubuntu 26.04.1 rootfs. qemu-user refuses seccomp, so the live tests
+stop there, and the native aarch64 path is next exercised by CI's `ubuntu-26.04-arm` job.

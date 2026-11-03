@@ -2,7 +2,7 @@
 
 > **Principle**: Security correctness first, then backend breadth, then performance. Every sandbox gets a number.
 
-This roadmap is **future-facing only** — shipped work lives in [CHANGELOG.md](../../CHANGELOG.md). Current release: **v3.14.0**. Toolchain pin: cc `6.7.9`; sigil `3.13.11` (the snapshot's — see CLAUDE.md hazard 4), samay `1.2.0`, ai-hwaccel `2.4.2` (no ai-hwaccel release is pinned to 6.7.9; samay 1.2.0 uses 2.4.2) (agnosys dropped at v3.5.0 — its security backends are internalized). 3.14.0 went to the uutils exec fix and the cyrius 6.7.9 move, ahead of the SEV-SNP arc pinned as 3.14.x below; the arcs keep their numbers until they are re-pinned.
+This roadmap is **future-facing only** — shipped work lives in [CHANGELOG.md](../../CHANGELOG.md). Current release: **v3.14.1**. Toolchain pin: cc `6.7.18`; sigil `3.13.15` (the snapshot's — see CLAUDE.md hazard 4), samay `1.5.1`, ai-hwaccel `2.5.6` (agnosys dropped at v3.5.0 — its security backends are internalized). 3.14.0 and 3.14.1 went to the uutils exec fix, the `basic` filter's socket writes and the cyrius 6.7.9 and 6.7.18 moves, ahead of the SEV-SNP arc pinned as 3.14.x below; the arcs keep their numbers until they are re-pinned.
 
 **Every release below is pinned.** Each names what ships in it, in the order the principle sets. To
 move an item, edit this file; do not let it drift. **An arc also takes the open fixes in the code it
@@ -18,13 +18,6 @@ work in 3.20) can be pulled forward; items with one say what it is.
 
 ### Open
 
-- [ ] **The `basic` seccomp filter kills a socket write (cyrius ≥ 6.6.16).** Live from 3.13.3: the
-  stdlib writes sockets with `sendto(…, MSG_NOSIGNAL, NULL, 0)` and the allowlist has no `sendto`, so
-  a process that loads the filter on itself dies of SIGSYS on its first `sock_send_all` (measured on
-  3.13.3; 3.13.2 on 6.6.14 lived). No spawn path loads it. The argument-pinned design and its
-  acceptance tests are in
-  [the issue](issues/2026-10-02-basic-seccomp-kills-native-tls-writes.md); the alternative is to
-  document `basic` as compute-only.
 - [ ] **Fetch the quote from the running guest: Gramine for SGX, the TD quote for TDX.** Needs
   SGX or TDX hardware to verify on; the development machine is AMD. kavach's side of the hand-off
   is in place (`backend_attest_nonce`, `backend_attach_quote`), and until the launchers use it

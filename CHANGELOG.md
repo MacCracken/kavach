@@ -7,6 +7,195 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.14.1] — 2026-11-02
+
+The `basic` seccomp filter admits a socket write again, and the toolchain moves to cyrius 6.7.18
+with the newest release of every dependency: sigil 3.13.15, ai-hwaccel 2.5.6 and samay 1.5.1.
+Since cyrius 6.6.16 the stdlib writes every socket with `sendto`. The filter now admits that call
+in the one shape that is a write, plus the `fcntl` and `poll` a deadline needs, and still kills
+everything else, so a native TLS client runs under it. 6.7.18's new lint check found a stderr
+message that dropped its last byte. On x86-64, 6.7.18's DCE now removes dead code instead of
+NOPing it, and `src/main.cyr` is 36% smaller. Results:
+
+| | x86-64 | aarch64 under qemu |
+|---|---|---|
+| Arch host | 1242 → **1284** of 1284 | 1170 → **1195** of 1195 |
+| Ubuntu 26.04 rootfs (uutils) | 1197 → **1239** of 1239 | 1130 → **1155** of 1155 |
+
+### Fixed — the `basic` seccomp filter killed a socket write ⚠
+
+Since cyrius 6.6.16 (its CVE-74 fix), every stdlib socket write is
+`sendto(fd, buf, n, MSG_NOSIGNAL, NULL, 0)`. That covers `sock_send`, `sock_send_all`, the async
+writers, and sandhi, http and native TLS through them. A deadline-bound socket read or write also
+sets `O_NONBLOCK` with `fcntl` and waits with `poll` (cyrius 6.6.13). The allowlist of
+`security_create_basic_seccomp_filter()` had none of those, so from 3.13.3 a process that loaded
+the filter on itself died of SIGSYS on its first socket write. No spawn path loads that filter,
+and no first-party project calls it.
+
+The design is the one the issue measured
+(`docs/development/issues/archived/2026-10-02-basic-seccomp-kills-native-tls-writes.md`). The miss
+action is still `KILL_PROCESS`.
+
+- **`sendto` only with no destination.** `dest_addr` must be NULL in both of its 32-bit words and
+  `addrlen` 0. On a connected socket that is exactly `write(2)`, so the filter admits no new reach;
+  it still refuses a datagram to an address, and `MSG_FASTOPEN`, which needs one. The flags are
+  left free: `MSG_NOSIGNAL`, `MSG_DONTWAIT` and `MSG_OOB` reach nothing new.
+- **`fcntl` only `F_GETFL` and `F_SETFL`**, so no `F_DUPFD`, locks, leases or owners.
+- **`poll` (x86-64 only) and `ppoll`**, unconditionally: each reads and writes only the caller's
+  own pollfd array.
+- **The filter is 40 instructions on x86-64 and 37 on aarch64, was 27 and 25.** The plain
+  allowlist JEQs jump to ALLOW, then the `sendto` and `fcntl` argument checks, then RET KILL and
+  RET ALLOW. The architecture check's x32 branch lands on the new KILL. `_seccomp_build`, whose
+  only caller this was, is gone; the four `struct seccomp_data` argument offsets it reads are named
+  in `BpfConst`.
+- **Measured with 3.14.0's filter against 3.14.1's,** each loaded by a forked child holding one end
+  of a socketpair:
+
+  | the child does | 3.14.0 | 3.14.1 |
+  |---|---|---|
+  | `sock_send_all(fd, "abc", 3)` | SIGSYS | 3 |
+  | `sendto(fd, …, MSG_NOSIGNAL, NULL, 0)` | SIGSYS | 3 |
+  | `fcntl` `F_GETFL`, `F_SETFL \| O_NONBLOCK` | SIGSYS | runs |
+  | `ppoll` for `POLLOUT` | SIGSYS | 1 |
+  | a native TLS 1.3 client: handshake, 40000 bytes each way, close, under a deadline | SIGSYS | byte-exact |
+  | `sendto` to an address; NULL with `addrlen` 16; a pointer with only its high word set | SIGSYS | SIGSYS |
+  | `fcntl(fd, F_DUPFD, 10)` | SIGSYS | SIGSYS |
+
+  Unfiltered, each refused shape returns, and NULL with `addrlen` 16 even sends, since the kernel
+  ignores the length. The filter is what refuses them.
+
+### Fixed — a stderr message dropped its last byte
+
+`kavach_syserr_print` wrote `"kernel module not loaded: "`, 26 bytes, with a length of 25, so
+the message ran straight into the module's name. cyrius 6.7.18's lint compares a write's length
+with its literal and flagged it (`src/sys_error.cyr`). It is the only one in `src/`.
+
+### Changed — cyrius 6.7.9 → 6.7.18, with the newest sigil, ai-hwaccel and samay
+
+- **`cyrius = "6.7.18"`**, the newest cyrius.
+- **`[deps.sigil]` 3.13.11 → 3.13.15**, the 6.7.18 snapshot's sigil (hazard 4) and also sigil's
+  newest tag.
+- **ai-hwaccel 2.4.2 → 2.5.6 and samay 1.2.0 → 1.5.1**, the newest tags of each (checked with
+  `git ls-remote`). samay 1.5.1 pins ai-hwaccel 2.5.6 and bayan 1.11.1, the versions kavach
+  resolves.
+- **`cyrius.lock`: 76 → 83 stdlib files.** bayan 1.11.1, the snapshot's fold, includes seven
+  `lib/unicode/` files: case folding, categories and normalization tables, and a decoder. bayan's
+  repo has an open issue about its bundle carrying those tables into every binary. `[deps]` is
+  unchanged.
+- **Binary sizes** of `src/main.cyr`:
+
+  | | 3.14.0 | 3.14.1 |
+  |---|---|---|
+  | x86-64 | 3,386,808 | **2,162,552** (−36%) |
+  | agnos | 3,342,520 | **2,118,320** (−37%) |
+  | aarch64 | 3,869,728 | **4,353,480** (+12.5%) |
+
+  On x86-64, 6.7.18's DCE removes the unreachable code instead of NOPing it ("1629870 bytes of
+  dead code eliminated"). On aarch64 it still declines ("aarch64 has no compaction repair model
+  yet") and carries the larger bayan and sandhi. Static data falls from 986,016 to 664,000 bytes
+  on x86-64: sigil 3.13.15 no longer keeps a 256 KiB static buffer, and its "array local over the
+  per-fn frame budget" warning is gone.
+- **The warnings:** no `duplicate fn` and no `undefined` in any build. What is left is the sigil
+  stdlib-leaf note and the static-data size. `cyrius fmt --check` finds no drift on 6.7.18.
+  `cyrius lint` has one new check, which found the stderr length above. Under `CYRIUS_DCE=1`,
+  6.7.18 no longer refuses to lint `src/backend_oci.cyr` and `src/backend_sy_agnos.cyr`; CI keeps
+  linting without DCE, and its comment says so. `scripts/check-symbols.py` passes, and both
+  sidecars are unchanged.
+- **Without DCE** (CI builds with `CYRIUS_DCE=1`), x86-64 `src/main.cyr` grows instead:
+  3,386,840 → 3,792,760 bytes. Most of the growth is bayan 1.9's Unicode tables (about 308 KB of
+  literals), which the bundled `lib/sigil.cyr` reaches through its own include of `lib/bayan.cyr`.
+  So they are in every binary, DCE or not, though kavach calls no bayan function.
+- **What 6.7.10–6.7.18 changes, read from cyrius's changelog and checked against the two
+  snapshots and a build:**
+  - the stdlib's socket write is still `sendto(…, MSG_NOSIGNAL, NULL, 0)`, its socket read
+    `read`, and its readiness wait `poll` (`ppoll` on aarch64). Native TLS adds only
+    `clock_gettime` and `getrandom`, so the filter above covers those paths;
+  - two calls outside the filter, neither on a path kavach takes under it: on aarch64,
+    `sys_dup2(fd, fd)` now asks `fcntl(F_GETFD)`, and `thread_local`'s foreign-TLS mode calls
+    `getpid` in a fork child;
+  - 6.7.11 adds cyrlint's write-length rule (the stderr fix above), 6.7.12 removes `cyrius tests`
+    (CI does not use it), and 6.7.14 makes `CYRIUS_DCE=1` compact past 4,096 dead runs (the x86-64
+    shrink);
+  - sigil 3.13.12 shrinks its static data, and 3.13.14 serves crypto from a pool of 64 lanes, so a
+    65th concurrent ECDSA verify is refused. `tls_native_close` now wipes the context's secrets;
+  - 376 new public names, none of them a kavach name. `scripts/check-symbols.py` does not parse
+    `const`, which the stdlib uses more each release; a `const` that collides with a kavach `var`
+    is a compile error, not a silent one;
+  - security fixes CYRIUS-2026-0036 to 0050. Those in code kavach builds:
+    - sigil's Poly1305 accepting forged records when threads shared a lane (0040);
+    - X.509 nameConstraints ignored (0042);
+    - unbounded HPACK in sandhi (0044);
+    - `file_write_atomic`'s temp briefly readable (0047);
+    - `http_get` with no deadline (0049).
+### Tests
+
+42 assertions are new, all for the basic filter.
+
+- **`basic_seccomp_filter_shape` (rewritten)** pins all 40 or 37 instructions: the counts, every
+  plain JEQ's target, the `sendto` and `fcntl` checks with each load offset, value and jump, and
+  the KILL that the x32 branch lands on.
+- **`basic_seccomp_admits_write_shaped_calls` (new)** loads the real filter in a forked child for
+  each shape in the table above. The shapes it must refuse each have an unfiltered control.
+- **`basic_seccomp_admits_a_tls_client` (new)** is the issue's acceptance test, ported from its
+  probe: a native TLS 1.3 client under the filter, with a deadline, against a server in the parent.
+- On a host that refuses seccomp (qemu-user) the two live tests say so and stop, as the other
+  seccomp tests do. They ran on the Arch host and in the 26.04 rootfs.
+- **Mutants, each caught:**
+  - against 3.14.0's basic filter, 28;
+  - `dest_addr`'s high word not checked: 2;
+  - `addrlen` not checked: 2;
+  - any `fcntl` command allowed: 2;
+  - `ppoll` dropped: 4;
+  - `sendto` allowed unpinned: 6.
+
+### Verified
+
+- **The release tree (cyrius 6.7.18):**
+  - the Arch host: 1284 of 1284 on x86-64 with seccomp loaded, and 1195 of 1195 on aarch64 under
+    qemu-aarch64 11.1.3;
+  - the Ubuntu 26.04.1 rootfs (non-root, user namespace and chroot): 1239 of 1239 on x86-64 with
+    seccomp loaded and 1155 of 1155 on aarch64 under 26.04's qemu 10.2.1, with uutils 0.8.0; on
+    x86-64 also with Ubuntu's uutils 0.10.0;
+  - also: `tests/samay_integration.tcyr` (12 of 12), the fuzz harness, the smoke banner on x86-64
+    and aarch64, the agnos build, and the CI security scan.
+- **The bundles:** `cyrius distlib --all` leaves both sidecars as they were (16 and 13 leaves), and
+  both compile with only their sidecar's stdlib. Each sidecar-only consumer runs on the host and
+  in the 26.04 rootfs: the base bundle's audit chain and capture, and the confine bundle's capture.
+  So does the README's `[deps.kavach]`-only consumer.
+- **CI's dependency steps, in a copy of the tracked files:** `cyrius deps --locked` passed;
+  `cyrius deps --verify` passed 83 of 83, and `cyrius deps` left the committed lock unchanged.
+- **3.14.0 on GitHub Actions**, the image this release keeps:
+  - 1195 of 1195 on `ubuntu-26.04` x86-64 with seccomp loaded;
+  - 1128 of 1128 under its qemu;
+  - 1186 of 1186 natively on `ubuntu-26.04-arm` with seccomp loaded.
+- **Not yet run:** this release on GitHub Actions. The native aarch64 run there is the first
+  native run of the new filter; qemu-user refuses seccomp.
+
+### Performance
+
+**The release tree on cyrius 6.7.18 against 3.14.0 on 6.7.9:** `scripts/bench-ab.py 3.14.0 .`, 7
+interleaved rounds per side, pinned to one CPU. The filter change reaches no benchmark, so every
+delta comes from the toolchain and the dependencies.
+
+- **21 of the 29 benchmarks overlap: no measured change.** That includes the exec rows:
+  `process_exec_echo` 2.717 → 2.806 ms, `process_exec_confined` 2.734 → 2.765 ms and
+  `process_exec_large_output` 123.5 → 124.2 ms.
+- **Three are faster, with separate ranges:** `cgroup_wrap_argv` 378 → 358 ns (−5.3%),
+  `gate_clean_output` 342.1 → 336.1 µs (−1.7%) and `code_scan_large_ac` 517.0 → 511.6 µs (−1.0%).
+- **Five are slower, with separate ranges:**
+  - `http_path_extract` 101 → 108 ns (+6.9%);
+  - `merge_policies_plain` 198 → 204 ns (+3.0%);
+  - `http_allowlist_hit` 74 → 76 ns (+2.7%);
+  - `merge_policies_landlock` 333 → 338 ns (+1.5%);
+  - `http_allowlist_miss` 83 → 84 ns (+1.2%).
+
+  `http_path_extract` and `merge_policies_plain` are the two short paths that moved at 3.13.3
+  too (a byte loop and an `alloc`). Not traced.
+- The `3.14.1` rows in `benches/bench-history.csv` are the release run
+  (`scripts/bench-history.sh 3.14.1`, pinned). Against the `3.14.0` rows they agree in direction:
+  `cgroup_wrap_argv` −6.7%, `http_path_extract` +4.9%, `merge_policies_plain` +6.0%, the rest
+  within ±4.3%.
+
 ## [3.14.0] — 2026-11-02
 
 kavach runs uutils coreutils, and CI runs on the current Ubuntu LTS. Since 3.12.7 a pinned exec

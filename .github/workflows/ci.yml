@@ -131,7 +131,8 @@ jobs:
         # corrupted 3 live function body/bodies; refusing to emit"). cyrlint
         # then reports it did NOT lint the file, which counted no warning,
         # so the gate passed without linting either file. Lint without DCE,
-        # and fail on a file cyrlint skips.
+        # and fail on a file cyrlint skips. (3.14.1: 6.7.18's DCE no longer
+        # refuses either file; lint has no use for DCE, so it stays off.)
         run: |
           total=0
           skipped=0
