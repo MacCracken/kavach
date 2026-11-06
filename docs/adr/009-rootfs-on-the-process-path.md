@@ -112,5 +112,9 @@ read 0 on both.
 - A chrooted caller is unchanged: on a plain directory it was refused at the private mount before and after, and onto a mount
   point it works. pivot_root(2) says a root on the initial ramfs cannot pivot, so such a host now refuses a rootfs. That
   is read and not run.
-- Not run: nginx and postgres rootless, an image under crun, and the rootfs group on aarch64, where qemu refuses the
-  namespaces and the group skips. The calls were traced under qemu, and the native job is the first real run.
+- ⚠ A nested user namespace holds every capability only where the host lets it. On CI's `ubuntu-26.04` root job `unshare` read
+  0 and `chroot` then failed there, likely AppArmor's restriction on unprivileged user namespaces, so the walk does not run
+  on that host. That is tighter, not looser, and the test asserts what must hold on both.
+- Not run: nginx and postgres rootless, an image under crun, any kernel with AppArmor, since every container here shares
+  one Arch kernel, and the rootfs group on aarch64. Under qemu the namespaces are refused and the calls were traced instead.
+  CI's native job gained a root step for it, which had not run when this was written.

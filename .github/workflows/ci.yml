@@ -201,7 +201,9 @@ jobs:
       - name: Tests
         # 3.12.9: the summary also goes out as a notice, which the checks API
         # serves without authentication. Job logs need admin rights, so this is
-        # how a run's count, and whether seccomp actually loaded, can be read.
+        # how a run's count, and whether seccomp actually loaded, can be read. A
+        # skip goes out the same way (3.14.6): this step runs rootless, and a group
+        # that skips here looks like a group that passed.
         run: |
           rc=0
           cyrius test tests/kavach.tcyr > /tmp/kavach_tests.txt 2>&1 || rc=$?
@@ -210,6 +212,9 @@ jobs:
           sec="seccomp loaded"
           grep -q "host refuses seccomp" /tmp/kavach_tests.txt && sec="seccomp refused by host"
           echo "::notice title=tests (x86_64)::${sum:-no summary line} — ${sec}"
+          { grep '^  SKIP:' /tmp/kavach_tests.txt || true; } | head -5 | while IFS= read -r skip; do
+            echo "::warning title=tests (x86_64)::${skip#  SKIP: }"
+          done
           exit $rc
 
       - name: Tests as root (real containers)
@@ -230,9 +235,10 @@ jobs:
           sudo build/kavach-test --kv-oci-only > /tmp/kavach_root.txt 2>&1 || rc=$?
           cat /tmp/kavach_root.txt
           sum=$(grep -E '^[0-9]+ passed' /tmp/kavach_root.txt | tail -1)
-          skip=$(grep -m1 '^  SKIP:' /tmp/kavach_root.txt || true)
-          [ -z "$skip" ] || echo "::warning title=tests as root::${skip}"
           echo "::notice title=tests as root::${sum:-no summary line}"
+          { grep '^  SKIP:' /tmp/kavach_root.txt || true; } | head -5 | while IFS= read -r skip; do
+            echo "::warning title=tests as root::${skip#  SKIP: }"
+          done
           exit $rc
 
       - name: Benchmarks
@@ -339,6 +345,26 @@ jobs:
           sec="seccomp loaded"
           grep -q "host refuses seccomp" /tmp/kavach_tests.txt && sec="seccomp refused by host"
           echo "::notice title=tests (aarch64 / native $(uname -m))::${sum:-no summary line} — ${sec}"
+          { grep '^  SKIP:' /tmp/kavach_tests.txt || true; } | head -5 | while IFS= read -r skip; do
+            echo "::warning title=tests (aarch64 / native)::${skip#  SKIP: }"
+          done
+          exit $rc
+
+      - name: Tests as root (aarch64, native)
+        # 3.14.6. The step above runs rootless, where a rootfs needs a user namespace,
+        # and a host restricting those would skip the group, so `pivot_root` and the
+        # capability bound would never meet a real aarch64 kernel. As root they need
+        # none. qemu cannot stand in: it refuses the namespaces, and the group skips.
+        # `release.yml` runs this workflow, so this step gates a release too.
+        run: |
+          rc=0
+          sudo build/kavach-test-aarch64 --kv-oci-only > /tmp/kavach_root.txt 2>&1 || rc=$?
+          cat /tmp/kavach_root.txt
+          sum=$(grep -E '^[0-9]+ passed' /tmp/kavach_root.txt | tail -1)
+          echo "::notice title=tests as root (aarch64 / native $(uname -m))::${sum:-no summary line}"
+          { grep '^  SKIP:' /tmp/kavach_root.txt || true; } | head -5 | while IFS= read -r skip; do
+            echo "::warning title=tests as root (aarch64 / native)::${skip#  SKIP: }"
+          done
           exit $rc
 
   security:

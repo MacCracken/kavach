@@ -93,10 +93,20 @@ In [the issue](docs/development/issues/2026-11-06-process-backend-keeps-every-ca
   `test_capability_masks` holds the constant to the list. `test_bound_clears_inheritable_and_ambient` exists because a
   mutation pass found the `capset` could be deleted with the suite green: inheritable capabilities pass `execve` whatever
   the bounding set says, and no test held any. Every other part of the change failed the suite when reverted.
-- 1898 assertions on x86-64, with the root groups passing as root and as uid 65534 on Arch with runc 1.5.2, Ubuntu 26.04
-  with 1.4.0 and Ubuntu 24.04 with 1.3.4, and 1611 on aarch64 under qemu, where the rootfs group skips: qemu refuses the namespaces.
-  The new calls were traced there instead (`pivot_root`, `umount2`, `capget`, `capset`, `prctl`), and CI's native job is
-  their first real run.
+- 1900 assertions on x86-64 and 1611 on aarch64 under qemu, on a development machine. The root groups pass as root and as
+  uid 65534 in containers of Arch with runc 1.5.2, Ubuntu 26.04 with 1.4.0 and Ubuntu 24.04 with 1.3.4.
+- ⚠ **Those three containers share one Arch kernel, with no AppArmor**, so they vary the userspace and runc, not the kernel.
+  CI's `ubuntu-26.04` root job failed the first draft of `test_process_rootfs_payload`: in a nested user namespace `unshare`
+  read 0 and `chroot` then failed, where the test took a namespace for one holding every capability. The payload was held
+  tighter there, not looser, with nothing mounted and nothing reached. The test now asserts that much on any host, and where
+  `chroot` did not run it skips the walk and prints the payload's numbers. AppArmor's restriction on unprivileged user
+  namespaces is the likely cause, read and not measured.
+- ⚠ **On aarch64 the rootfs path had not met a real kernel when this was written.** Under qemu the namespaces are refused and
+  the group skips, so the calls were traced instead (`pivot_root`, `umount2`, `capget`, `capset`, `prctl`). CI's native job
+  ran rootless only, where a host restricting user namespaces would skip the group too, so it gains a root step, which needs
+  no user namespace. That step's run is the first real one, and `release.yml` runs it too.
+- **CI raises every skip as a warning**, on the rootless x86-64 and native aarch64 steps as well as the root step, because a
+  skipped group read as a passed one, and job logs need admin rights where annotations do not.
 
 ### Benchmarks
 

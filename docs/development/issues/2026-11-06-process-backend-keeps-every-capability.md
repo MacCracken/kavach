@@ -173,7 +173,7 @@ reads `/proc/kcore` for one byte.
   3.14.6 until it bumps.
 - **A guessed handle.** The row hands the payload a real one. Whether a handle can be forged depends on the
   filesystem, and tmpfs and overlayfs were the only two run. ext4 and btrfs were not.
-- **aarch64, crun, and any kernel but 7.2.14.** `pivot_root` under a filter was not run either: the filter denies it, so
+- **A real aarch64 kernel, crun, and any kernel but 7.2.14**, which also means any kernel with AppArmor. `pivot_root` under a filter was not run either: the filter denies it, so
   it has to come before seccomp, as `chroot` does.
 
 ## Also seen
@@ -205,7 +205,8 @@ which hands back every capability, stays in and mounts nothing. nginx and the po
 
 **Still open.**
 
-- **A `/proc` the caller mounted.** This is the third row of the first table, and Ask 1 does not reach it:
+- **A `/proc` the caller mounted**, pinned to 3.14.7 on the [roadmap](../roadmap.md). This is the third row of the first
+  table, and Ask 1 does not reach it:
 
   | A rootfs whose caller mounted `/proc`, as root | 3.14.5 | 3.14.6 |
   |---|---|---|
@@ -232,3 +233,8 @@ which hands back every capability, stays in and mounts nothing. nginx and the po
 - The capability table had to leave `oci_spec.cyr`, which `[lib.confine]` does not carry. In-tree that would have compiled.
 - A chrooted caller is not a regression. On a plain directory it was refused at the private mount before and after, and
   onto a mount point it works in both.
+- CI's `ubuntu-26.04` root job failed the first draft of the test. In a nested user namespace `unshare` read 0 and `chroot`
+  then failed, where the test took that namespace for one holding every capability. Nothing mounted and nothing was reached,
+  so the payload was held tighter and the test was wrong. Every run here shared one Arch kernel with no AppArmor, whatever
+  the container's distribution, so none could show this. AppArmor's restriction on unprivileged user namespaces is the
+  likely cause. It is not measured: the skip now prints the payload's numbers, and CI raises it as a warning.

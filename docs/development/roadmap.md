@@ -2,7 +2,7 @@
 
 > **Principle**: Security correctness first, then backend breadth, then performance. Every sandbox gets a number.
 
-This roadmap is **future-facing only** — shipped work lives in [CHANGELOG.md](../../CHANGELOG.md). Current release: **v3.14.5**. Toolchain pin: cc `6.7.18`; sigil `3.13.15` (the snapshot's — see CLAUDE.md hazard 4), samay `1.5.1`, ai-hwaccel `2.5.6` (agnosys dropped at v3.5.0 — its security backends are internalized). 3.14.0 to 3.14.2 went to the uutils exec fix, the `basic` filter's socket writes, the cyrius 6.7.9 and 6.7.18 moves, and the open fixes: Intel's attestation collateral, the TDX RTMRs, the runtimes' own diagnostics and aarch64 namespaces. 3.14.3 and 3.14.4 followed with what stiva and agnosai filed: real argv, seccomp and `no_new_privs` on the OCI backend, and the WASM capture. They came ahead of the SEV-SNP arc pinned as 3.14.x below; the arcs keep their numbers until they are re-pinned.
+This roadmap is **future-facing only** — shipped work lives in [CHANGELOG.md](../../CHANGELOG.md). Current release: **v3.14.6**. Toolchain pin: cc `6.7.18`; sigil `3.13.15` (the snapshot's — see CLAUDE.md hazard 4), samay `1.5.1`, ai-hwaccel `2.5.6` (agnosys dropped at v3.5.0 — its security backends are internalized). 3.14.0 to 3.14.2 went to the uutils exec fix, the `basic` filter's socket writes, the cyrius 6.7.9 and 6.7.18 moves, and the open fixes: Intel's attestation collateral, the TDX RTMRs, the runtimes' own diagnostics and aarch64 namespaces. 3.14.3 and 3.14.4 followed with what stiva and agnosai filed: real argv, seccomp and `no_new_privs` on the OCI backend, and the WASM capture. They came ahead of the SEV-SNP arc pinned as 3.14.x below; the arcs keep their numbers until they are re-pinned.
 
 **Every release below is pinned.** Each names what ships in it, in the order the principle sets. To
 move an item, edit this file; do not let it drift. **An arc also takes the open fixes in the code it
@@ -13,6 +13,30 @@ a `bench-history.csv` row labeled with the version, a CHANGELOG entry with measu
 work in 3.20) can be pulled forward; items with one say what it is.
 
 ---
+
+## 3.14.7 — a read-only `/proc` in a process-path rootfs
+
+In a rootfs whose caller mounted `/proc`, a uid 0 payload still opens `core_pattern` and
+`sysrq-trigger` to write. That access is uid 0's, so 3.14.6's capability set does not reach it, and
+kavach mounts no `/proc` of its own. A caller has a reason to: the postgres entry point needs one on
+this path ([issue](issues/2026-11-06-process-backend-keeps-every-capability.md)).
+
+- [ ] After the pivot, where a `/proc` is there, make `/proc/sys` and `/proc/sysrq-trigger` read-only
+  and mask `/proc/kcore`, before the capabilities and seccomp, which take `mount` away. A prototype
+  held for those three paths, with the twelve: `core_pattern` read EROFS, and `umount` read EPERM, or
+  EINVAL from a nested user namespace.
+- [ ] **Decide** the paths. The OCI spec writes `runc spec`'s two full lists, and they live in
+  `oci_spec.cyr`, which `[lib.confine]` does not carry, as the capability table did.
+- [ ] **Decide** what masks `/proc/kcore`. The prototype bound the host's `/dev/null`, and after the
+  pivot a rootfs may have none.
+- [ ] **Decide** what a list naming CAP_SYS_ADMIN gets: with every capability `umount` worked and
+  `core_pattern` opened again, so the mounts hold only with the set.
+- [ ] Assert from inside a payload, with a `/proc` mounted in the rootfs, as CI's root job: rootless
+  a sysctl opened to write reads EACCES with or without the mount, so that half reads `mountinfo`.
+- [ ] Run the postgres entry point on a rootfs with `/dev` and `/proc` before and after, as ADR-009
+  did.
+- [ ] Measure `/proc/<pid>/root`. A payload here has no PID namespace, so it names the host's root
+  for any process that ptrace access lets it read.
 
 ## 3.14.x — TEE attestation II: SEV-SNP, and SGX sealing
 

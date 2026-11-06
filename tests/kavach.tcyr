@@ -8970,7 +8970,8 @@ fn _t_rootfs_payload(mode) {
     if (mode == 4) {
         # A nested user namespace hands back every capability, whatever the bound,
         # and the kernel refused one to a chrooted caller, so under chroot this read
-        # EPERM. Past pivot_root it works, and must reach nothing.
+        # EPERM. Past pivot_root it works, and must reach nothing. See the caller for
+        # a host where it holds less than that.
         var u = sys_unshare(CLONE_NEWUSER | CLONE_NEWNS);
         _t_payload_put("nested ");
         _t_payload_num(u);
@@ -8992,6 +8993,19 @@ fn _t_rootfs_set_mode(root, mode) {
 }
 
 var _T_ROOTFS_CODE = 0 - 1;
+
+# A payload's lines as one, for a skip, which CI reads a line of.
+fn _t_oneline(s) {
+    var n = strlen(s);
+    var r = alloc(n + 1);
+    memcpy(r, s, n + 1);
+    var i = 0;
+    while (i < n) {
+        if (load8(r + i) == 10) { store8(r + i, 32); }
+        i = i + 1;
+    }
+    return r;
+}
 
 # Run the payload through `process_exec`, as a sandbox with a rootfs does. The
 # payload's stdout, and its exit code in `_T_ROOTFS_CODE`.
@@ -9098,8 +9112,22 @@ fn test_process_rootfs_payload() {
       "with no filter there is still no mount");
     var n = _t_rootfs_exec(policy_new(), root, 4, 0);
     if (_t_has_line(n, "nested 0") == 1) {
-        assert(_t_has_line(n, "mount -1") == 1, "a nested user namespace mounts no /proc");
-        _t_rootfs_assert_stays_in(n, "a nested user namespace");
+        # ⚠ `unshare` reading 0 does not make the namespace's capabilities usable. On
+        # CI's ubuntu-26.04 root job it read 0, and `chroot` then failed where the plain
+        # walk above had worked. A bound payload has no CAP_SYS_ADMIN, so its `unshare`
+        # is an unprivileged one, and restricting those is what AppArmor does on Ubuntu:
+        # that is the likely reason, and not measured, since no kernel here has AppArmor.
+        # What must hold on any host holds either way, so that much is asserted either
+        # way. The walk is a test only where `chroot` ran, and the skip gives the numbers.
+        assert_eq(_T_ROOTFS_CODE, 0, "a nested user namespace: the payload finishes");
+        assert_eq(_t_has_line(n, "mount 0"), 0, "a nested user namespace mounts no /proc");
+        assert_eq(_t_count(n, "ESCAPED"), 0, "a nested user namespace reaches nothing");
+        if (_t_has_line(n, "sub 0") == 1) {
+            _t_rootfs_assert_stays_in(n, "a nested user namespace");
+        } else {
+            _t_oci_skip("this host gives a nested user namespace no `chroot`, so the walk did not run",
+              _t_oneline(n));
+        }
     }
 
     # `sandbox_spawn` reads no backend, so an OCI sandbox gets this path, and a
