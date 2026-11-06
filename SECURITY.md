@@ -71,6 +71,11 @@ and unblocking conditions:
 
 Resolved since earlier releases:
 
+- **v3.14.5:**
+  - an OCI container kept every capability with no filter, and all but CAP_SYS_ADMIN with one, and `/proc` was
+    neither masked nor read-only. Measured as root, a payload could open
+    `/proc/sys/kernel/core_pattern` to write. Every spec now writes twelve capabilities and `runc spec`'s two
+    path lists ([ADR-008](docs/adr/008-oci-capability-default.md)). CHANGELOG 3.14.5.
 - **v3.14.4:**
   - the OCI backend ran every container with no seccomp filter and without `no_new_privs`, on the
     path taken wherever runc or crun is installed, while `score_backend` scored the filter;
@@ -79,9 +84,8 @@ Resolved since earlier releases:
   - a payload could outlive `timeout_ms` for good, by writing while it read a large stdin, or by
     closing stdout and stderr and carrying on.
 
-  Two gaps were found and not closed: a container keeps every capability but CAP_SYS_ADMIN, and
-  `/proc` is neither masked nor read-only, which matters most when kavach runs as root; and gVisor
-  applies no filter. See `docs/development/issues/` and CHANGELOG 3.14.4.
+  Two gaps were found and not closed at the time: the capabilities and `/proc`, closed in v3.14.5; and
+  gVisor applies no filter, still open. See `docs/development/issues/` and CHANGELOG 3.14.4.
 - **v3.14.2:**
   - a quote passed on its signatures alone: Intel's TCB level, the QE identity and
     the PCK/root CRLs were not evaluated, so a genuine platform with an out-of-date

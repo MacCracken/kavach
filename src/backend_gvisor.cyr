@@ -103,6 +103,8 @@ fn gvisor_exec(sandbox, command) {
 
 # The run itself, under the runsc at `runsc`: bundle, run, delete, cleanup.
 fn _gvisor_exec_with(runsc, sandbox, command, start_ns) {
+    var refused = oci_capabilities_refusal(Sandbox_config(sandbox));
+    if (refused != 0) { return backend_error_result(refused); }
     var container_id = oci_container_id("kavach-gvisor");
     var bundle = oci_prepare_bundle(container_id, sandbox, command);
     if (bundle == 0) {

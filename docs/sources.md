@@ -44,7 +44,21 @@ kernel header references in `src/security.cyr`, ADR-005 and ADR-007).
 - **runc 1.5.2 with libseccomp 2.6.0**, measured in 3.14.4, not read: a name libseccomp does not know is skipped
   with nothing logged (`open_tree_attr`); a capability the kernel lacks is logged at `level=warning` into `--log`
   and ignored; a spec with no `process.capabilities` drops none.
+- **`runc spec` 1.5.2**, run in 3.14.5: `linux.maskedPaths` and `linux.readonlyPaths` are its output, and it lists
+  three capabilities. **runc 1.5.2, 1.4.0 and 1.3.4**, measured in 3.14.5 rootless and as root: all three apply
+  both lists and skip a path that does not exist, logging nothing. With no `linux.resources.devices`, runc 1.5.2
+  as root opened a device node of `c 1 3` and refused `c 1 11`.
+- **Docker 29.9.3's default capability set**, measured in 3.14.5: `CapEff` reads `00000000a80425fb`, which is the
+  twelve kavach writes plus CAP_NET_RAW and CAP_MKNOD.
+- **Linux capability numbers and first versions**: `capabilities(7)`, and `include/uapi/linux/capability.h`, whose
+  numbers order `_oci_capability_names`.
+- **Linux `fs/proc/proc_sysctl.c` and `net/sysctl_net.c`**, read in 3.14.5 to explain a measurement: `sysctl_perm`
+  goes through `test_perm`, which compares against the global root, and `net_ctl_permissions` gives root's bits only
+  to a holder of CAP_NET_ADMIN. Measured: a rootless payload's open of a net sysctl to write reads EACCES without that
+  capability and EROFS with it.
 - **runsc**, read from its source, since no runsc was at hand: `runsc/specutils/seccomp/seccomp.go` (`convertAction`
   has no `SCMP_ACT_KILL_PROCESS`), `runsc/config/flags.go` (`--oci-seccomp`), `runsc/boot/loader.go`
-  (`noNewPrivileges`).
+  (`noNewPrivileges`). In 3.14.5, `runsc/specutils/specutils.go`: `Capabilities` returns an empty set for a spec with
+  no list, and `capsFromNames` refuses a name it does not know; `MaskedPaths` and `ReadonlyPaths` are only cleared for
+  logging, and `runsc/boot` does not read them.
 - **wasmtime 50.0.1**: `wasmtime run -W help`, for the option names in `_wasm_append_limits`; each was run.

@@ -7,6 +7,92 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.14.5] — 2026-11-06
+
+A bounded capability set and a masked `/proc` on every OCI container, whatever the policy. Through 3.14.4 a spec
+with no filter named no capabilities, so runc dropped none, one with a filter dropped only CAP_SYS_ADMIN, and
+nothing was masked. A run as root was made for the first time, and the old spec let a payload open
+`/proc/sys/kernel/core_pattern` to write. Filed by kavach itself, probing 3.14.4. The set is the maintainer's
+choice, recorded in [ADR-008](docs/adr/008-oci-capability-default.md).
+
+### ⚠ Behaviour changes
+
+- **An OCI container holds twelve capabilities, under any policy.** Docker's default set less CAP_NET_RAW and
+  CAP_MKNOD: CAP_AUDIT_WRITE, CAP_CHOWN, CAP_DAC_OVERRIDE, CAP_FOWNER, CAP_FSETID, CAP_KILL,
+  CAP_NET_BIND_SERVICE, CAP_SETFCAP, CAP_SETGID, CAP_SETPCAP, CAP_SETUID and CAP_SYS_CHROOT. `CapEff` reads
+  `00000000a00405fb`, where it read `000001ffffffffff` with no filter and `0000003fffdfffff` with one. A payload
+  that needs anything else, such as a raw socket for `ping`, reads EPERM until it asks.
+- **Turning the filter off no longer gives a payload `mount`.** 3.14.4 said a payload that needed one of the
+  denied calls should use a policy with `seccomp_enabled` off. That now also takes CAP_SYS_ADMIN from
+  `config_capabilities`.
+- **`/proc/sys`, `/proc/sysrq-trigger`, `/proc/bus`, `/proc/fs` and `/proc/irq` are read-only, and `/proc/kcore`,
+  `/proc/keys` and the rest of `runc spec`'s list are masked.** A payload that sets a sysctl reads EACCES or
+  EROFS, even holding CAP_NET_ADMIN.
+- **A gVisor payload gains capabilities, from none.** runsc gives a spec with no list no capabilities at all, so
+  `chown` and `setuid` failed there. They are the sentry's own, held against its emulated kernel and not the host.
+  Read from runsc's source, not run: no runsc was at hand.
+- **`SANDBOX_CONFIG_SIZE` 168 → 176**, with the new field appended, so no existing offset moves. Size a config by
+  the constant.
+
+### Added
+
+- **`config_capabilities(c, v)`**: the capabilities an OCI or gVisor container runs with, as a vec of `CAP_*`
+  cstrs. It replaces the default, as `config_env` replaces its own, and an empty vec is no capabilities at all.
+- **`oci_default_capabilities()`**: the default as a fresh vec, so a payload that needs one more pushes onto it.
+- **`oci_capabilities_refusal(config)`**: why a list cannot be written, or 0. A name kavach does not know is
+  refused, and so is CAP_SYS_ADMIN under a seccomp filter, which is what `open_tree_attr` needs to get past a
+  read-only rootfs. The exec reports which as a diagnostic, and no runtime starts.
+
+### Security
+
+- **An OCI payload running as root could reach the host's kernel through `/proc`.** Measured as root, in a
+  privileged throwaway container under runc 1.5.2, opening files and writing nothing:
+
+  | | 3.14.4, no filter | 3.14.5 |
+  |---|---|---|
+  | `CapEff` | `000001ffffffffff` | `00000000a00405fb` |
+  | open `/proc/sys/kernel/core_pattern` to write | **allowed** | EROFS |
+  | open `/proc/sysrq-trigger` to write | **allowed** | EROFS |
+  | read `/proc/kcore` | a byte | none |
+
+  A core pattern naming a program runs that program on the host, and no filter stops it, because writing a sysctl
+  is an `open` and a `write`. Rootless the same open reads EACCES, with or without the mount.
+- **`CapEff` is not the whole bound.** With no filter, `unshare` hands a payload every capability in a nested user
+  namespace, whatever the bounding set says, and a spec cannot stop that. Measured as root and rootless, they do
+  not reach what the spec set up: `umount` of `/proc/sys` and of a mask reads EINVAL, and a fresh `/proc` mount is
+  refused. With no masks the same payload mounts one, so the masks are what refuses it. The filter denies
+  `unshare` outright, so this concerns a policy with no filter.
+- The set was chosen against what consumers run. Under `no-new-privileges`, nginx, postgres's entry point, `su` and
+  `chown` all run under these twelve, and all fail under `runc spec`'s three. CAP_NET_RAW reaches nothing in the
+  empty network namespace of a policy with no network, and `network_enabled` shares the host's, where a payload
+  running as root could read and forge host traffic. CAP_MKNOD cannot make a device in a user namespace, and as
+  root, opening one past runc's default rules read EPERM.
+- The default names nothing newer than CAP_SETFCAP (2.6.24), so runc's `level=warning` for a capability the kernel
+  lacks, which `_oci_exec_with` reads as a runtime failure, cannot arise from it.
+
+### Performance
+
+`oci_spec_filtered` 47.00 µs → 34.52 µs (−26.6%, ranges separate, `scripts/bench-ab.py 3.14.4 . --rounds 3`): the
+capability list is 12 names where it was 37. `process_exec_echo` reads +7.1% in the release row and +0.5% with
+overlapping ranges under `bench-ab`, on a path this release did not touch, so that row is noise.
+
+### Tests
+
+- `test_oci_payload_observes_the_filter` asserts the bound from inside a container, under no filter, the filter
+  and a read-only rootfs, and that a payload asking for CAP_NET_RAW holds it and can open a raw socket. Passing
+  rootless and as root under runc 1.5.2, 1.4.0 and 1.3.4.
+- **CI runs that group as root**, as a new step in the x86-64 job, through `--kv-oci-only`. Not yet seen on a hosted
+  runner: it was run in Ubuntu 26.04 and 24.04 containers with their packaged runc. A skip raises a warning.
+- A rootless `/proc/sys` cannot be tested by opening a sysctl to write: `sysctl_perm` compares against the global
+  root, so that open reads EACCES with or without the mount. The test reads `mountinfo`, and has a payload holding
+  CAP_NET_ADMIN read EROFS, which only the mount can answer.
+- The group's skip was silent, so a spec that stopped runc from starting read as a host that cannot run a
+  container, and passed. It now prints `SKIP:` with the runtime's message.
+- 21 mutants of this change were each run through the suite in a copy of the tree, and 5 more through the group as
+  root, each judged against a no-op control. All failed it, among them a spec with no list without a filter (the
+  3.14.4 behaviour), each mask removed, a list written outside `linux`, CAP_SYS_ADMIN let through under the filter,
+  and a capability table out of kernel order.
+
 ## [3.14.4] — 2026-11-06
 
 The OCI backend's confinement, and the capture every backend shares. Through 3.14.3 the OCI spec carried no

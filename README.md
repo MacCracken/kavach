@@ -12,6 +12,11 @@ classification, credential proxy, HMAC-SHA256 audit chain — all in pure Cyrius
 
 ## Status
 
+**v3.14.5 — a bounded capability set and a masked `/proc` on every OCI container.** Under any policy a container
+now holds twelve capabilities, Docker's default set less CAP_NET_RAW and CAP_MKNOD, and `/proc/sys` is read-only.
+Through 3.14.4 a payload running as root could open `/proc/sys/kernel/core_pattern` to write. `config_capabilities`
+is how a payload asks for more. **1803** assertions green on x86-64, **1594** on aarch64 under qemu.
+
 **v3.14.4 — seccomp and `no_new_privs` on the OCI backend, and a capture that cannot be held.** An OCI
 container now runs under the policy's filter, with `noNewPrivileges` set, where it had neither; measured from
 inside runc, `mount` and `unshare` now die by SIGSYS, and a filtered container has no CAP_SYS_ADMIN. `config_stdin` goes out while the payload's output drains,
@@ -343,7 +348,7 @@ cyrius deps
 cyrius build src/main.cyr build/kavach
 ./build/kavach
 
-# Run the test suite (1596 assertions; run from the repository root,
+# Run the test suite (1803 assertions; run from the repository root,
 # since the real-Intel attestation vectors are read from tests/data/).
 cyrius test tests/kavach.tcyr
 
@@ -378,7 +383,7 @@ consumer's `cyrius.cyml`:
 [deps.kavach]
 git     = "https://github.com/MacCracken/kavach.git"
 path    = "../kavach"          # local sibling checkout (optional)
-tag     = "3.14.4"
+tag     = "3.14.5"
 modules = ["dist/kavach.cyr"]
 
 # OPTIONAL since 3.13.3 (cyrius 6.6.20): dist/kavach.deps is now the

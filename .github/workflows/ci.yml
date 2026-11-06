@@ -212,6 +212,26 @@ jobs:
           echo "::notice title=tests (x86_64)::${sum:-no summary line} — ${sec}"
           exit $rc
 
+      - name: Tests as root (real containers)
+        # 3.14.5. The step above runs rootless, where a payload's capabilities are
+        # held in a user namespace that owns nothing on the host. Run as root they
+        # are real, and `/proc/sys/kernel/core_pattern` opens to write unless the
+        # spec stops it, so that is the case the capability set and `/proc` masks
+        # exist for. Rootless, that open reads EACCES with or without the mask.
+        # `--kv-oci-only` runs the real-container group alone, because the rest of
+        # the suite assumes an unprivileged caller. A skip passes the step, as the
+        # group's own skips do, so it is raised here as a warning.
+        run: |
+          cyrius build tests/kavach.tcyr build/kavach-test
+          rc=0
+          sudo build/kavach-test --kv-oci-only > /tmp/kavach_root.txt 2>&1 || rc=$?
+          cat /tmp/kavach_root.txt
+          sum=$(grep -E '^[0-9]+ passed' /tmp/kavach_root.txt | tail -1)
+          skip=$(grep -m1 '^  SKIP:' /tmp/kavach_root.txt || true)
+          [ -z "$skip" ] || echo "::warning title=tests as root::${skip}"
+          echo "::notice title=tests as root::${sum:-no summary line}"
+          exit $rc
+
       - name: Benchmarks
         run: cyrius bench tests/kavach.bcyr
 

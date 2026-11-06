@@ -1991,7 +1991,12 @@ fn test_config_stdin() {
     config_wasm_trap_on_grow_failure(cfg, 0);
     assert_eq(SandboxConfig_stdin(cfg), payload, "stdin reads past the wasm fields' append");
     assert_eq(SandboxConfig_stdin_inherit(cfg), 1, "and so does stdin_inherit");
-    assert_eq(SANDBOX_CONFIG_SIZE, 168, "and the struct is 168 bytes");
+    # `capabilities` took it to 176 in 3.14.5.
+    assert_eq(SandboxConfig_capabilities(cfg), 0, "capabilities defaults to 0: the default set");
+    config_capabilities(cfg, 1);
+    assert_eq(SandboxConfig_wasm_max_memories(cfg), 3, "wasm_max_memories reads past its append");
+    assert_eq(SandboxConfig_capabilities(cfg), 1, "and capabilities reads its own value");
+    assert_eq(SANDBOX_CONFIG_SIZE, 176, "and the struct is 176 bytes");
     return 0;
 }
 
@@ -7893,6 +7898,7 @@ fn test_wasm_runs_under_the_policys_confinement() {
 
 # How often `needle` occurs in `s`.
 fn _t_count(s, needle) {
+    if (s == 0) { return 0; }                   # a refused spec: report it, don't crash on it
     var nl = strlen(needle);
     var n = strlen(s);
     var c = 0;
@@ -7980,7 +7986,7 @@ fn test_oci_spec_carries_the_filter() {
     }
     assert_eq(seen, 7, "and each flag is matched against itself");
 
-    # The filter's other half: see `_oci_capabilities_json`.
+    # The filter's other half: see `oci_capabilities_refusal`.
     var caps = bayan_json_v_obj_get_by_cstr(proc, "capabilities");
     assert(caps != 0, "a filtered spec names its capabilities, in process");
     assert(bayan_json_v_obj_get_by_cstr(caps, "bounding") != 0, "bounding");
@@ -8002,7 +8008,6 @@ fn test_oci_spec_follows_the_policy() {
     var spec = oci_generate_spec(_t_oci_sandbox(KavachBackend.OCI, policy_new(), 0), "echo hi");
     assert(spec != 0, "a spec with no filter is generated");
     assert_eq(cstr_contains(spec, "seccomp"), 0, "a policy without seccomp gets no filter");
-    assert_eq(cstr_contains(spec, "capabilities"), 0, "and no capability list");
     assert(cstr_contains(spec, "\"noNewPrivileges\":true") == 1,
       "and keeps noNewPrivileges, as `confine_child` does on a rootfs");
 
@@ -8015,7 +8020,6 @@ fn test_oci_spec_follows_the_policy() {
     # not pass, and refuses SCMP_ACT_KILL_PROCESS when it is.
     var gv = oci_generate_spec(_t_oci_sandbox(KavachBackend.GVISOR, policy_basic(), 0), "echo hi");
     assert_eq(cstr_contains(gv, "seccomp"), 0, "gVisor's spec carries no filter");
-    assert_eq(cstr_contains(gv, "capabilities"), 0, "and no capability list");
     assert(cstr_contains(gv, "\"noNewPrivileges\":true") == 1, "and does carry noNewPrivileges");
     return 0;
 }
@@ -8033,6 +8037,192 @@ fn test_oci_spec_fits_the_filter() {
     var spec = oci_generate_spec(sb, "echo hi");
     assert(spec != 0, "a filter, a long rootfs and every limit fit the buffer");
     if (spec != 0) { assert(cstr_contains(spec, "\"seccomp\":{") == 1, "and the filter is in it"); }
+    return 0;
+}
+
+# ---- 3.14.5: a bounded capability set, and /proc masked and read-only -------
+
+fn _t_lbl(a, b) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, a);
+    str_builder_add_cstr(sb, b);
+    return str_data(str_builder_build(sb));
+}
+
+# The approved default, as a literal so a change to it has to change this too.
+fn _t_oci_caps_literal() {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "[\"CAP_CHOWN\",\"CAP_DAC_OVERRIDE\",\"CAP_FOWNER\",\"CAP_FSETID\",\"CAP_KILL\",");
+    str_builder_add_cstr(sb, "\"CAP_SETGID\",\"CAP_SETUID\",\"CAP_SETPCAP\",\"CAP_NET_BIND_SERVICE\",");
+    str_builder_add_cstr(sb, "\"CAP_SYS_CHROOT\",\"CAP_AUDIT_WRITE\",\"CAP_SETFCAP\"]");
+    return str_data(str_builder_build(sb));
+}
+
+# What every spec must say, whatever made it. A parse for where each member sits:
+# a member closed into the wrong object is valid JSON a runtime does not apply.
+fn _t_spec_is_bounded(spec, what) {
+    assert(spec != 0, _t_lbl(what, ": generated"));
+    if (spec == 0) { return 0; }
+    var v = bayan_json_v_parse_buf(spec, strlen(spec));
+    assert(v != 0, _t_lbl(what, ": parses"));
+    if (v == 0) { return 0; }
+    var proc = bayan_json_v_obj_get_by_cstr(v, "process");
+    var caps = bayan_json_v_obj_get_by_cstr(proc, "capabilities");
+    assert(caps != 0, _t_lbl(what, ": capabilities is a member of process"));
+    if (caps != 0) {
+        assert(bayan_json_v_obj_get_by_cstr(caps, "inheritable") == 0, _t_lbl(what, ": no inheritable set"));
+        assert(bayan_json_v_obj_get_by_cstr(caps, "ambient") == 0, _t_lbl(what, ": no ambient set"));
+    }
+    var lit = _t_oci_caps_literal();
+    assert_eq(_t_count(spec, _t_lbl("\"bounding\":", lit)), 1, _t_lbl(what, ": bounding is the default set"));
+    assert_eq(_t_count(spec, _t_lbl("\"effective\":", lit)), 1, _t_lbl(what, ": effective is the default set"));
+    assert_eq(_t_count(spec, _t_lbl("\"permitted\":", lit)), 1, _t_lbl(what, ": permitted is the default set"));
+    assert_eq(_t_count(spec, "\"CAP_"), 36, _t_lbl(what, ": and nothing else names one"));
+
+    var lx = bayan_json_v_obj_get_by_cstr(v, "linux");
+    assert(bayan_json_v_obj_get_by_cstr(lx, "maskedPaths") != 0, _t_lbl(what, ": maskedPaths is a member of linux"));
+    assert(bayan_json_v_obj_get_by_cstr(lx, "readonlyPaths") != 0, _t_lbl(what, ": readonlyPaths too"));
+    var mp = str_builder_new();
+    str_builder_add_cstr(mp, "\"maskedPaths\":[\"/proc/acpi\",\"/proc/asound\",\"/proc/kcore\",\"/proc/keys\",");
+    str_builder_add_cstr(mp, "\"/proc/latency_stats\",\"/proc/timer_list\",\"/proc/timer_stats\",");
+    str_builder_add_cstr(mp, "\"/proc/sched_debug\",\"/sys/firmware\",\"/proc/scsi\"]");
+    assert_eq(_t_count(spec, str_data(str_builder_build(mp))), 1, _t_lbl(what, ": masked as `runc spec` does"));
+    var rp = str_builder_new();
+    str_builder_add_cstr(rp, "\"readonlyPaths\":[\"/proc/bus\",\"/proc/fs\",\"/proc/irq\",\"/proc/sys\",");
+    str_builder_add_cstr(rp, "\"/proc/sysrq-trigger\"]");
+    assert_eq(_t_count(spec, str_data(str_builder_build(rp))), 1, _t_lbl(what, ": read-only as `runc spec` does"));
+    return 0;
+}
+
+# Every backend and policy that reaches a spec gets the same bound. Through 3.14.4
+# a policy with no filter wrote no list, and a runtime drops nothing then.
+fn test_oci_spec_bounds_every_policy() {
+    test_group("oci_spec_bounds_every_policy");
+    var o = KavachBackend.OCI;
+    _t_spec_is_bounded(oci_generate_spec(_t_oci_sandbox(o, policy_new(), 0), "echo hi"), "no policy");
+    _t_spec_is_bounded(oci_generate_spec(_t_oci_sandbox(o, policy_minimal(), 0), "echo hi"), "minimal");
+    _t_spec_is_bounded(oci_generate_spec(_t_oci_sandbox(o, policy_basic(), 0), "echo hi"), "basic");
+    _t_spec_is_bounded(oci_generate_spec(_t_oci_sandbox(o, policy_strict(), 0), "echo hi"), "strict");
+    _t_spec_is_bounded(oci_generate_spec(_t_oci_sandbox(o, policy_basic(), "/tmp/kv-r"), "echo hi"), "a rootfs");
+    # A policy with a network shares the host's namespace, so CAP_NET_RAW above all stays out.
+    var net = policy_basic();
+    SandboxPolicy_set_network_enabled(net, 1);
+    _t_spec_is_bounded(oci_generate_spec(_t_oci_sandbox(o, net, 0), "echo hi"), "a network");
+    var g = KavachBackend.GVISOR;
+    _t_spec_is_bounded(oci_generate_spec(_t_oci_sandbox(g, policy_basic(), 0), "echo hi"), "gVisor basic");
+    _t_spec_is_bounded(oci_generate_spec(_t_oci_sandbox(g, policy_new(), 0), "echo hi"), "gVisor no policy");
+    return 0;
+}
+
+fn _t_oci_caps_spec(backend, policy, caps) {
+    var sb = _t_oci_sandbox(backend, policy, 0);
+    config_capabilities(Sandbox_config(sb), caps);
+    return oci_generate_spec(sb, "echo hi");
+}
+
+fn _t_vec1(s) {
+    var v = vec_new();
+    vec_push(v, s);
+    return v;
+}
+
+# How a payload asks for more, and what it may not ask for.
+fn test_oci_config_capabilities() {
+    test_group("oci_config_capabilities");
+    var o = KavachBackend.OCI;
+    var more = oci_default_capabilities();
+    assert_eq(vec_len(more), 12, "the default set is twelve names");
+    vec_push(more, "CAP_NET_RAW");
+    assert_eq(vec_len(oci_default_capabilities()), 12, "and each call hands back its own vec");
+    var spec = _t_oci_caps_spec(o, policy_basic(), more);
+    assert(spec != 0, "a name pushed onto the default is written");
+    assert_eq(_t_count(spec, "\"CAP_NET_RAW\""), 3, "in each of the three sets");
+    assert_eq(_t_count(spec, "\"CAP_CHOWN\""), 3, "and the default stays");
+
+    spec = _t_oci_caps_spec(o, policy_basic(), _t_vec1("CAP_KILL"));
+    assert_eq(_t_count(spec, "\"CAP_"), 3, "a list replaces the default, so a caller can narrow it");
+    assert_eq(_t_count(spec, "\"CAP_KILL\""), 3, "to what it names");
+
+    spec = _t_oci_caps_spec(o, policy_basic(), vec_new());
+    assert(spec != 0, "an empty list is a spec");
+    assert_eq(_t_count(spec, "\"CAP_"), 0, "with no capabilities");
+    assert_eq(_t_count(spec, "\"bounding\":[]"), 1, "written, not left out: no key drops nothing");
+
+    # Each name in the table is accepted, and the table is in kernel order, so an
+    # index is a bit in /proc/self/status.
+    var names = _oci_capability_names();
+    assert_eq(vec_len(names), 41, "every capability through CAP_CHECKPOINT_RESTORE");
+    assert_eq(streq(vec_get(names, 13), "CAP_NET_RAW"), 1, "CAP_NET_RAW is bit 13");
+    assert_eq(streq(vec_get(names, 21), "CAP_SYS_ADMIN"), 1, "CAP_SYS_ADMIN is bit 21");
+    assert_eq(streq(vec_get(names, 31), "CAP_SETFCAP"), 1, "CAP_SETFCAP is bit 31");
+    assert_eq(streq(vec_get(names, 40), "CAP_CHECKPOINT_RESTORE"), 1, "the last is bit 40");
+    var all = vec_new();
+    var i = 0;
+    while (i < vec_len(names)) {
+        if (streq(vec_get(names, i), "CAP_SYS_ADMIN") == 0) { vec_push(all, vec_get(names, i)); }
+        i = i + 1;
+    }
+    assert(_t_oci_caps_spec(o, policy_basic(), all) != 0, "every other name is accepted under the filter");
+
+    # A long list is counted, not left to the fixed slack.
+    var many = vec_new();
+    i = 0;
+    while (i < 2000) {
+        vec_push(many, "CAP_NET_BIND_SERVICE");
+        i = i + 1;
+    }
+    assert(_t_oci_caps_spec(o, policy_new(), many) != 0, "a list longer than the slack fits");
+
+    # Refused, not dropped. The quote is the injection a name written unescaped
+    # would carry, and a comma is a list a substring match would pass.
+    var bad = vec_new();
+    vec_push(bad, "CAP_NOT_A_THING");
+    vec_push(bad, "cap_chown");
+    vec_push(bad, "CHOWN");
+    vec_push(bad, "");
+    vec_push(bad, "CAP_KILL,CAP_CHOWN");
+    vec_push(bad, "CAP_KILL\",\"CAP_SYS_ADMIN");
+    i = 0;
+    while (i < vec_len(bad)) {
+        var v = oci_default_capabilities();
+        vec_push(v, vec_get(bad, i));
+        assert_eq(_t_oci_caps_spec(o, policy_new(), v), 0, _t_lbl("refused: ", vec_get(bad, i)));
+        i = i + 1;
+    }
+    var hole = oci_default_capabilities();
+    vec_push(hole, 0);
+    assert_eq(_t_oci_caps_spec(o, policy_new(), hole), 0, "and so is a NULL name, without reading it");
+
+    # CAP_SYS_ADMIN reopens a read-only rootfs under the filter, by `open_tree_attr`.
+    var adm = oci_default_capabilities();
+    vec_push(adm, "CAP_SYS_ADMIN");
+    assert_eq(_t_oci_caps_spec(o, policy_basic(), adm), 0, "CAP_SYS_ADMIN is refused under the filter");
+    assert_eq(_t_oci_caps_spec(o, policy_strict(), adm), 0, "and under the strict one");
+    spec = _t_oci_caps_spec(o, policy_new(), adm);
+    assert(spec != 0, "and granted with no filter");
+    assert_eq(_t_count(spec, "\"CAP_SYS_ADMIN\""), 3, "in each set");
+    assert(_t_oci_caps_spec(KavachBackend.GVISOR, policy_basic(), adm) != 0,
+      "and on gVisor, whose spec carries no filter");
+
+    # The exec says why, as a diagnostic, and no runtime runs.
+    kavach_init();
+    var rec = _t_unique_tmp_path("/tmp/kavach-t-capr-");
+    var stub = _t_rt_stub(_t_unique_tmp_path("/tmp/kavach-t-caps-"), rec, 0);
+    var cfg = config_timeout_ms(config_new(), 10000);
+    config_capabilities(cfg, adm);
+    backend_diagnostic_reset();
+    var r = _t_rt_exec(KavachBackend.OCI, stub, cfg, "echo hi");
+    assert_eq(backend_result_is_diagnostic(), 1, "a refused list is a diagnostic");
+    assert_eq(ExecResult_exit_code(r), 1, "and exits 1");
+    assert(cstr_contains(ExecResult_stderr(r), "CAP_SYS_ADMIN") == 1, "naming the capability");
+    assert(file_open(rec, O_RDONLY, 0) < 0, "and the runtime was never started");
+    config_capabilities(cfg, _t_vec1("CAP_TYPO"));
+    backend_diagnostic_reset();
+    r = _t_rt_exec(KavachBackend.GVISOR, stub, cfg, "echo hi");
+    assert_eq(backend_result_is_diagnostic(), 1, "gVisor refuses the same way");
+    assert(cstr_contains(ExecResult_stderr(r), "unknown capability: CAP_TYPO") == 1, "naming the typo");
+    assert(file_open(rec, O_RDONLY, 0) < 0, "and runsc was never started");
+    sys_unlink(stub);
     return 0;
 }
 
@@ -8124,10 +8314,114 @@ fn _t_payload_i386() {
     return load32(&st) & 127;
 }
 
+# "<label> opened", or "<label> <-errno>", for opening `path` to write.
+#
+# ⚠ It opens and never writes. As root with a mask missing this is the host's own
+# /proc, and the open is what a read-only mount refuses, so nothing more is needed.
+fn _t_payload_wopen(label, path) {
+    _t_payload_put(label);
+    _t_payload_put(" ");
+    var fd = file_open(path, O_WRONLY, 0);
+    if (fd >= 0) {
+        sys_close(fd);
+        _t_payload_put("opened\n");
+        return 0;
+    }
+    _t_payload_num(fd);
+    _t_payload_put("\n");
+    return 0;
+}
+
+# "<label> <n>", the bytes one read of up to 1 byte returned, or -errno from the
+# open. 0 is a masked path, which reads as /dev/null.
+fn _t_payload_rbyte(label, path) {
+    _t_payload_put(label);
+    _t_payload_put(" ");
+    var fd = file_open(path, O_RDONLY, 0);
+    if (fd < 0) { _t_payload_num(fd); }
+    else {
+        var b[8];
+        _t_payload_num(sys_read(fd, &b, 1));
+        sys_close(fd);
+    }
+    _t_payload_put("\n");
+    return 0;
+}
+
+# "<label> 1" when `needle` is in this process's mountinfo, else "<label> 0".
+fn _t_payload_mounted(label, needle) {
+    var mi = alloc(65536);
+    var n = file_read_all("/proc/self/mountinfo", mi, 65535);
+    if (n < 0) { n = 0; }
+    store8(mi + n, 0);
+    _t_payload_put(label);
+    _t_payload_put(" ");
+    _t_payload_num(cstr_contains(mi, needle));
+    _t_payload_put("\n");
+    return 0;
+}
+
 # The payload half of `test_oci_payload_observes_the_filter`: this test binary,
 # copied into a rootfs and run by runc. It reports on stdout what it met, and the
 # parent asserts on that. A line per probe, so a miss names the call.
 fn _t_oci_payload(mode) {
+    if (mode == 3) {
+        # ⚠ Rootless, an open of a sysctl to write stops at the permission check,
+        # before the mount flag is read: `sysctl_perm` compares against the GLOBAL
+        # root, and `net_ctl_permissions` gives root's bits only to a holder of
+        # CAP_NET_ADMIN. So "pattern" and "sysrq" read EACCES with or without the
+        # mount, and prove something only as root. Two probes do not depend on that:
+        # "rosys" is the kernel's own word for the mount, and "netsys" reaches the
+        # flag rootless too once the payload holds CAP_NET_ADMIN.
+        _t_payload_mounted("rosys", " /proc/sys ro,");
+        _t_payload_wopen("netsys", "/proc/sys/net/ipv4/ip_forward");
+        _t_payload_wopen("pattern", "/proc/sys/kernel/core_pattern");
+        _t_payload_wopen("sysrq", "/proc/sysrq-trigger");
+        _t_payload_rbyte("readpattern", "/proc/sys/kernel/core_pattern");
+        _t_payload_rbyte("kcore", "/proc/kcore");
+        _t_payload_rbyte("keys", "/proc/keys");
+        # SAFETY: socket(AF_INET, SOCK_RAW, IPPROTO_ICMP) of constants; the fd is
+        # closed at once and nothing is sent.
+        var rs = syscall(SYS_SOCKET, 2, 3, 1);
+        _t_payload_put("rawsock ");
+        if (rs >= 0) {
+            sys_close(rs);
+            _t_payload_put("opened\n");
+        } else {
+            _t_payload_num(rs);
+            _t_payload_put("\n");
+        }
+        # SAFETY: mknodat(AT_FDCWD, path, S_IFCHR | 0600, 1:3), /dev/null's numbers,
+        # in the container's own /dev tmpfs, and removed if it worked.
+        var mk = syscall(SYS_MKNODAT, 0 - 100, "/dev/kv-node", 8576, 259);
+        _t_payload_put("mknod ");
+        _t_payload_num(mk);
+        _t_payload_put("\n");
+        if (mk == 0) { sys_unlink("/dev/kv-node"); }
+        return 0;
+    }
+    if (mode == 4) {
+        # With no filter `unshare` runs, and CLONE_NEWUSER hands the caller every
+        # capability in the new namespace whatever its bounding set says. That
+        # cannot be bounded from a spec, so what has to hold is that none of them
+        # reach what the spec set up: the kernel locks those mounts into the
+        # namespace (MNT_LOCKED), and umount reads EINVAL.
+        var u = sys_unshare(CLONE_NEWUSER | CLONE_NEWNS);
+        _t_payload_put("nested ");
+        _t_payload_num(u);
+        _t_payload_put("\n");
+        if (u != 0) { return 0; }
+        _t_payload_put("unmount-sys ");
+        _t_payload_num(sys_umount2("/proc/sys", 2));        # MNT_DETACH
+        _t_payload_put("\nunmount-kcore ");
+        _t_payload_num(sys_umount2("/proc/kcore", 2));
+        _t_payload_put("\n");
+        # EINVAL is also what a path that is not a mount reads, so whether the
+        # mounts are still there is asked separately.
+        _t_payload_mounted("still-sys", " /proc/sys ro,");
+        _t_payload_mounted("still-kcore", " /proc/kcore ");
+        return 0;
+    }
     if (mode == 0) {
         var st = alloc(8192);
         var n = file_read_all("/proc/self/status", st, 8191);
@@ -8243,7 +8537,78 @@ fn _t_oci_run(policy, root, mode) {
     var cmd = "/payload --kv-oci-payload 0";
     if (mode == 1) { cmd = "/payload --kv-oci-payload 1"; }
     if (mode == 2) { cmd = "/payload --kv-oci-payload 2"; }
+    if (mode == 3) { cmd = "/payload --kv-oci-payload 3"; }
+    if (mode == 4) { cmd = "/payload --kv-oci-payload 4"; }
     return oci_exec(sb, cmd);
+}
+
+# `_t_oci_run` with `caps` as the config's capability list.
+fn _t_oci_run_caps(policy, root, mode, caps) {
+    var sb = _t_oci_sandbox(KavachBackend.OCI, policy, root);
+    config_capabilities(Sandbox_config(sb), caps);
+    var cmd = "/payload --kv-oci-payload 0";
+    if (mode == 3) { cmd = "/payload --kv-oci-payload 3"; }
+    return oci_exec(sb, cmd);
+}
+
+# A skip says so on stdout. An `assert_eq(1, 1, ...)` alone prints nothing, so a
+# spec that stopped runc from starting read as a host that cannot run a container,
+# and the group passed. `why` is the runtime's own message when there is one.
+fn _t_oci_skip(what, why) {
+    _t_payload_put("  SKIP: ");
+    _t_payload_put(what);
+    if (why != 0) {
+        if (strlen(why) > 0) {
+            _t_payload_put(": ");
+            _t_payload_put(why);
+        }
+    }
+    _t_payload_put("\n");
+    assert_eq(1, 1, what);
+    return 0;
+}
+
+# What a payload reads whatever the policy. `CapEff` is the proof the issue asked
+# for, and the probes are what it stands for, because a value in /proc/self/status
+# says nothing of a mount.
+fn _t_oci_assert_bounded(policy, root, what) {
+    var st = _t_oci_run(policy, root, 0);
+    var so = ExecResult_stdout(st);
+    assert_eq(ExecResult_exit_code(st), 0, _t_lbl(what, ": the payload runs"));
+    assert(cstr_contains(so, "CapEff:\t00000000a00405fb") == 1, _t_lbl(what, ": CapEff is the default set"));
+    assert(cstr_contains(so, "CapPrm:\t00000000a00405fb") == 1, _t_lbl(what, ": and CapPrm"));
+    assert(cstr_contains(so, "CapBnd:\t00000000a00405fb") == 1, _t_lbl(what, ": and CapBnd"));
+    assert(cstr_contains(so, "CapInh:\t0000000000000000") == 1, _t_lbl(what, ": none inheritable"));
+    assert(cstr_contains(so, "CapAmb:\t0000000000000000") == 1, _t_lbl(what, ": none ambient"));
+
+    var r = _t_oci_run(policy, root, 3);
+    var o = ExecResult_stdout(r);
+    assert_eq(ExecResult_exit_code(r), 0, _t_lbl(what, ": the /proc probes ran"));
+    assert(_t_has_line(o, "rosys 1") == 1, _t_lbl(what, ": /proc/sys is mounted read-only"));
+    assert(_t_has_line(o, "readpattern 1") == 1, _t_lbl(what, ": and is still there to read"));
+    # Exactly EROFS as root, where this open is the escape. Rootless the permission
+    # check answers first, whatever the mount says: see the payload.
+    if (_t_has_line(o, "netsys -30") == 0) {
+        assert(sys_getuid() != 0, _t_lbl(what, ": as root, a net sysctl reads EROFS"));
+        assert(_t_has_line(o, "netsys -13") == 1, _t_lbl(what, ": rootless, a net sysctl reads EACCES"));
+    }
+    if (_t_has_line(o, "pattern -30") == 0) {
+        assert(sys_getuid() != 0, _t_lbl(what, ": as root, core_pattern reads EROFS"));
+        assert(_t_has_line(o, "pattern -13") == 1, _t_lbl(what, ": rootless, core_pattern reads EACCES"));
+    }
+    if (_t_has_line(o, "sysrq -30") == 0) {
+        assert(sys_getuid() != 0, _t_lbl(what, ": as root, sysrq-trigger reads EROFS"));
+        assert(_t_has_line(o, "sysrq -13") == 1, _t_lbl(what, ": rootless, sysrq-trigger reads EACCES"));
+    }
+    if (_t_has_line(o, "kcore -2") == 0) {
+        assert(_t_has_line(o, "kcore 0") == 1, _t_lbl(what, ": /proc/kcore reads nothing"));
+    }
+    if (_t_has_line(o, "keys -2") == 0) {
+        assert(_t_has_line(o, "keys 0") == 1, _t_lbl(what, ": /proc/keys reads nothing"));
+    }
+    assert(_t_has_line(o, "rawsock -1") == 1, _t_lbl(what, ": no raw socket"));
+    assert(_t_has_line(o, "mknod -1") == 1, _t_lbl(what, ": no device node"));
+    return 0;
 }
 
 # Whether the OCI runtime at `path` is built for this binary's architecture. A
@@ -8276,11 +8641,11 @@ fn _t_runtime_is_native(path) {
 fn test_oci_payload_observes_the_filter() {
     test_group("oci_payload_observes_the_filter");
     if (_oci_runtime_path() == 0) {
-        assert_eq(1, 1, "no OCI runtime here — not exercisable");
+        _t_oci_skip("no OCI runtime here — not exercisable", 0);
         return 0;
     }
     if (_t_runtime_is_native(_oci_runtime_path()) == 0) {
-        assert_eq(1, 1, "this build is emulated: qemu would answer for the payload — not exercisable");
+        _t_oci_skip("this build is emulated: qemu would answer for the payload — not exercisable", 0);
         return 0;
     }
     var root = "/tmp/kavach-t-oci-rootfs";
@@ -8290,7 +8655,7 @@ fn test_oci_payload_observes_the_filter() {
 
     var ctl = _t_oci_run(policy_new(), root, 0);
     if (ExecResult_exit_code(ctl) != 0 || cstr_contains(ExecResult_stdout(ctl), "Seccomp:") == 0) {
-        assert_eq(1, 1, "no container starts on this host — not exercisable");
+        _t_oci_skip("no container starts on this host — not exercisable", ExecResult_stderr(ctl));
         _t_oci_rootfs_clean(root, payload);
         return 0;
     }
@@ -8372,6 +8737,43 @@ fn test_oci_payload_observes_the_filter() {
         assert(_t_has_line(out, "i386 31") == 1, "and so does the i386 gate");
     }
     #endif
+
+    # The bound holds under any policy, not only under the filter. Through 3.14.4 a
+    # payload with no filter read 000001ffffffffff.
+    _t_oci_assert_bounded(policy_new(), root, "no filter");
+    _t_oci_assert_bounded(policy_basic(), root, "the filter");
+    _t_oci_assert_bounded(ropol, root, "a read-only rootfs");
+
+    # Asking reaches the payload, as a bit and as what the bit is for.
+    var more = oci_default_capabilities();
+    vec_push(more, "CAP_NET_RAW");
+    var ms = _t_oci_run_caps(policy_basic(), root, 0, more);
+    assert(cstr_contains(ExecResult_stdout(ms), "CapEff:\t00000000a00425fb") == 1,
+      "a payload that asks for CAP_NET_RAW holds it");
+    var mr = _t_oci_run_caps(policy_basic(), root, 3, more);
+    assert(_t_has_line(ExecResult_stdout(mr), "rawsock opened") == 1, "and can open a raw socket");
+    # CAP_NET_ADMIN carries a rootless payload past the permission check, so this
+    # EROFS can only be the mount: without `readonlyPaths` this open succeeds.
+    var adm = oci_default_capabilities();
+    vec_push(adm, "CAP_NET_ADMIN");
+    var ar = _t_oci_run_caps(policy_basic(), root, 3, adm);
+    assert(_t_has_line(ExecResult_stdout(ar), "netsys -30") == 1, "/proc/sys refuses a holder of CAP_NET_ADMIN");
+    var none = _t_oci_run_caps(policy_new(), root, 0, vec_new());
+    assert_eq(ExecResult_exit_code(none), 0, "a payload that asks for nothing runs");
+    assert(cstr_contains(ExecResult_stdout(none), "CapEff:\t0000000000000000") == 1, "and holds nothing");
+
+    # A nested user namespace is the one way past the bound, with no filter to stop
+    # `unshare`. What it gets must not reach the masks.
+    var nest = _t_oci_run(policy_new(), root, 4);
+    var no = ExecResult_stdout(nest);
+    if (_t_has_line(no, "nested 0") == 1) {
+        assert(_t_has_line(no, "unmount-sys -22") == 1, "a nested namespace cannot unmount /proc/sys");
+        assert(_t_has_line(no, "unmount-kcore -22") == 1, "nor the /proc/kcore mask");
+        assert(_t_has_line(no, "still-sys 1") == 1, "and /proc/sys is still mounted read-only");
+        assert(_t_has_line(no, "still-kcore 1") == 1, "and the mask is still mounted");
+    } else {
+        _t_oci_skip("this host refuses a nested user namespace", 0);
+    }
     _t_oci_rootfs_clean(root, payload);
     return 0;
 }
@@ -8790,6 +9192,13 @@ fn main() {
     if (argc() >= 3) {
         if (streq(argv(1), "--kv-oci-payload") == 1) { return _t_oci_payload(atoi(argv(2))); }
     }
+    # The real-container group alone, for CI's run as root. See the workflow.
+    if (argc() >= 2) {
+        if (streq(argv(1), "--kv-oci-only") == 1) {
+            test_oci_payload_observes_the_filter();
+            return assert_summary();
+        }
+    }
     test_backend_parse();
     test_base_scores();
     test_score_labels();
@@ -9057,6 +9466,8 @@ fn main() {
     test_oci_spec_carries_the_filter();
     test_oci_spec_follows_the_policy();
     test_oci_spec_fits_the_filter();
+    test_oci_spec_bounds_every_policy();
+    test_oci_config_capabilities();
     test_runtime_architecture_is_read();
     test_oci_payload_observes_the_filter();
     test_stdin_goes_out_while_output_drains();

@@ -4,9 +4,9 @@
 # Minimal spec: pid/ipc/uts/mount namespaces always included, network
 # namespace conditional on policy, resource limits applied when set, readonly
 # rootfs per policy, command wrapped in `/bin/sh -c`. Every spec sets
-# `noNewPrivileges`, and the OCI backend's carries the policy's seccomp filter
-# (`_oci_seccomp_json`) and the capabilities that filter needs dropped
-# (`_oci_capabilities_json`).
+# `noNewPrivileges`, a bounded capability set (`_oci_capabilities_json`) and the
+# masked and read-only /proc paths (`_oci_paths_json`), and the OCI backend's
+# carries the policy's seccomp filter (`_oci_seccomp_json`).
 
 var _oci_id_counter = 1;
 
@@ -114,37 +114,167 @@ fn _oci_wants_filter(config) {
     return 1;
 }
 
-# A filtered payload's capabilities as a `process.capabilities` member, with its
-# leading comma: every capability but CAP_SYS_ADMIN. "" with no filter, where the
-# spec names none and the runtime drops none.
+var _OCI_CAP_NAMES = 0;
+
+# Every capability a spec may name, in kernel order, so an index is that
+# capability's bit in /proc/self/status. Published last, as `_seccomp_deny_list`
+# publishes its table.
+#[must_use]
+fn _oci_capability_names() {
+    if (_OCI_CAP_NAMES != 0) { return _OCI_CAP_NAMES; }
+    var v = vec_new();
+    vec_push(v, "CAP_CHOWN");
+    vec_push(v, "CAP_DAC_OVERRIDE");
+    vec_push(v, "CAP_DAC_READ_SEARCH");
+    vec_push(v, "CAP_FOWNER");
+    vec_push(v, "CAP_FSETID");
+    vec_push(v, "CAP_KILL");
+    vec_push(v, "CAP_SETGID");
+    vec_push(v, "CAP_SETUID");
+    vec_push(v, "CAP_SETPCAP");
+    vec_push(v, "CAP_LINUX_IMMUTABLE");
+    vec_push(v, "CAP_NET_BIND_SERVICE");
+    vec_push(v, "CAP_NET_BROADCAST");
+    vec_push(v, "CAP_NET_ADMIN");
+    vec_push(v, "CAP_NET_RAW");
+    vec_push(v, "CAP_IPC_LOCK");
+    vec_push(v, "CAP_IPC_OWNER");
+    vec_push(v, "CAP_SYS_MODULE");
+    vec_push(v, "CAP_SYS_RAWIO");
+    vec_push(v, "CAP_SYS_CHROOT");
+    vec_push(v, "CAP_SYS_PTRACE");
+    vec_push(v, "CAP_SYS_PACCT");
+    vec_push(v, "CAP_SYS_ADMIN");
+    vec_push(v, "CAP_SYS_BOOT");
+    vec_push(v, "CAP_SYS_NICE");
+    vec_push(v, "CAP_SYS_RESOURCE");
+    vec_push(v, "CAP_SYS_TIME");
+    vec_push(v, "CAP_SYS_TTY_CONFIG");
+    vec_push(v, "CAP_MKNOD");
+    vec_push(v, "CAP_LEASE");
+    vec_push(v, "CAP_AUDIT_WRITE");
+    vec_push(v, "CAP_AUDIT_CONTROL");
+    vec_push(v, "CAP_SETFCAP");
+    vec_push(v, "CAP_MAC_OVERRIDE");
+    vec_push(v, "CAP_MAC_ADMIN");
+    vec_push(v, "CAP_SYSLOG");
+    vec_push(v, "CAP_WAKE_ALARM");
+    vec_push(v, "CAP_BLOCK_SUSPEND");
+    vec_push(v, "CAP_AUDIT_READ");
+    vec_push(v, "CAP_PERFMON");
+    vec_push(v, "CAP_BPF");
+    vec_push(v, "CAP_CHECKPOINT_RESTORE");
+    _OCI_CAP_NAMES = v;
+    return v;
+}
+
+# The capabilities a container gets unless `config_capabilities` names others, as
+# a fresh vec: a caller may push onto it and hand it back.
 #
-# This is the filter's other half, not a capability policy. `open_tree_attr` gets
-# past the filter by name (see `_oci_seccomp_json`) and needs CAP_SYS_ADMIN to
-# clone a tree. Measured under runc 1.5.2 with the filter on and a read-only
-# rootfs: a direct create read EROFS, while `open_tree_attr` with
-# MOUNT_ATTR_RDONLY in `attr_clr` returned a writable clone, and a file created
-# through it appeared in the rootfs. No `move_mount` is needed. With this list the
-# same call reads EPERM. The other calls the capability guards are denied already,
-# so a payload loses little, and Docker's default set leaves it out as well.
+# Docker's default set less CAP_NET_RAW and CAP_MKNOD. Measured under
+# `no-new-privileges`: nginx (its workers change user) and postgres's entry point
+# (it chowns the data directory and drops to postgres) both run under this set, as
+# do `su` and `chown`. All four fail under the three names `runc spec` writes.
 #
-# ⚠ The list stops at CAP_AUDIT_READ (Linux 3.16) on purpose. runc logs a
+#   - CAP_NET_RAW reaches nothing in the empty namespace of a policy with no
+#     network. `network_enabled` shares the HOST's namespace (`netns` in
+#     `oci_generate_spec`), where a payload running as root could read and forge
+#     the host's traffic. So it is either useless or too much.
+#   - CAP_MKNOD cannot make a device node in a user namespace. As root under runc
+#     1.5.2 it can, and opening one past runc's default rules still read EPERM.
+#
+# ⚠ Name nothing newer than the oldest kernel kavach supports. runc logs a
 # capability the kernel does not have at level=warning, into the `--log` file
-# `_oci_exec_with` reads as a runtime failure, so naming CAP_PERFMON (5.8), CAP_BPF
-# (5.8) or CAP_CHECKPOINT_RESTORE (5.9) would fail every container on a kernel
-# older than that. The filter denies `perf_event_open` and `bpf` regardless.
+# `_oci_exec_with` reads as a runtime failure, so a default of CAP_PERFMON (5.8)
+# would fail every container on a kernel older than that. The newest name here is
+# CAP_SETFCAP (2.6.24). A caller naming a newer one gets that failure on an older
+# kernel, which is the right answer to asking for what the kernel does not have.
+#[must_use]
+fn oci_default_capabilities() {
+    var v = vec_new();
+    vec_push(v, "CAP_CHOWN");
+    vec_push(v, "CAP_DAC_OVERRIDE");
+    vec_push(v, "CAP_FOWNER");
+    vec_push(v, "CAP_FSETID");
+    vec_push(v, "CAP_KILL");
+    vec_push(v, "CAP_SETGID");
+    vec_push(v, "CAP_SETUID");
+    vec_push(v, "CAP_SETPCAP");
+    vec_push(v, "CAP_NET_BIND_SERVICE");
+    vec_push(v, "CAP_SYS_CHROOT");
+    vec_push(v, "CAP_AUDIT_WRITE");
+    vec_push(v, "CAP_SETFCAP");
+    return v;
+}
+
+# Why this config's capability list cannot be written, as a message, or 0 when it
+# can. The spec is refused rather than the name dropped: a payload running with
+# less than its caller asked for fails later, somewhere that says nothing of why.
+#
+#   - An unknown name. A name is written into the spec unescaped because it has
+#     matched the table, and runc only warns about one it does not know, which
+#     `_oci_exec_with` would then report as a runtime failure.
+#   - CAP_SYS_ADMIN under the filter. `open_tree_attr` gets past the filter by name
+#     (see `_oci_seccomp_json`) and needs CAP_SYS_ADMIN to clone a tree. Measured
+#     under runc 1.5.2 with the filter on and a read-only rootfs: a direct create
+#     read EROFS, while `open_tree_attr` with MOUNT_ATTR_RDONLY in `attr_clr`
+#     returned a writable clone, and a file created through it appeared in the
+#     rootfs. No `move_mount` is needed. A caller who needs the capability turns
+#     the filter off. gVisor's spec carries no filter, so this does not apply there.
+#[must_use]
+fn oci_capabilities_refusal(config) {
+    if (config == 0) { return 0; }
+    var v = SandboxConfig_capabilities(config);
+    if (v == 0) { return 0; }
+    var known = _oci_capability_names();
+    var i = 0;
+    while (i < vec_len(v)) {
+        var name = vec_get(v, i);
+        var hit = 0;
+        var k = 0;
+        while (name != 0 && k < vec_len(known)) {
+            if (streq(name, vec_get(known, k)) == 1) { hit = 1; }
+            k = k + 1;
+        }
+        if (hit == 0) {
+            var sb = str_builder_new();
+            str_builder_add_cstr(sb, "unknown capability: ");
+            if (name != 0) { str_builder_add_cstr(sb, name); }
+            return str_data(str_builder_build(sb));
+        }
+        if (streq(name, "CAP_SYS_ADMIN") == 1 && _oci_wants_filter(config) == 1) {
+            return "CAP_SYS_ADMIN cannot be granted under a seccomp filter: it reopens a read-only rootfs";
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# The payload's capabilities as a `process.capabilities` member, with its leading
+# comma: the config's list, or `oci_default_capabilities()`. Every spec has one,
+# whatever the policy, because a runtime drops nothing when the key is absent.
+#
+# `inheritable` and `ambient` stay empty, as Docker's have since CVE-2022-24769.
+#
+# runsc reads the same key but defaults the other way: with none, a payload has no
+# capabilities at all (`specutils.Capabilities`, read and not run). So on gVisor
+# this list adds rather than removes. Those are the sentry's own, held against its
+# emulated kernel and not the host.
 fn _oci_capabilities_json(config) {
-    if (_oci_wants_filter(config) == 0) { return ""; }
+    var names = 0;
+    if (config != 0) { names = SandboxConfig_capabilities(config); }
+    if (names == 0) { names = oci_default_capabilities(); }
     var lb = str_builder_new();
-    str_builder_add_cstr(lb, "[\"CAP_CHOWN\",\"CAP_DAC_OVERRIDE\",\"CAP_DAC_READ_SEARCH\",\"CAP_FOWNER\",");
-    str_builder_add_cstr(lb, "\"CAP_FSETID\",\"CAP_KILL\",\"CAP_SETGID\",\"CAP_SETUID\",\"CAP_SETPCAP\",");
-    str_builder_add_cstr(lb, "\"CAP_LINUX_IMMUTABLE\",\"CAP_NET_BIND_SERVICE\",\"CAP_NET_BROADCAST\",");
-    str_builder_add_cstr(lb, "\"CAP_NET_ADMIN\",\"CAP_NET_RAW\",\"CAP_IPC_LOCK\",\"CAP_IPC_OWNER\",");
-    str_builder_add_cstr(lb, "\"CAP_SYS_MODULE\",\"CAP_SYS_RAWIO\",\"CAP_SYS_CHROOT\",\"CAP_SYS_PTRACE\",");
-    str_builder_add_cstr(lb, "\"CAP_SYS_PACCT\",\"CAP_SYS_BOOT\",\"CAP_SYS_NICE\",\"CAP_SYS_RESOURCE\",");
-    str_builder_add_cstr(lb, "\"CAP_SYS_TIME\",\"CAP_SYS_TTY_CONFIG\",\"CAP_MKNOD\",\"CAP_LEASE\",");
-    str_builder_add_cstr(lb, "\"CAP_AUDIT_WRITE\",\"CAP_AUDIT_CONTROL\",\"CAP_SETFCAP\",\"CAP_MAC_OVERRIDE\",");
-    str_builder_add_cstr(lb, "\"CAP_MAC_ADMIN\",\"CAP_SYSLOG\",\"CAP_WAKE_ALARM\",\"CAP_BLOCK_SUSPEND\",");
-    str_builder_add_cstr(lb, "\"CAP_AUDIT_READ\"]");
+    str_builder_add_cstr(lb, "[");
+    var i = 0;
+    while (i < vec_len(names)) {
+        if (i > 0) { str_builder_add_cstr(lb, ","); }
+        str_builder_add_cstr(lb, "\"");
+        str_builder_add_cstr(lb, vec_get(names, i));
+        str_builder_add_cstr(lb, "\"");
+        i = i + 1;
+    }
+    str_builder_add_cstr(lb, "]");
     var list = str_data(str_builder_build(lb));
     var sb = str_builder_new();
     str_builder_add_cstr(sb, ",\"capabilities\":{\"bounding\":");
@@ -154,6 +284,33 @@ fn _oci_capabilities_json(config) {
     str_builder_add_cstr(sb, ",\"permitted\":");
     str_builder_add_cstr(sb, list);
     str_builder_add_cstr(sb, "}");
+    return str_data(str_builder_build(sb));
+}
+
+# `linux.maskedPaths` and `linux.readonlyPaths`, with a leading comma: the lists
+# `runc spec` 1.5.2 writes.
+#
+# A filter cannot stand in for them, because writing a sysctl is an `open` and a
+# `write`, and a core pattern naming a program runs that program on the host.
+# Measured as root under runc 1.5.2 with neither list and every capability:
+#
+#   | | neither list | these lists |
+#   |---|---|---|
+#   | open /proc/sys/kernel/core_pattern to write | allowed | EROFS |
+#   | open /proc/sysrq-trigger to write | allowed | EROFS |
+#   | read /proc/kcore | a byte | none |
+#
+# A path that does not exist is skipped, which /sys/firmware always is: this spec
+# mounts no /sys. It stays, so the lists are runc's and not a variant of them.
+#
+# runsc's boot path applies neither (read, not run). Its /proc is its own.
+fn _oci_paths_json() {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, ",\"maskedPaths\":[\"/proc/acpi\",\"/proc/asound\",\"/proc/kcore\",\"/proc/keys\",");
+    str_builder_add_cstr(sb, "\"/proc/latency_stats\",\"/proc/timer_list\",\"/proc/timer_stats\",");
+    str_builder_add_cstr(sb, "\"/proc/sched_debug\",\"/sys/firmware\",\"/proc/scsi\"]");
+    str_builder_add_cstr(sb, ",\"readonlyPaths\":[\"/proc/bus\",\"/proc/fs\",\"/proc/irq\",\"/proc/sys\",");
+    str_builder_add_cstr(sb, "\"/proc/sysrq-trigger\"]");
     return str_data(str_builder_build(sb));
 }
 
@@ -188,9 +345,10 @@ fn _oci_capabilities_json(config) {
 # ⚠ One deny entry cannot hold by name. A runtime resolves a name through
 # libseccomp and skips one it does not know, silently, and a spec cannot give a
 # number. runc 1.5.2 with libseccomp 2.6.0 does not know `open_tree_attr` (Linux
-# 6.15). `_oci_capabilities_json` closes it from the other side. An older
-# libseccomp may skip more of the mount API, each call of which needs the same
-# capability: `test_oci_payload_observes_the_filter` reports what a host denies.
+# 6.15). No default set holds CAP_SYS_ADMIN, and `oci_capabilities_refusal` refuses
+# to grant it here, which closes that from the other side. An older libseccomp may
+# skip more of the mount API, each call of which needs the same capability:
+# `test_oci_payload_observes_the_filter` reports what a host denies.
 #
 # Not for gVisor. runsc applies a spec's filter only under `--oci-seccomp`, and
 # then refuses SCMP_ACT_KILL_PROCESS as an invalid action (runsc/specutils/
@@ -240,6 +398,7 @@ fn _oci_seccomp_json(config) {
 # Render OCI runtime config.json v1.0.2. Returns allocated cstr.
 fn oci_generate_spec(sandbox, command) {
     var config = Sandbox_config(sandbox);
+    if (oci_capabilities_refusal(config) != 0) { return 0; }
     var policy = SandboxConfig_policy(config);
     var cmd_escaped = oci_json_escape(command);
     var cfg_rootfs_for_args = SandboxConfig_rootfs(config);
@@ -333,6 +492,9 @@ fn oci_generate_spec(sandbox, command) {
     if (cap < 0) { return 0; }
     var caps_json = _oci_capabilities_json(config);
     cap = checked_add(cap, strlen(caps_json));
+    if (cap < 0) { return 0; }
+    var paths_json = _oci_paths_json();
+    cap = checked_add(cap, strlen(paths_json));
     if (cap < 0) { return 0; }
     cap = checked_add(cap, 2048);
     var scfg_cap = Sandbox_config(sandbox);
@@ -456,6 +618,7 @@ fn oci_generate_spec(sandbox, command) {
     }
     memcpy(buf + pos, resources, strlen(resources)); pos = pos + strlen(resources);
     memcpy(buf + pos, seccomp_json, strlen(seccomp_json)); pos = pos + strlen(seccomp_json);
+    memcpy(buf + pos, paths_json, strlen(paths_json)); pos = pos + strlen(paths_json);
     var tail = "}}";
     memcpy(buf + pos, tail, strlen(tail)); pos = pos + strlen(tail);
     # The sizing above must cover every byte written (3.12.9). A bump allocator

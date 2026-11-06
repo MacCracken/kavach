@@ -266,6 +266,8 @@ fn oci_exec(sandbox, command) {
 
 # The run itself, under the runtime at `runtime`: bundle, run, delete, cleanup.
 fn _oci_exec_with(runtime, sandbox, command, start_ns) {
+    var refused = oci_capabilities_refusal(Sandbox_config(sandbox));
+    if (refused != 0) { return backend_error_result(refused); }
     var container_id = oci_container_id("kavach-oci");
     var bundle = oci_prepare_bundle(container_id, sandbox, command);
     if (bundle == 0) {

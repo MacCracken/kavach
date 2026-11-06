@@ -164,12 +164,13 @@ struct SandboxConfig {
     wasm_max_table_elements;
     wasm_max_memories;
     wasm_grow_returns_failure;
+    capabilities;
 }
 
-# 168: the five `wasm_*` fields appended (3.14.4), so no existing field offset
-# moves; the same discipline `stdin_inherit` followed at 128, `env` at 120,
-# `fuel` at 112, `stdin`/`stdin_len` at 104 and `require_ns` at 88.
-var SANDBOX_CONFIG_SIZE = 168;
+# 176: `capabilities` appended (3.14.5), so no existing field offset moves; the same
+# discipline the five `wasm_*` fields followed at 168 (3.14.4), `stdin_inherit` at
+# 128, `env` at 120, `fuel` at 112, `stdin`/`stdin_len` at 104 and `require_ns` at 88.
+var SANDBOX_CONFIG_SIZE = 176;
 
 # Defaults match Rust's SandboxConfig::default():
 #   backend=Process, policy=basic(), timeout_ms=30000, inner_backend=-1 (none)
@@ -360,6 +361,21 @@ fn config_externalization(c, p) { SandboxConfig_set_externalization(c, p); retur
 # the process backend honoured it, and `config_workdir`, only under a policy
 # asking for confinement: its unconfined capture took neither.
 fn config_env(c, v) { SandboxConfig_set_env(c, v); return c; }
+
+# The capabilities an OCI or gVisor container runs with: a vec of "CAP_*" cstrs.
+# Unset, it runs with `oci_default_capabilities()`.
+#
+# Set, the list REPLACES that one, as `config_env` replaces its defaults. A payload
+# that needs one more pushes onto `oci_default_capabilities()`, and one that needs
+# less names less. An empty vec is no capabilities at all, where an empty
+# `config_env` means the defaults, because a caller who passes an empty list here
+# can only mean that.
+#
+# `oci_capabilities_refusal` says what fails the exec: a name kavach does not know,
+# and CAP_SYS_ADMIN under a seccomp filter. No other backend reads this, so a caller
+# narrowing it on a host that falls back to the process backend gets no narrowing,
+# and `score_backend`, which takes a policy, does not see it.
+fn config_capabilities(c, v) { SandboxConfig_set_capabilities(c, v); return c; }
 
 # Build a NULL-terminated envp from a vec of "KEY=VALUE" cstrs. `v == 0` (the
 # default) yields the empty envp every kavach exec path used unconditionally

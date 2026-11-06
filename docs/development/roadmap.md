@@ -2,7 +2,7 @@
 
 > **Principle**: Security correctness first, then backend breadth, then performance. Every sandbox gets a number.
 
-This roadmap is **future-facing only** — shipped work lives in [CHANGELOG.md](../../CHANGELOG.md). Current release: **v3.14.4**. Toolchain pin: cc `6.7.18`; sigil `3.13.15` (the snapshot's — see CLAUDE.md hazard 4), samay `1.5.1`, ai-hwaccel `2.5.6` (agnosys dropped at v3.5.0 — its security backends are internalized). 3.14.0 to 3.14.2 went to the uutils exec fix, the `basic` filter's socket writes, the cyrius 6.7.9 and 6.7.18 moves, and the open fixes: Intel's attestation collateral, the TDX RTMRs, the runtimes' own diagnostics and aarch64 namespaces. 3.14.3 and 3.14.4 followed with what stiva and agnosai filed: real argv, seccomp and `no_new_privs` on the OCI backend, and the WASM capture. They came ahead of the SEV-SNP arc pinned as 3.14.x below; the arcs keep their numbers until they are re-pinned.
+This roadmap is **future-facing only** — shipped work lives in [CHANGELOG.md](../../CHANGELOG.md). Current release: **v3.14.5**. Toolchain pin: cc `6.7.18`; sigil `3.13.15` (the snapshot's — see CLAUDE.md hazard 4), samay `1.5.1`, ai-hwaccel `2.5.6` (agnosys dropped at v3.5.0 — its security backends are internalized). 3.14.0 to 3.14.2 went to the uutils exec fix, the `basic` filter's socket writes, the cyrius 6.7.9 and 6.7.18 moves, and the open fixes: Intel's attestation collateral, the TDX RTMRs, the runtimes' own diagnostics and aarch64 namespaces. 3.14.3 and 3.14.4 followed with what stiva and agnosai filed: real argv, seccomp and `no_new_privs` on the OCI backend, and the WASM capture. They came ahead of the SEV-SNP arc pinned as 3.14.x below; the arcs keep their numbers until they are re-pinned.
 
 **Every release below is pinned.** Each names what ships in it, in the order the principle sets. To
 move an item, edit this file; do not let it drift. **An arc also takes the open fixes in the code it
@@ -90,10 +90,6 @@ release, with the payload's exit status brought out of the guest as 3.14 and 3.1
 
 ## Beyond 3.x — unpinned
 
-- The OCI spec's capabilities and `/proc`: a container keeps every capability but CAP_SYS_ADMIN, and
-  nothing is masked or read-only, which matters most run as root
-  ([issue](issues/2026-11-06-oci-spec-keeps-every-capability.md)). A policy decision
-  first: which set, and how a payload asks for more.
 - `seccomp_enabled` on gVisor: pass `--oci-seccomp` with a filter runsc accepts, or stop scoring it
   ([issue](issues/2026-11-06-gvisor-policy-seccomp-is-not-applied.md)). Needs a machine
   with runsc to run it on.
