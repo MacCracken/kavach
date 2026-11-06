@@ -94,6 +94,47 @@ fn _audit_record_if(chain, event_type, payload) {
 
 # ---- Main entry -----------------------------------------------------------
 
+# 1 when `backend`'s exec reads the argv a sandbox carries. The others take a
+# command line and hand it on as text.
+fn _kv_backend_reads_argv(backend) {
+    if (backend == KavachBackend.PROCESS) { return 1; }
+    if (backend == KavachBackend.OCI) { return 1; }
+    if (backend == KavachBackend.GVISOR) { return 1; }
+    return 0;
+}
+
+# sandbox_exec for a caller that holds real argv: `argv` is a vec of cstr, and
+# each element reaches the payload as one argument, whatever it holds. A command
+# string is split on spaces and tabs, so through sandbox_exec "a  b" arrives as
+# two arguments and "" as none. Returns what sandbox_exec returns.
+#
+# Everything but the payload's argv is sandbox_exec's: the runtime guard and the
+# audit chain read the elements joined with spaces, so a command the string form
+# refuses is refused here too. A backend that takes a command line refuses an
+# element the join would change, rather than flatten it.
+fn sandbox_exec_argv(sandbox, argv) {
+    var command = _kv_argv_command(argv);
+    if (command == 0) {
+        kavach_err_print(KAVACH_ERR_EXEC_FAILED, "argv needs a program with no space or tab in it");
+        return 0;
+    }
+    if (_kv_backend_reads_argv(SandboxConfig_backend(Sandbox_config(sandbox))) == 0) {
+        var i = 0;
+        while (i < vec_len(argv)) {
+            if (_kv_arg_is_word(vec_get(argv, i)) == 0) {
+                kavach_err_print(KAVACH_ERR_EXEC_FAILED,
+                  "this backend takes a command line; an empty argument or one with a space or tab cannot reach it");
+                return 0;
+            }
+            i = i + 1;
+        }
+    }
+    Sandbox_set_argv(sandbox, argv);
+    var r = sandbox_exec(sandbox, command);
+    Sandbox_set_argv(sandbox, 0);
+    return r;
+}
+
 # Execute a command through the full pipeline.
 # Returns ExecResult* on PASS/WARN, 0 on BLOCK/QUARANTINE/error.
 fn sandbox_exec(sandbox, command) {

@@ -59,6 +59,21 @@ struct SpawnedProcess {
 }
 var SPAWNED_PROCESS_SIZE = 40;
 
+# sandbox_spawn for a caller that holds real argv: `argv` is a vec of cstr, and
+# each element reaches the payload as one argument. See sandbox_exec_argv, whose
+# checks this shares. Returns SpawnedProcess*, or 0.
+fn sandbox_spawn_argv(sandbox, argv, log_path) {
+    var command = _kv_argv_command(argv);
+    if (command == 0) {
+        kavach_err_print(KAVACH_ERR_EXEC_FAILED, "argv needs a program with no space or tab in it");
+        return 0;
+    }
+    Sandbox_set_argv(sandbox, argv);
+    var spawned = sandbox_spawn(sandbox, command, log_path);
+    Sandbox_set_argv(sandbox, 0);
+    return spawned;
+}
+
 # Spawn `command` detached under `sandbox`'s policy, with stdout+stderr appended
 # to `log_path` (0 → /dev/null). Returns SpawnedProcess*, or 0.
 #
@@ -93,7 +108,7 @@ fn sandbox_spawn(sandbox, command, log_path) {
         kavach_err_print(KAVACH_ERR_EXEC_FAILED, "command blocked by runtime guard");
         return 0;
     }
-    var args = _split_command(command);
+    var args = _sandbox_command_argv(sandbox, command);
     var argc = vec_len(args);
     if (argc == 0) {
         kavach_err_print(KAVACH_ERR_EXEC_FAILED, "empty command");

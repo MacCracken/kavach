@@ -157,6 +157,12 @@ sandbox_exec(sb, "echo hi")
         appends the JSONL line whole or not at all (_audit_append)
 ```
 
+`sandbox_exec` and `sandbox_spawn` take a command line, split on spaces and tabs with no quote
+handling. A caller that holds real argv uses `sandbox_exec_argv` or `sandbox_spawn_argv` (v3.14.3):
+each element of the vec reaches the payload as one argument on the process, OCI and gVisor backends
+and on spawn, and any other backend refuses an element it cannot carry. The runtime guard and the audit
+chain read the elements joined with spaces in both forms, so `argv[0]` must hold no space or tab.
+
 ---
 
 ## Strength scoring

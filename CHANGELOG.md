@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.14.3] — 2026-11-06
+
+Real argv for a caller that holds it. `sandbox_exec` and `sandbox_spawn` take one string and split it
+on spaces and tabs, so an argument could hold neither and an empty one vanished. stiva, which holds
+real argv and had to flatten it to call kavach, printed an empty line for
+`run IMG -- /bin/sh -c 'echo one; echo two'`. This is additive: a command string is split as before.
+
+### Added
+
+- **`sandbox_exec_argv(sandbox, argv)` and `sandbox_spawn_argv(sandbox, argv, log_path)`.** `argv` is a
+  vec of cstr, and each element reaches the payload as one argument. The process, OCI and gVisor
+  backends and spawn all deliver it as given.
+  - **Only the payload's argv changes.** The runtime guard and the audit chain read the elements
+    joined with spaces, so what the string form refuses is refused here too. That includes a newline
+    on the process backend and on spawn, and `is_safe_argument`'s other control characters.
+  - **`argv[0]` must be a word: not empty, no space, no tab.** The guard's blocklist reads the first
+    word of the joined text as the program, so an `argv[0]` of `/tmp/a b/bash` would have shown it `a`
+    and then exec'd a file named `bash`.
+  - **A backend that takes a command line refuses what it cannot carry.** Firecracker, WASM, SGX, SEV,
+    TDX, SyAgnos and noop refuse an empty element or one holding a space or tab, rather than flatten it.
+    Elements a join would not change run as they always did.
+  - **OCI without a rootfs.** An argv call gets real `process.args` there too. The string form's
+    `/bin/sh -c` wrapper would have handed the arguments to a shell to parse.
+
+### Changed
+
+- **`SANDBOX_SIZE` 48 → 56.** A sandbox carries the argv for the length of the call (`Sandbox_argv`),
+  and it is cleared on every path out. Size a sandbox by the constant, never a number.
+
+### Tests
+
+**1415 → 1448** on x86-64, with and without `CYRIUS_DCE=1`, and **1357** on aarch64 under qemu.
+Each delivery test reads what the payload received: a `printf` of `a  b`, an empty argument and a tab
+prints `[a  b][][c\td]`, where a command string gives `[a][b][c][d]`. Six mutations were each caught:
+delivery removed, the `argv[0]` check removed, string backends flattening, the no-rootfs wrapper kept,
+and the argv left on the sandbox by exec and by spawn.
+
+### Performance
+
+`scripts/bench-history.sh` against the 3.14.2 row: `process_exec_echo` +7.0 % and `process_exec_confined`
++2.5 %, with the median row −4.7 %. Those two rows are not a regression. The change adds one field read
+to that path, and interleaved on one pinned CPU over four rounds 3.14.3 is +0.8 % and +1.4 % (2.831 →
+2.855 ms, 2.808 → 2.848 ms), inside the spread between rounds.
+
 ## [3.14.2] — 2026-11-02
 
 The roadmap's open items, as far as this machine can take them. A TDX or SGX quote now has to

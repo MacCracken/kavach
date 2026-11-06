@@ -7,8 +7,8 @@
 
 var PROCESS_MAX_OUTPUT = 1048576;
 
-# Whitespace-split command into a vec of cstrs. No quote handling —
-# callers with quoted args should build the vec themselves and bypass.
+# A command line is split on spaces and tabs, with no quote handling. A caller
+# whose arguments hold either uses sandbox_exec_argv.
 
 fn process_exec(sandbox, command) {
     var start_ns = mono_now_ns();
@@ -35,7 +35,7 @@ fn process_exec(sandbox, command) {
         return backend_guard_result(violations);
     }
 
-    var args = _split_command(command);
+    var args = _sandbox_command_argv(sandbox, command);
     if (vec_len(args) == 0) {
         return backend_error_result("empty command");
     }

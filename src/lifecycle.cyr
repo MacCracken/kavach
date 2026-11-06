@@ -370,9 +370,10 @@ struct Sandbox {
     created_at;
     started_at;
     stopped_at;
+    argv;           # the vec a sandbox_*_argv call is running, or 0
 }
 
-var SANDBOX_SIZE = 48;
+var SANDBOX_SIZE = 56;
 
 # Sandbox IDs: 64 bits from /dev/urandom, UUID-v4-equivalent for
 # correlation. Collision probability across 2^32 sandboxes is ~2^-32.
@@ -403,7 +404,68 @@ fn sandbox_create(config) {
     Sandbox_set_created_at(s, mono_now_ns());
     Sandbox_set_started_at(s, 0);
     Sandbox_set_stopped_at(s, 0);
+    Sandbox_set_argv(s, 0);
     return s;
+}
+
+# The payload's argv for the command in flight: the vec a sandbox_*_argv call
+# set, else `command` split on spaces and tabs. Only the argv form can carry an
+# argument that holds either, or an empty one.
+fn _sandbox_command_argv(sandbox, command) {
+    var argv = Sandbox_argv(sandbox);
+    if (argv != 0) { return argv; }
+    return _split_command(command);
+}
+
+# 1 when `s` is what _split_command hands back unchanged: not empty, no space,
+# no tab.
+fn _kv_arg_is_word(s) {
+    var n = strlen(s);
+    if (n == 0) { return 0; }
+    var i = 0;
+    while (i < n) {
+        var c = load8(s + i);
+        if (c == 32 || c == 9) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# `argv` joined with spaces: the text the runtime guard, the audit chain and a
+# string backend read. 0 when there is nothing to run.
+#
+# ⛔ The first element must be a word. The guard's blocklist reads the first
+# word of this text as the program, so an argv[0] of "/tmp/a b/bash" would show
+# it "a" and then exec a file named bash.
+fn _kv_argv_command(argv) {
+    if (argv == 0) { return 0; }
+    var n = vec_len(argv);
+    if (n == 0) { return 0; }
+    if (_kv_arg_is_word(vec_get(argv, 0)) == 0) { return 0; }
+    var cap = 1;
+    var i = 0;
+    while (i < n) {
+        cap = checked_add(cap, strlen(vec_get(argv, i)) + 1);
+        if (cap < 0) { return 0; }
+        i = i + 1;
+    }
+    var buf = alloc_checked(cap);
+    if (buf == 0) { return 0; }
+    var pos = 0;
+    i = 0;
+    while (i < n) {
+        if (i > 0) {
+            store8(buf + pos, 32);
+            pos = pos + 1;
+        }
+        var s = vec_get(argv, i);
+        var len = strlen(s);
+        memcpy(buf + pos, s, len);
+        pos = pos + len;
+        i = i + 1;
+    }
+    store8(buf + pos, 0);
+    return buf;
 }
 
 # Transition to a new state. Returns KAVACH_ERR_OK on success,

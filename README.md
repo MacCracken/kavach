@@ -12,6 +12,11 @@ classification, credential proxy, HMAC-SHA256 audit chain — all in pure Cyrius
 
 ## Status
 
+**v3.14.3 — real argv for a caller that holds it.** `sandbox_exec_argv` and `sandbox_spawn_argv` take
+a vec, so an argument can hold a space or a tab, or be empty. The runtime guard and the audit chain
+read the same text as before, and a backend that takes a command line refuses an argument it cannot
+carry rather than flatten it. **1448** assertions green on x86-64, **1357** on aarch64 under qemu.
+
 **v3.14.2 — Intel's collateral, the TDX RTMRs, and runtime errors kept from the gate.** A TDX or
 SGX quote now has to clear Intel's collateral: the platform's TCB level, the Quoting Enclave's
 identity and the PCK and root CRLs (`policy_attest_collateral`). A TD also has to clear its RTMRs,
@@ -331,7 +336,7 @@ cyrius deps
 cyrius build src/main.cyr build/kavach
 ./build/kavach
 
-# Run the test suite (1415 assertions; run from the repository root,
+# Run the test suite (1448 assertions; run from the repository root,
 # since the real-Intel attestation vectors are read from tests/data/).
 cyrius test tests/kavach.tcyr
 
@@ -366,7 +371,7 @@ consumer's `cyrius.cyml`:
 [deps.kavach]
 git     = "https://github.com/MacCracken/kavach.git"
 path    = "../kavach"          # local sibling checkout (optional)
-tag     = "3.14.2"
+tag     = "3.14.3"
 modules = ["dist/kavach.cyr"]
 
 # OPTIONAL since 3.13.3 (cyrius 6.6.20): dist/kavach.deps is now the

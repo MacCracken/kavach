@@ -3448,6 +3448,147 @@ fn _spawn_running_sandbox(policy) {
     return sb;
 }
 
+# ══ sandbox_exec_argv / sandbox_spawn_argv (3.14.3) ══
+
+# ["/usr/bin/printf", "[%s]", "a  b", "", "c<TAB>d"], which prints each argument
+# it received between brackets. The expected output is what the payload observes:
+# through a command string this prints "[a][b][c][d]".
+fn _argv_probe() {
+    var v = vec_new();
+    vec_push(v, "/usr/bin/printf");
+    vec_push(v, "[%s]");
+    vec_push(v, "a  b");
+    vec_push(v, "");
+    vec_push(v, "c\td");
+    return v;
+}
+
+fn _argv2(a, b) {
+    var v = vec_new();
+    vec_push(v, a);
+    vec_push(v, b);
+    return v;
+}
+
+fn test_exec_argv_keeps_boundaries() {
+    test_group("sandbox_exec_argv_keeps_boundaries");
+    var sb = _spawn_running_sandbox(0);
+    var r = sandbox_exec_argv(sb, _argv_probe());
+    assert(r != 0, "exec ran");
+    if (r == 0) { return 0; }
+    assert_eq(ExecResult_exit_code(r), 0, "exit 0");
+    assert_streq(ExecResult_stdout(r), "[a  b][][c\td]", "each element arrives as one argument");
+    assert_eq(Sandbox_argv(sb), 0, "the sandbox does not keep the argv");
+    # The string form on the same sandbox still splits.
+    var r2 = sandbox_exec(sb, "/usr/bin/printf [%s] a  b");
+    assert(r2 != 0, "string form ran");
+    if (r2 != 0) { assert_streq(ExecResult_stdout(r2), "[a][b]", "the string form is unchanged"); }
+    return 0;
+}
+
+fn test_spawn_argv_keeps_boundaries() {
+    test_group("sandbox_spawn_argv_keeps_boundaries");
+    var log = "/tmp/kavach_spawn_argv.txt";
+    xunlink(log);
+    var sb = _spawn_running_sandbox(0);
+    var sp = sandbox_spawn_argv(sb, _argv_probe(), log);
+    assert(sp != 0, "spawned");
+    if (sp == 0) { return 0; }
+    assert_eq(Sandbox_argv(sb), 0, "the sandbox does not keep the argv");
+    assert_eq(spawned_wait(sp), 0, "exit 0");
+    var buf = alloc(256);
+    var n = file_read_all(log, buf, 255);
+    if (n < 0) { n = 0; }
+    store8(buf + n, 0);
+    assert_streq(buf, "[a  b][][c\td]", "each element arrives as one argument");
+    xunlink(log);
+    return 0;
+}
+
+# The guard reads the first word of the joined text as the program, so an argv[0]
+# holding a space would show it one program and exec another.
+fn test_argv_refusals() {
+    test_group("sandbox_argv_refusals");
+    var sb = _spawn_running_sandbox(0);
+    assert_eq(sandbox_exec_argv(sb, _argv2("/tmp/a b/bash", "-c")), 0, "exec: a space in argv[0]");
+    assert_eq(sandbox_spawn_argv(sb, _argv2("/tmp/a b/bash", "-c"), 0), 0, "spawn: a space in argv[0]");
+    assert_eq(sandbox_exec_argv(sb, _argv2("/bin/t\tx", "-c")), 0, "exec: a tab in argv[0]");
+    assert_eq(sandbox_exec_argv(sb, _argv2("", "x")), 0, "exec: an empty argv[0]");
+    assert_eq(sandbox_exec_argv(sb, 0), 0, "exec: null argv");
+    assert_eq(sandbox_exec_argv(sb, vec_new()), 0, "exec: empty argv");
+    assert_eq(sandbox_spawn_argv(sb, 0, 0), 0, "spawn: null argv");
+    assert_eq(sandbox_spawn_argv(sb, vec_new(), 0), 0, "spawn: empty argv");
+    assert_eq(Sandbox_argv(sb), 0, "a refusal leaves nothing on the sandbox");
+    return 0;
+}
+
+# The argv form changes what reaches the payload and nothing else, so what the
+# string form refuses is refused here.
+fn test_argv_guard_still_applies() {
+    test_group("sandbox_argv_guard_still_applies");
+    var sb = _spawn_running_sandbox(0);
+    var r = sandbox_exec_argv(sb, _argv2("/bin/bash", "-i"));
+    assert(r != 0, "a guard refusal is a result");
+    if (r != 0) { assert(ExecResult_exit_code(r) != 0, "a blocked program does not run"); }
+    assert_eq(sandbox_spawn_argv(sb, _argv2("/bin/bash", "-i"), 0), 0, "spawn: a blocked program");
+    assert_eq(sandbox_spawn_argv(sb, _argv2("/bin/echo", "a\nb"), 0), 0, "spawn: a control character");
+    assert_eq(Sandbox_argv(sb), 0, "a refusal leaves nothing on the sandbox");
+    return 0;
+}
+
+# A backend that takes a command line cannot carry a boundary, so it refuses what
+# a join would change and runs what a join would not.
+fn test_argv_on_a_string_backend() {
+    test_group("sandbox_argv_on_a_string_backend");
+    kavach_init();
+    var cfg = config_new();
+    config_backend(cfg, KavachBackend.NOOP);
+    var sb = sandbox_create(cfg);
+    sandbox_transition(sb, SandboxState.RUNNING);
+    var r = sandbox_exec_argv(sb, _argv2("echo", "hi"));
+    assert(r != 0, "plain words run");
+    assert_eq(sandbox_exec_argv(sb, _argv2("echo", "a  b")), 0, "a space is refused, not flattened");
+    assert_eq(sandbox_exec_argv(sb, _argv2("echo", "a\tb")), 0, "a tab is refused, not flattened");
+    assert_eq(sandbox_exec_argv(sb, _argv2("echo", "")), 0, "an empty argument is refused, not dropped");
+    return 0;
+}
+
+# 1 when `spec` holds `want`.
+fn _spec_has(spec, want) {
+    if (strstr(spec, want) >= 0) { return 1; }
+    return 0;
+}
+
+fn test_oci_spec_takes_the_argv() {
+    test_group("oci_spec_takes_the_argv");
+    var cfg = config_new();
+    config_backend(cfg, KavachBackend.OCI);
+    config_rootfs(cfg, "/r");
+    var sb = alloc(SANDBOX_SIZE);
+    Sandbox_set_config(sb, cfg);
+    Sandbox_set_argv(sb, _argv_probe());
+    var spec = oci_generate_spec(sb, "/usr/bin/printf [%s] a  b  c\td");
+    assert(spec != 0, "a spec");
+    if (spec != 0) {
+        var want = "\"args\":[\"/usr/bin/printf\",\"[%s]\",\"a  b\",\"\",\"c\\td\"]";
+        assert_eq(_spec_has(spec, want), 1, "process.args is the vec, element for element");
+    }
+    # Without a rootfs the string form takes the /bin/sh wrapper. The argv form must
+    # not: a shell would parse the arguments.
+    var cfg2 = config_new();
+    config_backend(cfg2, KavachBackend.OCI);
+    var sb2 = alloc(SANDBOX_SIZE);
+    Sandbox_set_config(sb2, cfg2);
+    Sandbox_set_argv(sb2, _argv2("/bin/echo", "a  b"));
+    var spec2 = oci_generate_spec(sb2, "/bin/echo a  b");
+    assert(spec2 != 0, "a spec with no rootfs");
+    if (spec2 != 0) {
+        assert_eq(_spec_has(spec2, "\"args\":[\"/bin/echo\",\"a  b\"]"), 1, "no rootfs: real argv");
+        assert_eq(_spec_has(spec2, "/bin/sh"), 0, "no rootfs: no shell wrapper");
+    }
+    return 0;
+}
+
 fn test_spawn_lifecycle() {
     test_group("sandbox_spawn_lifecycle");
     var log = "/tmp/kavach_spawn_log.txt";
@@ -7908,6 +8049,12 @@ fn main() {
     test_file_write_secure_r();
     test_aho_corasick();
     test_persistent_guest();
+    test_exec_argv_keeps_boundaries();
+    test_spawn_argv_keeps_boundaries();
+    test_argv_refusals();
+    test_argv_guard_still_applies();
+    test_argv_on_a_string_backend();
+    test_oci_spec_takes_the_argv();
     test_spawn_lifecycle();
     test_spawn_exit_code_and_signal();
     test_spawn_detaches_and_logs();

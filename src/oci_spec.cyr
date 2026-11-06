@@ -207,8 +207,8 @@ fn oci_generate_spec(sandbox, command) {
     # the fixed slack ran out and the loop below wrote past `buf` (1500 tokens
     # crashed the process). Split first, and add 3 bytes per token.
     var av = 0;
-    if (cfg_rootfs_for_args != 0) {
-        av = _split_command(command);
+    if (cfg_rootfs_for_args != 0 || Sandbox_argv(sandbox) != 0) {
+        av = _sandbox_command_argv(sandbox, command);
         cap = checked_add(cap, checked_mul(vec_len(av), 3));
         if (cap < 0) { return 0; }
     }
@@ -224,8 +224,9 @@ fn oci_generate_spec(sandbox, command) {
     # could not run at all, and the failure looked like the payload doing
     # nothing. A rootfs-bearing sandbox gets real argv; without a rootfs the
     # legacy wrapper is kept, since a caller relying on shell syntax there has
-    # a host shell by definition.
-    if (cfg_rootfs_for_args != 0) {
+    # a host shell by definition. A caller of a sandbox_*_argv form gets real
+    # argv either way: the wrapper would hand its arguments to a shell to parse.
+    if (av != 0) {
         var ai = 0;
         while (ai < vec_len(av)) {
             if (ai > 0) { store8(buf + pos, 44); pos = pos + 1; }        # ','
