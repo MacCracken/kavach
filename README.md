@@ -17,7 +17,7 @@ container now runs under the policy's filter, with `noNewPrivileges` set, where 
 inside runc, `mount` and `unshare` now die by SIGSYS, and a filtered container has no CAP_SYS_ADMIN. `config_stdin` goes out while the payload's output drains,
 so a guest echoing a large input no longer hangs the caller past its deadline, and a payload exiting with its
 input unread no longer kills the host with SIGPIPE. The WASM backend gains store limits and traps on a failed
-grow by default. **1592** assertions green on x86-64, **1450** on aarch64 under qemu.
+grow by default. **1596** assertions green on x86-64, **1453** on aarch64 under qemu.
 
 **v3.14.3 — real argv for a caller that holds it.** `sandbox_exec_argv` and `sandbox_spawn_argv` take
 a vec, so an argument can hold a space or a tab, or be empty. The runtime guard and the audit chain
@@ -343,7 +343,7 @@ cyrius deps
 cyrius build src/main.cyr build/kavach
 ./build/kavach
 
-# Run the test suite (1592 assertions; run from the repository root,
+# Run the test suite (1596 assertions; run from the repository root,
 # since the real-Intel attestation vectors are read from tests/data/).
 cyrius test tests/kavach.tcyr
 

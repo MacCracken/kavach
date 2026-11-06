@@ -8064,6 +8064,51 @@ fn _t_payload_try(nr, a0, a1) {
     return load32(&st) & 127;
 }
 
+# bpf(0, NULL, 0) on aarch64, by hand. `syscall()` cannot reach it: the deny
+# table's number is native, 280, and a variable number goes through cyrius's
+# ESYSXLAT stub, which reads it as x86 utimensat. Nor can x86 bpf, 321, which has
+# no row there, and the stdlib names no bpf. Measured under `qemu-aarch64 -strace`.
+fn _t_aarch64_bpf() {
+    #ifdef CYRIUS_ARCH_AARCH64
+    # SAFETY: bpf with command 0, a NULL attr and size 0 fails with no effect, and
+    # under the filter never runs. x0-x2 and x8 are caller-saved, and the only
+    # caller exits straight after, on a stack this does not touch.
+    asm {
+        0x00; 0x00; 0x80; 0xD2;         # movz x0, #0
+        0x01; 0x00; 0x80; 0xD2;         # movz x1, #0
+        0x02; 0x00; 0x80; 0xD2;         # movz x2, #0
+        0x08; 0x23; 0x80; 0xD2;         # movz x8, #280
+        0x01; 0x00; 0x00; 0xD4;         # svc #0
+    }
+    #endif
+    return 0;
+}
+
+# Make denied call `name`, whose native number is `nr`, in a forked child, and
+# return the signal that ended it, 0 for a normal exit. The BPF filter wants native
+# numbers, but a `syscall()` here takes the stdlib's: on aarch64 39 is x86 getpid
+# and 41 x86 socket, so the table's numbers would run those and prove nothing. A
+# row added to the deny table with a collision of its own reads 0 here and fails.
+fn _t_payload_deny(name, nr) {
+    if (streq(name, "umount2") == 1) { nr = SYS_UMOUNT2; }
+    if (streq(name, "pivot_root") == 1) { nr = SYS_PIVOT_ROOT; }
+    #ifdef CYRIUS_ARCH_AARCH64
+    if (streq(name, "bpf") == 1) {
+        var pid = kv_fork();
+        if (pid == 0) {
+            _t_set_rlimit(4, 0);
+            _t_aarch64_bpf();
+            sys_exit(0);
+        }
+        var st[8];
+        store64(&st, 0);
+        kv_waitpid(pid, &st, 0);
+        return load32(&st) & 127;
+    }
+    #endif
+    return _t_payload_try(nr, 0, 0);
+}
+
 # A signal number from a forked child entering through the i386 gate, 0 for a
 # normal exit. 11, SIGSEGV, is a kernel with no IA32 emulation.
 fn _t_payload_i386() {
@@ -8116,7 +8161,7 @@ fn _t_oci_payload(mode) {
         _t_payload_put("deny ");
         _t_payload_put(vec_get(names, i));
         _t_payload_put(" ");
-        _t_payload_num(_t_payload_try(vec_get(nums, i), 0, 0));
+        _t_payload_num(_t_payload_deny(vec_get(names, i), vec_get(nums, i)));
         _t_payload_put("\n");
         i = i + 1;
     }
@@ -8201,15 +8246,41 @@ fn _t_oci_run(policy, root, mode) {
     return oci_exec(sb, cmd);
 }
 
+# Whether the OCI runtime at `path` is built for this binary's architecture. A
+# runtime is native to its host, so 0 means this binary is emulated. Reads the ELF
+# header's e_machine; the low half of an AUDIT_ARCH_* is that same EM_* value. A
+# runtime that is not an ELF (a wrapper script) says nothing, and reads as native.
+fn _t_runtime_is_native(path) {
+    var hdr[20];
+    if (file_read_all(path, &hdr, 20) != 20) { return 1; }
+    if (load32(&hdr) != 1179403647) { return 1; }   # 0x7F "ELF", little-endian
+    var em = load8(&hdr + 18) | (load8(&hdr + 19) << 8);
+    if (em == (security_seccomp_native_arch() & 65535)) { return 1; }
+    return 0;
+}
+
 # What a payload meets inside a real container, under the real runtime. This is
 # the test the rest stand on: through 3.14.3 a `policy_basic()` payload read
-# `Seccomp: 0` and mounted a tmpfs. Skips where no container can start (no runc,
-# a host that refuses unprivileged user namespaces, a foreign-arch payload under
-# qemu), which the unfiltered control below tells from a filter that kills it.
+# `Seccomp: 0` and mounted a tmpfs. Skips where no container can start (no runc, or
+# a host that refuses unprivileged user namespaces), which the unfiltered control
+# below tells from a filter that kills it.
+#
+# ⚠ It also skips an emulated build, and the control cannot tell that one. Where
+# binfmt_misc is registered for qemu, as on CI's cross job, runc runs this aarch64
+# binary inside the container under qemu, and the control passes. But the filter
+# sees qemu's host calls, not the guest's, and qemu answers most guest calls itself
+# (ptrace is ENOSYS there, `mount(NULL, …)` EFAULT, a clone with a namespace flag
+# EINVAL), so a call the filter would kill never reaches it. Measured: of the 27
+# deny rows only the handful qemu forwards died by SIGSYS. Nothing is wrong with
+# the filter in that run, and nothing about it can be concluded either.
 fn test_oci_payload_observes_the_filter() {
     test_group("oci_payload_observes_the_filter");
     if (_oci_runtime_path() == 0) {
         assert_eq(1, 1, "no OCI runtime here — not exercisable");
+        return 0;
+    }
+    if (_t_runtime_is_native(_oci_runtime_path()) == 0) {
+        assert_eq(1, 1, "this build is emulated: qemu would answer for the payload — not exercisable");
         return 0;
     }
     var root = "/tmp/kavach-t-oci-rootfs";
@@ -8302,6 +8373,38 @@ fn test_oci_payload_observes_the_filter() {
     }
     #endif
     _t_oci_rootfs_clean(root, payload);
+    return 0;
+}
+
+# The skip above decides whether the group proves anything, so it is tested too:
+# wrongly native fails CI's cross job, as the first 3.14.4 push did, and wrongly
+# foreign turns the real test off in silence.
+fn test_runtime_architecture_is_read() {
+    test_group("runtime_architecture_is_read");
+    var path = "/tmp/kavach-t-fake-runtime";
+    var h = alloc(20);
+    memset(h, 0, 20);
+    store32(h, 1179403647);
+    # An ELF for this architecture, then for the other one.
+    var em = security_seccomp_native_arch() & 65535;
+    store8(h + 18, em & 255);
+    store8(h + 19, (em >> 8) & 255);
+    sys_unlink(path);
+    file_write_all(path, h, 20);
+    assert_eq(_t_runtime_is_native(path), 1, "an ELF of this architecture is native");
+    var other = _t_nr(183, 62);
+    store8(h + 18, other & 255);
+    store8(h + 19, 0);
+    sys_unlink(path);
+    file_write_all(path, h, 20);
+    assert_eq(_t_runtime_is_native(path), 0, "an ELF of the other one means this build is emulated");
+    sys_unlink(path);
+    file_write_all(path, "#!/bin/sh\nexec runc \"$@\"\n", 26);
+    assert_eq(_t_runtime_is_native(path), 1, "a wrapper script says nothing");
+    sys_unlink(path);
+    file_write_all(path, "ab", 2);
+    assert_eq(_t_runtime_is_native(path), 1, "nor does a file too short to be an ELF");
+    sys_unlink(path);
     return 0;
 }
 
@@ -8954,6 +9057,7 @@ fn main() {
     test_oci_spec_carries_the_filter();
     test_oci_spec_follows_the_policy();
     test_oci_spec_fits_the_filter();
+    test_runtime_architecture_is_read();
     test_oci_payload_observes_the_filter();
     test_stdin_goes_out_while_output_drains();
     test_deadline_covers_a_stuck_stdin();

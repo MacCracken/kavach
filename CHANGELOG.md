@@ -119,25 +119,38 @@ a WASM guest could hold the calling thread past its deadline for good, and the b
 
 ### Tests
 
-**1448 → 1592** on x86-64, with and without `CYRIUS_DCE=1`, and **1357 → 1450** on aarch64 under qemu, where no
-container can start, so the payload group skips and the spec groups run. 12 more in `samay_integration`.
+**1448 → 1596** on x86-64, with and without `CYRIUS_DCE=1`, and **1357 → 1453** on aarch64 under qemu, where the
+payload group skips and the spec groups run. 12 more in `samay_integration`.
 
 - **`test_oci_payload_observes_the_filter` runs a real container.** The test binary is a static ELF, so it copies
   `/proc/self/exe` into a rootfs and runc runs it as its own payload, which makes each probed call from inside
   and prints what happened. An unfiltered control run tells a filter's kill from a host that cannot start a
   container, and the group skips on the latter. This test is what found `open_tree_attr` passing: every spec
   assertion was green with that call open.
+- **It skips an emulated build, because a control cannot see one.** The first push of this work failed CI's cross
+  job with 29 assertions. With binfmt registered for qemu, runc ran the aarch64 test binary inside the container
+  under qemu, and the control passed. The filter sees qemu's host calls, though, and qemu answers most guest calls
+  itself, so only the calls it forwards were killed: reproduced by hand, with the same `unshare`, `setns`,
+  `reboot` and `syslog` among them. The filter was not at fault. The group now reads the runtime's ELF machine, and
+  skips when it is not this binary's.
+- **On aarch64 the deny table's numbers cannot be handed to `syscall()`.** That failure was also hiding the next
+  one, in the native job, which is skipped while the cross job fails. A variable number goes through cyrius's
+  ESYSXLAT stub as an x86 number, so native 39, 41 and 280 ran `getpid`, `socket` and `utimensat`. The probe now
+  uses `SYS_UMOUNT2` and `SYS_PIVOT_ROOT`, and an `svc` by hand for `bpf`, which has no stdlib name and no route
+  through the stub. Checked row by row under `qemu-aarch64 -strace`, which is how a wrong immediate in that `svc`
+  was caught before it was pushed: it ran `geteuid`.
 - **The capture's tests use real payloads** (`/bin/cat`, `/bin/sleep`, `yes`, `wc`), so they need no wasmtime. A
   regression of the SIGPIPE fix ends the test binary with rc 141, since SIGPIPE is left at its default there.
 - **Each WASM limit runs at its value and over it**, so neither half passes on a run that failed for another
   reason.
 
-39 mutations, each judged against a no-op control: 37 caught. The first pass counted every one as caught, because
+45 mutations, each judged against a no-op control: 42 caught. The first pass counted every one as caught, because
 one test fails in any copy of the tree under `/tmp`. Reading it against the control showed two real gaps
 (input left when both streams close; the write end surviving a deadline kill), which now have tests, and one
 flaky test, the busy pipe, now made deterministic with four writers and caught 4 of 4. The two that survive each
 remove one term from the spec's buffer size: the fixed slack covers either alone today, and `pos >= cap` refuses
-the spec if it stops doing so.
+the spec if it stops doing so. The third, removing the emulated-build skip, cannot fail on x86-64, and the CI run
+above is what it looks like where it can.
 
 An independent review of the patch found the `open_tree_attr` write-through above, and a regression in the first
 draft (the deny table published before it was filled, so a concurrent first caller could compile a partial
@@ -151,7 +164,8 @@ filter). Both are fixed.
 - **stiva against this tree**, from a scratch copy (`CYRIUS_LOCAL=kavach`): all six suites and 102 smoke
   assertions pass, unchanged, and a real `stiva run` went from `NoNewPrivs: 0`, `Seccomp: 0` with `mount`
   succeeding to `NoNewPrivs: 1`, `Seccomp: 2` with `mount` exiting 159, reported as the payload's own exit.
-- Not run: crun, runsc, a run as root, a real aarch64 container.
+- Not run: crun, runsc, a run as root. **A real aarch64 container has not run here:** the numbers were checked under
+  qemu, but the kills on aarch64 are first exercised by CI's native job.
 
 ### Performance
 
