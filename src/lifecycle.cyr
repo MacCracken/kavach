@@ -159,12 +159,17 @@ struct SandboxConfig {
     fuel;
     env;
     stdin_inherit;
+    wasm_max_instances;
+    wasm_max_tables;
+    wasm_max_table_elements;
+    wasm_max_memories;
+    wasm_grow_returns_failure;
 }
 
-# 128: `stdin_inherit` appended (3.13.2), so no existing field offset moves; the
-# same discipline `env` followed at 120, `fuel` at 112, `stdin`/`stdin_len` at
-# 104 and `require_ns` at 88.
-var SANDBOX_CONFIG_SIZE = 128;
+# 168: the five `wasm_*` fields appended (3.14.4), so no existing field offset
+# moves; the same discipline `stdin_inherit` followed at 128, `env` at 120,
+# `fuel` at 112, `stdin`/`stdin_len` at 104 and `require_ns` at 88.
+var SANDBOX_CONFIG_SIZE = 168;
 
 # Defaults match Rust's SandboxConfig::default():
 #   backend=Process, policy=basic(), timeout_ms=30000, inner_backend=-1 (none)
@@ -209,9 +214,9 @@ fn config_timeout_ms(c, ms)    { SandboxConfig_set_timeout_ms(c, ms); return c; 
 # persistent guest has its own channel, `persistent_send`.
 #
 # ⚠ The buffer is NOT copied — it must outlive the `sandbox_exec` that consumes
-# it. And it is capped by pipe capacity: see `confine_capture_input`, which does
-# not retry a short write because a payload larger than the pipe would block
-# before the child is reading.
+# it. Its size is not capped: it goes out as the payload reads it, while its
+# output is drained and under the config's deadline (3.14.4; through 3.14.3 an
+# input past the pipe's 64 KiB could hang the caller for good).
 fn config_stdin(c, ptr, len)   {
     SandboxConfig_set_stdin(c, ptr);
     SandboxConfig_set_stdin_len(c, len);
@@ -254,6 +259,37 @@ fn _config_payload_stdin_len(c) {
 # 1e9 through `agnosai_wasm_sandbox_fuel` while the guest actually ran with 30x
 # that. Setting this makes the advertised limit the enforced one.
 fn config_fuel(c, fuel)        { SandboxConfig_set_fuel(c, fuel); return c; }
+
+# Bounds on what a WASM guest may create (3.14.4), each a wasmtime `-W` option of
+# the same name (`wasmtime run -W help`), checked against wasmtime 50.0.1. 0, the
+# default, leaves that bound to wasmtime. agnosai's Rust line held its guests to
+# 10 instances, tables and memories.
+fn config_wasm_max_instances(c, n)      { SandboxConfig_set_wasm_max_instances(c, n); return c; }
+# wasmtime's `-W max-tables`: tables a guest may create. 0 leaves it to wasmtime.
+fn config_wasm_max_tables(c, n)         { SandboxConfig_set_wasm_max_tables(c, n); return c; }
+# wasmtime's `-W max-table-elements`: the size a table may reach. 0 leaves it to wasmtime.
+fn config_wasm_max_table_elements(c, n) { SandboxConfig_set_wasm_max_table_elements(c, n); return c; }
+# wasmtime's `-W max-memories`: linear memories a guest may create. 0 leaves it to wasmtime.
+fn config_wasm_max_memories(c, n)       { SandboxConfig_set_wasm_max_memories(c, n); return c; }
+
+# Whether a failed `memory.grow` or `table.grow` traps (`on` 1, the default) or
+# returns -1 to the guest (`on` 0), as WebAssembly itself specifies. On by
+# default, as agnosai asked and its Rust line did: a guest that ignores -1 stops
+# with a non-zero exit, not on whatever it does with a failed allocation.
+#
+# ⚠ The trap is not free for a guest that handles -1 well. One that over-asks and
+# falls back when refused, or an allocator that treats NULL as a cache miss, exits
+# 0 with the trap off and traps with it on. Such a guest turns it off. A module's
+# own declared maximum counts as a failed grow too, so the 64 MiB default is not
+# the only ceiling that can trip it.
+#
+# Stored inverted, so the zeroed struct `config_new` builds means the default.
+fn config_wasm_trap_on_grow_failure(c, on) {
+    var ret = 0;
+    if (on == 0) { ret = 1; }
+    SandboxConfig_set_wasm_grow_returns_failure(c, ret);
+    return c;
+}
 
 # Require the namespaces the policy asks for, even without a rootfs.
 #

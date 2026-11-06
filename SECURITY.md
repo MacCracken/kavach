@@ -71,6 +71,17 @@ and unblocking conditions:
 
 Resolved since earlier releases:
 
+- **v3.14.4:**
+  - the OCI backend ran every container with no seccomp filter and without `no_new_privs`, on the
+    path taken wherever runc or crun is installed, while `score_backend` scored the filter;
+  - a payload exiting with `config_stdin` input unread killed the host process with SIGPIPE, unless
+    the host had ignored it;
+  - a payload could outlive `timeout_ms` for good, by writing while it read a large stdin, or by
+    closing stdout and stderr and carrying on.
+
+  Two gaps were found and not closed: a container keeps every capability but CAP_SYS_ADMIN, and
+  `/proc` is neither masked nor read-only, which matters most when kavach runs as root; and gVisor
+  applies no filter. See `docs/development/issues/` and CHANGELOG 3.14.4.
 - **v3.14.2:**
   - a quote passed on its signatures alone: Intel's TCB level, the QE identity and
     the PCK/root CRLs were not evaluated, so a genuine platform with an out-of-date

@@ -7,6 +7,168 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.14.4] — 2026-11-06
+
+The OCI backend's confinement, and the capture every backend shares. Through 3.14.3 the OCI spec carried no
+seccomp filter and no `noNewPrivileges`, on the path every container takes where runc or crun is installed,
+and `score_backend` added 5 for a filter nothing applied. Filed by stiva. Two reports from agnosai are closed:
+a WASM guest could hold the calling thread past its deadline for good, and the backend had no store limits.
+
+### ⚠ Behaviour changes
+
+- **A payload on the OCI backend dies by SIGSYS for a call the deny list names.** `policy_basic()`, which is
+  what `config_new()` installs, enables seccomp, so this is the default. A container that ran `mount`,
+  `unshare` or `strace` under 3.14.3 now exits 159. A payload that needs one of them uses a policy with
+  `seccomp_enabled` off, and gets what the process backend gives that policy.
+- **Every OCI and gVisor spec sets `noNewPrivileges`.** A setuid or file-capability binary in an image no
+  longer raises privilege when exec'd. It is unconditional, as `confine_child` is on a rootfs.
+- **A failed `memory.grow` or `table.grow` traps by default** on the WASM backend, where it returned -1, as
+  agnosai asked. A guest at its ceiling gets a non-zero exit in place of a NULL from `malloc`, and that includes
+  a guest that over-asks and falls back when refused, which exited 0 until now. A module's own declared maximum
+  counts as a failed grow too. `config_wasm_trap_on_grow_failure(cfg, 0)` restores -1.
+- **An OCI payload under the filter has no CAP_SYS_ADMIN.** `sethostname`, and anything else that needs it, now
+  reads EPERM. See Security.
+- **`SANDBOX_CONFIG_SIZE` 128 → 168**, with the new fields appended, so no existing offset moves. Size a config
+  by the constant.
+
+### Security
+
+- **seccomp and `no_new_privs` on the OCI backend.** The spec now sets `process.noNewPrivileges` and, when the
+  policy enables seccomp, `linux.seccomp`: the deny list the process backend's filter uses, from one table
+  (`_seccomp_deny_row`), with clone3 as ENOSYS and clone refused for each namespace flag. Measured with
+  `policy_basic()` under runc 1.5.2, inside the container:
+
+  | | 3.14.3 | 3.14.4 |
+  |---|---|---|
+  | `/proc/self/status` `NoNewPrivs` | 0 | 1 |
+  | `/proc/self/status` `Seccomp` | 0 | 2 |
+  | `mount -t tmpfs t /mnt` | succeeds | killed, 159 |
+  | `unshare -U id` | succeeds | killed, 159 |
+
+  Every other deny entry but one, each of the seven `clone` namespace flags, an x32 call and the i386 gate were
+  each made from inside the container, and each died by SIGSYS. A plain fork still runs, and clone3 reads ENOSYS.
+- **CAP_SYS_ADMIN is dropped when the filter is on, because the filter cannot hold one entry by name.** A runtime
+  resolves names through libseccomp and skips one it does not know, silently, and a spec cannot give a number.
+  runc 1.5.2 with libseccomp 2.6.0 does not know `open_tree_attr` (Linux 6.15), and that call bypassed a read-only
+  rootfs. An independent review of this patch found it; the first draft had called it harmless. Measured with
+  `read_only_rootfs` under the filter:
+
+  | | filter alone | with this |
+  |---|---|---|
+  | direct `open(O_CREAT)` | EROFS | EROFS |
+  | `open_tree_attr` clone, `attr_clr` = RDONLY | returns an fd | EPERM |
+  | create through that clone | **a file in the rootfs** | not reached |
+
+  So a filtered spec lists `process.capabilities`, every capability but this one (`_oci_capabilities_json`):
+  `CapEff` reads `0000003fffdfffff`. Docker's default set leaves it out as well, and the calls it guards are
+  denied anyway. The list stops at `CAP_AUDIT_READ` (Linux 3.16): runc logs a capability the kernel lacks at
+  `level=warning`, into the log kavach reads as a runtime failure, so naming a newer one would fail every
+  container on an older kernel. A policy with no filter gets no list, as before.
+- **A payload exiting with stdin unread killed the host.** The write had no reader, and SIGPIPE's default is to
+  die: rc 141 with `/bin/true` and 200,000 B, in a host that had not ignored the signal. SIGPIPE is held on the
+  writing thread for the capture and consumed if a write raised it, so the process-wide disposition and the
+  caller's mask are left as they were. The payload does not inherit the hold.
+- **A payload could outlive `timeout_ms`.** All three below are one capture, shared by the process, OCI, gVisor,
+  SY-agnos and WASM backends:
+  - Writing while reading a large stdin (agnosai's report): kavach blocked writing stdin, the guest blocked
+    writing stdout, and the deadline was checked only in the drain loop kavach never reached. stdin now goes out
+    from inside that loop, non-blocking.
+  - Closing stdout and stderr and carrying on: the drain ended at EOF, and the wait after it was blocking. A
+    payload doing that under a 1000 ms deadline was still running 6 s later. It is now killed at 1004 ms.
+  - Writing without pause: the deadline was read only on an idle pass, so a 1000 ms deadline fired at 2049 ms. It
+    is read on every pass, and fires at 1033 ms.
+
+  | echoing guest, 4 s deadline | 3.14.3 | 3.14.4 |
+  |---|---|---|
+  | 100,000 B | 61 ms | 55 ms |
+  | 200,000 B | hangs | 100 ms |
+  | 1 MiB | hangs | 479 ms |
+  | 10 MiB | hangs | 600 ms |
+
+  `config_stdin` has no size limit now; its comment and this capture's used to tell a caller to pass a large
+  input by file. 1 MiB and 10 MiB come back cut to the 1 MiB stdout cap, as any output does.
+
+### Added
+
+- **WASM store limits:** `config_wasm_max_instances`, `config_wasm_max_tables`,
+  `config_wasm_max_table_elements` and `config_wasm_max_memories`, each emitting the `-W` option of that name.
+  0, the default, leaves the bound to wasmtime. `config_wasm_trap_on_grow_failure(cfg, on)`, on by default. Each
+  limit was run under wasmtime 50.0.1 at its value and over it.
+- `security_seccomp_deny_names()` and `security_seccomp_oci_arch()`.
+
+### Known limits
+
+- **The filter's strength depends on the runtime's libseccomp.** `open_tree_attr` is denied by number on the
+  process backend, and on the OCI backend reads EPERM for want of a capability. A libseccomp older than 2.6.0
+  may skip more of the mount API, each call of which needs the same capability;
+  `test_oci_payload_observes_the_filter` reports what a host denies.
+- **A foreign ABI kills the thread under runc, not the process.** libseccomp's bad-arch action is a thread kill,
+  where kavach's own filter kills the process. The call never runs either way.
+- **A caller that blocks SIGPIPE keeps one kavach raised.** It stays pending, as after the caller's own write, so
+  unblocking it delivers it. The stdlib names no `rt_sigpending` to tell it from one the caller already had.
+- **Not closed here, filed in `docs/development/issues/`:**
+  - A container keeps every capability but CAP_SYS_ADMIN, and all of them with no filter, and `/proc` is neither
+    masked nor read-only. The filter does not cover that, since it filters syscalls and not files. It matters
+    most when kavach runs as root. Measured rootless; a run as root was not made.
+  - gVisor's `seccomp_enabled` is still scored and not applied. runsc needs `--oci-seccomp`, and refuses
+    `SCMP_ACT_KILL_PROCESS`; read from its source, since this machine has no runsc. A gVisor spec gains only
+    `noNewPrivileges`.
+  - sigil's TDX parser is unchanged: its fix is sigil's to ship and reaches kavach with a cyrius pin, and
+    kavach's unwrap from 3.14.2 stays until then.
+- crun was not run; kavach falls back to it only where runc is absent, and no crun is installed here.
+
+### Tests
+
+**1448 → 1592** on x86-64, with and without `CYRIUS_DCE=1`, and **1357 → 1450** on aarch64 under qemu, where no
+container can start, so the payload group skips and the spec groups run. 12 more in `samay_integration`.
+
+- **`test_oci_payload_observes_the_filter` runs a real container.** The test binary is a static ELF, so it copies
+  `/proc/self/exe` into a rootfs and runc runs it as its own payload, which makes each probed call from inside
+  and prints what happened. An unfiltered control run tells a filter's kill from a host that cannot start a
+  container, and the group skips on the latter. This test is what found `open_tree_attr` passing: every spec
+  assertion was green with that call open.
+- **The capture's tests use real payloads** (`/bin/cat`, `/bin/sleep`, `yes`, `wc`), so they need no wasmtime. A
+  regression of the SIGPIPE fix ends the test binary with rc 141, since SIGPIPE is left at its default there.
+- **Each WASM limit runs at its value and over it**, so neither half passes on a run that failed for another
+  reason.
+
+39 mutations, each judged against a no-op control: 37 caught. The first pass counted every one as caught, because
+one test fails in any copy of the tree under `/tmp`. Reading it against the control showed two real gaps
+(input left when both streams close; the write end surviving a deadline kill), which now have tests, and one
+flaky test, the busy pipe, now made deterministic with four writers and caught 4 of 4. The two that survive each
+remove one term from the spec's buffer size: the fixed slack covers either alone today, and `pos >= cap` refuses
+the spec if it stops doing so.
+
+An independent review of the patch found the `open_tree_attr` write-through above, and a regression in the first
+draft (the deny table published before it was filled, so a concurrent first caller could compile a partial
+filter). Both are fixed.
+
+### Verified
+
+- Replayed CI on the tree: lock, symbols, fmt, lint (0), vet, DCE build, bundle freshness, bundle compile, smoke,
+  tests, fuzz, the aarch64 and agnos builds, and the aarch64 suite under qemu. All pass. `cyrius audit` exits 1
+  on 3.14.3 and here, on the older undocumented-function count, and is not a CI gate.
+- **stiva against this tree**, from a scratch copy (`CYRIUS_LOCAL=kavach`): all six suites and 102 smoke
+  assertions pass, unchanged, and a real `stiva run` went from `NoNewPrivs: 0`, `Seccomp: 0` with `mount`
+  succeeding to `NoNewPrivs: 1`, `Seccomp: 2` with `mount` exiting 159, reported as the payload's own exit.
+- Not run: crun, runsc, a run as root, a real aarch64 container.
+
+### Performance
+
+`scripts/bench-ab.py 3.14.3 .`, 5 interleaved rounds pinned to one CPU, 30 benchmarks. 28 ranges overlap, which
+reads as no measured change, among them `process_exec_echo` (2.703 → 2.687 ms) and `process_exec_confined`
+(2.721 → 2.685 ms), so the deadline read on every pass and the reap after EOF cost a payload nothing.
+
+| bench | 3.14.3 | 3.14.4 | |
+|---|---|---|---|
+| `config_builder_full` | 112 ns | 119 ns | +6.2 %: `config_new` zeroes five more fields |
+| `code_scan_large_ac` | 521.49 µs | 506.81 µs | -2.8 %: code this release did not touch; read as layout |
+
+Two benchmarks are new, since neither path was measured before, so they have no 3.14.3 row:
+`process_exec_stdin_1mib` (12.382 ms, with an exec's 2.7 ms in it) and `oci_spec_filtered` (47.5 µs). A real
+container under runc took 30 ms with no filter and 30 ms with one, median of 8 through `sandbox_exec_argv`, so the
+filter's cost does not show against the run. The release row is in `benches/bench-history.csv`.
+
 ## [3.14.3] — 2026-11-06
 
 Real argv for a caller that holds it. `sandbox_exec` and `sandbox_spawn` take one string and split it

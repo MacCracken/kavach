@@ -1986,7 +1986,12 @@ fn test_config_stdin() {
     config_stdin_inherit(cfg, 1);
     assert_eq(SandboxConfig_stdin(cfg), payload, "stdin reads past stdin_inherit's append");
     assert_eq(SandboxConfig_env(cfg), 0, "and so does env");
-    assert_eq(SANDBOX_CONFIG_SIZE, 128, "and the struct is 128 bytes");
+    # The five `wasm_*` fields took it to 168 in 3.14.4.
+    config_wasm_max_memories(cfg, 3);
+    config_wasm_trap_on_grow_failure(cfg, 0);
+    assert_eq(SandboxConfig_stdin(cfg), payload, "stdin reads past the wasm fields' append");
+    assert_eq(SandboxConfig_stdin_inherit(cfg), 1, "and so does stdin_inherit");
+    assert_eq(SANDBOX_CONFIG_SIZE, 168, "and the struct is 168 bytes");
     return 0;
 }
 
@@ -7878,8 +7883,810 @@ fn test_wasm_runs_under_the_policys_confinement() {
     return 0;
 }
 
+# ---- 3.14.4: seccomp and NO_NEW_PRIVS on the OCI backend --------------------
+#
+# Through 3.14.3 `oci_generate_spec` emitted neither, on the path every container
+# takes where runc or crun is installed. The spec tests below pin what is
+# written; `test_oci_payload_observes_the_filter` pins what a payload inside a
+# real container meets, because a spec a runtime ignores would pass the first
+# kind and fail the second.
+
+# How often `needle` occurs in `s`.
+fn _t_count(s, needle) {
+    var nl = strlen(needle);
+    var n = strlen(s);
+    var c = 0;
+    var i = 0;
+    while (i + nl <= n) {
+        if (memeq(s + i, needle, nl) == 1) { c = c + 1; }
+        i = i + 1;
+    }
+    return c;
+}
+
+fn _t_oci_sandbox(backend, policy, rootfs) {
+    var cfg = config_new();
+    config_backend(cfg, backend);
+    config_policy(cfg, policy);
+    if (rootfs != 0) { config_rootfs(cfg, rootfs); }
+    config_timeout_ms(cfg, 20000);
+    var sb = alloc(SANDBOX_SIZE);
+    Sandbox_set_config(sb, cfg);
+    return sb;
+}
+
+# What a filtered spec says: the members, where a runtime reads them, and all of the deny table.
+fn test_oci_spec_carries_the_filter() {
+    test_group("oci_spec_carries_the_filter");
+    var spec = oci_generate_spec(_t_oci_sandbox(KavachBackend.OCI, policy_basic(), 0), "echo hi");
+    assert(spec != 0, "a spec with a filter is generated");
+    if (spec == 0) { return 0; }
+    assert(cstr_contains(spec, "\"noNewPrivileges\":true") == 1, "noNewPrivileges is set");
+    assert(cstr_contains(spec, "\"seccomp\":{\"defaultAction\":\"SCMP_ACT_ALLOW\"") == 1,
+      "the filter defaults to allow, as the exec filter does");
+    assert(cstr_contains(spec, security_seccomp_oci_arch()) == 1, "and names the native ABI");
+    assert_eq(_t_count(spec, "SCMP_ARCH_"), 1, "and no other");
+
+    # The members are in the objects a runtime reads them from. A parse, not a
+    # substring: a filter closed into the wrong object is valid JSON a runtime
+    # silently does not apply.
+    var v = bayan_json_v_parse_buf(spec, strlen(spec));
+    assert(v != 0, "the spec parses as JSON");
+    var proc = bayan_json_v_obj_get_by_cstr(v, "process");
+    assert(proc != 0 && bayan_json_v_obj_get_by_cstr(proc, "noNewPrivileges") != 0,
+      "noNewPrivileges is a member of process");
+    var lx = bayan_json_v_obj_get_by_cstr(v, "linux");
+    assert(lx != 0 && bayan_json_v_obj_get_by_cstr(lx, "seccomp") != 0,
+      "seccomp is a member of linux");
+
+    # One table feeds both filters. A name dropped from the OCI form would leave
+    # a call open under runc that stays denied under the process backend.
+    var names = security_seccomp_deny_names();
+    var nums = _seccomp_deny_list();
+    assert_eq(vec_len(names), vec_len(nums), "one name per denied number");
+    assert_eq(security_syscall_name_to_nr("mount"), vec_get(nums, 0), "and they line up");
+    var missing = 0;
+    var i = 0;
+    while (i < vec_len(names)) {
+        var q = alloc(strlen(vec_get(names, i)) + 3);
+        store8(q, 34);
+        memcpy(q + 1, vec_get(names, i), strlen(vec_get(names, i)));
+        store8(q + 1 + strlen(vec_get(names, i)), 34);
+        store8(q + 2 + strlen(vec_get(names, i)), 0);
+        if (cstr_contains(spec, q) == 0) { missing = missing + 1; }
+        i = i + 1;
+    }
+    assert_eq(missing, 0, "every denied call is named in the spec");
+
+    assert(cstr_contains(spec, "{\"names\":[\"clone3\"],\"action\":\"SCMP_ACT_ERRNO\",\"errnoRet\":38}") == 1,
+      "clone3 is ENOSYS, or glibc does not fall back to clone");
+    assert_eq(_t_count(spec, "\"names\":[\"clone\"]"), 7, "a clone rule per namespace flag");
+    assert_eq(_t_count(spec, "\"op\":\"SCMP_CMP_MASKED_EQ\""), 7, "each a masked compare");
+    var bit = 1;
+    var seen = 0;
+    while (bit <= SECCOMP_CLONE_NS_FLAGS) {
+        if ((SECCOMP_CLONE_NS_FLAGS & bit) != 0) {
+            var fb[32];
+            var flen = fmt_int_buf(bit, &fb);
+            store8(&fb + flen, 0);
+            var sb = str_builder_new();
+            str_builder_add_cstr(sb, "\"value\":");
+            str_builder_add_cstr(sb, &fb);
+            str_builder_add_cstr(sb, ",\"valueTwo\":");
+            str_builder_add_cstr(sb, &fb);
+            if (cstr_contains(spec, str_data(str_builder_build(sb))) == 1) { seen = seen + 1; }
+        }
+        bit = bit * 2;
+    }
+    assert_eq(seen, 7, "and each flag is matched against itself");
+
+    # The filter's other half: see `_oci_capabilities_json`.
+    var caps = bayan_json_v_obj_get_by_cstr(proc, "capabilities");
+    assert(caps != 0, "a filtered spec names its capabilities, in process");
+    assert(bayan_json_v_obj_get_by_cstr(caps, "bounding") != 0, "bounding");
+    assert(bayan_json_v_obj_get_by_cstr(caps, "effective") != 0, "effective");
+    assert(bayan_json_v_obj_get_by_cstr(caps, "permitted") != 0, "permitted");
+    assert_eq(cstr_contains(spec, "CAP_SYS_ADMIN"), 0, "CAP_SYS_ADMIN is not among them");
+    assert_eq(_t_count(spec, "\"CAP_CHOWN\""), 3, "and the rest are, in each set");
+    # A capability the kernel lacks goes into runc's log as a warning, which reads
+    # as a runtime failure. These three came after Linux 3.16.
+    assert_eq(cstr_contains(spec, "CAP_PERFMON"), 0, "no CAP_PERFMON");
+    assert_eq(cstr_contains(spec, "CAP_BPF"), 0, "no CAP_BPF");
+    assert_eq(cstr_contains(spec, "CAP_CHECKPOINT_RESTORE"), 0, "no CAP_CHECKPOINT_RESTORE");
+    return 0;
+}
+
+# The filter and its capability list go where the policy and the backend say.
+fn test_oci_spec_follows_the_policy() {
+    test_group("oci_spec_follows_the_policy");
+    var spec = oci_generate_spec(_t_oci_sandbox(KavachBackend.OCI, policy_new(), 0), "echo hi");
+    assert(spec != 0, "a spec with no filter is generated");
+    assert_eq(cstr_contains(spec, "seccomp"), 0, "a policy without seccomp gets no filter");
+    assert_eq(cstr_contains(spec, "capabilities"), 0, "and no capability list");
+    assert(cstr_contains(spec, "\"noNewPrivileges\":true") == 1,
+      "and keeps noNewPrivileges, as `confine_child` does on a rootfs");
+
+    # Fails closed by construction: the spec is the only route to the runtime, so
+    # an unset policy pointer must not read as "no filter asked for" and crash.
+    var strict = oci_generate_spec(_t_oci_sandbox(KavachBackend.OCI, policy_strict(), 0), "echo hi");
+    assert(cstr_contains(strict, "\"seccomp\":{") == 1, "policy_strict gets the filter");
+
+    # runsc applies a spec's filter only under `--oci-seccomp`, which kavach does
+    # not pass, and refuses SCMP_ACT_KILL_PROCESS when it is.
+    var gv = oci_generate_spec(_t_oci_sandbox(KavachBackend.GVISOR, policy_basic(), 0), "echo hi");
+    assert_eq(cstr_contains(gv, "seccomp"), 0, "gVisor's spec carries no filter");
+    assert_eq(cstr_contains(gv, "capabilities"), 0, "and no capability list");
+    assert(cstr_contains(gv, "\"noNewPrivileges\":true") == 1, "and does carry noNewPrivileges");
+    return 0;
+}
+
+# The largest spec the filter can land in: every limit, and a rootfs path the
+# mounts have to fit around. `oci_generate_spec` refuses an undercount at its end
+# rather than writing past the buffer, and today's fixed slack would cover the
+# filter even uncounted, so this pins that the spec generates, not the count.
+fn test_oci_spec_fits_the_filter() {
+    test_group("oci_spec_fits_the_filter");
+    var fill = alloc(1537);
+    memset(fill, 97, 1536);
+    store8(fill + 1536, 0);
+    var sb = _t_oci_sandbox(KavachBackend.OCI, policy_strict(), fill);
+    var spec = oci_generate_spec(sb, "echo hi");
+    assert(spec != 0, "a filter, a long rootfs and every limit fit the buffer");
+    if (spec != 0) { assert(cstr_contains(spec, "\"seccomp\":{") == 1, "and the filter is in it"); }
+    return 0;
+}
+
+fn _t_payload_put(c) { sys_write(1, c, strlen(c)); return 0; }
+
+fn _t_payload_num(n) {
+    var b[32];
+    var l = fmt_int_buf(n, &b);
+    sys_write(1, &b, l);
+    return 0;
+}
+
+# Make one raw call in a forked child and return the signal that ended it, 0 for
+# a normal exit. Run per call, because each is expected to kill the caller.
+fn _t_payload_try(nr, a0, a1) {
+    var pid = kv_fork();
+    if (pid == 0) {
+        _t_set_rlimit(4, 0);                        # RLIMIT_CORE
+        # SAFETY: only ever a denied call or a clone. NULL and zero arguments
+        # make every call in the deny list fail without acting (a NULL path or
+        # record, an empty flag word), so the unfiltered control is harmless too;
+        # clone with no new stack is fork, and its child exits at once below.
+        syscall(nr, a0, a1, 0, 0, 0, 0);
+        sys_exit(0);
+    }
+    var st[8];
+    store64(&st, 0);
+    kv_waitpid(pid, &st, 0);
+    return load32(&st) & 127;
+}
+
+# A signal number from a forked child entering through the i386 gate, 0 for a
+# normal exit. 11, SIGSEGV, is a kernel with no IA32 emulation.
+fn _t_payload_i386() {
+    var pid = kv_fork();
+    if (pid == 0) {
+        _t_set_rlimit(4, 0);
+        _t_int80_getpid();
+        sys_exit(0);
+    }
+    var st[8];
+    store64(&st, 0);
+    kv_waitpid(pid, &st, 0);
+    return load32(&st) & 127;
+}
+
+# The payload half of `test_oci_payload_observes_the_filter`: this test binary,
+# copied into a rootfs and run by runc. It reports on stdout what it met, and the
+# parent asserts on that. A line per probe, so a miss names the call.
+fn _t_oci_payload(mode) {
+    if (mode == 0) {
+        var st = alloc(8192);
+        var n = file_read_all("/proc/self/status", st, 8191);
+        if (n > 0) { sys_write(1, st, n); }
+        return 0;
+    }
+    if (mode == 2) {
+        # The write-through `_oci_capabilities_json` exists for. Each line is the
+        # call's result or its -errno, on a read-only rootfs.
+        _t_payload_put("direct ");
+        _t_payload_num(file_open("/kv-direct", O_WRONLY | O_CREAT, 420));
+        var attr[32];
+        memset(&attr, 0, 32);
+        store64(&attr + 8, 1);                      # attr_clr = MOUNT_ATTR_RDONLY
+        # SAFETY: open_tree_attr(AT_FDCWD, "/", OPEN_TREE_CLONE, &attr, 32); 467 on
+        # both arches. `attr` is the 32-byte struct mount_attr, read and not kept.
+        var fd = syscall(467, 0 - 100, "/", 1 | O_CLOEXEC, &attr, 32);
+        _t_payload_put("\ncloned ");
+        _t_payload_num(fd);
+        if (fd >= 0) {
+            _t_payload_put("\nthrough ");
+            _t_payload_num(syscall(SYS_OPENAT, fd, "kv-through", O_WRONLY | O_CREAT, 420));
+        }
+        _t_payload_put("\n");
+        return 0;
+    }
+    var names = security_seccomp_deny_names();
+    var nums = _seccomp_deny_list();
+    var i = 0;
+    while (i < vec_len(nums)) {
+        _t_payload_put("deny ");
+        _t_payload_put(vec_get(names, i));
+        _t_payload_put(" ");
+        _t_payload_num(_t_payload_try(vec_get(nums, i), 0, 0));
+        _t_payload_put("\n");
+        i = i + 1;
+    }
+    var bit = 1;
+    while (bit <= SECCOMP_CLONE_NS_FLAGS) {
+        if ((SECCOMP_CLONE_NS_FLAGS & bit) != 0) {
+            _t_payload_put("clone ");
+            _t_payload_num(bit);
+            _t_payload_put(" ");
+            _t_payload_num(_t_payload_try(SYS_CLONE, bit | SIGCHLD, 0));
+            _t_payload_put("\n");
+        }
+        bit = bit * 2;
+    }
+    _t_payload_put("fork ");
+    _t_payload_num(_t_payload_try(SYS_CLONE, SIGCHLD, 0));
+    _t_payload_put("\nclone3 ");
+    # SAFETY: clone3 with no argument struct; a size of 0 is refused before
+    # anything is read. 435 on both arches.
+    _t_payload_num(0 - syscall(435, 0, 0));
+    _t_payload_put("\n");
+    #ifdef CYRIUS_ARCH_X86
+    _t_payload_put("x32 ");
+    _t_payload_num(_t_payload_try(1073741863, 0, 0));   # getpid | __X32_SYSCALL_BIT
+    _t_payload_put("\ni386 ");
+    _t_payload_num(_t_payload_i386());
+    _t_payload_put("\n");
+    #endif
+    return 0;
+}
+
+# `line` on a line of its own in `out`.
+fn _t_has_line(out, line) {
+    var n = alloc(strlen(line) + 3);
+    store8(n, 10);
+    memcpy(n + 1, line, strlen(line));
+    store8(n + 1 + strlen(line), 10);
+    store8(n + 2 + strlen(line), 0);
+    if (cstr_contains(out, n) == 1) { return 1; }
+    # The first line has no newline before it.
+    if (strstr(out, line) == 0) { return 1; }
+    return 0;
+}
+
+fn _t_oci_rootfs(root) {
+    var exe = alloc(16777216);
+    var n = file_read_all("/proc/self/exe", exe, 16777216);
+    if (n <= 0) { return 0; }
+    var payload = alloc(strlen(root) + 16);
+    memcpy(payload, root, strlen(root));
+    memcpy(payload + strlen(root), "/payload", 9);
+    sys_unlink(payload);
+    kv_mkdir(root, 493);
+    var d = alloc(strlen(root) + 16);
+    memcpy(d, root, strlen(root));
+    memcpy(d + strlen(root), "/proc", 6);
+    kv_mkdir(d, 493);
+    memcpy(d + strlen(root), "/dev", 5);
+    kv_mkdir(d, 493);
+    if (file_write_all(payload, exe, n) != n) { return 0; }
+    sys_chmod(payload, 493);
+    return payload;
+}
+
+fn _t_oci_rootfs_clean(root, payload) {
+    sys_unlink(payload);
+    var d = alloc(strlen(root) + 16);
+    memcpy(d, root, strlen(root));
+    memcpy(d + strlen(root), "/proc", 6);
+    kv_rmdir(d);
+    memcpy(d + strlen(root), "/dev", 5);
+    kv_rmdir(d);
+    kv_rmdir(root);
+    return 0;
+}
+
+fn _t_oci_run(policy, root, mode) {
+    var sb = _t_oci_sandbox(KavachBackend.OCI, policy, root);
+    var cmd = "/payload --kv-oci-payload 0";
+    if (mode == 1) { cmd = "/payload --kv-oci-payload 1"; }
+    if (mode == 2) { cmd = "/payload --kv-oci-payload 2"; }
+    return oci_exec(sb, cmd);
+}
+
+# What a payload meets inside a real container, under the real runtime. This is
+# the test the rest stand on: through 3.14.3 a `policy_basic()` payload read
+# `Seccomp: 0` and mounted a tmpfs. Skips where no container can start (no runc,
+# a host that refuses unprivileged user namespaces, a foreign-arch payload under
+# qemu), which the unfiltered control below tells from a filter that kills it.
+fn test_oci_payload_observes_the_filter() {
+    test_group("oci_payload_observes_the_filter");
+    if (_oci_runtime_path() == 0) {
+        assert_eq(1, 1, "no OCI runtime here — not exercisable");
+        return 0;
+    }
+    var root = "/tmp/kavach-t-oci-rootfs";
+    var payload = _t_oci_rootfs(root);
+    assert(payload != 0, "the rootfs is built");
+    if (payload == 0) { return 0; }
+
+    var ctl = _t_oci_run(policy_new(), root, 0);
+    if (ExecResult_exit_code(ctl) != 0 || cstr_contains(ExecResult_stdout(ctl), "Seccomp:") == 0) {
+        assert_eq(1, 1, "no container starts on this host — not exercisable");
+        _t_oci_rootfs_clean(root, payload);
+        return 0;
+    }
+    assert(cstr_contains(ExecResult_stdout(ctl), "Seccomp:\t0") == 1,
+      "unfiltered, the payload has no filter: the control");
+    assert(cstr_contains(ExecResult_stdout(ctl), "NoNewPrivs:\t1") == 1,
+      "and has no_new_privs, with no seccomp asked for");
+
+    var unf = _t_oci_run(policy_new(), root, 1);
+    var uout = ExecResult_stdout(unf);
+    assert_eq(_t_count(uout, " 31\n"), 0, "unfiltered, nothing dies by SIGSYS");
+    assert(_t_has_line(uout, "fork 0") == 1, "and a plain fork runs");
+
+    var st = _t_oci_run(policy_basic(), root, 0);
+    assert_eq(ExecResult_exit_code(st), 0, "the payload runs under the filter");
+    assert(cstr_contains(ExecResult_stdout(st), "Seccomp:\t2") == 1,
+      "the kernel reports a filter on the payload");
+    assert(cstr_contains(ExecResult_stdout(st), "NoNewPrivs:\t1") == 1, "and no_new_privs");
+
+    # A read-only rootfs holds against a call no filter can name here. The control
+    # is the direct create, which must fail for the same reason as the clone.
+    var ropol = policy_basic();
+    SandboxPolicy_set_read_only_rootfs(ropol, 1);
+    var ro = _t_oci_run(ropol, root, 2);
+    var roout = ExecResult_stdout(ro);
+    assert_eq(ExecResult_exit_code(ro), 0, "the write-through probe ran");
+    assert(_t_has_line(roout, "direct -30") == 1, "a direct create reads EROFS");
+    assert_eq(cstr_contains(roout, "through"), 0, "open_tree_attr gave no writable clone");
+    if (_t_has_line(roout, "cloned -38") == 0) {
+        assert(_t_has_line(roout, "cloned -1") == 1, "it read EPERM, for want of CAP_SYS_ADMIN");
+    }
+
+    var r = _t_oci_run(policy_basic(), root, 1);
+    assert_eq(ExecResult_exit_code(r), 0, "the probes finish under the filter");
+    var out = ExecResult_stdout(r);
+    var names = security_seccomp_deny_names();
+    var i = 0;
+    while (i < vec_len(names)) {
+        var sb = str_builder_new();
+        str_builder_add_cstr(sb, "deny ");
+        str_builder_add_cstr(sb, vec_get(names, i));
+        str_builder_add_cstr(sb, " 31");
+        # ⚠ A runtime resolves a name through libseccomp and skips one it does not
+        # know, silently. runc 1.5.2 with libseccomp 2.6.0 does not know this one
+        # (Linux 6.15), so here it is held by the capability, as asserted above,
+        # and not by the filter. A libseccomp that learns it makes this line 31.
+        if (streq(vec_get(names, i), "open_tree_attr") == 1) {
+            if (_t_has_line(out, "deny open_tree_attr 0") == 1) {
+                assert_eq(1, 1, "open_tree_attr: this runtime cannot deny it");
+                i = i + 1;
+                continue;
+            }
+        }
+        assert_eq(_t_has_line(out, str_data(str_builder_build(sb))), 1, vec_get(names, i));
+        i = i + 1;
+    }
+    var clones = _t_count(out, "\nclone ");
+    assert_eq(clones, 7, "every namespace flag was tried");
+    var bit = 1;
+    while (bit <= SECCOMP_CLONE_NS_FLAGS) {
+        if ((SECCOMP_CLONE_NS_FLAGS & bit) != 0) {
+            var cb = str_builder_new();
+            str_builder_add_cstr(cb, "clone ");
+            var fb[32];
+            var flen = fmt_int_buf(bit, &fb);
+            store8(&fb + flen, 0);
+            str_builder_add_cstr(cb, &fb);
+            str_builder_add_cstr(cb, " 31");
+            assert_eq(_t_has_line(out, str_data(str_builder_build(cb))), 1,
+              "clone with a namespace flag dies by SIGSYS");
+        }
+        bit = bit * 2;
+    }
+    assert(_t_has_line(out, "fork 0") == 1, "a plain fork still runs");
+    assert(_t_has_line(out, "clone3 38") == 1, "and clone3 is ENOSYS, so glibc falls back");
+    #ifdef CYRIUS_ARCH_X86
+    assert(_t_has_line(out, "x32 31") == 1, "an x32 call dies by SIGSYS");
+    if (cstr_contains(out, "\ni386 11") == 0) {
+        assert(_t_has_line(out, "i386 31") == 1, "and so does the i386 gate");
+    }
+    #endif
+    _t_oci_rootfs_clean(root, payload);
+    return 0;
+}
+
+# ---- 3.14.4: stdin goes out while the payload's output drains ---------------
+
+fn _t_pattern(n) {
+    var b = alloc(n + 1);
+    var i = 0;
+    while (i < n) {
+        store8(b + i, 65 + (i % 26));
+        i = i + 1;
+    }
+    store8(b + n, 0);
+    return b;
+}
+
+fn _t_argv1(a) {
+    var v = vec_new();
+    vec_push(v, a);
+    return v;
+}
+
+fn _t_argv2(a, b) {
+    var v = vec_new();
+    vec_push(v, a);
+    vec_push(v, b);
+    return v;
+}
+
+fn _t_argv3(a, b, c) {
+    var v = vec_new();
+    vec_push(v, a);
+    vec_push(v, b);
+    vec_push(v, c);
+    return v;
+}
+
+# The reported shape: a guest echoing while it reads fills its stdout pipe while
+# kavach is writing its stdin. /bin/cat does just that, so this needs no wasmtime
+# (`test_wasm_stdin_does_not_deadlock` drives the guest the issue names). Past
+# two 64 KiB pipes the blocking write never returned, and neither did this.
+fn test_stdin_goes_out_while_output_drains() {
+    test_group("stdin_goes_out_while_output_drains");
+    var n = 200000;
+    var input = _t_pattern(n);
+    var cap = 1048576;
+    var buf = alloc(cap);
+    var got = confine_capture_input(_t_argv1("/bin/cat"), 0, 0, 0, 0, buf, cap, 0, 10000, 0, input, n);
+    assert_eq(got, n, "every byte came back");
+    assert_eq(memeq(buf, input, n), 1, "in order");
+    assert_eq(confine_last_exit(), 0, "and the payload saw its EOF and exited");
+    assert_eq(confine_last_timed_out(), 0, "before the deadline");
+
+    # Past the output cap: stdout closes early and the input still goes out.
+    var big = 5242880;
+    var tiny = 4096;
+    var tbuf = alloc(tiny);
+    var wc = confine_capture_input(_t_argv2("/usr/bin/wc", "-c"), 0, 0, 0, 0, tbuf, tiny, 0,
+      10000, 0, _t_pattern(big), big);
+    assert(wc > 0, "an input of many pipefuls goes out");
+    assert_eq(atoi(tbuf), big, "and the payload counted all of it");
+    return 0;
+}
+
+# The ask's fallback, and the hang's other half: a payload that never reads is
+# killed at the deadline, like any other that overruns it.
+fn test_deadline_covers_a_stuck_stdin() {
+    test_group("deadline_covers_a_stuck_stdin");
+    var n = 200000;
+    var buf = alloc(4096);
+    var t0 = mono_now_ns();
+    confine_capture_input(_t_argv2("/bin/sleep", "30"), 0, 0, 0, 0, buf, 4096, 0, 300, 0,
+      _t_pattern(n), n);
+    var ms = (mono_now_ns() - t0) / 1000000;
+    assert_eq(confine_last_timed_out(), 1, "the deadline fired");
+    assert_eq(confine_last_exit(), 137, "the payload was killed");
+    assert(ms < 5000, "well before the payload's own 30 s");
+    return 0;
+}
+
+# A payload can exit with stdin unread. The write then has no reader, and through
+# 3.14.3 SIGPIPE killed KAVACH'S process unless the host had ignored it: rc 141,
+# measured with `/bin/true` and 200,000 B. So SIGPIPE is at its default here, and
+# a regression ends this test binary with a non-zero exit, not a failed assert.
+fn test_stdin_to_a_payload_that_left() {
+    test_group("stdin_to_a_payload_that_left");
+    signal_default(SIGPIPE);
+    var n = 200000;
+    var buf = alloc(4096);
+    var got = confine_capture_input(_t_argv1("/bin/true"), 0, 0, 0, 0, buf, 4096, 0, 5000, 0,
+      _t_pattern(n), n);
+    assert_eq(got, 0, "kavach survived the write, and the payload wrote nothing");
+    assert_eq(confine_last_exit(), 0, "the payload's own exit is reported");
+
+    # The mask comes back as it was, a bit the caller had set included.
+    var set[8];
+    var before[8];
+    var after[8];
+    store64(&set, 1 << 9);                          # SIGUSR1 - 1 on both arches
+    sys_sigprocmask(SIG_BLOCK, &set, 0);
+    sys_sigprocmask(SIG_BLOCK, 0, &before);
+    confine_capture_input(_t_argv1("/bin/true"), 0, 0, 0, 0, buf, 4096, 0, 5000, 0,
+      _t_pattern(n), n);
+    sys_sigprocmask(SIG_BLOCK, 0, &after);
+    assert_eq(load64(&after), load64(&before), "the caller's signal mask is untouched");
+    sys_sigprocmask(SIG_UNBLOCK, &set, 0);
+
+    # The hold is the parent's: a payload inheriting it would get EPIPE where it
+    # dies of SIGPIPE, and the mask outlives exec. Asked of the payload itself.
+    var mine = alloc(8192);
+    var mlen = file_read_all("/proc/self/status", mine, 8191);
+    store8(mine + mlen, 0);
+    var at = strstr(mine, "SigBlk:");
+    assert(at >= 0, "the host reports its mask");
+    store8(mine + at + 24, 0);                      # "SigBlk:\t" + 16 hex digits
+    var theirs = alloc(8192);
+    var tlen = confine_capture_input(_t_argv3("/bin/grep", "SigBlk", "/proc/self/status"), 0, 0, 0,
+      0, theirs, 8192, 0, 5000, 0, _t_pattern(n), n);
+    store8(theirs + tlen, 0);
+    assert(cstr_contains(theirs, mine + at) == 1, "the payload's mask is the host's, no hold in it");
+    return 0;
+}
+
+# A payload that closes stdout and stderr and carries on used to outlive its
+# deadline: the drain ended at EOF, and the wait after it was blocking.
+fn test_deadline_outlives_the_streams() {
+    test_group("deadline_outlives_the_streams");
+    var buf = alloc(4096);
+    var t0 = mono_now_ns();
+    confine_capture_input(_t_argv3("/bin/sh", "-c", "exec >&- 2>&-; sleep 30"), 0, 0, 0, 0, buf,
+      4096, 0, 300, 0, 0, 0);
+    var ms = (mono_now_ns() - t0) / 1000000;
+    assert_eq(confine_last_timed_out(), 1, "the deadline fired after EOF");
+    assert_eq(confine_last_exit(), 137, "and the payload was killed");
+    assert(ms < 5000, "well before the payload's own 30 s");
+
+    # The same path must not cost a payload that does exit its real status.
+    confine_capture_input(_t_argv3("/bin/sh", "-c", "exec >&- 2>&-; exit 7"), 0, 0, 0, 0, buf,
+      4096, 0, 5000, 0, 0, 0);
+    assert_eq(confine_last_exit(), 7, "a payload that exits keeps its status");
+    assert_eq(confine_last_timed_out(), 0, "and is not reported as timed out");
+    return 0;
+}
+
+# A payload writing without pause leaves few idle passes, and the deadline was
+# read only on those: a 1000 ms deadline fired at 2049 ms. Several writers, so
+# the pipe is never empty and no pass can be idle: with one, how late the deadline
+# ran was chance. They die of SIGPIPE when the capture closes the pipe.
+fn test_deadline_holds_against_a_busy_pipe() {
+    test_group("deadline_holds_against_a_busy_pipe");
+    var buf = alloc(4096);
+    var t0 = mono_now_ns();
+    confine_capture_input(_t_argv3("/bin/sh", "-c", "yes >&2 & yes >&2 & yes >&2 & yes >&2 & wait"),
+      0, 0, 0, 0, buf, 4096, 0, 1000, 0, 0, 0);
+    var ms = (mono_now_ns() - t0) / 1000000;
+    assert_eq(confine_last_timed_out(), 1, "the deadline fired");
+    assert(ms < 1500, "within half a second of the deadline, on a payload that never idles");
+    return 0;
+}
+
+# Input can outlast the streams: a payload may close stdout and stderr and still
+# be reading, so EOF on both does not end the delivery.
+fn test_stdin_outlives_the_streams() {
+    test_group("stdin_outlives_the_streams");
+    var path = "/tmp/kavach-t-stdin-count";
+    sys_unlink(path);
+    var n = 200000;
+    var buf = alloc(4096);
+    confine_capture_input(_t_argv3("/bin/sh", "-c", "exec 2>&-; exec wc -c > /tmp/kavach-t-stdin-count"),
+      0, 0, 0, 0, buf, 4096, 0, 5000, 0, _t_pattern(n), n);
+    assert_eq(confine_last_timed_out(), 0, "the payload got its EOF and finished");
+    assert_eq(confine_last_exit(), 0, "and exited 0");
+    var got = alloc(64);
+    var len = file_read_all(path, got, 63);
+    store8(got + len, 0);
+    assert_eq(atoi(got), n, "having read all of it after both streams closed");
+    sys_unlink(path);
+    return 0;
+}
+
+# The deadline ends the input with the payload. A child can hold the read end
+# past the kill, and the pipe then stays full and open: EAGAIN for as long as the
+# child lives, so the write end has to close rather than wait for EPIPE.
+fn test_deadline_ends_the_input() {
+    test_group("deadline_ends_the_input");
+    var n = 200000;
+    var buf = alloc(4096);
+    var t0 = mono_now_ns();
+    confine_capture_input(_t_argv3("/bin/sh", "-c", "sleep 3 <&0 & wait"), 0, 0, 0, 0, buf, 4096, 0,
+      300, 0, _t_pattern(n), n);
+    var ms = (mono_now_ns() - t0) / 1000000;
+    assert_eq(confine_last_timed_out(), 1, "the deadline fired");
+    assert(ms < 2500, "and the capture returned, with the child still holding stdin");
+    return 0;
+}
+
+# ---- 3.14.4: the WASM backend's store limits ---------------------------------
+
+fn _t_argv_has(a, s) {
+    var i = 0;
+    while (i < vec_len(a)) {
+        if (streq(vec_get(a, i), s) == 1) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Each limit reaches wasmtime as its own `-W`, and an unset one stays off the argv.
+fn test_wasm_limits_reach_the_argv() {
+    test_group("wasm_limits_reach_the_argv");
+    var pol = policy_new();
+    var cfg = config_new();
+    var a = vec_new();
+    _wasm_append_limits(a, pol, 0, cfg);
+    assert_eq(_t_argv_has(a, "trap-on-grow-failure=y"), 1, "a failed grow traps by default");
+    assert_eq(cstr_contains(_t_join(a), "max-instances"), 0, "and an unset limit is not emitted");
+    assert_eq(cstr_contains(_t_join(a), "max-tables"), 0, "nor max-tables");
+    assert_eq(cstr_contains(_t_join(a), "max-table-elements"), 0, "nor max-table-elements");
+    assert_eq(cstr_contains(_t_join(a), "max-memories"), 0, "nor max-memories");
+
+    config_wasm_max_instances(cfg, 11);
+    config_wasm_max_tables(cfg, 12);
+    config_wasm_max_table_elements(cfg, 13);
+    config_wasm_max_memories(cfg, 14);
+    var b = vec_new();
+    _wasm_append_limits(b, pol, 0, cfg);
+    assert_eq(_t_argv_has(b, "max-instances=11"), 1, "max-instances");
+    assert_eq(_t_argv_has(b, "max-tables=12"), 1, "max-tables");
+    assert_eq(_t_argv_has(b, "max-table-elements=13"), 1, "max-table-elements");
+    assert_eq(_t_argv_has(b, "max-memories=14"), 1, "max-memories");
+    assert_eq(_t_count(_t_join(b), "-W "), 6, "each behind its own -W");
+
+    config_wasm_trap_on_grow_failure(cfg, 0);
+    var c = vec_new();
+    _wasm_append_limits(c, pol, 0, cfg);
+    assert_eq(_t_argv_has(c, "trap-on-grow-failure=y"), 0, "a caller can turn the trap off");
+    config_wasm_trap_on_grow_failure(cfg, 1);
+    var d = vec_new();
+    _wasm_append_limits(d, pol, 0, cfg);
+    assert_eq(_t_argv_has(d, "trap-on-grow-failure=y"), 1, "and back on");
+
+    # A negative is not a limit: "-W max-tables=-1" is a wasmtime usage error.
+    var neg = config_new();
+    config_wasm_max_tables(neg, 0 - 1);
+    var e = vec_new();
+    _wasm_append_limits(e, pol, 0, neg);
+    assert_eq(cstr_contains(_t_join(e), "max-tables"), 0, "a negative limit is not emitted");
+
+    var z = vec_new();
+    _wasm_append_limits(z, pol, 0, 0);
+    assert_eq(_t_argv_has(z, "trap-on-grow-failure=y"), 1, "no config is the defaults");
+    return 0;
+}
+
+fn _t_join(a) {
+    var sb = str_builder_new();
+    var i = 0;
+    while (i < vec_len(a)) {
+        str_builder_add_cstr(sb, vec_get(a, i));
+        str_builder_add_cstr(sb, " ");
+        i = i + 1;
+    }
+    return str_data(str_builder_build(sb));
+}
+
+fn _t_write_wat(path, text) {
+    sys_unlink(path);
+    file_write_all(path, text, strlen(text));
+    return path;
+}
+
+fn _t_wasm_run(cfg, path) {
+    config_backend(cfg, KavachBackend.WASM);
+    config_policy(cfg, policy_new());
+    config_timeout_ms(cfg, 5000);
+    var sb = alloc(SANDBOX_SIZE);
+    Sandbox_set_config(sb, cfg);
+    return wasm_exec(sb, path);
+}
+
+# Each bound under real wasmtime: over it the guest is refused, at it the guest
+# runs, so neither half passes on a run that failed for another reason.
+fn test_wasm_limits_bind_a_real_guest() {
+    test_group("wasm_limits_bind_a_real_guest");
+    kavach_init();
+    if (_wasm_binary_path() == 0) { return 0; }
+    var tables = _t_write_wat("/tmp/kavach-t-tables.wat",
+      "(module (memory (export \"memory\") 1) (table 1 funcref) (table 1 funcref) (func (export \"_start\")))");
+    var c = config_new();
+    config_wasm_max_tables(c, 1);
+    assert(ExecResult_exit_code(_t_wasm_run(c, tables)) != 0, "two tables over max-tables=1");
+    c = config_new();
+    config_wasm_max_tables(c, 2);
+    assert_eq(ExecResult_exit_code(_t_wasm_run(c, tables)), 0, "two tables at max-tables=2");
+
+    var big = _t_write_wat("/tmp/kavach-t-bigtable.wat",
+      "(module (memory (export \"memory\") 1) (table 100 funcref) (func (export \"_start\")))");
+    c = config_new();
+    config_wasm_max_table_elements(c, 10);
+    assert(ExecResult_exit_code(_t_wasm_run(c, big)) != 0, "100 elements over the limit of 10");
+    c = config_new();
+    config_wasm_max_table_elements(c, 100);
+    assert_eq(ExecResult_exit_code(_t_wasm_run(c, big)), 0, "100 elements at the limit of 100");
+
+    var mems = _t_write_wat("/tmp/kavach-t-mems.wat",
+      "(module (memory (export \"memory\") 1) (memory 1) (func (export \"_start\")))");
+    c = config_new();
+    config_wasm_max_memories(c, 1);
+    assert(ExecResult_exit_code(_t_wasm_run(c, mems)) != 0, "two memories over max-memories=1");
+    c = config_new();
+    config_wasm_max_memories(c, 2);
+    assert_eq(ExecResult_exit_code(_t_wasm_run(c, mems)), 0, "two memories at max-memories=2");
+
+    var inst = _t_write_wat("/tmp/kavach-t-inst.wat",
+      "(module (memory (export \"memory\") 1) (func (export \"_start\")))");
+    c = config_new();
+    config_wasm_max_instances(c, 1);
+    assert_eq(ExecResult_exit_code(_t_wasm_run(c, inst)), 0, "one instance at max-instances=1");
+
+    # exit 42: the guest saw -1 from the grow. Past the 64 MiB default ceiling.
+    var grow = _t_write_wat("/tmp/kavach-t-grow.wat",
+      "(module (import \"wasi_snapshot_preview1\" \"proc_exit\" (func $x (param i32)))
+         (memory (export \"memory\") 1)
+         (func (export \"_start\")
+           (if (i32.eq (memory.grow (i32.const 16384)) (i32.const -1))
+             (then (call $x (i32.const 42))))
+           (call $x (i32.const 7))))");
+    c = config_new();
+    var trapped = _t_wasm_run(c, grow);
+    assert(ExecResult_exit_code(trapped) != 42, "by default a failed grow never reaches the guest");
+    assert(ExecResult_exit_code(trapped) != 0, "it traps");
+    assert(ExecResult_exit_code(trapped) != 7, "and the grow did not succeed");
+    c = config_new();
+    config_wasm_trap_on_grow_failure(c, 0);
+    assert_eq(ExecResult_exit_code(_t_wasm_run(c, grow)), 42, "turned off, the guest gets -1");
+
+    sys_unlink(tables); sys_unlink(big); sys_unlink(mems); sys_unlink(inst); sys_unlink(grow);
+    return 0;
+}
+
+# The guest the issue reports: it echoes stdin in 4 KiB chunks while reading it.
+fn test_wasm_stdin_does_not_deadlock() {
+    test_group("wasm_stdin_does_not_deadlock");
+    kavach_init();
+    if (_wasm_binary_path() == 0) { return 0; }
+    var path = _t_write_wat("/tmp/kavach-t-stream.wat",
+      "(module
+         (import \"wasi_snapshot_preview1\" \"fd_read\" (func $r (param i32 i32 i32 i32) (result i32)))
+         (import \"wasi_snapshot_preview1\" \"fd_write\" (func $w (param i32 i32 i32 i32) (result i32)))
+         (memory (export \"memory\") 1)
+         (func (export \"_start\")
+           (local $n i32)
+           (block $done
+             (loop $rd
+               (i32.store (i32.const 0) (i32.const 1024))
+               (i32.store (i32.const 4) (i32.const 4096))
+               (drop (call $r (i32.const 0) (i32.const 0) (i32.const 1) (i32.const 16)))
+               (local.set $n (i32.load (i32.const 16)))
+               (br_if $done (i32.eqz (local.get $n)))
+               (i32.store (i32.const 0) (i32.const 1024))
+               (i32.store (i32.const 4) (local.get $n))
+               (drop (call $w (i32.const 1) (i32.const 0) (i32.const 1) (i32.const 16)))
+               (br $rd)))))");
+    var n = 200000;
+    var cfg = config_new();
+    config_stdin(cfg, _t_pattern(n), n);
+    var t0 = mono_now_ns();
+    var r = _t_wasm_run(cfg, path);
+    var ms = (mono_now_ns() - t0) / 1000000;
+    assert_eq(ExecResult_timed_out(r), 0, "the guest finished inside the 5 s deadline");
+    assert_eq(ExecResult_exit_code(r), 0, "and exited 0");
+    assert_eq(strlen(ExecResult_stdout(r)), n, "with every byte echoed");
+    assert(ms < 5000, "which the hang never did");
+    sys_unlink(path);
+    return 0;
+}
+
 fn main() {
+    args_init();
     alloc_init();
+    # The payload half of `test_oci_payload_observes_the_filter`. No assertion
+    # output from here: stdout is what the test reads.
+    if (argc() >= 3) {
+        if (streq(argv(1), "--kv-oci-payload") == 1) { return _t_oci_payload(atoi(argv(2))); }
+    }
     test_backend_parse();
     test_base_scores();
     test_score_labels();
@@ -8144,6 +8951,20 @@ fn main() {
     test_runtime_failures_are_diagnostics();
     test_sy_agnos_real_docker();
     test_wasm_runs_under_the_policys_confinement();
+    test_oci_spec_carries_the_filter();
+    test_oci_spec_follows_the_policy();
+    test_oci_spec_fits_the_filter();
+    test_oci_payload_observes_the_filter();
+    test_stdin_goes_out_while_output_drains();
+    test_deadline_covers_a_stuck_stdin();
+    test_stdin_to_a_payload_that_left();
+    test_deadline_outlives_the_streams();
+    test_deadline_holds_against_a_busy_pipe();
+    test_stdin_outlives_the_streams();
+    test_deadline_ends_the_input();
+    test_wasm_limits_reach_the_argv();
+    test_wasm_limits_bind_a_real_guest();
+    test_wasm_stdin_does_not_deadlock();
     return assert_summary();
 }
 

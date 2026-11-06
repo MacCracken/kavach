@@ -644,21 +644,32 @@ fn confine_capture_input_env_wd(args, policy, rootfs, cgroup_path, seccomp_info,
     sys_close(wfd);
     sys_close(ewfd);
 
-    # Send the payload's stdin and close it, so a guest that reads to EOF makes
-    # progress. ⚠ BEFORE the drain loop, and the close is what matters: a guest
-    # blocked on a read that never ends would hit the deadline instead of
-    # answering, and the failure would look like a timeout rather than a
-    # protocol mistake.
+    # **The payload's stdin goes out from inside the drain loop** (3.14.4). Until
+    # then it was one blocking write here, before the loop. A guest that writes
+    # while it reads fills its stdout pipe while kavach is still blocked on its
+    # stdin, and from then on each waits on the other. The deadline is checked
+    # only in the loop, so `timeout_ms` never fired: agnosai measured an echoing
+    # WASM guest on 200,000 B of stdin holding the calling thread for good. A
+    # guest that reads to EOF still gets its EOF: the close comes after the last
+    # byte, and straight away for an empty input.
     #
-    # ⚠ A short write is not retried. Pipe capacity is 64 KiB by default and the
-    # child is not reading yet, so an input larger than that would block here
-    # while the child is still in `execve` — which is a deadlock, not a slow
-    # write. Callers with a large payload should pass it by file instead; stated
-    # rather than papered over with a partial write nobody checks.
+    # O_NONBLOCK belongs to this end's file description, so the payload's read
+    # end stays a plain blocking pipe. SIGPIPE is held for the write, since a
+    # payload may exit without reading it all: see `_confine_sigpipe_hold`.
+    var in_sent = 0;
+    var in_failed = 0;
+    var in_held = 0;
+    var in_mask[8];
     if (in_rfd >= 0) {
         sys_close(in_rfd);
-        if (input_len > 0) { sys_write(in_wfd, input, input_len); }
-        sys_close(in_wfd);
+        if (input_len > 0) {
+            syscall(SYS_FCNTL, in_wfd, F_SETFL, O_NONBLOCK);
+            _confine_sigpipe_hold(&in_mask);
+            in_held = 1;
+        } else {
+            sys_close(in_wfd);
+            in_wfd = 0 - 1;
+        }
     }
 
     # **Both ends non-blocking and drained round-robin** (3.11.5). Draining one
@@ -678,8 +689,23 @@ fn confine_capture_input_env_wd(args, policy, rootfs, cgroup_path, seccomp_info,
     var edone = 0;
     var killed = 0;
     var idle = 0;
-    while (odone == 0 || edone == 0) {
+    while (odone == 0 || edone == 0 || in_wfd >= 0) {
         var moved = 0;
+        if (in_wfd >= 0) {
+            var w = sys_write(in_wfd, input + in_sent, input_len - in_sent);
+            if (w > 0) {
+                in_sent = in_sent + w;
+                moved = 1;
+            }
+            # EAGAIN is a full pipe and EINTR a retry; anything else (EPIPE, the
+            # reader is gone) ends the input, and the payload's exit status says
+            # what became of it.
+            if (w < 0 && w != 0 - EAGAIN && w != 0 - EINTR) { in_failed = 1; }
+            if (in_failed == 1 || in_sent >= input_len) {
+                sys_close(in_wfd);
+                in_wfd = 0 - 1;
+            }
+        }
         # **A full buffer ends a stream without blocking the payload** (3.13.2).
         # Until then a full buffer only stopped the reads. The payload then
         # blocked writing to that pipe, never closed the other one, and the loop
@@ -713,15 +739,22 @@ fn confine_capture_input_env_wd(args, policy, rootfs, cgroup_path, seccomp_info,
                 moved = 1;
             }
         }
-        if (moved == 0) {
-            if (deadline > 0 && mono_now_ns() / 1000000 >= deadline) {
-                # Kill FIRST: the payload's pipe ends must close, or the loop
-                # would wait on an EOF that is never coming.
-                sys_kill(pid, 9);
-                killed = 1;
-                odone = 1;
-                edone = 1;
-            } else {
+        # The deadline is read on every pass, not only an idle one (3.14.4). A
+        # payload keeping a pipe busy leaves few idle passes: measured, one writing
+        # stderr without pause under a 1000 ms deadline was killed at 2049 ms.
+        if (deadline > 0 && mono_now_ns() / 1000000 >= deadline) {
+            # Kill FIRST: the payload's pipe ends must close, or the loop
+            # would wait on an EOF that is never coming.
+            sys_kill(pid, 9);
+            killed = 1;
+            odone = 1;
+            edone = 1;
+            if (in_wfd >= 0) {
+                sys_close(in_wfd);
+                in_wfd = 0 - 1;
+            }
+        } else {
+            if (moved == 0) {
                 # An idle iteration still sleeps rather than spinning — a
                 # non-blocking read that finds nothing returns at once, and
                 # retrying it burns a core for as long as the payload runs.
@@ -743,18 +776,24 @@ fn confine_capture_input_env_wd(args, policy, rootfs, cgroup_path, seccomp_info,
                 idle = idle + 1;
                 if (idle < CONFINE_POLL_RAMP) { kv_sleep_ms(1); }
                 else { kv_sleep_ms(CONFINE_POLL_MS); }
+            } else {
+                # While input is going out the pace is the payload's, so it does
+                # not settle at the slow end of the ramp: 5 ms a pipeful would cap
+                # a large stdin at 13 MiB/s.
+                if (in_wfd >= 0) { idle = 0; }
             }
         }
     }
     if (rfd >= 0) { sys_close(rfd); }
     sys_close(erfd);
+    if (in_held == 1) { _confine_sigpipe_release(&in_mask, in_failed); }
     store8(&_confine_err_buf + etotal, 0);
     _confine_err_len = etotal;
-    _confine_last_timed_out = killed;
 
     var stbuf[4];
     store32(&stbuf, 0);
-    kv_waitpid(pid, &stbuf, 0);
+    if (_confine_reap(pid, &stbuf, killed, deadline) == 1) { killed = 1; }
+    _confine_last_timed_out = killed;
     var status = load32(&stbuf);
     var sig = status & 127;
     var code = 0;
@@ -763,6 +802,78 @@ fn confine_capture_input_env_wd(args, policy, rootfs, cgroup_path, seccomp_info,
     _confine_last_exit = code;
     return total;
     #endif
+}
+
+# Reap `pid` into `stbuf`, holding it to `deadline` (ms, 0 for none) when it was
+# not `killed` already. Returns 1 if the deadline killed it here, else 0.
+#
+# The drain loop ends at EOF on both streams, and that is not the payload's exit
+# (3.14.4): one that closes stdout and stderr and carries on was outside the
+# deadline, and held the caller in a blocking wait for as long as it ran.
+# Measured, a payload closing its stdio and sleeping under a 1000 ms deadline
+# was still running 6 s later.
+fn _confine_reap(pid, stbuf, killed, deadline) {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    if (killed == 0 && deadline > 0) {
+        while (1 == 1) {
+            # 0 is still running. Anything else ends the wait: the pid, or an
+            # error such as ECHILD when the host ignores SIGCHLD.
+            if (kv_waitpid(pid, stbuf, WNOHANG) != 0) { return 0; }
+            if (mono_now_ns() / 1000000 >= deadline) { break; }
+            kv_sleep_ms(1);
+        }
+        sys_kill(pid, 9);
+        kv_waitpid(pid, stbuf, 0);
+        return 1;
+    }
+    kv_waitpid(pid, stbuf, 0);
+    return 0;
+    #endif
+}
+
+# Hold SIGPIPE on the calling thread while kavach writes a payload's stdin; the
+# caller's mask goes to `mask` (8 bytes).
+#
+# A payload that exits with stdin unread leaves the write end with no reader, and
+# the next write raises SIGPIPE in KAVACH'S process, whose default is to die. It
+# was possible before 3.14.4 and needed a payload exiting inside one write; with
+# the write in the drain loop a payload has the whole run to do it. The signal
+# goes to the writing thread, so a thread mask covers it without touching the
+# process-wide disposition, which is the consumer's. The parent only: the child
+# has forked already, so the payload does not inherit the block.
+fn _confine_sigpipe_hold(mask) {
+    #ifndef CYRIUS_TARGET_AGNOS
+    var set[8];
+    store64(&set, 1 << (SIGPIPE - 1));
+    sys_sigprocmask(SIG_BLOCK, &set, mask);
+    #endif
+    return 0;
+}
+
+# Undo `_confine_sigpipe_hold`. After a failed write (`failed` 1) the SIGPIPE it
+# raised is pending, and would be delivered when the mask comes back, so it is
+# taken first, through a signalfd: the stdlib names no rt_sigtimedwait, and
+# CLAUDE.md forbids the raw number. A caller that had SIGPIPE blocked keeps
+# whatever is pending, as it would after its own write.
+fn _confine_sigpipe_release(mask, failed) {
+    #ifndef CYRIUS_TARGET_AGNOS
+    var bit = 1 << (SIGPIPE - 1);
+    if (failed == 1 && (load64(mask) & bit) == 0) {
+        var set[8];
+        store64(&set, bit);
+        var fd = sys_signalfd(0 - 1, &set, O_NONBLOCK | O_CLOEXEC);
+        if (fd >= 0) {
+            var info[128];                                  # struct signalfd_siginfo
+            sys_read(fd, &info, 128);
+            sys_close(fd);
+        }
+    }
+    sys_sigprocmask(SIG_SETMASK, mask, 0);
+    #endif
+    return 0;
 }
 
 # The pre-3.11.8 shape: capture with the child inheriting the parent's stdin.

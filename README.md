@@ -12,6 +12,13 @@ classification, credential proxy, HMAC-SHA256 audit chain — all in pure Cyrius
 
 ## Status
 
+**v3.14.4 — seccomp and `no_new_privs` on the OCI backend, and a capture that cannot be held.** An OCI
+container now runs under the policy's filter, with `noNewPrivileges` set, where it had neither; measured from
+inside runc, `mount` and `unshare` now die by SIGSYS, and a filtered container has no CAP_SYS_ADMIN. `config_stdin` goes out while the payload's output drains,
+so a guest echoing a large input no longer hangs the caller past its deadline, and a payload exiting with its
+input unread no longer kills the host with SIGPIPE. The WASM backend gains store limits and traps on a failed
+grow by default. **1592** assertions green on x86-64, **1450** on aarch64 under qemu.
+
 **v3.14.3 — real argv for a caller that holds it.** `sandbox_exec_argv` and `sandbox_spawn_argv` take
 a vec, so an argument can hold a space or a tab, or be empty. The runtime guard and the audit chain
 read the same text as before, and a backend that takes a command line refuses an argument it cannot
@@ -336,7 +343,7 @@ cyrius deps
 cyrius build src/main.cyr build/kavach
 ./build/kavach
 
-# Run the test suite (1448 assertions; run from the repository root,
+# Run the test suite (1592 assertions; run from the repository root,
 # since the real-Intel attestation vectors are read from tests/data/).
 cyrius test tests/kavach.tcyr
 
@@ -371,7 +378,7 @@ consumer's `cyrius.cyml`:
 [deps.kavach]
 git     = "https://github.com/MacCracken/kavach.git"
 path    = "../kavach"          # local sibling checkout (optional)
-tag     = "3.14.3"
+tag     = "3.14.4"
 modules = ["dist/kavach.cyr"]
 
 # OPTIONAL since 3.13.3 (cyrius 6.6.20): dist/kavach.deps is now the

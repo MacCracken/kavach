@@ -384,6 +384,16 @@ fn security_seccomp_native_arch(): i64 {
     #endif
 }
 
+# The same architecture as an OCI runtime spec names it (`linux.seccomp`).
+fn security_seccomp_oci_arch() {
+    #ifdef CYRIUS_ARCH_AARCH64
+    return "SCMP_ARCH_AARCH64";
+    #endif
+    #ifdef CYRIUS_ARCH_X86
+    return "SCMP_ARCH_X86_64";
+    #endif
+}
+
 # BPF sock_filter instruction — kernel ABI struct (8 bytes).
 # Layout enforced by per-field widths; pointer-to-struct dot syntax
 # emits store16/store8/store32 at the kernel-correct offsets.
@@ -499,47 +509,74 @@ fn _seccomp_push(v, x86_64_nr, aarch64_nr): i64 {
 # Syscalls denied by the exec-safe profile. These are the ones a container
 # payload has no business making and that lead directly to host compromise or
 # namespace escape. Ordered roughly by how often they appear in escape chains.
+#
+# Each row names its call as well as numbering it (3.14.4). The BPF filter
+# compares numbers; an OCI runtime takes names (`_oci_seccomp_json`). One table
+# feeds both, so a payload under runc is denied what a payload under the process
+# backend is denied, and a row added here reaches both.
 var _SECCOMP_DENY = 0;
+var _SECCOMP_DENY_NAMES = 0;
+
+# One deny row, for the architecture this binary was built for. A call that
+# architecture does not have is left out of both lists.
+fn _seccomp_deny_row(v, names, name, x86_64_nr, aarch64_nr): i64 {
+    var nr = _seccomp_native_nr(x86_64_nr, aarch64_nr);
+    if (nr >= 0) {
+        vec_push(v, nr);
+        vec_push(names, name);
+    }
+    return 0;
+}
 
 fn _seccomp_deny_list() {
     if (_SECCOMP_DENY != 0) { return _SECCOMP_DENY; }
     var v = vec_new();
-    #             x86-64, aarch64
-    _seccomp_push(v, 165, 40);      # mount
-    _seccomp_push(v, 166, 39);      # umount2
-    _seccomp_push(v, 155, 41);      # pivot_root
-    _seccomp_push(v, 272, 97);      # unshare        — re-namespacing after confinement
-    _seccomp_push(v, 308, 268);     # setns          — entering another container's ns
-    _seccomp_push(v, 101, 117);     # ptrace         — reading/writing sibling processes
-    _seccomp_push(v, 310, 270);     # process_vm_readv
-    _seccomp_push(v, 311, 271);     # process_vm_writev
-    _seccomp_push(v, 175, 105);     # init_module
-    _seccomp_push(v, 176, 106);     # delete_module
-    _seccomp_push(v, 313, 273);     # finit_module
-    _seccomp_push(v, 246, 104);     # kexec_load
-    _seccomp_push(v, 169, 142);     # reboot
-    _seccomp_push(v, 167, 224);     # swapon
-    _seccomp_push(v, 168, 225);     # swapoff
-    _seccomp_push(v, 321, 280);     # bpf
-    _seccomp_push(v, 298, 241);     # perf_event_open
-    _seccomp_push(v, 323, 282);     # userfaultfd    — a classic exploit-timing primitive
-    _seccomp_push(v, 139, 0 - 1);   # sysfs          — x86-64 only
-    _seccomp_push(v, 103, 116);     # syslog
+    var n = vec_new();
+    #                 name, x86-64, aarch64
+    _seccomp_deny_row(v, n, "mount", 165, 40);
+    _seccomp_deny_row(v, n, "umount2", 166, 39);
+    _seccomp_deny_row(v, n, "pivot_root", 155, 41);
+    _seccomp_deny_row(v, n, "unshare", 272, 97);  # re-namespacing after confinement
+    _seccomp_deny_row(v, n, "setns", 308, 268);  # entering another container's ns
+    _seccomp_deny_row(v, n, "ptrace", 101, 117);  # reading/writing sibling processes
+    _seccomp_deny_row(v, n, "process_vm_readv", 310, 270);
+    _seccomp_deny_row(v, n, "process_vm_writev", 311, 271);
+    _seccomp_deny_row(v, n, "init_module", 175, 105);
+    _seccomp_deny_row(v, n, "delete_module", 176, 106);
+    _seccomp_deny_row(v, n, "finit_module", 313, 273);
+    _seccomp_deny_row(v, n, "kexec_load", 246, 104);
+    _seccomp_deny_row(v, n, "reboot", 169, 142);
+    _seccomp_deny_row(v, n, "swapon", 167, 224);
+    _seccomp_deny_row(v, n, "swapoff", 168, 225);
+    _seccomp_deny_row(v, n, "bpf", 321, 280);
+    _seccomp_deny_row(v, n, "perf_event_open", 298, 241);
+    _seccomp_deny_row(v, n, "userfaultfd", 323, 282);  # a classic exploit-timing primitive
+    _seccomp_deny_row(v, n, "sysfs", 139, 0 - 1);  # x86-64 only
+    _seccomp_deny_row(v, n, "syslog", 103, 116);
     # The mount API that is not mount(2) (3.12.9). Each reaches what the denied
     # mount does: fsopen + fsconfig + fsmount + move_mount builds and attaches a
     # filesystem; open_tree + move_mount attaches a bind mount; mount_setattr
     # changes an existing mount's flags. Numbered since Linux 5.1 in the shared
     # table, so both columns agree. An older kernel returns ENOSYS for them anyway.
-    _seccomp_push(v, 428, 428);     # open_tree
-    _seccomp_push(v, 429, 429);     # move_mount
-    _seccomp_push(v, 430, 430);     # fsopen
-    _seccomp_push(v, 431, 431);     # fsconfig
-    _seccomp_push(v, 432, 432);     # fsmount
-    _seccomp_push(v, 433, 433);     # fspick
-    _seccomp_push(v, 442, 442);     # mount_setattr
-    _seccomp_push(v, 467, 467);     # open_tree_attr (Linux 6.15)
+    _seccomp_deny_row(v, n, "open_tree", 428, 428);
+    _seccomp_deny_row(v, n, "move_mount", 429, 429);
+    _seccomp_deny_row(v, n, "fsopen", 430, 430);
+    _seccomp_deny_row(v, n, "fsconfig", 431, 431);
+    _seccomp_deny_row(v, n, "fsmount", 432, 432);
+    _seccomp_deny_row(v, n, "fspick", 433, 433);
+    _seccomp_deny_row(v, n, "mount_setattr", 442, 442);
+    _seccomp_deny_row(v, n, "open_tree_attr", 467, 467);  # (Linux 6.15)
+    # Published last, names first: a thread that sees the list sees all of it, and
+    # a filter compiled from a half-built list would miss the rows not yet pushed.
+    _SECCOMP_DENY_NAMES = n;
     _SECCOMP_DENY = v;
     return v;
+}
+
+# The deny list by name, in the order of `_seccomp_deny_list`.
+fn security_seccomp_deny_names() {
+    _seccomp_deny_list();
+    return _SECCOMP_DENY_NAMES;
 }
 
 # Syscalls the basic (allowlist) profile permits.

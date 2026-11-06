@@ -3,7 +3,10 @@
 #
 # Minimal spec: pid/ipc/uts/mount namespaces always included, network
 # namespace conditional on policy, resource limits applied when set, readonly
-# rootfs per policy, command wrapped in `/bin/sh -c`.
+# rootfs per policy, command wrapped in `/bin/sh -c`. Every spec sets
+# `noNewPrivileges`, and the OCI backend's carries the policy's seccomp filter
+# (`_oci_seccomp_json`) and the capabilities that filter needs dropped
+# (`_oci_capabilities_json`).
 
 var _oci_id_counter = 1;
 
@@ -101,6 +104,139 @@ fn oci_network_mode(policy) {
     return "none";
 }
 
+# Whether this config's spec carries the filter.
+fn _oci_wants_filter(config) {
+    if (config == 0) { return 0; }
+    if (SandboxConfig_backend(config) == KavachBackend.GVISOR) { return 0; }
+    var policy = SandboxConfig_policy(config);
+    if (policy == 0) { return 0; }
+    if (SandboxPolicy_seccomp_enabled(policy) != 1) { return 0; }
+    return 1;
+}
+
+# A filtered payload's capabilities as a `process.capabilities` member, with its
+# leading comma: every capability but CAP_SYS_ADMIN. "" with no filter, where the
+# spec names none and the runtime drops none.
+#
+# This is the filter's other half, not a capability policy. `open_tree_attr` gets
+# past the filter by name (see `_oci_seccomp_json`) and needs CAP_SYS_ADMIN to
+# clone a tree. Measured under runc 1.5.2 with the filter on and a read-only
+# rootfs: a direct create read EROFS, while `open_tree_attr` with
+# MOUNT_ATTR_RDONLY in `attr_clr` returned a writable clone, and a file created
+# through it appeared in the rootfs. No `move_mount` is needed. With this list the
+# same call reads EPERM. The other calls the capability guards are denied already,
+# so a payload loses little, and Docker's default set leaves it out as well.
+#
+# ⚠ The list stops at CAP_AUDIT_READ (Linux 3.16) on purpose. runc logs a
+# capability the kernel does not have at level=warning, into the `--log` file
+# `_oci_exec_with` reads as a runtime failure, so naming CAP_PERFMON (5.8), CAP_BPF
+# (5.8) or CAP_CHECKPOINT_RESTORE (5.9) would fail every container on a kernel
+# older than that. The filter denies `perf_event_open` and `bpf` regardless.
+fn _oci_capabilities_json(config) {
+    if (_oci_wants_filter(config) == 0) { return ""; }
+    var lb = str_builder_new();
+    str_builder_add_cstr(lb, "[\"CAP_CHOWN\",\"CAP_DAC_OVERRIDE\",\"CAP_DAC_READ_SEARCH\",\"CAP_FOWNER\",");
+    str_builder_add_cstr(lb, "\"CAP_FSETID\",\"CAP_KILL\",\"CAP_SETGID\",\"CAP_SETUID\",\"CAP_SETPCAP\",");
+    str_builder_add_cstr(lb, "\"CAP_LINUX_IMMUTABLE\",\"CAP_NET_BIND_SERVICE\",\"CAP_NET_BROADCAST\",");
+    str_builder_add_cstr(lb, "\"CAP_NET_ADMIN\",\"CAP_NET_RAW\",\"CAP_IPC_LOCK\",\"CAP_IPC_OWNER\",");
+    str_builder_add_cstr(lb, "\"CAP_SYS_MODULE\",\"CAP_SYS_RAWIO\",\"CAP_SYS_CHROOT\",\"CAP_SYS_PTRACE\",");
+    str_builder_add_cstr(lb, "\"CAP_SYS_PACCT\",\"CAP_SYS_BOOT\",\"CAP_SYS_NICE\",\"CAP_SYS_RESOURCE\",");
+    str_builder_add_cstr(lb, "\"CAP_SYS_TIME\",\"CAP_SYS_TTY_CONFIG\",\"CAP_MKNOD\",\"CAP_LEASE\",");
+    str_builder_add_cstr(lb, "\"CAP_AUDIT_WRITE\",\"CAP_AUDIT_CONTROL\",\"CAP_SETFCAP\",\"CAP_MAC_OVERRIDE\",");
+    str_builder_add_cstr(lb, "\"CAP_MAC_ADMIN\",\"CAP_SYSLOG\",\"CAP_WAKE_ALARM\",\"CAP_BLOCK_SUSPEND\",");
+    str_builder_add_cstr(lb, "\"CAP_AUDIT_READ\"]");
+    var list = str_data(str_builder_build(lb));
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, ",\"capabilities\":{\"bounding\":");
+    str_builder_add_cstr(sb, list);
+    str_builder_add_cstr(sb, ",\"effective\":");
+    str_builder_add_cstr(sb, list);
+    str_builder_add_cstr(sb, ",\"permitted\":");
+    str_builder_add_cstr(sb, list);
+    str_builder_add_cstr(sb, "}");
+    return str_data(str_builder_build(sb));
+}
+
+# The exec-safe filter as a `linux.seccomp` member, with its leading comma: what
+# `security_create_exec_seccomp_filter` compiles for the process backend, in the
+# form a runtime compiles itself, from the same table. "" when no filter applies.
+#
+# Through 3.14.3 the spec carried no filter and no `noNewPrivileges`, on the
+# path every container takes where runc or crun is installed, while
+# `score_backend` added 5 for `seccomp_enabled`. Measured under runc 1.5.2 with
+# `policy_basic()`: the payload read `Seccomp: 0` and `NoNewPrivs: 0` from
+# /proc/self/status, and `mount -t tmpfs` and `unshare -U` both succeeded.
+#
+#   - The default is ALLOW, with the deny list killing the process: the same
+#     deny-list trade the exec filter makes, for the reason it gives.
+#   - The spec stays `ociVersion` 1.0.2, whose text predates some of these fields.
+#     runc 1.5.2 applies them under it, as measured below, and reads no gate there.
+#   - `architectures` names the native ABI alone, so a call through any other
+#     (the i386 gate, x32) never runs, as under `_seccomp_write_prologue`. The
+#     action differs: libseccomp kills the calling thread where that filter kills
+#     the process, so another thread in the payload would carry on.
+#   - clone3 is ENOSYS, not a kill: its flags are behind a pointer seccomp cannot
+#     read, and glibc answers ENOSYS by falling back to clone, which it can.
+#     `errnoRet` is what makes it ENOSYS; a runtime's default errno is EPERM,
+#     and glibc does not fall back from that.
+#   - clone is denied once per namespace flag. The filter's one JSET cannot be
+#     written here: the only masked operator is SCMP_CMP_MASKED_EQ, which asks
+#     whether the masked value equals a datum, and "any of these bits" is not an
+#     equality. A rule per bit is. They are separate rules, not one rule's
+#     `args`, because `args` are ANDed unless a runtime special-cases them.
+#
+# ⚠ One deny entry cannot hold by name. A runtime resolves a name through
+# libseccomp and skips one it does not know, silently, and a spec cannot give a
+# number. runc 1.5.2 with libseccomp 2.6.0 does not know `open_tree_attr` (Linux
+# 6.15). `_oci_capabilities_json` closes it from the other side. An older
+# libseccomp may skip more of the mount API, each call of which needs the same
+# capability: `test_oci_payload_observes_the_filter` reports what a host denies.
+#
+# Not for gVisor. runsc applies a spec's filter only under `--oci-seccomp`, and
+# then refuses SCMP_ACT_KILL_PROCESS as an invalid action (runsc/specutils/
+# seccomp/seccomp.go), so a spec written for runc would be ignored or refused.
+# See docs/development/issues/2026-11-06-gvisor-policy-seccomp-is-not-applied.md.
+fn _oci_seccomp_json(config) {
+    if (_oci_wants_filter(config) == 0) { return ""; }
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, ",\"seccomp\":{\"defaultAction\":\"SCMP_ACT_ALLOW\",\"architectures\":[\"");
+    str_builder_add_cstr(sb, security_seccomp_oci_arch());
+    str_builder_add_cstr(sb, "\"],\"syscalls\":[{\"names\":[");
+    var names = security_seccomp_deny_names();
+    var i = 0;
+    while (i < vec_len(names)) {
+        if (i > 0) { str_builder_add_cstr(sb, ","); }
+        str_builder_add_cstr(sb, "\"");
+        str_builder_add_cstr(sb, vec_get(names, i));
+        str_builder_add_cstr(sb, "\"");
+        i = i + 1;
+    }
+    str_builder_add_cstr(sb, "],\"action\":\"SCMP_ACT_KILL_PROCESS\"}");
+    str_builder_add_cstr(sb, ",{\"names\":[\"clone3\"],\"action\":\"SCMP_ACT_ERRNO\",\"errnoRet\":");
+    var eb[24];
+    var elen = fmt_int_buf(ENOSYS, &eb);
+    store8(&eb + elen, 0);
+    str_builder_add_cstr(sb, &eb);
+    str_builder_add_cstr(sb, "}");
+    var bit = 1;
+    while (bit <= SECCOMP_CLONE_NS_FLAGS) {
+        if ((SECCOMP_CLONE_NS_FLAGS & bit) != 0) {
+            var fb[24];
+            var flen = fmt_int_buf(bit, &fb);
+            store8(&fb + flen, 0);
+            str_builder_add_cstr(sb, ",{\"names\":[\"clone\"],\"action\":\"SCMP_ACT_KILL_PROCESS\",");
+            str_builder_add_cstr(sb, "\"args\":[{\"index\":0,\"value\":");
+            str_builder_add_cstr(sb, &fb);
+            str_builder_add_cstr(sb, ",\"valueTwo\":");
+            str_builder_add_cstr(sb, &fb);
+            str_builder_add_cstr(sb, ",\"op\":\"SCMP_CMP_MASKED_EQ\"}]}");
+        }
+        bit = bit * 2;
+    }
+    str_builder_add_cstr(sb, "]}");
+    return str_data(str_builder_build(sb));
+}
+
 # Render OCI runtime config.json v1.0.2. Returns allocated cstr.
 fn oci_generate_spec(sandbox, command) {
     var config = Sandbox_config(sandbox);
@@ -192,6 +328,12 @@ fn oci_generate_spec(sandbox, command) {
     if (cap < 0) { return 0; }
     cap = checked_add(cap, strlen(cwd_json));
     if (cap < 0) { return 0; }
+    var seccomp_json = _oci_seccomp_json(config);
+    cap = checked_add(cap, strlen(seccomp_json));
+    if (cap < 0) { return 0; }
+    var caps_json = _oci_capabilities_json(config);
+    cap = checked_add(cap, strlen(caps_json));
+    if (cap < 0) { return 0; }
     cap = checked_add(cap, 2048);
     var scfg_cap = Sandbox_config(sandbox);
     if (scfg_cap != 0) {
@@ -253,6 +395,10 @@ fn oci_generate_spec(sandbox, command) {
     if (scfg != 0) { cfg_rf = SandboxConfig_rootfs(scfg); }
     var _mb = str_builder_new();
     str_builder_add_cstr(_mb, cwd_json);
+    # Unconditional, as `confine_child` sets it on every rootfs'd process-backend
+    # run, whatever the policy. runsc honours it too (runsc/boot/loader.go).
+    str_builder_add_cstr(_mb, ",\"noNewPrivileges\":true");
+    str_builder_add_cstr(_mb, caps_json);
     if (cfg_rf != 0) { str_builder_add_cstr(_mb, "},\"root\":{\"path\":\""); }
     else { str_builder_add_cstr(_mb, "},\"root\":{\"path\":\"rootfs\",\"readonly\":"); }
     var mid1b = str_data(str_builder_build(_mb));
@@ -309,6 +455,7 @@ fn oci_generate_spec(sandbox, command) {
         memcpy(buf + pos, m3, strlen(m3)); pos = pos + strlen(m3);
     }
     memcpy(buf + pos, resources, strlen(resources)); pos = pos + strlen(resources);
+    memcpy(buf + pos, seccomp_json, strlen(seccomp_json)); pos = pos + strlen(seccomp_json);
     var tail = "}}";
     memcpy(buf + pos, tail, strlen(tail)); pos = pos + strlen(tail);
     # The sizing above must cover every byte written (3.12.9). A bump allocator

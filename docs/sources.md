@@ -34,3 +34,17 @@ kernel header references in `src/security.cyr`, ADR-005 and ADR-007).
 | gVisor `runsc/cmd/util/util.go` (`Errorf`, `Fatalf`) | runsc's own failures go to stderr and, as a JSON line `{"msg":…,"level":"error"}`, to the `--log` file; `Fatalf` exits 128. |
 | gVisor `runsc/cli/cli.go` | `--log` opens the error logger; internal logs go to a discarding emitter unless `--debug-log` or `--alsologtostderr` is set. So a non-empty `--log` file means runsc failed. |
 | docker 29.9.2, measured on this machine (CHANGELOG 3.14.2) | `docker run` prints its own errors on the container's stderr and exits 125/126/127; `create` / `start -a -i` / `inspect --format {{.State.Error}}` separate them: a container that never started leaves `.State.Error` set, a payload's own exit 127 leaves it empty. |
+
+## OCI seccomp and capabilities (`src/oci_spec.cyr`)
+
+- **OCI runtime spec**, `linux.seccomp` and `process.capabilities`:
+  [config-linux.md](https://github.com/opencontainers/runtime-spec/blob/main/config-linux.md),
+  [config.md](https://github.com/opencontainers/runtime-spec/blob/main/config.md). `SCMP_CMP_MASKED_EQ` compares
+  `arg & value` with `valueTwo`, which is why `_oci_seccomp_json` writes one `clone` rule per namespace flag.
+- **runc 1.5.2 with libseccomp 2.6.0**, measured in 3.14.4, not read: a name libseccomp does not know is skipped
+  with nothing logged (`open_tree_attr`); a capability the kernel lacks is logged at `level=warning` into `--log`
+  and ignored; a spec with no `process.capabilities` drops none.
+- **runsc**, read from its source, since no runsc was at hand: `runsc/specutils/seccomp/seccomp.go` (`convertAction`
+  has no `SCMP_ACT_KILL_PROCESS`), `runsc/config/flags.go` (`--oci-seccomp`), `runsc/boot/loader.go`
+  (`noNewPrivileges`).
+- **wasmtime 50.0.1**: `wasmtime run -W help`, for the option names in `_wasm_append_limits`; each was run.

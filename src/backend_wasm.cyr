@@ -223,7 +223,11 @@ fn _wasm_push_w_opt(args, key, value) {
 #
 # The `-W` group has existed since wasmtime 14, so the pair form is not a
 # 47-specific accommodation — it is the spelling that has been correct all along.
-fn _wasm_append_limits(args, policy, fuel) {
+#
+# The store limits came in 3.14.4 (`config_wasm_max_instances` and its peers);
+# until then a guest was bounded in memory and fuel alone, and a failed grow
+# returned -1. `cfg` may be 0, which is every default.
+fn _wasm_append_limits(args, policy, fuel, cfg) {
     # Always emitted — see `WASM_DEFAULT_MEMORY_LIMIT_MB` for why a missing
     # policy limit must not mean "unbounded".
     _wasm_push_w_opt(args, "max-memory-size",
@@ -232,6 +236,24 @@ fn _wasm_append_limits(args, policy, fuel) {
     if (fuel > 0) {
         _wasm_push_w_opt(args, "fuel", fuel);
     }
+    var grow_returns = 0;
+    if (cfg != 0) {
+        _wasm_push_w_limit(args, "max-instances", SandboxConfig_wasm_max_instances(cfg));
+        _wasm_push_w_limit(args, "max-tables", SandboxConfig_wasm_max_tables(cfg));
+        _wasm_push_w_limit(args, "max-table-elements", SandboxConfig_wasm_max_table_elements(cfg));
+        _wasm_push_w_limit(args, "max-memories", SandboxConfig_wasm_max_memories(cfg));
+        grow_returns = SandboxConfig_wasm_grow_returns_failure(cfg);
+    }
+    if (grow_returns == 0) {
+        vec_push(args, "-W");
+        vec_push(args, "trap-on-grow-failure=y");
+    }
+    return 0;
+}
+
+# `_wasm_push_w_opt` for a store limit the config may leave at wasmtime's default.
+fn _wasm_push_w_limit(args, key, value) {
+    if (value > 0) { _wasm_push_w_opt(args, key, value); }
     return 0;
 }
 
@@ -308,7 +330,7 @@ fn wasm_exec(sandbox, command) {
         vec_push(args, "-C");
         vec_push(args, "cache=n");
     }
-    _wasm_append_limits(args, policy, _wasm_effective_fuel(cfg, timeout));
+    _wasm_append_limits(args, policy, _wasm_effective_fuel(cfg, timeout), cfg);
     if (_wasm_append_preopens(args, sandbox) != 0) {
         return backend_error_result("WASM backend cannot preopen a path containing \"::\"");
     }

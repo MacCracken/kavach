@@ -258,6 +258,46 @@ fn bench_process_exec_confined() {
     return _bench_exec("/bin/echo hi", policy_strict());
 }
 
+# stdin past the pipe's capacity, delivered from inside the drain loop (3.14.4).
+# `wc` reads all of it before writing, so this is delivery, not output handling,
+# and the time is what the loop's pace costs a large input.
+var _BENCH_STDIN = 0;
+var _BENCH_STDIN_LEN = 1048576;
+
+fn bench_process_exec_stdin_1mib() {
+    if (_BENCH_STDIN == 0) {
+        _BENCH_STDIN = alloc(_BENCH_STDIN_LEN);
+        memset(_BENCH_STDIN, 65, _BENCH_STDIN_LEN);
+    }
+    var cfg = config_new();
+    config_backend(cfg, KavachBackend.PROCESS);
+    config_policy(cfg, policy_minimal());
+    config_timeout_ms(cfg, 30000);
+    config_stdin(cfg, _BENCH_STDIN, _BENCH_STDIN_LEN);
+    var s = sandbox_create(cfg);
+    if (s == 0) { return 0; }
+    sandbox_transition(s, SandboxState.RUNNING);
+    sandbox_exec(s, "/usr/bin/wc -c");
+    sandbox_destroy(s);
+    return 0;
+}
+
+# The spec every `policy_basic()` container now gets: the filter and the capability
+# list, built from strings before runc starts. Against a runc run this is nothing;
+# it is here so it stays that way.
+var _BENCH_OCI_SB = 0;
+
+fn bench_oci_spec_filtered() {
+    if (_BENCH_OCI_SB == 0) {
+        var cfg = config_new();
+        config_backend(cfg, KavachBackend.OCI);
+        _BENCH_OCI_SB = alloc(SANDBOX_SIZE);
+        Sandbox_set_config(_BENCH_OCI_SB, cfg);
+    }
+    oci_generate_spec(_BENCH_OCI_SB, "/bin/echo hi");
+    return 0;
+}
+
 fn bench_sandbox_full_lifecycle() {
     var cfg = config_new();
     config_backend(cfg, KavachBackend.NOOP);
@@ -538,6 +578,14 @@ fn main() {
     var b25 = bench_new("process_exec_confined");
     bench_run(b25, &bench_process_exec_confined, 50);
     vec_push(benches, b25);
+
+    var b36 = bench_new("process_exec_stdin_1mib");
+    bench_run(b36, &bench_process_exec_stdin_1mib, 50);
+    vec_push(benches, b36);
+
+    var b37 = bench_new("oci_spec_filtered");
+    bench_run(b37, &bench_oci_spec_filtered, 2000);
+    vec_push(benches, b37);
 
     # Disk-bound (reference only)
     var b15 = bench_new("audit_chain_record_to_tmpfs");
