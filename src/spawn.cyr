@@ -31,17 +31,17 @@
 #   5. NO_NEW_PRIVS    — must precede seccomp; the kernel rejects a filter from
 #                        an unprivileged process without it.
 #   6. namespaces      — unshare before the payload exists.
-#   7. landlock        — path rules; also sets NO_NEW_PRIVS itself.
-#   8. execve.
-#
-#   8. rootfs entry    — chroot into the container filesystem, before landlock
+#   7. rootfs entry    — pivot_root into the container filesystem, before landlock
 #                        (path rules resolve against the current root) and
-#                        before seccomp (which denies mount/chroot).
-#   9. seccomp         — applied LAST, or it would filter the confinement steps
+#                        before seccomp (which denies mount and pivot_root).
+#   8. landlock        — path rules; also sets NO_NEW_PRIVS itself.
+#   9. capabilities    — with a rootfs, the bound set (3.14.6).
+#  10. seccomp         — applied LAST, or it would filter the confinement steps
 #                        above it. Uses the exec-safe DENY-list profile; the
 #                        20-syscall allowlist cannot be used pre-exec because it
 #                        does not permit execve. See
 #                        security_create_exec_seccomp_filter.
+#  11. execve.
 
 # A detached child under sandbox policy.
 #   pid         — child pid
@@ -80,8 +80,14 @@ fn sandbox_spawn_argv(sandbox, argv, log_path) {
 # Refuses when: the sandbox is not RUNNING, the policy requires attestation,
 # the command carries control characters or trips the runtime guard, the policy
 # asks for an isolation primitive that cannot be applied (see
-# _spawn_seccomp_supported), or the fork fails. A refusal prints through
-# kavach_err_print and leaves nothing running.
+# _spawn_seccomp_supported), a rootfs'd config names a capability kavach does not
+# know, or the fork fails. A refusal prints through kavach_err_print and leaves
+# nothing running.
+#
+# ⚠ It reads no backend. A sandbox configured for OCI forks here too, with no
+# runtime: it gets the bound set and a pivot_root, and no PID namespace, no `/proc`
+# and no masks, and `score_backend` still scores it as OCI. See
+# docs/development/issues/2026-11-06-process-backend-keeps-every-capability.md.
 fn sandbox_spawn(sandbox, command, log_path) {
     if (Sandbox_state(sandbox) != SandboxState.RUNNING) {
         kavach_err_print(KAVACH_ERR_EXEC_FAILED, "sandbox not running");
@@ -112,6 +118,11 @@ fn sandbox_spawn(sandbox, command, log_path) {
     var argc = vec_len(args);
     if (argc == 0) {
         kavach_err_print(KAVACH_ERR_EXEC_FAILED, "empty command");
+        return 0;
+    }
+    var caps_refused = confine_capabilities_refusal(Sandbox_config(sandbox));
+    if (caps_refused != 0) {
+        kavach_err_print(KAVACH_ERR_EXEC_FAILED, caps_refused);
         return 0;
     }
 
@@ -167,6 +178,7 @@ fn sandbox_spawn(sandbox, command, log_path) {
     var spawn_wd = 0;
     if (cfg != 0) { spawn_wd = SandboxConfig_workdir(cfg); }
     var envp = kv_envp_from_vec(spawn_env);
+    var spawn_caps = confine_capabilities(cfg);
 
     # Pinned before fork (ADR-005 §H4); not with a rootfs, where the command
     # must resolve inside it.
@@ -198,8 +210,8 @@ fn sandbox_spawn(sandbox, command, log_path) {
         # that.
         # 3.12.2: the config's workdir, applied inside the rootfs. Read in the
         # parent (cfg is not touched after fork).
-        confine_child_wd(policy, rootfs, cgroup_path, spawn_uid, spawn_gid, seccomp_info, 1,
-          spawn_wd);
+        confine_child_caps(policy, rootfs, cgroup_path, spawn_uid, spawn_gid, seccomp_info, 1,
+          spawn_wd, spawn_caps);
         kv_exec_child(pin, vec_get(args, 0), argv, envp);
         sys_exit(127);
     }

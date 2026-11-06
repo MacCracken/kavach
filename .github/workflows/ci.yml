@@ -218,9 +218,12 @@ jobs:
         # are real, and `/proc/sys/kernel/core_pattern` opens to write unless the
         # spec stops it, so that is the case the capability set and `/proc` masks
         # exist for. Rootless, that open reads EACCES with or without the mask.
-        # `--kv-oci-only` runs the real-container group alone, because the rest of
-        # the suite assumes an unprivileged caller. A skip passes the step, as the
-        # group's own skips do, so it is raised here as a warning.
+        # 3.14.6: the same run covers a rootfs on the process path, where a payload
+        # held every real capability and left the rootfs by `chroot`, and `mknod`
+        # reads the same rootless with or without the bound.
+        # `--kv-oci-only` runs these groups alone, because the rest of the suite
+        # assumes an unprivileged caller. A skip passes the step, as the groups' own
+        # skips do, so it is raised here as a warning.
         run: |
           cyrius build tests/kavach.tcyr build/kavach-test
           rc=0

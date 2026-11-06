@@ -66,7 +66,7 @@ fn runtime_guard_config_default() {
 # `/bin/sh` and running it is an escape. When the sandbox has a rootfs, that
 # premise is gone: the name resolves INSIDE the container's filesystem, to a
 # binary the caller supplied, reached only after `_spawn_enter_rootfs` has
-# chrooted and the namespaces are up. The isolation there is the rootfs, the
+# pivoted and the namespaces are up. The isolation there is the rootfs, the
 # namespaces, seccomp and the cgroup — not the payload's filename.
 #
 # Applying it anyway made kavach unusable as a container runtime, which is what

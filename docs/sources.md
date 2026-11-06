@@ -48,6 +48,12 @@ kernel header references in `src/security.cyr`, ADR-005 and ADR-007).
   three capabilities. **runc 1.5.2, 1.4.0 and 1.3.4**, measured in 3.14.5 rootless and as root: all three apply
   both lists and skip a path that does not exist, logging nothing. With no `linux.resources.devices`, runc 1.5.2
   as root opened a device node of `c 1 3` and refused `c 1 11`.
+- **pivot_root(2)** (man-pages), read for 3.14.6: `chdir(new_root); pivot_root(".", "."); umount2(".", MNT_DETACH)` needs
+  no temporary directory, because the call stacks the old root on top of the new one and `.` resolves up that stack. It
+  also says the initial ramfs cannot be pivoted, which was read and not run. **runc's `pivotRoot`**
+  (`libcontainer/rootfs_linux.go`), read for the same sequence, and for the `chdir("/")` that follows it.
+- **capabilities(7)**, read for 3.14.6: at `execve` a process's inheritable set survives for a uid 0 program whatever the
+  bounding set holds, which is why the bound clears it. Measured by `test_bound_clears_inheritable_and_ambient`.
 - **Docker 29.9.3's default capability set**, measured in 3.14.5: `CapEff` reads `00000000a80425fb`, which is the
   twelve kavach writes plus CAP_NET_RAW and CAP_MKNOD.
 - **Linux capability numbers and first versions**: `capabilities(7)`, and `include/uapi/linux/capability.h`, whose

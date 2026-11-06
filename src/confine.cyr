@@ -32,7 +32,19 @@ enum SpawnExit {
     SPAWN_EXIT_ROOTFS = 119;
     SPAWN_EXIT_IDMAP = 118;
     SPAWN_EXIT_WORKDIR = 117;
+    SPAWN_EXIT_CAPS = 116;
 }
+
+# 3.14.6: the capabilities a payload with a rootfs keeps unless its config names
+# others, as a mask: `oci_default_capabilities()`, which a payload reads as
+# `CapEff: 00000000a00405fb`. A constant because `confine_child` runs after fork,
+# where it cannot allocate, and `test_capability_masks` holds it to the list.
+var KAVACH_CAPS_DEFAULT = 0xA00405FB;
+
+# prctl(2) options and the capget(2) header version, which the stdlib does not name.
+var KAVACH_PR_CAPBSET_READ = 23;
+var KAVACH_PR_CAPBSET_DROP = 24;
+var KAVACH_CAP_VERSION_3 = 0x20080522;
 
 # Namespace flags implied by the policy.
 #
@@ -53,7 +65,7 @@ fn _spawn_ns_flags(policy, rootfs) {
         if (SandboxPolicy_network_enabled(policy) == 0) { f = f | NS_NETWORK; }
     }
     # Entering a rootfs needs a mount namespace of our own, or making `/`
-    # private and chrooting would affect the host.
+    # private and entering it would affect the host.
     if (rootfs != 0) { f = f | NS_MOUNT; }
     if (f == 0) { return 0; }
     # Unprivileged, neither a network nor a mount namespace is obtainable on its
@@ -65,6 +77,8 @@ fn _spawn_ns_flags(policy, rootfs) {
 
 # mount(2) flags used to detach our mount namespace from the host's.
 var MS_REC_PRIVATE = 278528;        # MS_REC (0x4000) | MS_PRIVATE (0x40000)
+var MS_REC_BIND = 20480;            # MS_REC (0x4000) | MS_BIND (0x1000)
+var KAVACH_MNT_DETACH = 2;
 
 # Map our uid/gid to root INSIDE the new user namespace.
 #
@@ -98,17 +112,30 @@ fn _spawn_write_idmaps(uid, gid) {
 # Requires a mount namespace already unshared (the caller does that with
 # NS_MOUNT), or the private-mount call below would alter the HOST's propagation.
 #
-# Uses chroot(2), not pivot_root(2). chroot is escapable by a process that holds
-# CAP_SYS_CHROOT *and* a directory fd outside the new root — which is exactly why
-# the caller closes inherited descriptors first, and why the payload is left with
-# no capability to re-chroot. pivot_root is the stronger primitive and wants the
-# rootfs to be a mount point of its own; recorded as the next increment in the
-# 3.9.1 CHANGELOG entry ("pivot_root is the stronger primitive and is the next
-# increment"), because it is a behaviour change rather than a silent upgrade.
+# pivot_root(2), runc's sequence, since 3.14.6. Through 3.14.5 this was chroot(2),
+# which moves a process's root and leaves the old tree in its mount namespace. A
+# payload left in three calls, needing no fd from outside: `chroot("sub")` puts its
+# cwd outside the new root, `..` from there walks to the top of the namespace, and
+# `chroot(".")` settles there. It held CAP_SYS_CHROOT, nothing denies `chroot`, and
+# that held rootless too (docs/development/issues/2026-11-06-process-backend-keeps-
+# every-capability.md). Here nothing is left to walk up to, because the old root is
+# detached, so a payload may hold CAP_SYS_CHROOT, as `oci_default_capabilities` has
+# it do. See ADR-009.
+#
+# pivot_root wants a mount point, so the rootfs is bound onto itself first, and
+# MS_REC because a user namespace refuses to bind a subtree holding locked mounts
+# without it. The rest is the sequence pivot_root(2) gives for needing no temporary
+# directory: `pivot_root(".", ".")` stacks the old root on top of the new one, and
+# `.` resolves up that stack, so the detach takes the old root off.
+#
+# ⛔ FAILS CLOSED where this cannot run, with no fall back to chroot, which is the
+# escape. pivot_root(2) names a root on the initial ramfs as one such host (read, not
+# run). A caller that is itself chrooted onto a plain directory is refused sooner, at
+# the private mount, as it was through 3.14.5, and onto a mount point it works.
 fn _spawn_enter_rootfs(rootfs) {
     if (rootfs == 0) { return 0; }
-    # ⛔ LINUX ONLY, AND IT MUST FAIL CLOSED ELSEWHERE. This is mount-namespace + chroot
-    # confinement: agnos has no mount namespaces, no `chroot`, and no `chdir` syscall — `sys_mount`
+    # ⛔ LINUX ONLY, AND IT MUST FAIL CLOSED ELSEWHERE. This is mount-namespace + pivot_root
+    # confinement: agnos has no mount namespaces, no `pivot_root`, and no `chdir` syscall — `sys_mount`
     # is a 0-argument stub there and `SYS_CHDIR` is not in the enum at all, so this function did not
     # even COMPILE for `--agnos`, taking every consumer of `[deps.kavach]` down with it.
     # ⚠ The agnos arm returns -1, NOT 0. Returning 0 would report "the payload is confined to
@@ -117,18 +144,20 @@ fn _spawn_enter_rootfs(rootfs) {
     #ifdef CYRIUS_TARGET_AGNOS
     return 0 - 1;
     #endif
-    # sys_chroot since 3.14.2. Through 3.14.1 aarch64 refused here, before any
-    # side effect: kavach's own x86-64 161 is sethostname(2) there, which through
-    # 3.12.7 could rename the host's UTS namespace and report the payload as
-    # confined, and the native 51 is renumbered to getsockname by cyrius. The
-    # stdlib names SYS_CHROOT in both Linux peers (ESYSXLAT 161→51, below the
-    # 51→204 row).
     #ifndef CYRIUS_TARGET_AGNOS
-    # Detach propagation, or our mounts (and the chroot) leak to the host.
+    # Detach propagation, or our mounts leak to the host.
     if (sys_mount(0, "/", 0, MS_REC_PRIVATE, 0) < 0) { return 0 - 1; }
-    if (sys_chroot(rootfs) < 0) { return 0 - 1; }
-    # chroot does NOT move cwd; leaving it outside the new root is itself an
-    # escape route.
+    # "/" is the root already, with nothing above it to leave, and pivot_root reads
+    # EBUSY for a new root on the mount it would replace.
+    if (streq(rootfs, "/") == 1) {
+        if (syscall(SYS_CHDIR, "/") < 0) { return 0 - 1; }
+        return 0;
+    }
+    if (sys_mount(rootfs, rootfs, 0, MS_REC_BIND, 0) < 0) { return 0 - 1; }
+    if (syscall(SYS_CHDIR, rootfs) < 0) { return 0 - 1; }
+    if (sys_pivot_root(".", ".") < 0) { return 0 - 1; }
+    if (sys_umount2(".", KAVACH_MNT_DETACH) < 0) { return 0 - 1; }
+    # As runc does, because the kernel promises nothing about the cwd after this.
     if (syscall(SYS_CHDIR, "/") < 0) { return 0 - 1; }
     return 0;
     #endif
@@ -139,7 +168,7 @@ fn _spawn_enter_rootfs(rootfs) {
 # ⚠ MUST run AFTER `_spawn_enter_rootfs`, or the path resolves against the HOST
 # filesystem — a `workdir` of `/app` would land in the host's `/app` and the
 # payload would run outside the container with no error. `_spawn_enter_rootfs`
-# already `chdir("/")`s after chroot, so this refines a cwd that is already
+# already `chdir("/")`s after the pivot, so this refines a cwd that is already
 # inside the root rather than establishing one.
 #
 # ⚠ FAILS CLOSED. A workdir the caller asked for and did not get is a silently
@@ -159,6 +188,77 @@ fn _spawn_enter_workdir(workdir) {
     if (syscall(SYS_CHDIR, workdir) < 0) { return 0 - 1; }
     return 0;
     #endif
+}
+
+# Bound the calling process, the child, to `mask`: the bounding set, then permitted
+# and effective, with inheritable empty, which takes ambient with it. Returns 0, or
+# -1 when a capability that had to go could not be dropped.
+#
+# The bounding set is what holds. A payload running as uid 0, in the host's user
+# namespace or its own, takes its permitted set from it at `execve`. CAP_SETPCAP
+# drops it, so that comes before the `capset` that may give it up.
+#
+# A bound, not a grant. `mask` is cut to what the caller holds, because `capset`
+# refuses more, and NO_NEW_PRIVS stops `execve` adding any.
+#
+# Only with a rootfs: see `confine_child_caps`. ⛔ LINUX ONLY, like the sequence.
+fn _spawn_bound_capabilities(mask) {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0 - 1;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    var hdr[8];
+    var data[24];
+    store32(&hdr, KAVACH_CAP_VERSION_3);
+    store32(&hdr + 4, 0);
+    memset(&data, 0, 24);
+    if (sys_capget(&hdr, &data) != 0) { return 0 - 1; }
+    var held = load32(&data + 4) | (load32(&data + 16) << 32);
+    var i = 0;
+    while (i < 64) {
+        if (((mask >> i) & 1) == 0) {
+            # EINVAL is past the kernel's last capability.
+            var bounded = syscall(SYS_PRCTL, KAVACH_PR_CAPBSET_READ, i, 0, 0, 0);
+            if (bounded < 0) { break; }
+            if (bounded == 1) {
+                if (syscall(SYS_PRCTL, KAVACH_PR_CAPBSET_DROP, i, 0, 0, 0) < 0) { return 0 - 1; }
+            }
+        }
+        i = i + 1;
+    }
+    var keep = mask & held;
+    memset(&data, 0, 24);
+    store32(&data, keep & 0xFFFFFFFF);
+    store32(&data + 4, keep & 0xFFFFFFFF);
+    store32(&data + 12, keep >> 32);
+    store32(&data + 16, keep >> 32);
+    if (sys_capset(&hdr, &data) != 0) { return 0 - 1; }
+    return 0;
+    #endif
+}
+
+# Why `config`'s capability list cannot be honoured here, as a message, or 0. Read
+# with a rootfs only, which is where a list applies. CAP_SYS_ADMIN under a filter
+# is not refused, unlike `oci_capabilities_refusal`: that rule answers a runtime
+# resolving a filter by name and skipping one it does not know, and this filter
+# compares numbers, so `open_tree_attr` is denied here.
+#[must_use]
+fn confine_capabilities_refusal(config) {
+    if (config == 0) { return 0; }
+    if (SandboxConfig_rootfs(config) == 0) { return 0; }
+    var v = SandboxConfig_capabilities(config);
+    if (v == 0) { return 0; }
+    return security_capability_refusal(v);
+}
+
+# `config`'s capabilities as a mask, for `confine_child_caps`. Built in the PARENT,
+# because alloc after fork is unsafe and the list is strings.
+#[must_use]
+fn confine_capabilities(config) {
+    if (config == 0) { return KAVACH_CAPS_DEFAULT; }
+    var v = SandboxConfig_capabilities(config);
+    if (v == 0) { return KAVACH_CAPS_DEFAULT; }
+    return security_capability_mask(v);
 }
 
 # SIGPIPE back to its default in the payload (3.13.2), with the stdlib's
@@ -201,7 +301,7 @@ fn _spawn_die_with_parent(ppid) {
 # and ignored — most of the range is simply not open. The one fd spared is the
 # pinned binary the child is about to exec (kv_exec_pin, util.cyr). It is a
 # close-on-exec fd to a FILE, and it only exists when there is no rootfs, so it
-# is never the directory-outside-the-root that makes a chroot escapable.
+# is never a directory outside the root, which is what closing the rest is for.
 fn _spawn_close_inherited(from) {
     var fd = from;
     while (fd < SPAWN_MAX_FD) {
@@ -297,9 +397,10 @@ fn _spawn_redirect_stdio(log_path) {
 # Order is security-relevant and is the reason this is one function rather than
 # a checklist each backend re-implements:
 #   fds -> cgroup -> NO_NEW_PRIVS -> namespaces (+idmap) -> rootfs -> landlock
-#   -> seccomp
-# seccomp is last because it denies mount/chroot/unshare; rootfs entry precedes
-# landlock because landlock path rules resolve against the current root.
+#   -> capabilities -> seccomp
+# seccomp is last because it denies mount/pivot_root/unshare; rootfs entry precedes
+# landlock because landlock path rules resolve against the current root, and the
+# capabilities follow landlock because its rules open their paths.
 # `want_ns` (3.11.3) — whether to create namespaces as the policy requests.
 #
 # **1 for every caller that predates 3.11.3, and their behaviour is unchanged.**
@@ -325,6 +426,19 @@ fn confine_child(policy, rootfs, cgroup_path, uid, gid, seccomp_info, want_ns) {
 # is unchanged for every existing caller — the same discipline `confine_capture`
 # follows for `input` and `confine_capture_input_env` for `env`.
 fn confine_child_wd(policy, rootfs, cgroup_path, uid, gid, seccomp_info, want_ns, workdir) {
+    return confine_child_caps(policy, rootfs, cgroup_path, uid, gid, seccomp_info, want_ns, workdir,
+      KAVACH_CAPS_DEFAULT);
+}
+
+# 3.14.6: the same sequence with the capabilities a payload with a rootfs keeps, as
+# a mask (`confine_capabilities`). The wrapper above gives it the default, so a
+# caller of `dist/kavach-confine.cyr` passing a rootfs gets the bound unasked.
+#
+# ⚠ `caps` applies only with a rootfs. With none the payload is on the host's files,
+# where no set bounds a uid 0 process from what root owns (`core_pattern` opens to
+# write with `CapEff` zero), so this path holds what kavach holds, as it always has.
+# See ADR-009.
+fn confine_child_caps(policy, rootfs, cgroup_path, uid, gid, seccomp_info, want_ns, workdir, caps) {
     # ⛔ THE WHOLE SEQUENCE IS LINUX-SPECIFIC and none of it exists on agnos: no cgroups, no
     # `prctl`, no namespaces, no landlock, no seccomp. `SYS_PRCTL` is not even in the agnos syscall
     # enum, so this function failed to COMPILE for `--agnos` and took every consumer of
@@ -345,7 +459,7 @@ fn confine_child_wd(policy, rootfs, cgroup_path, uid, gid, seccomp_info, want_ns
     # on `confine_child`'s signature.
     #
     # ⛔ A rootfs always gets its namespaces, whatever `want_ns` says (3.12.9).
-    # `_spawn_enter_rootfs` makes `/` private and chroots, and with no mount
+    # `_spawn_enter_rootfs` makes `/` private and pivots, and with no mount
     # namespace of our own that `mount` lands in the caller's: as root, the
     # host's propagation. kavach's own callers pass want_ns = 1 whenever there
     # is a rootfs, but this function is exported (`dist/kavach-confine.cyr`),
@@ -365,10 +479,13 @@ fn confine_child_wd(policy, rootfs, cgroup_path, uid, gid, seccomp_info, want_ns
         }
     }
     if (_spawn_enter_rootfs(rootfs) != 0) { sys_exit(SPAWN_EXIT_ROOTFS); }
-    # After the chroot, so the path resolves inside the container. See the fn's header.
+    # After the pivot, so the path resolves inside the container. See the fn's header.
     if (_spawn_enter_workdir(workdir) != 0) { sys_exit(SPAWN_EXIT_WORKDIR); }
 
     if (_spawn_apply_landlock(policy) != 0) { sys_exit(SPAWN_EXIT_LANDLOCK); }
+    if (rootfs != 0) {
+        if (_spawn_bound_capabilities(caps) != 0) { sys_exit(SPAWN_EXIT_CAPS); }
+    }
     if (seccomp_info != 0) {
         if (is_ok(security_load_seccomp(security_seccomp_filter_ptr(seccomp_info),
               security_seccomp_filter_len(seccomp_info))) == 0) {
@@ -396,6 +513,7 @@ fn spawn_exit_name(code) {
     if (code == SPAWN_EXIT_LANDLOCK) { return "cannot apply landlock"; }
     if (code == SPAWN_EXIT_SECCOMP) { return "cannot load seccomp filter"; }
     if (code == SPAWN_EXIT_ROOTFS) { return "cannot enter rootfs"; }
+    if (code == SPAWN_EXIT_CAPS) { return "cannot bound capabilities"; }
     if (code == SPAWN_EXIT_IDMAP) {
         return "cannot write uid_map/gid_map (already inside a restricted user namespace?)";
     }
@@ -525,11 +643,77 @@ fn confine_capture_input_env(args, policy, rootfs, cgroup_path, seccomp_info, bu
 # 3.12.2: …and the payload's working directory. `workdir == 0` is unchanged
 # behaviour, so the wrapper above covers every 3.12.0/3.12.1 caller.
 #
-# ⚠ The parameter list has grown to 14 by strict append-and-wrap, which has kept
-# every release source-compatible but is at the end of its useful life. The next
-# capability here should take a config struct instead of a 15th positional.
+# ⚠ The parameter list grew to 14 by strict append-and-wrap, which kept every release
+# source-compatible and is where it stops. What comes next is a `ConfineCapture`
+# field: `caps` was the first (3.14.6).
 fn confine_capture_input_env_wd(args, policy, rootfs, cgroup_path, seccomp_info, buf, buflen,
   want_ns, timeout_ms, do_confine, input, input_len, env, workdir) {
+    return confine_capture_run(confine_capture_new(args, policy, rootfs, cgroup_path, seccomp_info,
+        buf, buflen, want_ns, timeout_ms, do_confine, input, input_len, env, workdir));
+}
+
+# One capture: everything `confine_capture_run` reads.
+#derive(accessors)
+struct ConfineCapture {
+    args;
+    policy;
+    rootfs;
+    cgroup_path;
+    seccomp_info;
+    buf;
+    buflen;
+    want_ns;
+    timeout_ms;
+    do_confine;
+    input;
+    input_len;
+    env;
+    workdir;
+    caps;
+}
+var CONFINE_CAPTURE_SIZE = 120;
+
+# A capture of what the positional wrappers above have always taken, with `caps` at
+# the default. A caller with a config sets `caps` from `confine_capabilities`.
+fn confine_capture_new(args, policy, rootfs, cgroup_path, seccomp_info, buf, buflen,
+  want_ns, timeout_ms, do_confine, input, input_len, env, workdir) {
+    var c = alloc(CONFINE_CAPTURE_SIZE);
+    ConfineCapture_set_args(c, args);
+    ConfineCapture_set_policy(c, policy);
+    ConfineCapture_set_rootfs(c, rootfs);
+    ConfineCapture_set_cgroup_path(c, cgroup_path);
+    ConfineCapture_set_seccomp_info(c, seccomp_info);
+    ConfineCapture_set_buf(c, buf);
+    ConfineCapture_set_buflen(c, buflen);
+    ConfineCapture_set_want_ns(c, want_ns);
+    ConfineCapture_set_timeout_ms(c, timeout_ms);
+    ConfineCapture_set_do_confine(c, do_confine);
+    ConfineCapture_set_input(c, input);
+    ConfineCapture_set_input_len(c, input_len);
+    ConfineCapture_set_env(c, env);
+    ConfineCapture_set_workdir(c, workdir);
+    ConfineCapture_set_caps(c, KAVACH_CAPS_DEFAULT);
+    return c;
+}
+
+# Fork, confine, exec and capture. Returns the bytes in `buf`, or -1; the payload's
+# exit code is `confine_last_exit()`.
+fn confine_capture_run(c) {
+    var args = ConfineCapture_args(c);
+    var policy = ConfineCapture_policy(c);
+    var rootfs = ConfineCapture_rootfs(c);
+    var cgroup_path = ConfineCapture_cgroup_path(c);
+    var seccomp_info = ConfineCapture_seccomp_info(c);
+    var buf = ConfineCapture_buf(c);
+    var buflen = ConfineCapture_buflen(c);
+    var want_ns = ConfineCapture_want_ns(c);
+    var timeout_ms = ConfineCapture_timeout_ms(c);
+    var do_confine = ConfineCapture_do_confine(c);
+    var input = ConfineCapture_input(c);
+    var input_len = ConfineCapture_input_len(c);
+    var env = ConfineCapture_env(c);
+    var workdir = ConfineCapture_workdir(c);
+    var caps = ConfineCapture_caps(c);
     # ⛔ LINUX ONLY — the fork/confine/execve/capture path. agnos has no fork by design and its
     # sandboxing goes through backend_sy_agnos, not this file.
     # ⚠ -1, never a fabricated success: a caller must not receive an empty capture buffer and
@@ -631,7 +815,7 @@ fn confine_capture_input_env_wd(args, policy, rootfs, cgroup_path, seccomp_info,
         # mean an UNCONFINED capture silently ignored the caller's workdir, which
         # is the decorative-setter shape this release exists to remove.
         if (do_confine != 0) {
-            confine_child_wd(policy, rootfs, cgroup_path, uid, gid, seccomp_info, want_ns, 0);
+            confine_child_caps(policy, rootfs, cgroup_path, uid, gid, seccomp_info, want_ns, 0, caps);
         }
         # After confinement, so the path resolves inside the rootfs when there is one.
         if (_spawn_enter_workdir(workdir) != 0) { sys_exit(SPAWN_EXIT_WORKDIR); }

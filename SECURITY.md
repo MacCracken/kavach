@@ -59,6 +59,14 @@ Items tracked in [ADR-004](docs/adr/004-deferred-features.md) and
 [ADR-005](docs/adr/005-v2-hardening-pass.md) with documented residual risk
 and unblocking conditions:
 
+- **A payload with no rootfs, as root, is on the host's files.** It holds what kavach holds. No capability set would
+  bound it: `/proc/sys/kernel/core_pattern` and files root owns open to write with `CapEff` zero, because that access
+  is uid 0's. A landlock rule is what bounds it (`policy_landlock_add`), and no preset names one.
+- **A `/proc` a caller mounted in a process-path rootfs is not read-only.** kavach mounts none, but where a caller has,
+  a payload running as uid 0 opens `core_pattern` and `sysrq-trigger` to write. On the OCI backend the mounts stop that.
+- **`sandbox_spawn` reads no backend.** A sandbox configured for OCI forks without a runtime: it holds the default set
+  and gets `pivot_root`, with no PID namespace, no `/proc` and no masks, and `score_backend` scores it as OCI.
+  All three are in `docs/development/issues/2026-11-06-process-backend-keeps-every-capability.md`.
 - **HTTP credential proxy** — direct env/file/stdin injection and the
   loopback HTTP proxy (`GET /v1/secret/<name>`) ship; HTTPS `CONNECT`
   tunnelling is not implemented
@@ -71,6 +79,11 @@ and unblocking conditions:
 
 Resolved since earlier releases:
 
+- **v3.14.6:**
+  - a payload with a rootfs on the process path, and every `sandbox_spawn` whatever the backend, held every capability
+    and left its rootfs by `chroot`, as root and rootless, under `policy_basic()`. From there, as root, it could open
+    `core_pattern` to write. A rootfs is now entered with `pivot_root` and the payload holds the OCI default set
+    ([ADR-009](docs/adr/009-rootfs-on-the-process-path.md)). CHANGELOG 3.14.6.
 - **v3.14.5:**
   - an OCI container kept every capability with no filter, and all but CAP_SYS_ADMIN with one, and `/proc` was
     neither masked nor read-only. Measured as root, a payload could open

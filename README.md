@@ -12,6 +12,13 @@ classification, credential proxy, HMAC-SHA256 audit chain — all in pure Cyrius
 
 ## Status
 
+**v3.14.6 — a rootfs on the process path holds.** A payload there is now entered with `pivot_root` and holds the same
+twelve capabilities as an OCI container, on `sandbox_exec` and `sandbox_spawn`, whatever backend the sandbox names.
+Through 3.14.5 it held every capability and left its rootfs in three calls, as root and rootless, under
+`policy_basic()`. nginx and the postgres entry point behave as they did. A payload with no rootfs is unchanged, and
+[what is still open](docs/development/issues/2026-11-06-process-backend-keeps-every-capability.md) is filed.
+**1898** assertions green on x86-64, **1611** on aarch64 under qemu.
+
 **v3.14.5 — a bounded capability set and a masked `/proc` on every OCI container.** Under any policy a container
 now holds twelve capabilities, Docker's default set less CAP_NET_RAW and CAP_MKNOD, and `/proc/sys` is read-only.
 Through 3.14.4 a payload running as root could open `/proc/sys/kernel/core_pattern` to write. `config_capabilities`
@@ -383,7 +390,7 @@ consumer's `cyrius.cyml`:
 [deps.kavach]
 git     = "https://github.com/MacCracken/kavach.git"
 path    = "../kavach"          # local sibling checkout (optional)
-tag     = "3.14.5"
+tag     = "3.14.6"
 modules = ["dist/kavach.cyr"]
 
 # OPTIONAL since 3.13.3 (cyrius 6.6.20): dist/kavach.deps is now the

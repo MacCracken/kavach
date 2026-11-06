@@ -7,6 +7,105 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.14.6] — 2026-11-06
+
+A rootfs on the process path holds. Through 3.14.5 a payload there held every capability and left its rootfs in three
+calls, as root and rootless, and `sandbox_spawn` took that path whatever backend the sandbox named, so a detached payload
+never met 3.14.5's set. Now a rootfs is entered with `pivot_root` and the payload holds the same twelve capabilities as
+an OCI container. Filed by kavach itself, measuring the process backend after 3.14.5. The entry is the maintainer's
+choice, recorded in [ADR-009](docs/adr/009-rootfs-on-the-process-path.md). Three things stay open: see **Still open**.
+
+### ⚠ Behaviour changes
+
+- **A payload with a rootfs holds twelve capabilities on the process path**, on `sandbox_exec`, `sandbox_spawn` and any
+  caller of `confine_child`: `oci_default_capabilities()`, in the bounding, permitted and effective sets, with inheritable
+  and ambient empty. `CapEff` reads `00000000a00405fb`, where it read `000001ffffffffff` as root. A payload needing
+  anything else reads EPERM until it asks with `config_capabilities`.
+- **A rootfs is entered with `pivot_root`, with no fall back to `chroot`**, so a host where it cannot run refuses the
+  rootfs, with SPAWN_EXIT_ROOTFS. pivot_root(2) names a root on the initial ramfs. That is read and not run. A caller
+  chrooted onto a plain directory was already refused, at the private mount. `rootfs == "/"` skips the pivot and keeps
+  the private mount.
+- **`config_capabilities` is read on the process path with a rootfs**, and a name kavach does not know now fails the
+  exec or refuses the spawn. Through 3.14.5 the path ignored the list.
+- **`sandbox_spawn` on an OCI or gVisor sandbox is bounded**, by the same path. It still reads no backend.
+
+Measured against the images ADR-008 used, as root, before and after, on the process path, nothing that ran stopped:
+
+| | As kavach leaves a rootfs | Caller adds `/dev` and `/proc` |
+|---|---|---|
+| `su`, `chown` | run, as before | run, as before |
+| nginx, serves a page, workers at uid 101 | runs, as before | runs, as before |
+| postgres entry point, answers `pg_isready` | fails, as before: `gosu` stats `/proc/self/exe` | runs, as before |
+
+### Added
+
+- **`confine_child_caps`**: the confinement sequence with the capabilities as a mask. `confine_child_wd` and `confine_child`
+  pass the default, so a `dist/kavach-confine.cyr` caller with a rootfs is bounded unasked.
+- **`ConfineCapture`**, `confine_capture_new` and `confine_capture_run`: a capture as a struct, as the 14-positional
+  function's own note asked of the next field. Every positional function stays.
+- **`confine_capabilities(config)`** and **`confine_capabilities_refusal(config)`**: a config's list as a mask, built in the
+  parent, and why it cannot be honoured.
+- **`security_capability_names()`**, **`security_capability_mask(names)`** and **`security_capability_refusal(names)`**.
+- **SPAWN_EXIT_CAPS (116)**, "cannot bound capabilities".
+
+### Changed
+
+- **The capability table and `oci_default_capabilities` moved to `src/security.cyr`.** `[lib.confine]` carries `confine.cyr`
+  and not `oci_spec.cyr`, so leaving them would have compiled in-tree and broken thoth's build. The public name is unchanged,
+  and `_oci_capability_names` is `security_capability_names`.
+
+### Security
+
+- **A process-path payload with a rootfs could leave it, and as root reach the host.** Measured as root in a privileged
+  throwaway container, from a payload under `policy_basic()`, opening files and writing nothing. `sandbox_exec` and
+  `sandbox_spawn` read the same, and `sandbox_spawn` read the same on an OCI sandbox with runc installed:
+
+  | | 3.14.5 | 3.14.6 |
+  |---|---|---|
+  | `CapEff`, `CapBnd` | `000001ffffffffff` | `00000000a00405fb` |
+  | leave the rootfs by `chroot`, read a file outside it | **escapes** | stays in |
+  | …then open `core_pattern` to write, read `/proc/kcore` | **allowed**, a byte | ENOENT, ENOENT |
+  | `mknod` a character device in the rootfs and open it | **opens** | EPERM |
+  | `open_by_handle_at` a file outside the rootfs, handed a real handle | **reads it** | EPERM |
+  | with no filter, `mount` a `/proc` of its own | **mounts** | EPERM |
+
+  Rootless the `chroot` row read the same, reaching what the rootless uid can, and now stays in. A nested user namespace,
+  which hands a payload every capability again, stays in too and mounts nothing.
+- **`chroot` was not denied, and the code said it was.** `src/confine.cyr` and `src/spawn.cyr` said the filter denies it, and
+  that a chroot needs a directory fd from outside to escape, and that the payload had no capability to re-chroot. None held.
+  Those comments are gone, and the deny list is unchanged: the table is shared with the OCI filter, and ADR-008 kept
+  CAP_SYS_CHROOT on purpose, which is safe now on both paths.
+
+### Still open
+
+In [the issue](docs/development/issues/2026-11-06-process-backend-keeps-every-capability.md), and in `SECURITY.md`:
+
+- **A `/proc` a caller mounted in a rootfs is not read-only.** kavach mounts none, but where a caller has, uid 0 with the
+  twelve still opens `core_pattern` and `sysrq-trigger` to write, because that access is uid 0's, and not a capability's.
+  `/proc/kcore` is closed by the set. A read-only mount with the bound held in a prototype.
+- **A payload with no rootfs is unchanged.** No set would bound it, and a landlock rule does.
+- **`sandbox_spawn` still reads no backend**, so an OCI sandbox gets no PID namespace, no `/proc` and no masks this way, and
+  is scored as OCI.
+
+### Tests
+
+- **`test_process_rootfs_payload`** asserts all of this from inside a payload, on both paths, and CI's root job runs it.
+  `test_capability_masks` holds the constant to the list. `test_bound_clears_inheritable_and_ambient` exists because a
+  mutation pass found the `capset` could be deleted with the suite green: inheritable capabilities pass `execve` whatever
+  the bounding set says, and no test held any. Every other part of the change failed the suite when reverted.
+- 1898 assertions on x86-64, with the root groups passing as root and as uid 65534 on Arch with runc 1.5.2, Ubuntu 26.04
+  with 1.4.0 and Ubuntu 24.04 with 1.3.4, and 1611 on aarch64 under qemu, where the rootfs group skips: qemu refuses the namespaces.
+  The new calls were traced there instead (`pivot_root`, `umount2`, `capget`, `capset`, `prctl`), and CI's native job is
+  their first real run.
+
+### Benchmarks
+
+Recorded as `3.14.6` in `benches/bench-history.csv`, and no exec row moved: `process_exec_confined` reads 2.787 ms against
+2.786 ms. The largest shift of the 32 is `policy_strict_create`, 49 to 53 ns, which this change does not touch. None of the
+32 enters a rootfs, so that was timed apart: both builds interleaved as root on one payload, 16 windows of 150 execs a side,
+each a whole driver process. 3.14.5 reads a median of 6.60 ms (6.52 to 6.74), and 3.14.6 6.68 ms (6.54 to 6.78). The ranges
+overlap, which reads as no measured change.
+
 ## [3.14.5] — 2026-11-06
 
 A bounded capability set and a masked `/proc` on every OCI container, whatever the policy. Through 3.14.4 a spec

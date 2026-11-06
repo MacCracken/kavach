@@ -263,7 +263,7 @@ Each backend is a plug into the dispatch table. To add `<name>`:
 | Platform | State | Evidence |
 |---|---|---|
 | Linux x86-64 | Supported | The full suite in CI, with seccomp loaded. |
-| Linux aarch64 | Supported (v3.13.0); namespaces and rootfs entry since v3.14.2, through the stdlib's `sys_unshare` and `sys_chroot` ([ADR-007](../adr/007-syscall-numbers-across-architectures.md)) | The `aarch64 (native)` CI job, blocking since v3.12.9, on GitHub's arm64 runner: 1186 of 1186 with seccomp loaded on the 3.14.0 run. Also cross-built and run under qemu, which refuses user namespaces in its multi-threaded process, so the namespace and rootfs tests run fully only on the native job. |
+| Linux aarch64 | Supported (v3.13.0); namespaces and rootfs entry since v3.14.2, through the stdlib's `sys_unshare` and `sys_pivot_root` (`sys_chroot` through v3.14.5) ([ADR-007](../adr/007-syscall-numbers-across-architectures.md)) | The `aarch64 (native)` CI job, blocking since v3.12.9, on GitHub's arm64 runner: 1186 of 1186 with seccomp loaded on the 3.14.0 run. Also cross-built and run under qemu, which refuses user namespaces in its multi-threaded process, so the namespace and rootfs tests run fully only on the native job. |
 | agnos | Builds (`cyrius build --agnos`); the Linux confinement primitives return not-supported | Confinement there is the capability layer's (v3.5.1). |
 
 ## External dependencies

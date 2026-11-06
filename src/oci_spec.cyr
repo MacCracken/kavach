@@ -114,106 +114,13 @@ fn _oci_wants_filter(config) {
     return 1;
 }
 
-var _OCI_CAP_NAMES = 0;
-
-# Every capability a spec may name, in kernel order, so an index is that
-# capability's bit in /proc/self/status. Published last, as `_seccomp_deny_list`
-# publishes its table.
-#[must_use]
-fn _oci_capability_names() {
-    if (_OCI_CAP_NAMES != 0) { return _OCI_CAP_NAMES; }
-    var v = vec_new();
-    vec_push(v, "CAP_CHOWN");
-    vec_push(v, "CAP_DAC_OVERRIDE");
-    vec_push(v, "CAP_DAC_READ_SEARCH");
-    vec_push(v, "CAP_FOWNER");
-    vec_push(v, "CAP_FSETID");
-    vec_push(v, "CAP_KILL");
-    vec_push(v, "CAP_SETGID");
-    vec_push(v, "CAP_SETUID");
-    vec_push(v, "CAP_SETPCAP");
-    vec_push(v, "CAP_LINUX_IMMUTABLE");
-    vec_push(v, "CAP_NET_BIND_SERVICE");
-    vec_push(v, "CAP_NET_BROADCAST");
-    vec_push(v, "CAP_NET_ADMIN");
-    vec_push(v, "CAP_NET_RAW");
-    vec_push(v, "CAP_IPC_LOCK");
-    vec_push(v, "CAP_IPC_OWNER");
-    vec_push(v, "CAP_SYS_MODULE");
-    vec_push(v, "CAP_SYS_RAWIO");
-    vec_push(v, "CAP_SYS_CHROOT");
-    vec_push(v, "CAP_SYS_PTRACE");
-    vec_push(v, "CAP_SYS_PACCT");
-    vec_push(v, "CAP_SYS_ADMIN");
-    vec_push(v, "CAP_SYS_BOOT");
-    vec_push(v, "CAP_SYS_NICE");
-    vec_push(v, "CAP_SYS_RESOURCE");
-    vec_push(v, "CAP_SYS_TIME");
-    vec_push(v, "CAP_SYS_TTY_CONFIG");
-    vec_push(v, "CAP_MKNOD");
-    vec_push(v, "CAP_LEASE");
-    vec_push(v, "CAP_AUDIT_WRITE");
-    vec_push(v, "CAP_AUDIT_CONTROL");
-    vec_push(v, "CAP_SETFCAP");
-    vec_push(v, "CAP_MAC_OVERRIDE");
-    vec_push(v, "CAP_MAC_ADMIN");
-    vec_push(v, "CAP_SYSLOG");
-    vec_push(v, "CAP_WAKE_ALARM");
-    vec_push(v, "CAP_BLOCK_SUSPEND");
-    vec_push(v, "CAP_AUDIT_READ");
-    vec_push(v, "CAP_PERFMON");
-    vec_push(v, "CAP_BPF");
-    vec_push(v, "CAP_CHECKPOINT_RESTORE");
-    _OCI_CAP_NAMES = v;
-    return v;
-}
-
-# The capabilities a container gets unless `config_capabilities` names others, as
-# a fresh vec: a caller may push onto it and hand it back.
-#
-# Docker's default set less CAP_NET_RAW and CAP_MKNOD. Measured under
-# `no-new-privileges`: nginx (its workers change user) and postgres's entry point
-# (it chowns the data directory and drops to postgres) both run under this set, as
-# do `su` and `chown`. All four fail under the three names `runc spec` writes.
-#
-#   - CAP_NET_RAW reaches nothing in the empty namespace of a policy with no
-#     network. `network_enabled` shares the HOST's namespace (`netns` in
-#     `oci_generate_spec`), where a payload running as root could read and forge
-#     the host's traffic. So it is either useless or too much.
-#   - CAP_MKNOD cannot make a device node in a user namespace. As root under runc
-#     1.5.2 it can, and opening one past runc's default rules still read EPERM.
-#
-# ⚠ Name nothing newer than the oldest kernel kavach supports. runc logs a
-# capability the kernel does not have at level=warning, into the `--log` file
-# `_oci_exec_with` reads as a runtime failure, so a default of CAP_PERFMON (5.8)
-# would fail every container on a kernel older than that. The newest name here is
-# CAP_SETFCAP (2.6.24). A caller naming a newer one gets that failure on an older
-# kernel, which is the right answer to asking for what the kernel does not have.
-#[must_use]
-fn oci_default_capabilities() {
-    var v = vec_new();
-    vec_push(v, "CAP_CHOWN");
-    vec_push(v, "CAP_DAC_OVERRIDE");
-    vec_push(v, "CAP_FOWNER");
-    vec_push(v, "CAP_FSETID");
-    vec_push(v, "CAP_KILL");
-    vec_push(v, "CAP_SETGID");
-    vec_push(v, "CAP_SETUID");
-    vec_push(v, "CAP_SETPCAP");
-    vec_push(v, "CAP_NET_BIND_SERVICE");
-    vec_push(v, "CAP_SYS_CHROOT");
-    vec_push(v, "CAP_AUDIT_WRITE");
-    vec_push(v, "CAP_SETFCAP");
-    return v;
-}
-
 # Why this config's capability list cannot be written, as a message, or 0 when it
 # can. The spec is refused rather than the name dropped: a payload running with
 # less than its caller asked for fails later, somewhere that says nothing of why.
 #
-#   - An unknown name. A name is written into the spec unescaped because it has
-#     matched the table, and runc only warns about one it does not know, which
-#     `_oci_exec_with` would then report as a runtime failure.
+#   - An unknown name (`security_capability_refusal`). A name is written into the
+#     spec unescaped because it has matched the table, and runc only warns about one
+#     it does not know, which `_oci_exec_with` would then report as a runtime failure.
 #   - CAP_SYS_ADMIN under the filter. `open_tree_attr` gets past the filter by name
 #     (see `_oci_seccomp_json`) and needs CAP_SYS_ADMIN to clone a tree. Measured
 #     under runc 1.5.2 with the filter on and a read-only rootfs: a direct create
@@ -226,23 +133,11 @@ fn oci_capabilities_refusal(config) {
     if (config == 0) { return 0; }
     var v = SandboxConfig_capabilities(config);
     if (v == 0) { return 0; }
-    var known = _oci_capability_names();
+    var unknown = security_capability_refusal(v);
+    if (unknown != 0) { return unknown; }
     var i = 0;
     while (i < vec_len(v)) {
-        var name = vec_get(v, i);
-        var hit = 0;
-        var k = 0;
-        while (name != 0 && k < vec_len(known)) {
-            if (streq(name, vec_get(known, k)) == 1) { hit = 1; }
-            k = k + 1;
-        }
-        if (hit == 0) {
-            var sb = str_builder_new();
-            str_builder_add_cstr(sb, "unknown capability: ");
-            if (name != 0) { str_builder_add_cstr(sb, name); }
-            return str_data(str_builder_build(sb));
-        }
-        if (streq(name, "CAP_SYS_ADMIN") == 1 && _oci_wants_filter(config) == 1) {
+        if (streq(vec_get(v, i), "CAP_SYS_ADMIN") == 1 && _oci_wants_filter(config) == 1) {
             return "CAP_SYS_ADMIN cannot be granted under a seccomp filter: it reopens a read-only rootfs";
         }
         i = i + 1;

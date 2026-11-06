@@ -4393,8 +4393,8 @@ fn test_syscall_name_map_is_native() {
     return 0;
 }
 
-# 3.14.2: unshare(2) and chroot(2) go through the stdlib's sys_unshare and
-# sys_chroot, on aarch64 too. Through 3.14.1 kavach spelled x86-64 272 and 161
+# 3.14.2: unshare(2) goes through the stdlib's sys_unshare, on aarch64 too, as the
+# rootfs entry's own calls do. Through 3.14.1 kavach spelled x86-64 272 and 161
 # itself and aarch64 refused both (it ran them as kcmp and sethostname through
 # 3.12.7). In a child: a user and mount namespace, then the rootfs entry, then
 # the view from inside. The root is an empty directory holding one marker file,
@@ -4432,7 +4432,7 @@ fn test_rootfs_entry_confines_to_the_root() {
     assert_eq(status & 127, 0, "the child is not killed");
     var code = (status >> 8) & 255;
     if (spawn_namespaces_available(want) == 1) {
-        assert_eq(code, 0, "namespaces, then chroot: the marker is at / and the host's /etc is gone");
+        assert_eq(code, 0, "namespaces, then pivot_root: the marker is at / and the host's /etc is gone");
     }
     if (spawn_namespaces_available(want) == 0) {
         assert(code == 2 || code == 3, "no namespaces on this host: refused before the rootfs entry");
@@ -4519,6 +4519,7 @@ fn test_spawn_exit_name() {
     assert(strstr(spawn_exit_name(123), "namespace") >= 0, "and it mentions namespaces");
     assert(strstr(spawn_exit_name(125), "seccomp") >= 0, "seccomp code names seccomp");
     assert(strstr(spawn_exit_name(119), "rootfs") >= 0, "rootfs code names rootfs");
+    assert(strstr(spawn_exit_name(116), "capabilities") >= 0, "capabilities code names capabilities");
     # Namespace creation and id mapping must be DISTINGUISHABLE — they fail on
     # different hosts and the fix for each is different.
     assert(streq(spawn_exit_name(118), spawn_exit_name(123)) == 0,
@@ -8150,7 +8151,7 @@ fn test_oci_config_capabilities() {
 
     # Each name in the table is accepted, and the table is in kernel order, so an
     # index is a bit in /proc/self/status.
-    var names = _oci_capability_names();
+    var names = security_capability_names();
     assert_eq(vec_len(names), 41, "every capability through CAP_CHECKPOINT_RESTORE");
     assert_eq(streq(vec_get(names, 13), "CAP_NET_RAW"), 1, "CAP_NET_RAW is bit 13");
     assert_eq(streq(vec_get(names, 21), "CAP_SYS_ADMIN"), 1, "CAP_SYS_ADMIN is bit 21");
@@ -8781,6 +8782,369 @@ fn test_oci_payload_observes_the_filter() {
 # The skip above decides whether the group proves anything, so it is tested too:
 # wrongly native fails CI's cross job, as the first 3.14.4 push did, and wrongly
 # foreign turns the real test off in silence.
+# The default set as a mask, and how a list becomes one. `confine_child` cannot
+# allocate, so the default is a constant, and this is what holds it to the list.
+fn test_capability_masks() {
+    test_group("capability_masks");
+    assert_eq(security_capability_mask(oci_default_capabilities()), KAVACH_CAPS_DEFAULT,
+      "the constant is the default list");
+    assert_eq(KAVACH_CAPS_DEFAULT, 0xA00405FB, "which a payload reads as CapEff 00000000a00405fb");
+    var one = vec_new();
+    vec_push(one, "CAP_SYS_CHROOT");
+    assert_eq(security_capability_mask(one), 1 << 18, "a name is its kernel bit");
+    vec_push(one, "CAP_CHECKPOINT_RESTORE");
+    assert_eq(security_capability_mask(one), (1 << 18) | (1 << 40), "the last bit fits");
+    assert_eq(security_capability_mask(vec_new()), 0, "an empty list is no capabilities");
+    assert_eq(security_capability_refusal(oci_default_capabilities()), 0, "the default is all known");
+    var bad = vec_new();
+    vec_push(bad, "CAP_CHOWN");
+    vec_push(bad, "CAP_NONSENSE");
+    assert(strstr(security_capability_refusal(bad), "CAP_NONSENSE") >= 0, "a refusal names the name");
+
+    var c = config_new();
+    assert_eq(confine_capabilities(c), KAVACH_CAPS_DEFAULT, "an unset list is the default");
+    assert_eq(confine_capabilities(0), KAVACH_CAPS_DEFAULT, "and so is no config");
+    config_capabilities(c, vec_new());
+    assert_eq(confine_capabilities(c), 0, "an empty list is none, not the default");
+    config_capabilities(c, bad);
+    assert_eq(confine_capabilities_refusal(c), 0, "with no rootfs a list is not read");
+    config_rootfs(c, "/r");
+    assert(confine_capabilities_refusal(c) != 0, "with one a bad list is refused");
+    var adm = oci_default_capabilities();
+    vec_push(adm, "CAP_SYS_ADMIN");
+    config_capabilities(c, adm);
+    config_policy(c, policy_basic());
+    assert_eq(confine_capabilities_refusal(c), 0, "the process filter compares numbers, so no name rule");
+
+    var cc = confine_capture_new(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+    assert_eq(ConfineCapture_caps(cc), KAVACH_CAPS_DEFAULT, "a capture defaults to the set");
+    return 0;
+}
+
+# Inheritable capabilities pass `execve` for a uid 0 payload whatever the bounding
+# set says, so the bound has to clear them, and ambient with them. A payload cannot
+# show it: it only has what this suite's process has, which is none. So a child in a
+# user namespace of its own, where it holds everything, raises both and bounds itself.
+fn test_bound_clears_inheritable_and_ambient() {
+    test_group("bound_clears_inheritable_and_ambient");
+    if (spawn_namespaces_available(NS_USER) == 0) {
+        assert_eq(1, 1, "no user namespace here — not exercisable");
+        return 0;
+    }
+    var uid = sys_getuid();
+    var gid = kv_getgid();
+    var pid = kv_fork();
+    if (pid == 0) {
+        if (is_ok(security_create_namespace(NS_USER)) == 0) { sys_exit(2); }
+        if (_spawn_write_idmaps(uid, gid) != 0) { sys_exit(2); }
+        var hdr[8];
+        var d[24];
+        store32(&hdr, KAVACH_CAP_VERSION_3);
+        store32(&hdr + 4, 0);
+        memset(&d, 0, 24);
+        if (sys_capget(&hdr, &d) != 0) { sys_exit(3); }
+        store32(&d + 8, load32(&d + 4));            # inheritable = permitted
+        store32(&d + 20, load32(&d + 16));
+        if (sys_capset(&hdr, &d) != 0) { sys_exit(3); }
+        # SAFETY: PR_CAP_AMBIENT (47), PR_CAP_AMBIENT_RAISE (2), CAP_SYS_ADMIN (21),
+        # in this child's own user namespace.
+        if (syscall(SYS_PRCTL, 47, 2, 21, 0, 0) != 0) { sys_exit(3); }
+        if (_spawn_bound_capabilities(KAVACH_CAPS_DEFAULT) != 0) { sys_exit(4); }
+        memset(&d, 0, 24);
+        if (sys_capget(&hdr, &d) != 0) { sys_exit(3); }
+        if (load32(&d + 8) != 0 || load32(&d + 20) != 0) { sys_exit(5); }
+        if (load32(&d) != KAVACH_CAPS_DEFAULT) { sys_exit(6); }
+        # PR_CAP_AMBIENT_IS_SET (1).
+        if (syscall(SYS_PRCTL, 47, 1, 21, 0, 0) != 0) { sys_exit(7); }
+        if (syscall(SYS_PRCTL, KAVACH_PR_CAPBSET_READ, 21, 0, 0, 0) != 0) { sys_exit(8); }
+        sys_exit(0);
+    }
+    var st[8];
+    store64(&st, 0);
+    kv_waitpid(pid, &st, 0);
+    var status = load32(&st);
+    assert_eq(status & 127, 0, "the child is not killed");
+    var code = (status >> 8) & 255;
+    if (code != 2) { assert_eq(code, 0, "inheritable and ambient are gone, and the set is the default"); }
+    return 0;
+}
+
+# ---- What a payload meets in a process-path rootfs (3.14.6) -----------------
+#
+# ⚠ Assert from inside. Through 3.14.5 a payload here held every capability and
+# walked out of its rootfs, and the suite was green, because every rootfs test
+# asserted what the payload could see at `/`, and nothing tried to leave.
+#
+# This payload is the test binary, and such a rootfs has no /proc, so `args_init`
+# finds no /proc/self/cmdline and it has no argv. The mode is a file instead.
+
+var _T_ROOTFS_MARKER = "/tmp/kavach-t-rootfs-marker";
+
+fn _t_rootfs_mode() {
+    var b[8];
+    if (file_read_all("/kv-mode", &b, 1) != 1) { return 0 - 1; }
+    return load8(&b) - 48;
+}
+
+# capget and PR_CAPBSET_READ, because /proc/self/status is not there to read.
+fn _t_rootfs_payload_caps() {
+    var hdr[8];
+    var d[24];
+    store32(&hdr, KAVACH_CAP_VERSION_3);
+    store32(&hdr + 4, 0);
+    memset(&d, 0, 24);
+    sys_capget(&hdr, &d);
+    var bnd = 0;
+    var i = 0;
+    while (i < 64) {
+        var c = syscall(SYS_PRCTL, KAVACH_PR_CAPBSET_READ, i, 0, 0, 0);
+        if (c < 0) { break; }
+        if (c == 1) { bnd = bnd | (1 << i); }
+        i = i + 1;
+    }
+    _t_payload_put("eff ");
+    _t_payload_num(load32(&d) | (load32(&d + 12) << 32));
+    _t_payload_put("\nprm ");
+    _t_payload_num(load32(&d + 4) | (load32(&d + 16) << 32));
+    _t_payload_put("\ninh ");
+    _t_payload_num(load32(&d + 8) | (load32(&d + 20) << 32));
+    _t_payload_put("\nbnd ");
+    _t_payload_num(bnd);
+    _t_payload_put("\n");
+    return 0;
+}
+
+# A chroot below the cwd leaves the cwd outside the root, and `..` from there walks
+# to the top of the mount namespace. Under chroot(2) that top was the host's tree.
+fn _t_rootfs_payload_walk() {
+    _t_payload_put("before ");
+    _t_payload_num(file_open(_T_ROOTFS_MARKER, O_RDONLY, 0));
+    var r = sys_chroot("/sub");
+    _t_payload_put("\nsub ");
+    _t_payload_num(r);
+    _t_payload_put("\n");
+    if (r != 0) { return 0; }
+    var i = 0;
+    while (i < 64) {
+        syscall(SYS_CHDIR, "..");
+        i = i + 1;
+    }
+    _t_payload_put("dot ");
+    _t_payload_num(sys_chroot("."));
+    syscall(SYS_CHDIR, "/");
+    var fd = file_open(_T_ROOTFS_MARKER, O_RDONLY, 0);
+    _t_payload_put("\nafter ");
+    if (fd >= 0) {
+        sys_close(fd);
+        _t_payload_put("ESCAPED\n");
+        return 0;
+    }
+    _t_payload_num(fd);
+    _t_payload_put("\n");
+    return 0;
+}
+
+fn _t_rootfs_payload(mode) {
+    # SAFETY: PR_SET_DUMPABLE 0. A filter kill is a core dump, and a core dump runs
+    # the host's core_pattern. No mode here expects a kill; this is for a test gone wrong.
+    syscall(SYS_PRCTL, 4, 0, 0, 0, 0);
+    if (mode == 0) { return _t_rootfs_payload_caps(); }
+    if (mode == 1) { return _t_rootfs_payload_walk(); }
+    if (mode == 2) {
+        # SAFETY: mknodat(AT_FDCWD, path, S_IFCHR | 0600, 1:3), /dev/null's numbers,
+        # in the payload's own rootfs, and removed if it worked.
+        var mk = syscall(SYS_MKNODAT, 0 - 100, "/kv-node", 8576, 259);
+        _t_payload_put("mknod ");
+        _t_payload_num(mk);
+        _t_payload_put("\n");
+        if (mk == 0) { sys_unlink("/kv-node"); }
+        return 0;
+    }
+    if (mode == 3) {
+        # Only with no filter, which would kill it.
+        _t_payload_put("mount ");
+        _t_payload_num(sys_mount("proc", "/proc", "proc", 0, 0));
+        _t_payload_put("\n");
+        return 0;
+    }
+    if (mode == 4) {
+        # A nested user namespace hands back every capability, whatever the bound,
+        # and the kernel refused one to a chrooted caller, so under chroot this read
+        # EPERM. Past pivot_root it works, and must reach nothing.
+        var u = sys_unshare(CLONE_NEWUSER | CLONE_NEWNS);
+        _t_payload_put("nested ");
+        _t_payload_num(u);
+        _t_payload_put("\n");
+        if (u != 0) { return 0; }
+        _t_payload_put("mount ");
+        _t_payload_num(sys_mount("proc", "/proc", "proc", 0, 0));
+        _t_payload_put("\n");
+        return _t_rootfs_payload_walk();
+    }
+    return 0;
+}
+
+fn _t_rootfs_set_mode(root, mode) {
+    var b[8];
+    store8(&b, 48 + mode);
+    file_write_all(_t_lbl(root, "/kv-mode"), &b, 1);
+    return 0;
+}
+
+var _T_ROOTFS_CODE = 0 - 1;
+
+# Run the payload through `process_exec`, as a sandbox with a rootfs does. The
+# payload's stdout, and its exit code in `_T_ROOTFS_CODE`.
+fn _t_rootfs_exec(policy, root, mode, caps) {
+    _t_rootfs_set_mode(root, mode);
+    var sb = _t_oci_sandbox(KavachBackend.PROCESS, policy, root);
+    if (caps != 0) { config_capabilities(Sandbox_config(sb), caps); }
+    var r = process_exec(sb, "/payload");
+    _T_ROOTFS_CODE = ExecResult_exit_code(r);
+    return ExecResult_stdout(r);
+}
+
+# The same through `sandbox_spawn`, which reads no backend, so `backend` is a real
+# variable here. 0 when the spawn is refused.
+fn _t_rootfs_spawn(backend, policy, root, mode, caps) {
+    _t_rootfs_set_mode(root, mode);
+    var log = "/tmp/kavach-t-rootfs.log";
+    sys_unlink(log);
+    var sb = _t_oci_sandbox(backend, policy, root);
+    if (caps != 0) { config_capabilities(Sandbox_config(sb), caps); }
+    Sandbox_set_state(sb, SandboxState.RUNNING);
+    var sp = sandbox_spawn(sb, "/payload", log);
+    if (sp == 0) { return 0; }
+    var waited = 0;
+    while (waited < 10000) {
+        if (spawned_try_wait(sp) == 1) { break; }
+        sleep_ms(5);
+        waited = waited + 5;
+    }
+    _T_ROOTFS_CODE = spawned_terminate(sp, 100);
+    var buf = alloc(4096);
+    var n = file_read_all(log, buf, 4095);
+    if (n < 0) { n = 0; }
+    store8(buf + n, 0);
+    sys_unlink(log);
+    return buf;
+}
+
+fn _t_rootfs_assert_default_set(o, what) {
+    assert_eq(_T_ROOTFS_CODE, 0, _t_lbl(what, ": the payload runs"));
+    # 2684618235 is 0xa00405fb, the set an OCI payload reads.
+    assert(_t_has_line(o, "eff 2684618235") == 1, _t_lbl(what, ": CapEff is the default set"));
+    assert(_t_has_line(o, "prm 2684618235") == 1, _t_lbl(what, ": and CapPrm"));
+    assert(_t_has_line(o, "bnd 2684618235") == 1, _t_lbl(what, ": and CapBnd"));
+    assert(_t_has_line(o, "inh 0") == 1, _t_lbl(what, ": none inheritable"));
+    return 0;
+}
+
+fn _t_rootfs_assert_stays_in(o, what) {
+    assert_eq(_T_ROOTFS_CODE, 0, _t_lbl(what, ": the walk finishes"));
+    assert(_t_has_line(o, "before -2") == 1, _t_lbl(what, ": the marker is out of sight"));
+    # The payload keeps CAP_SYS_CHROOT, and `chroot` itself must still work, or the
+    # walk below proves nothing and images that call it stop running.
+    assert(_t_has_line(o, "sub 0") == 1, _t_lbl(what, ": chroot works"));
+    assert(_t_has_line(o, "dot 0") == 1, _t_lbl(what, ": at the top too"));
+    assert_eq(_t_count(o, "ESCAPED"), 0, _t_lbl(what, ": nothing was reached"));
+    assert(_t_has_line(o, "after -2") == 1, _t_lbl(what, ": the marker is still out of sight"));
+    return 0;
+}
+
+fn test_process_rootfs_payload() {
+    test_group("process_rootfs_payload");
+    if (_t_runtime_is_native("/bin/sh") == 0) {
+        _t_oci_skip("this build is emulated: no payload of its arch starts here — not exercisable", 0);
+        return 0;
+    }
+    var nsf = _spawn_ns_flags(policy_new(), "/r");
+    if (spawn_namespaces_available(nsf) == 0) {
+        _t_oci_skip("this host refuses the namespaces a rootfs needs — not exercisable", 0);
+        return 0;
+    }
+    var root = "/tmp/kavach-t-rootfs";
+    var payload = _t_oci_rootfs(root);
+    assert(payload != 0, "the rootfs is built");
+    if (payload == 0) { return 0; }
+    var sub = _t_lbl(root, "/sub");
+    kv_mkdir(sub, 493);
+    file_write_all(_T_ROOTFS_MARKER, "x\n", 2);
+
+    var i = 0;
+    while (i < 2) {
+        var pn = "policy_basic";
+        var p = policy_basic();
+        if (i == 1) {
+            pn = "policy_new";
+            p = policy_new();
+        }
+        var ex = _t_lbl(pn, ", exec");
+        var sp = _t_lbl(pn, ", spawn");
+        _t_rootfs_assert_default_set(_t_rootfs_exec(p, root, 0, 0), ex);
+        _t_rootfs_assert_default_set(_t_rootfs_spawn(KavachBackend.PROCESS, p, root, 0, 0), sp);
+        _t_rootfs_assert_stays_in(_t_rootfs_exec(p, root, 1, 0), ex);
+        _t_rootfs_assert_stays_in(_t_rootfs_spawn(KavachBackend.PROCESS, p, root, 1, 0), sp);
+        # CAP_MKNOD is what this reads as root. Rootless a user namespace refuses
+        # it anyway, so this row proves something only in the root job.
+        assert(_t_has_line(_t_rootfs_exec(p, root, 2, 0), "mknod -1") == 1, _t_lbl(ex, ": no device node"));
+        assert(_t_has_line(_t_rootfs_spawn(KavachBackend.PROCESS, p, root, 2, 0), "mknod -1") == 1,
+          _t_lbl(sp, ": no device node"));
+        i = i + 1;
+    }
+
+    # With no filter only, which kills a `mount`.
+    assert(_t_has_line(_t_rootfs_exec(policy_new(), root, 3, 0), "mount -1") == 1,
+      "with no filter there is still no mount");
+    var n = _t_rootfs_exec(policy_new(), root, 4, 0);
+    if (_t_has_line(n, "nested 0") == 1) {
+        assert(_t_has_line(n, "mount -1") == 1, "a nested user namespace mounts no /proc");
+        _t_rootfs_assert_stays_in(n, "a nested user namespace");
+    }
+
+    # `sandbox_spawn` reads no backend, so an OCI sandbox gets this path, and a
+    # detached payload gets the same bound on any backend.
+    _t_rootfs_assert_default_set(_t_rootfs_spawn(KavachBackend.OCI, policy_basic(), root, 0, 0),
+      "an OCI sandbox, spawn");
+    _t_rootfs_assert_stays_in(_t_rootfs_spawn(KavachBackend.OCI, policy_basic(), root, 1, 0),
+      "an OCI sandbox, spawn");
+
+    # A list replaces the default, on both paths, as `oci_exec` reads it.
+    var one = vec_new();
+    vec_push(one, "CAP_CHOWN");
+    assert(_t_has_line(_t_rootfs_exec(policy_basic(), root, 0, one), "eff 1") == 1, "a list narrows");
+    var o2 = _t_rootfs_spawn(KavachBackend.PROCESS, policy_basic(), root, 0, one);
+    assert(_t_has_line(o2, "eff 1") == 1, "and on spawn");
+    assert(_t_has_line(o2, "bnd 1") == 1, "the bounding set with it");
+    var none = _t_rootfs_exec(policy_basic(), root, 0, vec_new());
+    assert_eq(_T_ROOTFS_CODE, 0, "with no capabilities a payload still runs");
+    assert(_t_has_line(none, "eff 0") == 1, "an empty list is none");
+    assert(_t_has_line(none, "bnd 0") == 1, "bounded too");
+    var more = oci_default_capabilities();
+    vec_push(more, "CAP_SYS_PTRACE");
+    var plus = _t_rootfs_exec(policy_basic(), root, 0, more);
+    # 0xa00405fb | 1 << 19, which is what extending the default means.
+    assert(_t_has_line(plus, "eff 2685142523") == 1, "a list extends");
+
+    # A name kavach does not know reaches no payload on either path.
+    var bad = vec_new();
+    vec_push(bad, "CAP_NONSENSE");
+    _t_rootfs_set_mode(root, 0);
+    var sb = _t_oci_sandbox(KavachBackend.PROCESS, policy_basic(), root);
+    config_capabilities(Sandbox_config(sb), bad);
+    var refused = process_exec(sb, "/payload");
+    assert(ExecResult_exit_code(refused) != 0, "an unknown name fails the exec");
+    assert_eq(_t_count(ExecResult_stdout(refused), "eff "), 0, "and no payload ran");
+    assert_eq(_t_rootfs_spawn(KavachBackend.PROCESS, policy_basic(), root, 0, bad), 0,
+      "and refuses the spawn");
+
+    sys_unlink(_T_ROOTFS_MARKER);
+    sys_unlink(_t_lbl(root, "/kv-mode"));
+    kv_rmdir(sub);
+    _t_oci_rootfs_clean(root, payload);
+    return 0;
+}
+
 fn test_runtime_architecture_is_read() {
     test_group("runtime_architecture_is_read");
     var path = "/tmp/kavach-t-fake-runtime";
@@ -9187,6 +9551,11 @@ fn test_wasm_stdin_does_not_deadlock() {
 fn main() {
     args_init();
     alloc_init();
+    # The payload half of `test_process_rootfs_payload`: no /proc, so no argv.
+    if (argc() == 0) {
+        var rootfs_mode = _t_rootfs_mode();
+        if (rootfs_mode >= 0) { return _t_rootfs_payload(rootfs_mode); }
+    }
     # The payload half of `test_oci_payload_observes_the_filter`. No assertion
     # output from here: stdout is what the test reads.
     if (argc() >= 3) {
@@ -9196,6 +9565,8 @@ fn main() {
     if (argc() >= 2) {
         if (streq(argv(1), "--kv-oci-only") == 1) {
             test_oci_payload_observes_the_filter();
+            test_bound_clears_inheritable_and_ambient();
+            test_process_rootfs_payload();
             return assert_summary();
         }
     }
@@ -9389,6 +9760,9 @@ fn main() {
     test_seccomp_kills_what_it_denies();
     test_syscall_name_map_is_native();
     test_rootfs_entry_confines_to_the_root();
+    test_capability_masks();
+    test_bound_clears_inheritable_and_ambient();
+    test_process_rootfs_payload();
     test_spawn_terminate_escalates();
     test_spawn_null_handles();
     test_spawn_namespaces_environment_aware();

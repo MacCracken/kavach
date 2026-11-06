@@ -362,7 +362,8 @@ fn config_externalization(c, p) { SandboxConfig_set_externalization(c, p); retur
 # asking for confinement: its unconfined capture took neither.
 fn config_env(c, v) { SandboxConfig_set_env(c, v); return c; }
 
-# The capabilities an OCI or gVisor container runs with: a vec of "CAP_*" cstrs.
+# The capabilities a payload with a rootfs runs with, on the OCI and gVisor backends
+# and, since 3.14.6, on the process path and `sandbox_spawn`: a vec of "CAP_*" cstrs.
 # Unset, it runs with `oci_default_capabilities()`.
 #
 # Set, the list REPLACES that one, as `config_env` replaces its defaults. A payload
@@ -371,9 +372,10 @@ fn config_env(c, v) { SandboxConfig_set_env(c, v); return c; }
 # `config_env` means the defaults, because a caller who passes an empty list here
 # can only mean that.
 #
-# `oci_capabilities_refusal` says what fails the exec: a name kavach does not know,
-# and CAP_SYS_ADMIN under a seccomp filter. No other backend reads this, so a caller
-# narrowing it on a host that falls back to the process backend gets no narrowing,
+# A name kavach does not know fails the exec on every path. `oci_capabilities_refusal`
+# refuses CAP_SYS_ADMIN under a seccomp filter too, on the OCI backend, and
+# `confine_capabilities_refusal` says why the process path does not. A sandbox with
+# no rootfs does not read this, so a caller narrowing it there gets no narrowing,
 # and `score_backend`, which takes a policy, does not see it.
 fn config_capabilities(c, v) { SandboxConfig_set_capabilities(c, v); return c; }
 

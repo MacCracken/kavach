@@ -1,4 +1,4 @@
-# 2026-11-06 — a process-backend payload keeps every capability, and a rootfs does not hold it — OPEN
+# 2026-11-06 — a process-backend payload keeps every capability, and a rootfs does not hold it — OPEN IN PART
 
 **Discovered:** 2026-11-06, measuring the process backend as root after kavach 3.14.5 closed the same hole on the
 OCI backend.
@@ -7,9 +7,9 @@ rootfs still does not hold, so a payload reads whatever the rootless uid can.
 **Affects:** every kavach release with a process backend: `confine_child_wd` and `_spawn_enter_rootfs`
 (`src/confine.cyr`), `_seccomp_deny_list` (`src/security.cyr`), `sandbox_spawn` (`src/spawn.cyr`) and persistent
 guests. Consumers that reach them, stiva's `run -d` among them, whatever backend the sandbox names.
-**Status:** 🔴 OPEN. Measured as root and rootless against 3.14.5, on x86-64, Linux 7.2.14 and runc 1.5.2. No
-behaviour has changed. The fix is a policy decision, as [ADR-008](../../adr/008-oci-capability-default.md)'s was, and
-waits on the maintainer.
+**Status:** 🟡 OPEN IN PART. A rootfs is ✅ **resolved in kavach 3.14.6**, by the maintainer's choice of `pivot_root`
+([ADR-009](../../adr/009-rootfs-on-the-process-path.md)); see the resolution at the end. Three things stay open, listed
+there. What follows is as filed, measured against 3.14.5 on x86-64, Linux 7.2.14 and runc 1.5.2.
 
 ## What happens
 
@@ -169,7 +169,8 @@ reads `/proc/kcore` for one byte.
 
 - **The write.** `core_pattern` was opened and never written, so the last step of the chain was not run, as in 3.14.5.
   That a write would be accepted with `CapEff` zero is reasoning from the open, not a test.
-- **`stiva run -d`.** Its path to `sandbox_spawn` is read from stiva's source, which pins 3.14.4.
+- **`stiva run -d`.** Its path to `sandbox_spawn` is read from stiva's source, which pins 3.14.4, so it gets none of
+  3.14.6 until it bumps.
 - **A guessed handle.** The row hands the payload a real one. Whether a handle can be forged depends on the
   filesystem, and tmpfs and overlayfs were the only two run. ext4 and btrfs were not.
 - **aarch64, crun, and any kernel but 7.2.14.** `pivot_root` under a filter was not run either: the filter denies it, so
@@ -180,3 +181,54 @@ reads `/proc/kcore` for one byte.
 `score_backend` adds 5 for `network_enabled = 0`, but `sandbox_exec` with no rootfs leaves the payload in kavach's
 network namespace unless `require_ns` is set. `ns/net` equals the driver's. `confine_child`'s header calls that path
 one that claims no isolation it did not get, and the score does claim it.
+
+`score_backend` adds 3 for `read_only_rootfs`, which `policy_strict()` sets, and nothing on the process path applies it.
+`docs/architecture/overview.md` says as much. Since 3.14.6 the rootfs is a bind mount of its own, so a remount is a line.
+
+## Resolution in part (3.14.6)
+
+**Ask 1, 2 and 5, as proposed.** The maintainer chose `pivot_root` and the twelve over keeping `chroot`, and
+`config_capabilities` is read. `sandbox_spawn` has it by sharing `confine_child_caps`. As root, under either policy, on
+`sandbox_exec` and `sandbox_spawn`, and on `sandbox_spawn` with an OCI sandbox:
+
+| From a rootfs with no `/proc` | 3.14.5 | 3.14.6 |
+|---|---|---|
+| `CapEff`, `CapBnd` | `000001ffffffffff` | `00000000a00405fb` |
+| leave the rootfs by `chroot`, then read a file outside it | **escapes** | stays in |
+| `mknod` a character device and open it | **opens** | EPERM |
+| `open_by_handle_at` a file outside the rootfs | **reads it** | EPERM |
+| with no filter, `mount` a `/proc` of its own | **mounts** | EPERM |
+
+`chroot` itself still works, for an image that calls it. Rootless the walk stays in too, and a nested user namespace,
+which hands back every capability, stays in and mounts nothing. nginx and the postgres entry point behave as they did on
+3.14.5, on a rootfs as kavach leaves it and with `/dev` and `/proc` added: the table is in ADR-009.
+
+**Still open.**
+
+- **A `/proc` the caller mounted.** This is the third row of the first table, and Ask 1 does not reach it:
+
+  | A rootfs whose caller mounted `/proc`, as root | 3.14.5 | 3.14.6 |
+  |---|---|---|
+  | open `core_pattern` to write | allowed | **allowed** |
+  | open `sysrq-trigger` to write | allowed | **allowed** |
+  | read `/proc/kcore` | a byte | EPERM |
+
+  A rootfs needs this to run the postgres entry point, so a caller has a reason to do it. The candidate is the second row
+  of the Candidates table, done after the pivot: read-only `/proc/sys` and `sysrq-trigger`, and `/dev/null` over
+  `/proc/kcore`, where a `/proc` is there. It held as a prototype, and it is on no kavach path. A payload here has no PID
+  namespace either, so `/proc/<pid>/root` names the host's root for any process that ptrace access lets it read. That
+  was not measured.
+- **No rootfs, as root (Ask 3).** Unchanged, and now in `SECURITY.md`. `config_capabilities` is not read there, so a caller
+  narrowing a list on that path gets no narrowing. Whether the path takes a set is still the decision in Ask 3.
+- **`sandbox_spawn` on an OCI sandbox (Ask 4).** Bounded, with no PID namespace, no `/proc` and no masks, and scored as OCI.
+
+**Found on the way.**
+
+- `rootfs == "/"` read EBUSY from `pivot_root`, which `test_rootfs_always_gets_a_mount_namespace` caught. Nothing is above it
+  to leave, so it skips the pivot and keeps the private mount.
+- A mutation pass reverted each part of the change, and one survived: with the `capset` deleted the suite stayed green.
+  Inheritable capabilities pass `execve` for a uid 0 payload whatever the bounding set says, and no test held any.
+  `test_bound_clears_inheritable_and_ambient` does now.
+- The capability table had to leave `oci_spec.cyr`, which `[lib.confine]` does not carry. In-tree that would have compiled.
+- A chrooted caller is not a regression. On a plain directory it was refused at the private mount before and after, and
+  onto a mount point it works in both.

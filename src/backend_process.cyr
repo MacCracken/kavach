@@ -39,6 +39,8 @@ fn process_exec(sandbox, command) {
     if (vec_len(args) == 0) {
         return backend_error_result("empty command");
     }
+    var caps_refused = confine_capabilities_refusal(Sandbox_config(sandbox));
+    if (caps_refused != 0) { return backend_error_result(caps_refused); }
 
     # Cgroup wrap: if the sandbox's policy carries any resource limit
     # (memory.max / cpu.max / pids.max), create a per-sandbox cgroup,
@@ -132,8 +134,10 @@ fn process_exec(sandbox, command) {
             if (SandboxConfig_require_ns(cfg) == 1) { want_ns = 1; }
         }
         # The workdir is applied inside the rootfs.
-        n = confine_capture_input_env_wd(args, pol, rootfs, cgroup_path, sec, buf,
+        var capture = confine_capture_new(args, pol, rootfs, cgroup_path, sec, buf,
           PROCESS_MAX_OUTPUT, want_ns, tmo, 1, pexec_in, pexec_in_len, pexec_env, pexec_wd);
+        ConfineCapture_set_caps(capture, confine_capabilities(cfg));
+        n = confine_capture_run(capture);
         cgroup_teardown(cgroup_path);
         var end_rf = mono_now_ns();
         var rr = backend_capture_finish(buf, n, PROCESS_MAX_OUTPUT, "exec failed", start_ns, end_rf);

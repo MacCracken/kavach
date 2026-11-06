@@ -1,6 +1,7 @@
 # ADR-008 — The OCI capability default, and how a payload asks for more
 
-**Status**: Accepted
+**Status**: Accepted. Since v3.14.6 the process path holds this set and reads this list too, with a rootfs:
+[ADR-009](009-rootfs-on-the-process-path.md). "No other backend reads the list" below is true of 3.14.5.
 **Date**: 2026-11-06
 **Version**: v3.14.5
 
