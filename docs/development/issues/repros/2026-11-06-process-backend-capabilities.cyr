@@ -1,0 +1,323 @@
+# What a process-backend payload holds, and what it reaches, through kavach's
+# public paths. The driver half of the issue of the same date. The payload is the C
+# file of the same name, because a rootfs here has no /proc, and a Cyrius binary
+# reads its argv from /proc/self/cmdline. x86-64.
+#
+#   gcc -static -O1 -o <dir>/capprobe-payload <this name>.c
+#   cyrius build <this file> <dir>/capprobe-driver      # from the repository root
+#   <dir>/capprobe-driver --drive <empty work dir> <dir>/capprobe-payload
+#
+# That runs as any uid, and is the rootless half. As real root it runs only in a
+# throwaway privileged container: the .sh of the same name, every step bounded. The
+# payload's header says what it will and will not touch.
+
+include "src/util.cyr"
+include "src/error.cyr"
+include "src/sys_error.cyr"
+include "src/sys_util.cyr"
+include "src/security.cyr"
+include "src/mac.cyr"
+include "src/kernel_audit.cyr"
+include "src/backend.cyr"
+include "src/policy.cyr"
+include "src/scoring.cyr"
+include "src/lifecycle.cyr"
+include "src/scanning_types.cyr"
+include "src/aho_corasick.cyr"
+include "src/scanning_secrets.cyr"
+include "src/scanning_code.cyr"
+include "src/scanning_data.cyr"
+include "src/scanning_gate.cyr"
+include "src/scanning_runtime.cyr"
+include "src/scanning_threat.cyr"
+include "src/audit.cyr"
+include "src/credential.cyr"
+include "src/credential_http.cyr"
+include "src/quarantine.cyr"
+include "src/cgroup.cyr"
+include "src/oci_spec.cyr"
+include "src/confine.cyr"
+include "src/backend_dispatch.cyr"
+include "src/backend_noop.cyr"
+include "src/backend_process.cyr"
+include "src/backend_gvisor.cyr"
+include "src/backend_oci.cyr"
+include "src/backend_wasm.cyr"
+include "src/backend_sy_agnos.cyr"
+include "src/backend_sgx.cyr"
+include "src/backend_sev.cyr"
+include "src/backend_tdx.cyr"
+include "src/backend_firecracker.cyr"
+include "src/persistent.cyr"
+include "src/spawn.cyr"
+include "src/composite.cyr"
+include "src/observability.cyr"
+include "src/attest_collateral.cyr"
+include "src/attestation.cyr"
+include "src/sandbox_exec.cyr"
+
+fn P(c) { sys_write(1, c, strlen(c)); return 0; }
+fn N(n) {
+    var b[32];
+    var l = fmt_int_buf(n, &b);
+    sys_write(1, &b, l);
+    return 0;
+}
+
+var D_DIR = 0;
+var D_RFS = 0;
+var D_RFSP = 0;
+var D_MARK = 0;
+var D_SELF = 0;
+var D_SEQ = 0;
+
+fn cat2(a, b) {
+    var la = strlen(a);
+    var lb = strlen(b);
+    var r = alloc(la + lb + 1);
+    memcpy(r, a, la);
+    memcpy(r + la, b, lb + 1);
+    return r;
+}
+fn cat3(a, b, c) { return cat2(cat2(a, b), c); }
+
+fn pol_of(name) {
+    if (streq(name, "basic") == 1) { return policy_basic(); }
+    if (streq(name, "basic+landlock") == 1) {
+        var lp = policy_basic();
+        policy_landlock_add(lp, D_DIR, FS_READ_ONLY);
+        return lp;
+    }
+    return policy_new();
+}
+
+fn mk_sandbox(backend, polname, rootfs) {
+    var cfg = config_new();
+    config_backend(cfg, backend);
+    config_policy(cfg, pol_of(polname));
+    if (rootfs != 0) { config_rootfs(cfg, rootfs); }
+    config_timeout_ms(cfg, 15000);
+    var sb = sandbox_create(cfg);
+    if (sb == 0) { return 0; }
+    sandbox_transition(sb, SandboxState.RUNNING);
+    return sb;
+}
+
+fn hdr(bname, polname, rootname, path, mode) {
+    P("=== "); P(bname); P(" "); P(polname); P(" "); P(rootname); P(" ");
+    P(path); P(" "); P(mode); P("\n");
+    return 0;
+}
+
+fn d_exec(backend, bname, polname, rootfs, rootname, prog, args) {
+    hdr(bname, polname, rootname, "exec", args);
+    var sb = mk_sandbox(backend, polname, rootfs);
+    if (sb == 0) { P("no sandbox\n"); return 0; }
+    var r = sandbox_exec(sb, cat3(prog, " --payload ", args));
+    if (r == 0) { P("exec returned 0\n"); return 0; }
+    P(ExecResult_stdout(r));
+    P("exit "); N(ExecResult_exit_code(r)); P("\n");
+    var se = ExecResult_stderr(r);
+    if (se != 0) {
+        if (strlen(se) > 0) { P("stderr "); P(se); P("\n"); }
+    }
+    return 0;
+}
+
+fn d_spawn(backend, bname, polname, rootfs, rootname, prog, args) {
+    hdr(bname, polname, rootname, "spawn", args);
+    var sb = mk_sandbox(backend, polname, rootfs);
+    if (sb == 0) { P("no sandbox\n"); return 0; }
+    D_SEQ = D_SEQ + 1;
+    var nb[32];
+    var nl = fmt_int_buf(D_SEQ, &nb);
+    store8(&nb + nl, 0);
+    var log = cat3(D_DIR, "/spawn-", &nb);
+    var sp = sandbox_spawn(sb, cat3(prog, " --payload ", args), log);
+    if (sp == 0) { P("spawn returned 0\n"); return 0; }
+    var waited = 0;
+    while (waited < 8000) {
+        if (spawned_try_wait(sp) == 1) { break; }
+        sleep_ms(10);
+        waited = waited + 10;
+    }
+    var code = spawned_terminate(sp, 200);
+    var buf = alloc(16384);
+    var n = file_read_all(log, buf, 16383);
+    if (n > 0) { sys_write(1, buf, n); }
+    sys_unlink(log);
+    P("exit "); N(code);
+    if (spawn_exit_name(code) != 0) { P(" ("); P(spawn_exit_name(code)); P(")"); }
+    P("\n");
+    return 0;
+}
+
+fn d_both(backend, bname, polname, rootfs, rootname, prog, args) {
+    d_exec(backend, bname, polname, rootfs, rootname, prog, args);
+    d_spawn(backend, bname, polname, rootfs, rootname, prog, args);
+    return 0;
+}
+
+# The persistent guest: no rootfs on this path, and it reads a policy.
+fn d_persist(polname) {
+    hdr("persistent", polname, "no-rootfs", "guest", "cred");
+    var g = persistent_spawn_confined(cat2(D_SELF, " --payload cred"), pol_of(polname));
+    if (g == 0) { P("guest refused\n"); return 0; }
+    var buf = alloc(4096);
+    var n = persistent_read(g, buf, 4095);
+    while (n > 0) {
+        sys_write(1, buf, n);
+        n = persistent_read(g, buf, 4095);
+    }
+    persistent_terminate(g);
+    return 0;
+}
+
+fn copy_file(from, to) {
+    var b = alloc(16777216);
+    var n = file_read_all(from, b, 16777216);
+    if (n <= 0) { return 0 - 1; }
+    sys_unlink(to);
+    if (file_write_all(to, b, n) != n) { return 0 - 1; }
+    sys_chmod(to, 493);
+    return 0;
+}
+
+fn make_rootfs(root, probe) {
+    kv_mkdir(root, 493);
+    kv_mkdir(cat2(root, "/proc"), 493);
+    kv_mkdir(cat2(root, "/dev"), 493);
+    kv_mkdir(cat2(root, "/sub"), 493);
+    return copy_file(probe, cat2(root, "/probe"));
+}
+
+# A real handle for the marker, taken here, outside the rootfs, and left inside it
+# for the payload: what an attacker has to guess, handed to it, so the row shows
+# whether a chroot bounds a handle at all. Not whether guessing is practical.
+fn take_handle() {
+    var h = alloc(256);
+    memset(h, 0, 256);
+    store32(h, 128);
+    var mid[8];
+    # SAFETY: name_to_handle_at(AT_FDCWD, marker, h, &mid, 0); x86-64 303.
+    var r = syscall(303, 0 - 100, D_MARK, h, &mid, 0);
+    P("driver: handle for the marker "); N(r); P("\n");
+    if (r != 0) { return 0; }
+    file_write_all(cat2(D_RFS, "/kv-handle"), h, 8 + load32(h));
+    return 1;
+}
+
+fn drive(dir, probe) {
+    D_DIR = dir;
+    D_RFS = cat2(dir, "/rfs");
+    D_RFSP = cat2(dir, "/rfsproc");
+    D_MARK = cat2(dir, "/outside-marker");
+    D_SELF = cat2(dir, "/probe");
+    kavach_init();
+    if (make_rootfs(D_RFS, probe) != 0) { P("no rootfs\n"); return 1; }
+    if (copy_file(probe, D_SELF) != 0) { P("no probe\n"); return 1; }
+    file_write_all(D_MARK, "outside\n", 8);
+
+    P("score process basic "); N(score_backend(KavachBackend.PROCESS, policy_basic())); P("\n");
+    P("score process new "); N(score_backend(KavachBackend.PROCESS, policy_new())); P("\n");
+    P("score oci basic "); N(score_backend(KavachBackend.OCI, policy_basic())); P("\n");
+    var b[64];
+    var l = sys_readlink("/proc/self/ns/mnt", &b, 63);
+    P("driver ns-mnt "); sys_write(1, &b, l); P("\n");
+    l = sys_readlink("/proc/self/ns/net", &b, 63);
+    P("driver ns-net "); sys_write(1, &b, l); P("\n");
+    l = sys_readlink("/proc/self/ns/pid", &b, 63);
+    P("driver ns-pid "); sys_write(1, &b, l); P("\n");
+    var have_handle = take_handle();
+
+    var esc = cat2("esc ", D_MARK);
+    var fh = "fh";
+    if (have_handle == 1) { fh = "fh /kv-handle"; }
+    var P_B = KavachBackend.PROCESS;
+    var pols = vec_new();
+    vec_push(pols, "basic");
+    vec_push(pols, "new");
+
+    # 1. What the task asks: no rootfs, a rootfs, both policies, both paths.
+    var i = 0;
+    while (i < 2) {
+        var pn = vec_get(pols, i);
+        d_both(P_B, "process", pn, 0, "no-rootfs", D_SELF, "base");
+        d_both(P_B, "process", pn, D_RFS, "rootfs", "/probe", "base");
+        # A rootfs whose caller mounted /proc in it, set up by the script before
+        # this runs, is what lets /proc/self/status be read and compared.
+        var st = alloc(256);
+        if (file_read_all(cat2(D_RFSP, "/proc/self/comm"), st, 64) > 0) {
+            d_both(P_B, "process", pn, D_RFSP, "rootfs+proc", "/probe", "base");
+        }
+        d_persist(pn);
+        i = i + 1;
+    }
+
+    # 2. What the set is worth with a rootfs and no /proc: one payload per chain,
+    # because a filter kill ends the process.
+    i = 0;
+    while (i < 2) {
+        var pn2 = vec_get(pols, i);
+        d_both(P_B, "process", pn2, D_RFS, "rootfs", "/probe", "mp");
+        d_both(P_B, "process", pn2, D_RFS, "rootfs", "/probe", esc);
+        d_both(P_B, "process", pn2, D_RFS, "rootfs", "/probe", "dev");
+        d_both(P_B, "process", pn2, D_RFS, "rootfs", "/probe", fh);
+        i = i + 1;
+    }
+
+    # 3. The control: the same payload under runc must read 3.14.5's set, or this
+    # probe proves nothing. And what sandbox_spawn makes of an OCI sandbox.
+    if (backend_is_available(KavachBackend.OCI) == 1) {
+        var O_B = KavachBackend.OCI;
+        i = 0;
+        while (i < 2) {
+            var pn3 = vec_get(pols, i);
+            d_both(O_B, "oci", pn3, D_RFS, "rootfs", "/probe", "base");
+            d_both(O_B, "oci", pn3, D_RFS, "rootfs", "/probe", esc);
+            d_both(O_B, "oci", pn3, D_RFS, "rootfs", "/probe", "dev");
+            d_both(O_B, "oci", pn3, D_RFS, "rootfs", "/probe", fh);
+            i = i + 1;
+        }
+    } else {
+        P("=== no OCI runtime: control skipped\n");
+    }
+
+    # 4. Does a bound set close it? In the payload, so kavach is unchanged.
+    var masks = vec_new();
+    vec_push(masks, "a00405fb");                    # ADR-008's twelve
+    vec_push(masks, "a00005fb");                    # less CAP_SYS_CHROOT (bit 18)
+    vec_push(masks, "0");
+    i = 0;
+    while (i < 3) {
+        var m = vec_get(masks, i);
+        var j = 0;
+        while (j < 2) {
+            var pn4 = vec_get(pols, j);
+            d_exec(P_B, "process", pn4, 0, "no-rootfs", D_SELF, cat3("drop ", m, " base"));
+            d_exec(P_B, "process", pn4, D_RFS, "rootfs", "/probe", cat3("drop ", m, cat2(" ", esc)));
+            d_exec(P_B, "process", pn4, D_RFS, "rootfs", "/probe", cat3("drop ", m, " dev"));
+            d_exec(P_B, "process", pn4, D_RFS, "rootfs", "/probe", cat3("drop ", m, cat2(" ", fh)));
+            d_exec(P_B, "process", pn4, D_RFS, "rootfs", "/probe", cat3("drop ", m, cat2(" nest ", D_MARK)));
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+
+    # 5. What already bounds a payload with no rootfs: a landlock rule.
+    d_both(P_B, "process", "basic+landlock", 0, "no-rootfs", D_SELF, "base");
+    return 0;
+}
+
+fn main() {
+    args_init();
+    alloc_init();
+    if (argc() >= 4) {
+        if (streq(argv(1), "--drive") == 1) { return drive(argv(2), argv(3)); }
+    }
+    P("usage: --drive <dir> <probe>\n");
+    return 2;
+}
+
+var rc = main();
+sys_exit(rc);
