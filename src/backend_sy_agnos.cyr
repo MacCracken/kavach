@@ -180,19 +180,21 @@ fn sy_agnos_exec(sandbox, command) {
 }
 
 # Run a runtime command that is not the payload (`create`, `inspect`): no
-# stdin, its own deadline, stdout into `buf`. Returns the byte count, or -1; its
-# stderr and exit status are `confine_last_*`.
+# stdin, its own deadline, stdout into `buf`. Returns the run's capture: its
+# byte count (`ConfineCapture_total`, -1 for a failed capture), stderr and exit
+# status. 3.14.8: through 3.14.7 these were read back from `confine_last_*`,
+# which another thread's capture rewrites. The caller releases it.
 fn _sy_agnos_tool(args, timeout_ms, buf, cap) {
-    return confine_capture_input_env_wd(args, 0, 0, 0, 0, buf, cap, 0, timeout_ms, 0, "", 0, 0, 0);
+    var c = confine_capture_new(args, 0, 0, 0, 0, buf, cap, 0, timeout_ms, 0, "", 0, 0, 0);
+    confine_capture_run(c);
+    return c;
 }
 
-# "<prefix><the last capture's stderr>", trimmed of trailing newlines.
-fn _sy_agnos_diag(prefix) {
-    var n = confine_last_stderr_len();
-    var e = alloc(n + 1);
-    memcpy(e, confine_last_stderr(), n);
-    store8(e + n, 0);
-    return _oci_diag(prefix, e);
+# "<prefix><capture c's stderr>", trimmed of trailing newlines. Releases `c`.
+fn _sy_agnos_diag(prefix, c) {
+    var d = _oci_diag(prefix, confine_capture_stderr(c));
+    confine_capture_release(c);
+    return d;
 }
 
 # Milliseconds of `timeout_ms` left since `start_ns`; 0 when there was no
@@ -279,14 +281,15 @@ fn _sy_agnos_exec_with(runtime, sandbox, command, start_ns) {
     vec_push(args, command);
 
     var idbuf[128];
-    var cn = _sy_agnos_tool(args, timeout_ms, &idbuf, 128);
-    if (cn < 0 || confine_last_exit() != 0 || confine_last_timed_out() == 1) {
+    var cc = _sy_agnos_tool(args, timeout_ms, &idbuf, 128);
+    if (ConfineCapture_total(cc) < 0 || ConfineCapture_exit(cc) != 0 || ConfineCapture_timed_out(cc) == 1) {
         var why = "sy-agnos: container create failed: ";
-        if (confine_last_timed_out() == 1) { why = "sy-agnos: container create ran past the deadline: "; }
-        var d = _sy_agnos_diag(why);
+        if (ConfineCapture_timed_out(cc) == 1) { why = "sy-agnos: container create ran past the deadline: "; }
+        var d = _sy_agnos_diag(why, cc);
         _sy_agnos_remove(runtime, name);
         return backend_error_result(d);
     }
+    confine_capture_release(cc);
 
     var sargs = vec_new();
     vec_push(sargs, runtime);
@@ -296,11 +299,12 @@ fn _sy_agnos_exec_with(runtime, sandbox, command, start_ns) {
     vec_push(sargs, name);
     var out_cap = 1048576;
     var out_buf = backend_capture_buf(out_cap);
-    var n = confine_capture_input_env_wd(sargs, 0, 0, 0, 0, out_buf, out_cap, 0,
+    var sc = confine_capture_new(sargs, 0, 0, 0, 0, out_buf, out_cap, 0,
       _sy_agnos_left(timeout_ms, start_ns), 0, _config_payload_stdin(config), _config_payload_stdin_len(config), 0, 0);
+    var n = confine_capture_run(sc);
     var end_ns = mono_now_ns();
-    var timed_out = confine_last_timed_out();
-    var r = backend_run_finish(out_buf, n, out_cap, "sy-agnos container run failed", start_ns, end_ns);
+    var timed_out = ConfineCapture_timed_out(sc);
+    var r = backend_capture_result(sc, "sy-agnos container run failed", start_ns, end_ns);
     backend_capture_release(out_buf, out_cap);
 
     if (n >= 0 && timed_out == 0) {
@@ -312,13 +316,15 @@ fn _sy_agnos_exec_with(runtime, sandbox, command, start_ns) {
         vec_push(iargs, name);
         var ecap = 4096;
         var ebuf = alloc(ecap + 1);
-        var en = _sy_agnos_tool(iargs, 10000, ebuf, ecap);
-        if (en < 0 || confine_last_exit() != 0) {
+        var ic = _sy_agnos_tool(iargs, 10000, ebuf, ecap);
+        var en = ConfineCapture_total(ic);
+        if (en < 0 || ConfineCapture_exit(ic) != 0) {
             var idiag = _sy_agnos_diag(
-              "sy-agnos: cannot inspect the container, so its stderr cannot be shown to be the payload's: ");
+              "sy-agnos: cannot inspect the container, so its stderr cannot be shown to be the payload's: ", ic);
             _sy_agnos_remove(runtime, name);
             return backend_error_result(idiag);
         }
+        confine_capture_release(ic);
         store8(ebuf + en, 0);
         var state_err = _oci_diag("", ebuf);
         if (strlen(state_err) > 0) {

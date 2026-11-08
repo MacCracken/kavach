@@ -35,6 +35,7 @@ enum SpawnExit {
     SPAWN_EXIT_CAPS = 116;
     SPAWN_EXIT_PROC = 115;
     SPAWN_EXIT_READONLY = 114;
+    SPAWN_EXIT_DEV = 113;
 }
 
 # 3.14.6: the capabilities a payload with a rootfs keeps unless its config names
@@ -51,6 +52,8 @@ var KAVACH_CAP_VERSION_3 = 0x20080522;
 # CAP_SYS_ADMIN's bit. With it and no filter a payload unmounts the read-only `/proc`
 # and `/sys`, and as root mounts a `/proc` of its own (3.14.7).
 var KAVACH_CAP_SYS_ADMIN = 21;
+# CAP_SETPCAP's bit, which dropping from the bounding set takes (3.14.8).
+var KAVACH_CAP_SETPCAP = 8;
 
 # statfs(2) f_type values (linux/magic.h), and where f_type and f_flags sit in the
 # 64-bit Linux `struct statfs`, the same on x86-64 and aarch64. The stdlib's STATFS_*
@@ -79,11 +82,17 @@ var KAVACH_ST_RELATIME = 4096;
 # exactly how rootless containers get one. So when we are not root we pair
 # NS_USER with it. Running as root, the user namespace is unnecessary and adds a
 # uid-mapping step nothing here needs, so it is omitted.
+#
+# 3.14.8: not for a policy naming TCP ports (`policy_network_allow_tcp`). A fresh
+# network namespace holds only a loopback that is down, so the ports would reach
+# nothing; landlock holds that payload to them instead, with no namespace.
 #[must_use]
 fn _spawn_ns_flags(policy, rootfs) {
     var f = 0;
     if (policy != 0) {
-        if (SandboxPolicy_network_enabled(policy) == 0) { f = f | NS_NETWORK; }
+        if (SandboxPolicy_network_enabled(policy) == 0 && policy_network_tcp_rules(policy) == 0) {
+            f = f | NS_NETWORK;
+        }
     }
     # Entering a rootfs needs a mount namespace of our own, or making `/`
     # private and entering it would affect the host.
@@ -308,6 +317,156 @@ fn _spawn_proc_sys_held() {
     #endif
 }
 
+# ---- A /dev of kavach's own in a rootfs (3.14.8) ---------------------------
+#
+# Through 3.14.7 a payload with a rootfs met whatever `dev` the caller left there.
+# ADR-009 ran postgres with the caller's `/dev` an rbind of the host's, and a payload
+# holding the twelve then opened the host's disk, `/dev/nvme0n1`, read-only: uid 0
+# owns the node, so no capability is asked for, and the process path has no device
+# cgroup to refuse it, as runc's does. Now, as runc does, the payload never sees a
+# `dev` it was handed: where the rootfs has a `dev` directory, kavach mounts a tmpfs
+# over it holding runc's default devices bound from the host's, a devpts of its own,
+# a tmpfs `/dev/shm` and runc's links, the four into /proc only where the rootfs has a
+# procfs at /proc. The maintainer chose this over a cgroup
+# device program, which needs bpf(2), a cgroup and root, and over covering only a
+# `dev` something is mounted on. See ADR-011.
+#
+# A rootfs with no `dev` keeps having none, since kavach makes no directory in the
+# caller's tree. One whose `dev` is a symlink is refused: before the pivot it would
+# resolve against the host. Like the /proc guards, this runs before the pivot with
+# the cwd at the top of the new root, and is ⛔ LINUX ONLY.
+
+# The host nodes the payload gets, runc's default devices: null, zero, full, random,
+# urandom and tty, by index, as literals, so the child reads them with no
+# allocation. A node the host does not have is left out, as runc leaves one out.
+var KAVACH_DEV_NODES = 6;
+
+fn _spawn_dev_node(i) {
+    if (i == 0) { return "null"; }
+    if (i == 1) { return "zero"; }
+    if (i == 2) { return "full"; }
+    if (i == 3) { return "random"; }
+    if (i == 4) { return "urandom"; }
+    if (i == 5) { return "tty"; }
+    return 0;
+}
+
+# "<prefix><name>" into `buf` (at least 64 bytes), NUL-terminated. Returns `buf`.
+fn _spawn_join(buf, prefix, name) {
+    var pn = strlen(prefix);
+    var nn = strlen(name);
+    memcpy(buf, prefix, pn);
+    memcpy(buf + pn, name, nn);
+    store8(buf + pn + nn, 0);
+    return buf;
+}
+
+# Make the rootfs's `dev` kavach's own. `userns` is 1 when the child is in a user
+# namespace of its own, where only uid and gid 0 are mapped, so devpts takes no
+# `gid=5`. `self_root` is 1 for a rootfs of "/", whose `dev` is the host's own and
+# is read through a descriptor taken before it is covered. Returns the device id of
+# the new `dev`, for `_spawn_dev_held`, 0 when there is no `dev` to make, or -1
+# when one is there and could not be made, and the payload must not run.
+fn _spawn_own_dev(userns, self_root) {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0 - 1;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    var st[144];
+    var l = kv_lstat("dev", &st);
+    if (l == 0 - ENOENT) { return 0; }
+    if (l != 0) { return 0 - 1; }
+    var mode = load32(&st + STAT_MODE) & 0xF000;
+    if (mode == 0xA000) { return 0 - 1; }                 # a symlink: refused
+    if (mode != 0x4000) { return 0; }                     # a file: nothing to cover
+    # The host's devices, as a prefix: "/dev/", or for a rootfs of "/" the host's
+    # `/dev` through a descriptor held open under the tmpfs that covers it.
+    var src[64];
+    var prefix = "/dev/";
+    var hostfd = 0 - 1;
+    if (self_root == 1) {
+        hostfd = file_open("/dev", O_RDONLY | O_DIRECTORY | O_CLOEXEC, 0);
+        if (hostfd < 0) { return 0 - 1; }
+        var pb[48];
+        var pn = 0;
+        memcpy(&pb, "/proc/self/fd/", 14);
+        pn = 14 + fmt_int_buf(hostfd, &pb + 14);
+        store8(&pb + pn, 47);                              # '/'
+        store8(&pb + pn + 1, 0);
+        prefix = &pb;
+    }
+    var r = sys_mount("tmpfs", "dev", "tmpfs", MS_NOSUID, "mode=755,size=65536k");
+    if (r != 0) {
+        if (hostfd >= 0) { sys_close(hostfd); }
+        return 0 - 1;
+    }
+    var dst[64];
+    var i = 0;
+    while (i < KAVACH_DEV_NODES) {
+        var name = _spawn_dev_node(i);
+        _spawn_join(&src, prefix, name);
+        var sst[144];
+        # A char device, or it is left out: a host without the node, or with
+        # something else at its name, gives the payload nothing there.
+        if (sys_stat(&src, &sst) == 0 && (load32(&sst + STAT_MODE) & 0xF000) == 0x2000) {
+            _spawn_join(&dst, "dev/", name);
+            var f = file_open(&dst, O_WRONLY | O_CREAT | O_CLOEXEC, 438);
+            if (f < 0) { r = 0 - 1; }
+            else {
+                sys_close(f);
+                if (sys_mount(&src, &dst, 0, MS_BIND, 0) != 0) { r = 0 - 1; }
+            }
+        }
+        i = i + 1;
+    }
+    if (hostfd >= 0) { sys_close(hostfd); }
+    if (r != 0) { return 0 - 1; }
+    if (kv_mkdir("dev/pts", 493) != 0) { return 0 - 1; }
+    var pts_opts = "newinstance,ptmxmode=0666,mode=0620,gid=5";
+    if (userns == 1) { pts_opts = "newinstance,ptmxmode=0666,mode=0620"; }
+    if (sys_mount("devpts", "dev/pts", "devpts", MS_NOSUID | MS_NOEXEC, pts_opts) != 0) { return 0 - 1; }
+    if (kv_mkdir("dev/shm", 1023) != 0) { return 0 - 1; }
+    if (sys_mount("shm", "dev/shm", "tmpfs", MS_NOSUID | MS_NODEV | MS_NOEXEC,
+        "mode=1777,size=65536k") != 0) {
+        return 0 - 1;
+    }
+    # runc's links into /proc only where the rootfs has a procfs at /proc, as a
+    # caller who mounted one does: runc always mounts one, and kavach does not. With
+    # none they would dangle, and an open of one with O_CREAT fails where through
+    # 3.14.7 it made a file: nginx:alpine's error log is a link to /dev/stderr, and
+    # measured, it stopped starting with them. Without a /proc the payload meets what
+    # 3.14.7 gave it there.
+    if (_spawn_is_fs("proc", KAVACH_PROC_SUPER_MAGIC) == 1) {
+        if (sys_symlink("/proc/self/fd", "dev/fd") != 0) { return 0 - 1; }
+        if (sys_symlink("/proc/self/fd/0", "dev/stdin") != 0) { return 0 - 1; }
+        if (sys_symlink("/proc/self/fd/1", "dev/stdout") != 0) { return 0 - 1; }
+        if (sys_symlink("/proc/self/fd/2", "dev/stderr") != 0) { return 0 - 1; }
+    }
+    if (sys_symlink("pts/ptmx", "dev/ptmx") != 0) { return 0 - 1; }
+    var dst2[144];
+    if (sys_stat("dev", &dst2) != 0) { return 0 - 1; }
+    var id = load64(&dst2);
+    if (id == 0) { id = 1; }
+    return id;
+    #endif
+}
+
+# After the pivot, whether `/dev` is the one `_spawn_own_dev` made (`dev_id`, its
+# device id, or 0 when it made none). Returns 0, or -1, and then the payload must
+# not run.
+fn _spawn_dev_held(dev_id) {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0 - 1;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    if (dev_id <= 0) { return 0; }
+    var st[144];
+    if (sys_stat("/dev", &st) != 0) { return 0 - 1; }
+    if (load64(&st) != dev_id) { return 0 - 1; }
+    return 0;
+    #endif
+}
+
 # Remount the root read-only, for a policy with `read_only_rootfs` (3.14.7). Through
 # 3.14.6 the flag was scored and nothing on the process path applied it. Run after
 # the pivot, where `/` is the rootfs's own bind, so only that mount changes: a `/proc`
@@ -335,8 +494,8 @@ fn _spawn_readonly_root() {
 # payload left in three calls, needing no fd from outside: `chroot("sub")` puts its
 # cwd outside the new root, `..` from there walks to the top of the namespace, and
 # `chroot(".")` settles there. It held CAP_SYS_CHROOT, nothing denies `chroot`, and
-# that held rootless too (docs/development/issues/2026-11-06-process-backend-keeps-
-# every-capability.md). Here nothing is left to walk up to, because the old root is
+# that held rootless too (docs/development/issues/archived/2026-11-06-process-backend-
+# keeps-every-capability.md). Here nothing is left to walk up to, because the old root is
 # detached, so a payload may hold CAP_SYS_CHROOT, as `oci_default_capabilities` has
 # it do. See ADR-009.
 #
@@ -355,6 +514,15 @@ fn _spawn_readonly_root() {
 # them (`_spawn_guard_proc_sys`), between the bind and the pivot. Returns 0, -1 when
 # the rootfs cannot be entered, or -2 when a `/proc` or `/sys` there cannot be guarded.
 fn _spawn_enter_rootfs(rootfs) {
+    var userns = 0;
+    if (sys_getuid() != 0) { userns = 1; }
+    return _spawn_enter_rootfs_ns(rootfs, userns);
+}
+
+# The same, told whether the child is in a user namespace of its own (`userns`).
+# 3.14.8: and the rootfs's `dev` made kavach's own (`_spawn_own_dev`), between the
+# /proc guards and the pivot, or -3 when it cannot be.
+fn _spawn_enter_rootfs_ns(rootfs, userns) {
     if (rootfs == 0) { return 0; }
     # ⛔ LINUX ONLY, AND IT MUST FAIL CLOSED ELSEWHERE. This is mount-namespace + pivot_root
     # confinement: agnos has no mount namespaces, no `pivot_root`, and no `chdir` syscall — `sys_mount`
@@ -375,19 +543,27 @@ fn _spawn_enter_rootfs(rootfs) {
         if (syscall(SYS_CHDIR, "/") < 0) { return 0 - 1; }
         if (_spawn_guard_proc_sys() != 0) { return 0 - 2; }
         if (_spawn_proc_sys_held() != 0) { return 0 - 2; }
+        var self_dev = _spawn_own_dev(userns, 1);
+        if (self_dev < 0) { return 0 - 3; }
+        if (_spawn_dev_held(self_dev) != 0) { return 0 - 3; }
         return 0;
     }
     if (sys_mount(rootfs, rootfs, 0, MS_REC_BIND, 0) < 0) { return 0 - 1; }
     if (syscall(SYS_CHDIR, rootfs) < 0) { return 0 - 1; }
     # Before the pivot: the mask's /dev/null is the host's, and a bind from a mount
     # the pivot then detaches reads EINVAL. The cwd is the bind, so the relative
-    # paths resolve in it, and the mounts move with it.
+    # paths resolve in it, and the mounts move with it. The same holds for the
+    # devices `_spawn_own_dev` binds, which come after, so the masks' /dev/null is
+    # the host's and not the rootfs's.
     if (_spawn_guard_proc_sys() != 0) { return 0 - 2; }
+    var dev_id = _spawn_own_dev(userns, 0);
+    if (dev_id < 0) { return 0 - 3; }
     if (sys_pivot_root(".", ".") < 0) { return 0 - 1; }
     if (sys_umount2(".", KAVACH_MNT_DETACH) < 0) { return 0 - 1; }
     # As runc does, because the kernel promises nothing about the cwd after this.
     if (syscall(SYS_CHDIR, "/") < 0) { return 0 - 1; }
     if (_spawn_proc_sys_held() != 0) { return 0 - 2; }
+    if (_spawn_dev_held(dev_id) != 0) { return 0 - 3; }
     return 0;
     #endif
 }
@@ -430,7 +606,15 @@ fn _spawn_enter_workdir(workdir) {
 # A bound, not a grant. `mask` is cut to what the caller holds, because `capset`
 # refuses more, and NO_NEW_PRIVS stops `execve` adding any.
 #
-# Only with a rootfs: see `confine_child_caps`. ⛔ LINUX ONLY, like the sequence.
+# 3.14.8: on every confined payload, not only one with a rootfs. A caller that is
+# not uid 0 and holds no CAP_SETPCAP, as a rootless kavach outside a user namespace
+# does, cannot drop the bounding set and need not: under NO_NEW_PRIVS a file's
+# capabilities and a set-id bit grant nothing at `execve`, and only uid 0 takes
+# the bounding set there. Its permitted, effective and inheritable sets are still
+# lowered to `mask`, which holds with nothing held. uid 0 without CAP_SETPCAP
+# cannot be bounded, and fails closed.
+#
+# ⛔ LINUX ONLY, like the sequence.
 fn _spawn_bound_capabilities(mask) {
     #ifdef CYRIUS_TARGET_AGNOS
     return 0 - 1;
@@ -442,18 +626,23 @@ fn _spawn_bound_capabilities(mask) {
     store32(&hdr + 4, 0);
     memset(&data, 0, 24);
     if (sys_capget(&hdr, &data) != 0) { return 0 - 1; }
+    var eff = load32(&data) | (load32(&data + 12) << 32);
     var held = load32(&data + 4) | (load32(&data + 16) << 32);
-    var i = 0;
-    while (i < 64) {
-        if (((mask >> i) & 1) == 0) {
-            # EINVAL is past the kernel's last capability.
-            var bounded = syscall(SYS_PRCTL, KAVACH_PR_CAPBSET_READ, i, 0, 0, 0);
-            if (bounded < 0) { break; }
-            if (bounded == 1) {
-                if (syscall(SYS_PRCTL, KAVACH_PR_CAPBSET_DROP, i, 0, 0, 0) < 0) { return 0 - 1; }
+    if (((eff >> KAVACH_CAP_SETPCAP) & 1) == 1) {
+        var i = 0;
+        while (i < 64) {
+            if (((mask >> i) & 1) == 0) {
+                # EINVAL is past the kernel's last capability.
+                var bounded = syscall(SYS_PRCTL, KAVACH_PR_CAPBSET_READ, i, 0, 0, 0);
+                if (bounded < 0) { break; }
+                if (bounded == 1) {
+                    if (syscall(SYS_PRCTL, KAVACH_PR_CAPBSET_DROP, i, 0, 0, 0) < 0) { return 0 - 1; }
+                }
             }
+            i = i + 1;
         }
-        i = i + 1;
+    } else {
+        if (sys_geteuid() == 0) { return 0 - 1; }
     }
     var keep = mask & held;
     memset(&data, 0, 24);
@@ -466,8 +655,8 @@ fn _spawn_bound_capabilities(mask) {
     #endif
 }
 
-# Why `config`'s capability list cannot be honoured here, as a message, or 0. Read
-# with a rootfs only, which is where a list applies. CAP_SYS_ADMIN under a filter
+# Why `config`'s capability list cannot be honoured here, as a message, or 0.
+# CAP_SYS_ADMIN under a filter
 # is not refused, unlike `oci_capabilities_refusal`: that rule answers a runtime
 # resolving a filter by name and skipping one it does not know, and this filter
 # compares numbers, so `open_tree_attr` is denied here.
@@ -476,14 +665,18 @@ fn _spawn_bound_capabilities(mask) {
 # and `/sys` that `_spawn_guard_proc_sys` makes, and as root mounts a `/proc` of its
 # own, so with it the masks would mean nothing. A filter denies `mount`, `umount2`,
 # `move_mount` and the rest of the mount API, and there the masks hold.
+#
+# 3.14.8: read with no rootfs too, since a list applies to every confined payload.
+# The CAP_SYS_ADMIN rule stays a rootfs's: with no rootfs there is no `/proc` of
+# the caller's to unmount, and the payload is on the host's files already.
 #[must_use]
 fn confine_capabilities_refusal(config) {
     if (config == 0) { return 0; }
-    if (SandboxConfig_rootfs(config) == 0) { return 0; }
     var v = SandboxConfig_capabilities(config);
     if (v == 0) { return 0; }
     var unknown = security_capability_refusal(v);
     if (unknown != 0) { return unknown; }
+    if (SandboxConfig_rootfs(config) == 0) { return 0; }
     if (((security_capability_mask(v) >> KAVACH_CAP_SYS_ADMIN) & 1) == 1) {
         var p = SandboxConfig_policy(config);
         var filtered = 0;
@@ -567,8 +760,8 @@ fn _spawn_cgroup_join(cgroup_path) {
 }
 
 # Install `policy`'s landlock ruleset in the calling process, the child, after
-# the rootfs and before `execve`. Returns 0, also when the policy asks for no
-# landlock (a count of 0), or -1 when the ruleset could not be applied.
+# the rootfs and before `execve`. Returns 0, also on a kernel with no landlock, or
+# -1 when the ruleset could not be applied.
 #
 # `confine_child` and the persistent guest's sequence both call this, so they
 # cannot differ on what a policy means. Until 3.11.3 `confine_child` passed
@@ -590,15 +783,63 @@ fn _spawn_cgroup_join(cgroup_path) {
 # they were stored and scored and applied by nothing; a `policy_strict()`
 # payload could signal kavach itself. A policy with scopes and no rules gets a
 # ruleset of scopes alone.
-fn _spawn_apply_landlock(policy) {
+#
+# **Every confined payload gets a domain** (3.14.8), whatever the policy names,
+# from `security_apply_landlock_domain`. A domain refuses ptrace access, and with it
+# `/proc/<pid>/root`, to a process outside it: through 3.14.7 a payload with a
+# caller's `/proc` read a file in a sibling sandbox's root as root. On ABI v6 the
+# domain scopes its signals, so a payload signals neither kavach nor a sibling.
+# And a policy denying network (`network_enabled = 0`) has its TCP binds and
+# connects refused by it, but for the ports it names, where it is not in a network
+# namespace of its own: agnosai filed that most hosts refuse the namespace.
+#
+# `net_deny` is `_spawn_net_alone`'s answer: 1 when the payload is denied network
+# and has no network namespace of its own to deny it.
+fn _spawn_apply_landlock(policy, net_deny) {
+    var count = 0;
+    var scopes = 0;
+    var rules = 0;
+    var binds = 0;
+    var connects = 0;
+    if (policy != 0) {
+        count = SandboxPolicy_landlock_rules_len(policy);
+        if (count < 0) { count = 0; }
+        scopes = _spawn_landlock_scopes(policy);
+        rules = SandboxPolicy_landlock_rules(policy);
+        if (policy_landlock_is_deny_all(policy) == 1) { rules = 0; }
+        if (net_deny == 1) {
+            binds = SandboxPolicy_network_tcp_bind(policy);
+            connects = SandboxPolicy_network_tcp_connect(policy);
+        }
+    }
+    if (is_ok(security_apply_landlock_domain(rules, count, scopes, net_deny, binds, connects)) == 0) {
+        return 0 - 1;
+    }
+    return 0;
+}
+
+# 1 when the payload's network is denied without a namespace (3.14.8): `policy`
+# has `network_enabled = 0`, the confinement made no network namespace (`nsf`, the
+# flags it created), and the kernel has landlock's network rights (ABI v4). The
+# payload then gets landlock's TCP rule and `security_net_seccomp_filter`, both or
+# neither. In a namespace of its own the namespace is the isolation, as through
+# 3.14.7. Below ABI v4 neither applies and nothing changes from 3.14.7: the payload
+# keeps the network, and `score_config` gives it no credit for it.
+fn _spawn_net_alone(policy, nsf) {
     if (policy == 0) { return 0; }
-    var count = SandboxPolicy_landlock_rules_len(policy);
-    if (count < 0) { count = 0; }
-    var scopes = _spawn_landlock_scopes(policy);
-    if (count == 0 && scopes == 0) { return 0; }
-    var rules = SandboxPolicy_landlock_rules(policy);
-    if (policy_landlock_is_deny_all(policy) == 1) { rules = 0; }
-    if (is_ok(security_apply_landlock_scoped(rules, count, scopes)) == 0) { return 0 - 1; }
+    if (SandboxPolicy_network_enabled(policy) != 0) { return 0; }
+    if ((nsf & NS_NETWORK) != 0) { return 0; }
+    if (security_landlock_abi_version() < 4) { return 0; }
+    return 1;
+}
+
+# Load `security_net_seccomp_filter` in the child. 0, or -1.
+fn _spawn_load_net_filter() {
+    var info = security_net_seccomp_filter();
+    if (is_ok(security_load_seccomp(security_seccomp_filter_ptr(info),
+          security_seccomp_filter_len(info))) == 0) {
+        return 0 - 1;
+    }
     return 0;
 }
 
@@ -680,10 +921,13 @@ fn confine_child_wd(policy, rootfs, cgroup_path, uid, gid, seccomp_info, want_ns
 # a mask (`confine_capabilities`). The wrapper above gives it the default, so a
 # caller of `dist/kavach-confine.cyr` passing a rootfs gets the bound unasked.
 #
-# ⚠ `caps` applies only with a rootfs. With none the payload is on the host's files,
-# where no set bounds a uid 0 process from what root owns (`core_pattern` opens to
-# write with `CapEff` zero), so this path holds what kavach holds, as it always has.
-# See ADR-009.
+# 3.14.8: `caps` applies with no rootfs too (the issue's Ask 3, as the maintainer
+# decided). Through 3.14.7 a uid 0 payload with no rootfs kept every capability
+# kavach held, CAP_SYS_MODULE, CAP_SYS_RAWIO and CAP_SYS_ADMIN among them, and
+# read `/proc/kcore`. ⚠ It is still on the host's files: no set bounds uid 0 from
+# what root owns, and `core_pattern` opens to write with `CapEff` zero, which
+# SECURITY.md says. A landlock rule (`policy_landlock_add`) is what bounds that.
+# See ADR-009 and ADR-011.
 fn confine_child_caps(policy, rootfs, cgroup_path, uid, gid, seccomp_info, want_ns, workdir, caps) {
     # ⛔ THE WHOLE SEQUENCE IS LINUX-SPECIFIC and none of it exists on agnos: no cgroups, no
     # `prctl`, no namespaces, no landlock, no seccomp. `SYS_PRCTL` is not even in the agnos syscall
@@ -724,8 +968,11 @@ fn confine_child_caps(policy, rootfs, cgroup_path, uid, gid, seccomp_info, want_
             if (_spawn_write_idmaps(uid, gid) != 0) { sys_exit(SPAWN_EXIT_IDMAP); }
         }
     }
-    var entered = _spawn_enter_rootfs(rootfs);
+    var userns = 0;
+    if ((nsf & NS_USER) != 0) { userns = 1; }
+    var entered = _spawn_enter_rootfs_ns(rootfs, userns);
     if (entered == 0 - 2) { sys_exit(SPAWN_EXIT_PROC); }
+    if (entered == 0 - 3) { sys_exit(SPAWN_EXIT_DEV); }
     if (entered != 0) { sys_exit(SPAWN_EXIT_ROOTFS); }
     if (rootfs != 0 && policy != 0) {
         if (SandboxPolicy_read_only_rootfs(policy) == 1) {
@@ -735,7 +982,8 @@ fn confine_child_caps(policy, rootfs, cgroup_path, uid, gid, seccomp_info, want_
     # After the pivot, so the path resolves inside the container. See the fn's header.
     if (_spawn_enter_workdir(workdir) != 0) { sys_exit(SPAWN_EXIT_WORKDIR); }
 
-    if (_spawn_apply_landlock(policy) != 0) { sys_exit(SPAWN_EXIT_LANDLOCK); }
+    var net_alone = _spawn_net_alone(policy, nsf);
+    if (_spawn_apply_landlock(policy, net_alone) != 0) { sys_exit(SPAWN_EXIT_LANDLOCK); }
     if (rootfs != 0) {
         # 3.14.7: CAP_SYS_ADMIN with no filter unmounts the read-only `/proc` and, as
         # root, mounts a `/proc` of its own, so it is refused without one. The
@@ -744,13 +992,18 @@ fn confine_child_caps(policy, rootfs, cgroup_path, uid, gid, seccomp_info, want_
         if (((caps >> KAVACH_CAP_SYS_ADMIN) & 1) == 1 && seccomp_info == 0) {
             sys_exit(SPAWN_EXIT_CAPS);
         }
-        if (_spawn_bound_capabilities(caps) != 0) { sys_exit(SPAWN_EXIT_CAPS); }
     }
+    # 3.14.8: with a rootfs or without one.
+    if (_spawn_bound_capabilities(caps) != 0) { sys_exit(SPAWN_EXIT_CAPS); }
     if (seccomp_info != 0) {
         if (is_ok(security_load_seccomp(security_seccomp_filter_ptr(seccomp_info),
               security_seccomp_filter_len(seccomp_info))) == 0) {
             sys_exit(SPAWN_EXIT_SECCOMP);
         }
+    }
+    # 3.14.8: the network rules landlock's TCP rights leave to a filter.
+    if (net_alone == 1) {
+        if (_spawn_load_net_filter() != 0) { sys_exit(SPAWN_EXIT_SECCOMP); }
     }
     return 0;
     #endif
@@ -776,6 +1029,7 @@ fn spawn_exit_name(code) {
     if (code == SPAWN_EXIT_CAPS) { return "cannot bound capabilities"; }
     if (code == SPAWN_EXIT_PROC) { return "cannot make /proc or /sys in the rootfs read-only"; }
     if (code == SPAWN_EXIT_READONLY) { return "cannot make the rootfs read-only"; }
+    if (code == SPAWN_EXIT_DEV) { return "cannot give the payload a /dev of its own in the rootfs"; }
     if (code == SPAWN_EXIT_IDMAP) {
         return "cannot write uid_map/gid_map (already inside a restricted user namespace?)";
     }
@@ -910,11 +1164,32 @@ fn confine_capture_input_env(args, policy, rootfs, cgroup_path, seccomp_info, bu
 # field: `caps` was the first (3.14.6).
 fn confine_capture_input_env_wd(args, policy, rootfs, cgroup_path, seccomp_info, buf, buflen,
   want_ns, timeout_ms, do_confine, input, input_len, env, workdir) {
-    return confine_capture_run(confine_capture_new(args, policy, rootfs, cgroup_path, seccomp_info,
-        buf, buflen, want_ns, timeout_ms, do_confine, input, input_len, env, workdir));
+    var c = confine_capture_new(args, policy, rootfs, cgroup_path, seccomp_info,
+      buf, buflen, want_ns, timeout_ms, do_confine, input, input_len, env, workdir);
+    var n = confine_capture_run(c);
+    confine_capture_release(c);
+    return n;
 }
 
-# One capture: everything `confine_capture_run` reads.
+# One capture: everything `confine_capture_run` reads, and since 3.14.8 what it
+# found, which the fields after `caps` hold.
+#
+# **A run's result is the capture's** (3.14.8). Through 3.14.7 it was the process's:
+# the stderr went into one static buffer as it arrived, and the exit code and the
+# deadline flag into three globals, which each backend read back. Two captures on
+# two threads wrote the same buffer at once. agnosai measured 100 to 125 runs of 200
+# returning a stderr that was not their own, or two spliced, with `/bin/ls` and
+# `/bin/cat` on two threads through `sandbox_exec`. Now each capture has a stderr
+# buffer of its own, and kavach's backends read the capture they ran.
+#
+#   total      what `confine_capture_run` returned: the bytes in `buf`, or -1
+#   exit       the payload's exit code, 128 + the signal that ended it
+#   timed_out  1 when the deadline killed it
+#   err        its stderr, NUL-terminated, up to CONFINE_ERR_MAX - 1 bytes
+#   err_len    how many of those bytes it wrote
+#
+# `err` is an anonymous mapping of CONFINE_ERR_MAX bytes, so it costs the pages the
+# payload's stderr fills, and `confine_capture_release` gives it back.
 #derive(accessors)
 struct ConfineCapture {
     args;
@@ -932,8 +1207,13 @@ struct ConfineCapture {
     env;
     workdir;
     caps;
+    total;
+    exit;
+    timed_out;
+    err;
+    err_len;
 }
-var CONFINE_CAPTURE_SIZE = 120;
+var CONFINE_CAPTURE_SIZE = 160;
 
 # A capture of what the positional wrappers above have always taken, with `caps` at
 # the default. A caller with a config sets `caps` from `confine_capabilities`.
@@ -955,12 +1235,62 @@ fn confine_capture_new(args, policy, rootfs, cgroup_path, seccomp_info, buf, buf
     ConfineCapture_set_env(c, env);
     ConfineCapture_set_workdir(c, workdir);
     ConfineCapture_set_caps(c, KAVACH_CAPS_DEFAULT);
+    ConfineCapture_set_total(c, 0 - 1);
+    ConfineCapture_set_exit(c, 0);
+    ConfineCapture_set_timed_out(c, 0);
+    ConfineCapture_set_err(c, 0);
+    ConfineCapture_set_err_len(c, 0);
     return c;
 }
 
-# Fork, confine, exec and capture. Returns the bytes in `buf`, or -1; the payload's
-# exit code is `confine_last_exit()`.
+# Fork, confine, exec and capture. Returns the bytes in `buf`, or -1. The rest of
+# the run is the capture's (`ConfineCapture_exit`, `_timed_out`, `_err` and
+# `_err_len`), and is copied to `confine_last_*` for a caller on one thread.
 fn confine_capture_run(c) {
+    var n = _confine_capture_run(c);
+    ConfineCapture_set_total(c, n);
+    return n;
+}
+
+# Give back a capture's stderr buffer. The capture's other fields stay readable;
+# its stderr reads empty after this. Safe to call twice.
+fn confine_capture_release(c) {
+    if (c == 0) { return 0; }
+    var e = ConfineCapture_err(c);
+    if (e != 0) {
+        backend_capture_release(e, CONFINE_ERR_MAX);
+        ConfineCapture_set_err(c, 0);
+        ConfineCapture_set_err_len(c, 0);
+    }
+    return 0;
+}
+
+# The capture's stderr, NUL-terminated, "" when it has none.
+#[must_use]
+fn confine_capture_stderr(c) {
+    if (c == 0) { return ""; }
+    var e = ConfineCapture_err(c);
+    if (e == 0) { return ""; }
+    return e;
+}
+
+# What the capture's run wrote to stderr is also what `confine_last_*` reads, for
+# a caller with one thread. ⚠ Those are still one process's, so with two captures
+# at once they read whichever finished last: a caller with threads reads the
+# capture it ran.
+fn _confine_mirror_last(c) {
+    var n = ConfineCapture_err_len(c);
+    var e = ConfineCapture_err(c);
+    if (e != 0 && n > 0) { memcpy(&_confine_err_buf, e, n); }
+    else { n = 0; }
+    store8(&_confine_err_buf + n, 0);
+    _confine_err_len = n;
+    _confine_last_exit = ConfineCapture_exit(c);
+    _confine_last_timed_out = ConfineCapture_timed_out(c);
+    return 0;
+}
+
+fn _confine_capture_run(c) {
     var args = ConfineCapture_args(c);
     var policy = ConfineCapture_policy(c);
     var rootfs = ConfineCapture_rootfs(c);
@@ -998,6 +1328,14 @@ fn confine_capture_run(c) {
     # No buffer (3.14.7: `backend_capture_buf` answers 0 when it has none) is a
     # failed capture, never a write through a null pointer.
     if (buf == 0 || buflen < 2) { return 0 - 1; }
+    # The capture's own stderr buffer (3.14.8), taken before the fork as stdout's is.
+    var ebuf = ConfineCapture_err(c);
+    if (ebuf == 0) {
+        ebuf = backend_capture_buf(CONFINE_ERR_MAX);
+        if (ebuf == 0) { return 0 - 1; }
+        ConfineCapture_set_err(c, ebuf);
+    }
+    ConfineCapture_set_err_len(c, 0);
     var argv = alloc((argc + 1) * 8);
     var i = 0;
     while (i < argc) {
@@ -1081,6 +1419,14 @@ fn confine_capture_run(c) {
         # is the decorative-setter shape this release exists to remove.
         if (do_confine != 0) {
             confine_child_caps(policy, rootfs, cgroup_path, uid, gid, seccomp_info, want_ns, 0, caps);
+        } else {
+            # 3.14.8: an unconfined payload closes what it inherited too. Its pipes
+            # are not close-on-exec, and a capture forked on another thread holds
+            # this one's: through 3.14.7 such a payload kept them open, so this
+            # capture waited for its EOF until that payload exited, and a payload
+            # could read or write another run's stdio. The confined path has
+            # closed them since 3.9.1, through `confine_child`.
+            _spawn_close_inherited(3);
         }
         # After confinement, so the path resolves inside the rootfs when there is one.
         if (_spawn_enter_workdir(workdir) != 0) { sys_exit(SPAWN_EXIT_WORKDIR); }
@@ -1180,7 +1526,9 @@ fn confine_capture_run(c) {
         if (edone == 0) {
             var room = CONFINE_ERR_MAX - 1 - etotal;
             var m = 0;
-            if (room > 0) { m = sys_read(erfd, &_confine_err_buf + etotal, room); }
+            # The sink is read into and never read from, so two captures sharing
+            # it share nothing either keeps.
+            if (room > 0) { m = sys_read(erfd, ebuf + etotal, room); }
             else { m = sys_read(erfd, &_confine_err_sink, CONFINE_ERR_SINK); }
             if (m == 0) { edone = 1; }
             if (m > 0) {
@@ -1236,19 +1584,20 @@ fn confine_capture_run(c) {
     if (rfd >= 0) { sys_close(rfd); }
     sys_close(erfd);
     if (in_held == 1) { _confine_sigpipe_release(&in_mask, in_failed); }
-    store8(&_confine_err_buf + etotal, 0);
-    _confine_err_len = etotal;
+    store8(ebuf + etotal, 0);
+    ConfineCapture_set_err_len(c, etotal);
 
     var stbuf[4];
     store32(&stbuf, 0);
     if (_confine_reap(pid, &stbuf, killed, deadline) == 1) { killed = 1; }
-    _confine_last_timed_out = killed;
+    ConfineCapture_set_timed_out(c, killed);
     var status = load32(&stbuf);
     var sig = status & 127;
     var code = 0;
     if (sig == 0) { code = (status >> 8) & 255; }
     else { code = 128 + sig; }
-    _confine_last_exit = code;
+    ConfineCapture_set_exit(c, code);
+    _confine_mirror_last(c);
     return total;
     #endif
 }
@@ -1337,6 +1686,10 @@ fn confine_capture(args, policy, rootfs, cgroup_path, seccomp_info, buf, buflen,
 # count, and a caller that only looked at that would report success for a
 # payload that never ran — which is exactly how the missing-rootfs bug stayed
 # invisible.
+#
+# ⚠ The process's most recent, copied from the capture when it finishes
+# (3.14.8). A caller running captures on two threads reads `ConfineCapture_exit`
+# of the capture it ran: this one is whichever finished last.
 var _confine_last_exit = 0;
 
 # How often the drain loop looks again while a payload is running.
@@ -1353,6 +1706,10 @@ var CONFINE_POLL_RAMP = 8;
 # Ceiling on captured stderr. A payload cannot make the parent allocate without
 # bound by writing diagnostics.
 var CONFINE_ERR_MAX = 65536;
+# The most recent capture's stderr, copied there when it finishes (3.14.8). Until
+# then every capture wrote its payload's stderr straight into this buffer, which is
+# what two threads raced on. A top-level `var x[N]` is N*8 bytes, so it holds more
+# than CONFINE_ERR_MAX.
 var _confine_err_buf[65536];
 var _confine_err_len = 0;
 
@@ -1367,6 +1724,9 @@ var _confine_err_sink[512];
 # `ExecResult.stderr` was hardcoded to "" — so a caller that checked it was told
 # the payload wrote nothing, which is a different claim from "we did not keep
 # it".
+#
+# ⚠ The process's most recent capture, for a caller with one thread: see
+# `_confine_last_exit`. `confine_capture_stderr` reads a capture's own.
 #[must_use]
 fn confine_last_stderr() { return &_confine_err_buf; }
 

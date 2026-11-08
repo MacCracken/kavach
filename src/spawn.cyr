@@ -34,8 +34,10 @@
 #   7. rootfs entry    — pivot_root into the container filesystem, before landlock
 #                        (path rules resolve against the current root) and
 #                        before seccomp (which denies mount and pivot_root).
-#   8. landlock        — path rules; also sets NO_NEW_PRIVS itself.
-#   9. capabilities    — with a rootfs, the bound set (3.14.6).
+#   8. landlock        — a domain of the payload's own, with its path rules,
+#                        scopes and TCP rules (3.14.8); also sets NO_NEW_PRIVS.
+#   9. capabilities    — the bound set: with a rootfs since 3.14.6, without one
+#                        since 3.14.8.
 #  10. seccomp         — applied LAST, or it would filter the confinement steps
 #                        above it. Uses the exec-safe DENY-list profile; the
 #                        20-syscall allowlist cannot be used pre-exec because it
@@ -49,6 +51,9 @@
 #   exit_code   — -1 until reaped
 #   cgroup_path — cstr | 0; rmdir'd when the child is reaped
 #   log_path    — cstr | 0; where stdout+stderr went
+#   kill_fn     — fn(sp, signal) -> 0 / -1, a backend's own signal, or 0 (3.14.8)
+#   reap_fn     — fn(sp), a backend's own teardown once the child is reaped, or 0
+#   ctx         — what those two read
 #derive(accessors)
 struct SpawnedProcess {
     pid;
@@ -56,8 +61,24 @@ struct SpawnedProcess {
     exit_code;
     cgroup_path;
     log_path;
+    kill_fn;
+    reap_fn;
+    ctx;
 }
-var SPAWNED_PROCESS_SIZE = 40;
+var SPAWNED_PROCESS_SIZE = 64;
+
+# A handle for a detached child `pid`: alive, its exit code -1 until reaped, and
+# no backend teardown. A backend's spawn sets `kill_fn`, `reap_fn` and `ctx`.
+fn spawned_process_new(pid, cgroup_path, log_path) {
+    var sp = alloc(SPAWNED_PROCESS_SIZE);
+    memset(sp, 0, SPAWNED_PROCESS_SIZE);
+    SpawnedProcess_set_pid(sp, pid);
+    SpawnedProcess_set_alive(sp, 1);
+    SpawnedProcess_set_exit_code(sp, 0 - 1);
+    SpawnedProcess_set_cgroup_path(sp, cgroup_path);
+    SpawnedProcess_set_log_path(sp, log_path);
+    return sp;
+}
 
 # sandbox_spawn for a caller that holds real argv: `argv` is a vec of cstr, and
 # each element reaches the payload as one argument. See sandbox_exec_argv, whose
@@ -84,10 +105,17 @@ fn sandbox_spawn_argv(sandbox, argv, log_path) {
 # know, or the fork fails. A refusal prints through kavach_err_print and leaves
 # nothing running.
 #
-# ⚠ It reads no backend. A sandbox configured for OCI forks here too, with no
-# runtime: it gets the bound set and a pivot_root, and no PID namespace, no `/proc`
-# and no masks, and `score_backend` still scores it as OCI. See
-# docs/development/issues/2026-11-06-process-backend-keeps-every-capability.md.
+# 3.14.8: a backend with a spawn of its own takes it from here, after the checks
+# above it, which every detached payload passes (`backend_spawn_fn`). The OCI
+# backend registers one: `runc run` in the foreground, so the payload gets runc's
+# PID namespace, `/proc`, masks, device rules and filter, and the handle's pid is
+# runc's, which forwards a signal and exits with the payload's status. Through
+# 3.14.7 an OCI sandbox detached here on the process path, with no PID namespace
+# and no `/proc` of its own, which 3.14.7 scored as that (`score_spawn`) and the
+# issue's Ask 4 asked be detached through runc instead. Every other backend, and
+# an OCI sandbox from `dist/kavach-confine.cyr`, which carries no OCI backend,
+# still detaches on the process path. See
+# docs/development/issues/archived/2026-11-06-process-backend-keeps-every-capability.md.
 fn sandbox_spawn(sandbox, command, log_path) {
     if (Sandbox_state(sandbox) != SandboxState.RUNNING) {
         kavach_err_print(KAVACH_ERR_EXEC_FAILED, "sandbox not running");
@@ -120,6 +148,8 @@ fn sandbox_spawn(sandbox, command, log_path) {
         kavach_err_print(KAVACH_ERR_EXEC_FAILED, "empty command");
         return 0;
     }
+    var own = backend_spawn_fn(SandboxConfig_backend(Sandbox_config(sandbox)));
+    if (own != 0) { return fncall3(own, sandbox, command, log_path); }
     var caps_refused = confine_capabilities_refusal(Sandbox_config(sandbox));
     if (caps_refused != 0) {
         kavach_err_print(KAVACH_ERR_EXEC_FAILED, caps_refused);
@@ -218,13 +248,7 @@ fn sandbox_spawn(sandbox, command, log_path) {
 
     # ── parent ──
     if (pin >= 0) { sys_close(pin); }
-    var sp = alloc(SPAWNED_PROCESS_SIZE);
-    SpawnedProcess_set_pid(sp, pid);
-    SpawnedProcess_set_alive(sp, 1);
-    SpawnedProcess_set_exit_code(sp, 0 - 1);
-    SpawnedProcess_set_cgroup_path(sp, cgroup_path);
-    SpawnedProcess_set_log_path(sp, log_path);
-    return sp;
+    return spawned_process_new(pid, cgroup_path, log_path);
 }
 
 # Child pid, or -1.
@@ -261,6 +285,13 @@ fn _spawned_reap(sp, status) {
     SpawnedProcess_set_alive(sp, 0);
     cgroup_teardown(SpawnedProcess_cgroup_path(sp));
     SpawnedProcess_set_cgroup_path(sp, 0);
+    # 3.14.8: a backend's own teardown, once: the OCI spawn deletes the container
+    # and its bundle.
+    var reap = SpawnedProcess_reap_fn(sp);
+    if (reap != 0) {
+        SpawnedProcess_set_reap_fn(sp, 0);
+        fncall1(reap, sp);
+    }
     return code;
 }
 
@@ -296,6 +327,10 @@ fn spawned_wait(sp) {
 fn spawned_kill(sp, signal) {
     if (sp == 0) { return 0 - 1; }
     if (SpawnedProcess_alive(sp) == 0) { return 0 - 1; }
+    # 3.14.8: a backend's own signal. runc forwards what it is sent, but cannot be
+    # asked to forward a SIGKILL, which the OCI spawn sends through `runc kill`.
+    var kf = SpawnedProcess_kill_fn(sp);
+    if (kf != 0) { return fncall2(kf, sp, signal); }
     if (sys_kill(SpawnedProcess_pid(sp), signal) < 0) { return 0 - 1; }
     return 0;
 }

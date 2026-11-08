@@ -31,8 +31,31 @@ var _last_assessment = 0;
 
 fn sandbox_exec_set_ext_policy(p) { _default_ext_policy = p; return 0; }
 fn sandbox_exec_set_audit_chain(c) { _global_audit_chain = c; return 0; }
+
+# The process's most recent scan and assessment. ⚠ With execs on two threads
+# these are either one's (3.14.8): a caller with threads reads its sandbox's,
+# `sandbox_last_scan_result` and `sandbox_last_assessment`.
 fn sandbox_exec_last_scan_result() { return _last_scan_result; }
 fn sandbox_exec_last_assessment() { return _last_assessment; }
+
+# What `sandbox_exec` found for `sandbox`'s last exec (3.14.8): the gate's
+# ScanResult, the ThreatAssessment, and the AttestationResult when the policy
+# required attestation. 0 when the exec stopped before that step, or for a
+# diagnostic, which skips the gates.
+fn sandbox_last_scan_result(sandbox) {
+    if (sandbox == 0) { return 0; }
+    return Sandbox_last_scan(sandbox);
+}
+
+fn sandbox_last_assessment(sandbox) {
+    if (sandbox == 0) { return 0; }
+    return Sandbox_last_assessment(sandbox);
+}
+
+fn sandbox_last_attestation(sandbox) {
+    if (sandbox == 0) { return 0; }
+    return Sandbox_last_attestation(sandbox);
+}
 
 # ---- Attestation (3.13.0) -------------------------------------------------
 var _last_attestation = 0;
@@ -42,7 +65,13 @@ var _attest_next_nonce_len = 0;
 
 # The AttestationResult of the last exec whose quote was checked, or 0: the
 # policy did not require attestation, or the exec stopped before the check.
+# ⚠ The process's most recent: see `sandbox_last_attestation`.
 fn sandbox_exec_last_attestation() { return _last_attestation; }
+
+# Held by an attesting exec from taking its nonce to taking its quote (3.14.8), so
+# the process-wide pair `backend_attest_nonce` and `backend_attach_quote` belongs
+# to one exec at a time. An exec that does not attest never takes it.
+var _attest_exec_lock = 0;
 
 # Verify quotes as of Unix time `t` rather than the wall clock; 0 returns to
 # the clock. For checking evidence at the time it was recorded, and for tests
@@ -53,6 +82,9 @@ fn sandbox_exec_set_attest_time(t) { _attest_time = t; return 0; }
 # one: a relying party's challenge, so the quote is fresh for that party. Used
 # once; the exec after it draws a random nonce again. Returns 0, or -1 for a
 # nonce of the wrong length.
+#
+# "The next exec" is the process's next attesting one, which takes it under
+# `_attest_exec_lock`, so it reaches one exec and no other.
 fn sandbox_exec_set_attest_nonce(nonce, len) {
     if (nonce == 0 || len <= 0 || len > ATTEST_NONCE_MAX) { return 0 - 1; }
     var copy = alloc(len);
@@ -63,19 +95,34 @@ fn sandbox_exec_set_attest_nonce(nonce, len) {
 }
 
 # The nonce for this exec: the caller's, once, or 32 bytes from the kernel
-# CSPRNG. Returns 0 if getrandom fails, which fails the exec.
-fn _attest_take_nonce() {
+# CSPRNG. Returns 0 if getrandom fails, which fails the exec. Set on `sandbox`,
+# and on the process-wide pair, which the caller holds `_attest_exec_lock` for.
+fn _attest_take_nonce(sandbox) {
+    var n = 0;
+    var len = 0;
     if (_attest_next_nonce_len > 0) {
-        var n = _attest_next_nonce;
-        backend_attest_reset(n, _attest_next_nonce_len);
+        n = _attest_next_nonce;
+        len = _attest_next_nonce_len;
         _attest_next_nonce = 0;
         _attest_next_nonce_len = 0;
-        return n;
+    } else {
+        n = alloc(32);
+        if (fill_random(n, 32) != 32) { return 0; }
+        len = 32;
     }
-    var fresh = alloc(32);
-    if (fill_random(fresh, 32) != 32) { return 0; }
-    backend_attest_reset(fresh, 32);
-    return fresh;
+    backend_attest_reset(n, len);
+    Sandbox_set_attest_nonce(sandbox, n);
+    Sandbox_set_attest_nonce_len(sandbox, len);
+    return n;
+}
+
+# Clear `sandbox`'s attestation context, so no exec reads another's nonce or quote.
+fn _attest_clear(sandbox) {
+    Sandbox_set_attest_nonce(sandbox, 0);
+    Sandbox_set_attest_nonce_len(sandbox, 0);
+    Sandbox_set_quote(sandbox, 0);
+    Sandbox_set_quote_len(sandbox, 0);
+    return 0;
 }
 
 fn _ensure_default_ext_policy() {
@@ -137,6 +184,14 @@ fn sandbox_exec_argv(sandbox, argv) {
 
 # Execute a command through the full pipeline.
 # Returns ExecResult* on PASS/WARN, 0 on BLOCK/QUARANTINE/error.
+#
+# 3.14.8: two execs on two threads are two runs. What one exec finds is its own:
+# the capture's result is the capture's, the diagnostic flag the result's, the
+# scan, assessment and attestation the sandbox's (`sandbox_last_*`), and an
+# attesting exec holds `_attest_exec_lock` across its dispatch. The
+# `sandbox_exec_last_*` accessors still read the process's most recent. One
+# sandbox is one exec at a time: its `last_*` fields describe whichever of two
+# execs on it finished last.
 fn sandbox_exec(sandbox, command) {
     if (Sandbox_state(sandbox) != SandboxState.RUNNING) {
         kavach_err_print(KAVACH_ERR_EXEC_FAILED, "sandbox not running");
@@ -155,7 +210,11 @@ fn sandbox_exec(sandbox, command) {
     var sp = SandboxConfig_policy(cfg);
     var attest = policy_wants_attestation(sp);
     _last_attestation = 0;
-    backend_attest_reset(0, 0);
+    Sandbox_set_last_attestation(sandbox, 0);
+    Sandbox_set_last_scan(sandbox, 0);
+    Sandbox_set_last_assessment(sandbox, 0);
+    _attest_clear(sandbox);
+    var lock = 0;
     if (attest == 1) {
         var bid = SandboxConfig_backend(cfg);
         if (kavach_attest_backend_supported(bid) == 0) {
@@ -163,24 +222,47 @@ fn sandbox_exec(sandbox, command) {
             _audit_record_if(audit, "exec_error", "attestation required; backend cannot attest");
             return 0;
         }
-        if (_attest_take_nonce() == 0) {
+        lock = kavach_lock_cell(&_attest_exec_lock);
+        if (lock == 0) {
+            kavach_err_print(KAVACH_ERR_POLICY_VIOLATION, "attestation required; no lock");
+            _audit_record_if(audit, "exec_error", "attestation required; no lock");
+            return 0;
+        }
+        mutex_lock(lock);
+        if (_attest_take_nonce(sandbox) == 0) {
+            backend_attest_reset(0, 0);
+            mutex_unlock(lock);
             kavach_err_print(KAVACH_ERR_POLICY_VIOLATION, "attestation required; no nonce");
             _audit_record_if(audit, "exec_error", "attestation required; no nonce");
             return 0;
         }
     }
 
-    # 1. Backend dispatch. The diagnostic flag is cleared first, so it can only
-    # describe this dispatch's result (see backend_diagnostic_reset).
+    # 1. Backend dispatch. The process-wide diagnostic flag is cleared first for a
+    # caller on one thread (see backend_diagnostic_reset); this exec reads the
+    # result's own.
     backend_diagnostic_reset();
     var result = backend_dispatch_exec(sandbox, command);
     # Taken and cleared on every path out of the dispatch, so none of them
-    # leaves a nonce or quote for whatever dispatches next.
-    var quote = backend_quote();
-    var quote_len = backend_quote_len();
-    var nonce = backend_attest_nonce();
-    var nonce_len = backend_attest_nonce_len();
-    backend_attest_reset(0, 0);
+    # leaves a nonce or quote for whatever dispatches next. The sandbox's quote
+    # first, then one a backend handed to the process-wide pair.
+    var quote = 0;
+    var quote_len = 0;
+    var nonce = 0;
+    var nonce_len = 0;
+    if (attest == 1) {
+        quote = Sandbox_quote(sandbox);
+        quote_len = Sandbox_quote_len(sandbox);
+        if (quote == 0) {
+            quote = backend_quote();
+            quote_len = backend_quote_len();
+        }
+        nonce = Sandbox_attest_nonce(sandbox);
+        nonce_len = Sandbox_attest_nonce_len(sandbox);
+        backend_attest_reset(0, 0);
+        mutex_unlock(lock);
+    }
+    _attest_clear(sandbox);
     if (result == 0) {
         _audit_record_if(audit, "exec_error", "backend dispatch failed");
         return 0;
@@ -193,8 +275,9 @@ fn sandbox_exec(sandbox, command) {
     # lets kavach censor its own error messages — see
     # backend_result_is_diagnostic. With no payload there is no guest to attest
     # either. The result still flows back to the caller carrying its non-zero
-    # exit code and its reason.
-    if (backend_result_is_diagnostic() == 1) {
+    # exit code and its reason. 3.14.8: the result says so, not a process-wide
+    # flag another thread's dispatch may have set or cleared.
+    if (exec_result_is_diagnostic(result) == 1) {
         _last_scan_result = 0;
         _last_assessment = 0;
         _audit_record_if(audit, "exec_complete", "diagnostic");
@@ -211,6 +294,7 @@ fn sandbox_exec(sandbox, command) {
         var ar = kavach_attest_quote(SandboxConfig_backend(cfg), quote, quote_len, sp,
           nonce, nonce_len, now);
         _last_attestation = ar;
+        Sandbox_set_last_attestation(sandbox, ar);
         _audit_record_if(audit, "attestation", attestation_trust_name(AttestationResult_trust(ar)));
         if (kavach_attest_passes(ar, sp) == 0) {
             kavach_err_print(KAVACH_ERR_POLICY_VIOLATION, AttestationResult_details(ar));
@@ -221,10 +305,12 @@ fn sandbox_exec(sandbox, command) {
     # 3. Externalization gate
     var scan = gate_apply(result, policy);
     _last_scan_result = scan;
+    Sandbox_set_last_scan(sandbox, scan);
 
     # 4. Threat classification
     var assessment = classify_threat(ScanResult_findings(scan));
     _last_assessment = assessment;
+    Sandbox_set_last_assessment(sandbox, assessment);
 
     var verdict = ScanResult_verdict(scan);
 
@@ -250,6 +336,16 @@ fn sandbox_exec(sandbox, command) {
 fn kavach_init() {
     alloc_init();
     sha256_global_init();
+    # 3.14.8: the tables kavach builds once and only reads after, built here, on
+    # the thread that calls this before a consumer starts others. Each is
+    # published only when whole, so building one late on two threads costs a
+    # second copy and nothing else; this keeps even that off the exec path.
+    _cg_automaton();
+    _seccomp_deny_list();
+    _seccomp_allow_list();
+    security_capability_names();
+    _syscall_map_init();
+    _oci_paths_json();
     backend_noop_register();
     backend_process_register();
     backend_gvisor_register();

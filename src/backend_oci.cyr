@@ -108,6 +108,9 @@ var _OCI_ERR_MAX = 8192;
 # when the child exited normally, `128 + signal` when it was killed — the same
 # convention `confine_capture` uses, so an exit code means the same thing on
 # both backends.
+#
+# ⚠ The process's most recent, for a caller on one thread (3.14.8). The backend
+# reads the exit status from the run's own capture (`_oci_run_capture`).
 #[must_use]
 fn oci_last_exit() { return _oci_last_exit; }
 
@@ -147,18 +150,35 @@ fn _oci_log_path(container_id) { return _oci_scratch_path("/log-", container_id)
 # byte count, or -1; `oci_last_exit()` is the runtime's exit status (the
 # container's, when it ran) and `confine_last_stderr()` its stderr. A deadline
 # kills the runtime; `_oci_delete` then stops the container.
+#
+# For a caller on one thread. The backend runs `_oci_run_capture` (3.14.8).
 fn _oci_run(runtime, bundle, container_id, cfg, out_buf, out_cap) {
+    var c = _oci_run_capture(runtime, bundle, container_id, cfg, out_buf, out_cap);
+    if (c == 0) {
+        _oci_last_exit = 1;
+        return 0 - 1;
+    }
+    var n = ConfineCapture_total(c);
+    if (n < 0) { _oci_last_exit = 1; }
+    else { _oci_last_exit = ConfineCapture_exit(c); }
+    confine_capture_release(c);
+    return n;
+}
+
+# The same run, handing back its capture, or 0 when it was refused before the
+# runtime ran: no state directory or log path, or agnos.
+fn _oci_run_capture(runtime, bundle, container_id, cfg, out_buf, out_cap) {
     # ⛔ LINUX ONLY — forks a child that execs an OCI runtime (runc/crun). Neither the fork nor
     # the runtime exists on agnos.
-    # ⚠ -1 rather than an empty-but-successful capture, so "the container produced no output"
+    # ⚠ 0 rather than an empty-but-successful capture, so "the container produced no output"
     # and "there is no container runtime here" stay distinguishable.
     #ifdef CYRIUS_TARGET_AGNOS
-    return 0 - 1;
+    return 0;
     #endif
     var state_root = _oci_state_root();
-    if (state_root == 0) { _oci_last_exit = 1; return 0 - 1; }
+    if (state_root == 0) { return 0; }
     var log_path = _oci_log_path(container_id);
-    if (log_path == 0) { _oci_last_exit = 1; return 0 - 1; }
+    if (log_path == 0) { return 0; }
     var args = vec_new();
     vec_push(args, runtime);
     vec_push(args, "--root");
@@ -183,10 +203,7 @@ fn _oci_run(runtime, bundle, container_id, cfg, out_buf, out_cap) {
     # before fork, so the child execs the binary that was found (ADR-005 §H4).
     # Its environment is empty, as everywhere else in kavach — `--root` above is
     # what removes this path's dependency on XDG_RUNTIME_DIR.
-    var n = backend_run_capture(args, cfg, out_buf, out_cap);
-    if (n < 0) { _oci_last_exit = 1; }
-    else { _oci_last_exit = confine_last_exit(); }
-    return n;
+    return backend_run_start(args, cfg, out_buf, out_cap);
 }
 
 # Read back (and remove) one of the run's scratch files. Returns a cstr — "" when
@@ -276,7 +293,7 @@ fn _oci_exec_with(runtime, sandbox, command, start_ns) {
 
     var out_cap = 1048576;
     var out_buf = backend_capture_buf(out_cap);
-    var n = _oci_run(runtime, bundle, container_id, Sandbox_config(sandbox), out_buf, out_cap);
+    var oc = _oci_run_capture(runtime, bundle, container_id, Sandbox_config(sandbox), out_buf, out_cap);
     var end_ns = mono_now_ns();
     var runclog = _oci_take_log(container_id);
 
@@ -297,6 +314,7 @@ fn _oci_exec_with(runtime, sandbox, command, start_ns) {
     # status on its own failure, so the exit code alone cannot say which
     # happened. The log file can.
     if (strlen(runclog) > 0) {
+        confine_capture_release(oc);
         backend_capture_release(out_buf, out_cap);
         return backend_error_result(_oci_diag("OCI runtime run failed: ", runclog));
     }
@@ -304,8 +322,14 @@ fn _oci_exec_with(runtime, sandbox, command, start_ns) {
     # The payload's REAL outcome: its exit status, whether the deadline killed
     # it, and its stderr, which DOES belong to the payload and so DOES get
     # scanned (before 3.9.2 it went to /dev/null and bypassed the gate). When
-    # n < 0 the capture itself failed and its own (1, fail_msg) pair is the truth.
-    var r = backend_run_finish(out_buf, n, out_cap, "OCI runtime run failed", start_ns, end_ns);
+    # the capture itself failed its own (1, fail_msg) pair is the truth. 3.14.8:
+    # read from this run's capture, which no other thread's run writes.
+    var r = 0;
+    if (oc == 0) {
+        r = backend_capture_finish(out_buf, 0 - 1, out_cap, "OCI runtime run failed", start_ns, end_ns);
+    } else {
+        r = backend_capture_result(oc, "OCI runtime run failed", start_ns, end_ns);
+    }
     backend_capture_release(out_buf, out_cap);
     return r;
 }
@@ -328,6 +352,158 @@ fn _oci_diag(prefix, detail) {
     return out;
 }
 
+# ---- a detached container (3.14.8) -----------------------------------------
+#
+# `sandbox_spawn` on an OCI sandbox, as the issue's Ask 4 asked and the maintainer
+# decided: `runc run` in the foreground, detached as the process path detaches a
+# payload (its own session, stdin from /dev/null, stdout and stderr appended to the
+# log). runc is the handle's pid. It stays the container's parent, forwards a
+# signal it is sent to the container, exits with the container's status, and
+# deletes the container when that ends. So `spawned_wait`, `spawned_try_wait` and
+# `spawned_terminate` keep their meaning, and the payload gets what `oci_exec`'s
+# gets: a PID namespace, runc's `/proc` with its masks, its device rules, ADR-008's
+# capabilities and the policy's filter. runc's own errors go to the log, the
+# detached payload's only channel.
+#
+# Through 3.14.7 an OCI sandbox's spawn ran on the process path: the bound set and a
+# pivot_root, with no PID namespace, no `/proc` of its own and no device rules.
+# stiva's `run -d` lands here.
+#
+#   - SIGKILL to runc would kill runc and not its container, so `spawned_kill` sends
+#     it through `runc kill`, and to runc itself only when that fails, before the
+#     container exists.
+#   - Once runc is reaped, `runc delete --force` and the bundle's removal run, so a
+#     runc that was killed leaves nothing behind.
+#derive(accessors)
+struct OciSpawn {
+    runtime;
+    id;
+    bundle;
+}
+var OCI_SPAWN_SIZE = 24;
+
+fn oci_spawn(sandbox, command, log_path) {
+    # ⛔ LINUX ONLY, like `_oci_run`.
+    #ifdef CYRIUS_TARGET_AGNOS
+    kavach_err_print(KAVACH_ERR_BACKEND_UNAVAILABLE, "OCI");
+    return 0;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    var runtime = _oci_runtime_path();
+    if (runtime == 0) {
+        kavach_err_print(KAVACH_ERR_BACKEND_UNAVAILABLE, "no OCI runtime (runc/crun) found in PATH");
+        return 0;
+    }
+    var state_root = _oci_state_root();
+    if (state_root == 0) {
+        kavach_err_print(KAVACH_ERR_EXEC_FAILED,
+          "OCI state directory under /tmp is not a private directory owned by this user; refusing to spawn");
+        return 0;
+    }
+    var refused = oci_capabilities_refusal(Sandbox_config(sandbox));
+    if (refused != 0) {
+        kavach_err_print(KAVACH_ERR_EXEC_FAILED, refused);
+        return 0;
+    }
+    var id = oci_container_id("kavach-oci");
+    var bundle = oci_prepare_bundle(id, sandbox, command);
+    if (bundle == 0) {
+        kavach_err_print(KAVACH_ERR_EXEC_FAILED, "failed to prepare OCI bundle");
+        return 0;
+    }
+    var args = vec_new();
+    vec_push(args, runtime);
+    vec_push(args, "--root");
+    vec_push(args, state_root);
+    vec_push(args, "run");
+    vec_push(args, "--bundle");
+    vec_push(args, bundle);
+    vec_push(args, id);
+    var argc = vec_len(args);
+    var argv = alloc((argc + 1) * 8);
+    var i = 0;
+    while (i < argc) {
+        store64(argv + i * 8, vec_get(args, i));
+        i = i + 1;
+    }
+    store64(argv + argc * 8, 0);
+    var envp = alloc(8);
+    store64(envp, 0);
+    # Pinned before fork (ADR-005 §H4), as every runtime kavach starts.
+    var pin = kv_exec_pin(runtime);
+    var pid = kv_fork();
+    if (pid < 0) {
+        if (pin >= 0) { sys_close(pin); }
+        oci_cleanup_bundle(bundle);
+        kavach_err_print(KAVACH_ERR_EXEC_FAILED, "fork failed");
+        return 0;
+    }
+    if (pid == 0) {
+        _spawn_default_sigpipe();
+        _kv_exec_keep_fd = pin;
+        kv_setsid();
+        if (_spawn_redirect_stdio(log_path) != 0) { sys_exit(SPAWN_EXIT_STDIO); }
+        _spawn_close_inherited(3);
+        kv_exec_child(pin, runtime, argv, envp);
+        sys_exit(127);
+    }
+    if (pin >= 0) { sys_close(pin); }
+    var ctx = alloc(OCI_SPAWN_SIZE);
+    OciSpawn_set_runtime(ctx, runtime);
+    OciSpawn_set_id(ctx, id);
+    OciSpawn_set_bundle(ctx, bundle);
+    var sp = spawned_process_new(pid, 0, log_path);
+    SpawnedProcess_set_ctx(sp, ctx);
+    SpawnedProcess_set_kill_fn(sp, &_oci_spawn_kill);
+    SpawnedProcess_set_reap_fn(sp, &_oci_spawn_reap);
+    return sp;
+    #endif
+}
+
+# The bundle a spawned container runs from, or 0 for a handle that is not one.
+fn oci_spawned_bundle(sp) {
+    if (sp == 0) { return 0; }
+    var ctx = SpawnedProcess_ctx(sp);
+    if (ctx == 0) { return 0; }
+    return OciSpawn_bundle(ctx);
+}
+
+# `spawned_kill` for a container: SIGKILL through `runc kill`, which signals the
+# container's init, and every other signal to runc, which forwards it.
+fn _oci_spawn_kill(sp, signal) {
+    var ctx = SpawnedProcess_ctx(sp);
+    if (signal == 9) {
+        var root = _oci_state_root();
+        if (root != 0) {
+            var args = vec_new();
+            vec_push(args, OciSpawn_runtime(ctx));
+            vec_push(args, "--root");
+            vec_push(args, root);
+            vec_push(args, "kill");
+            vec_push(args, OciSpawn_id(ctx));
+            vec_push(args, "KILL");
+            var sink[64];
+            var c = confine_capture_new(args, 0, 0, 0, 0, &sink, 64, 0, 10000, 0, "", 0, 0, 0);
+            confine_capture_run(c);
+            var ok = 0;
+            if (ConfineCapture_total(c) >= 0 && ConfineCapture_exit(c) == 0) { ok = 1; }
+            confine_capture_release(c);
+            if (ok == 1) { return 0; }
+        }
+    }
+    if (sys_kill(SpawnedProcess_pid(sp), signal) < 0) { return 0 - 1; }
+    return 0;
+}
+
+# Once runc is reaped: the container's state, however runc ended, and its bundle.
+fn _oci_spawn_reap(sp) {
+    var ctx = SpawnedProcess_ctx(sp);
+    if (ctx == 0) { return 0; }
+    _oci_delete(OciSpawn_runtime(ctx), OciSpawn_id(ctx));
+    oci_cleanup_bundle(OciSpawn_bundle(ctx));
+    return 0;
+}
+
 fn oci_health(sandbox) {
     if (_oci_runtime_path() == 0) { return 0; }
     return 1;
@@ -339,5 +515,6 @@ fn backend_oci_register() {
     backend_register_exec(KavachBackend.OCI, &oci_exec);
     backend_register_health(KavachBackend.OCI, &oci_health);
     backend_register_destroy(KavachBackend.OCI, &oci_destroy);
+    backend_register_spawn(KavachBackend.OCI, &oci_spawn);
     return 0;
 }

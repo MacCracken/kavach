@@ -91,6 +91,7 @@ stdlib = [
     "slice",
     "str",
     "string",
+    "sync",
     "syscalls",
     "tagged",
     "thread",

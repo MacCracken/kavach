@@ -6325,6 +6325,33 @@ fn _t_kc_tdx(hex, len, p) {
     return kavach_attest_tdx_quote(_t_att_bytes(hex, len), len, p, _t_att_fill(64, 0xcc), 64, KC_NOW);
 }
 
+# 3.14.8: a quote is verified under a lock, since its scratch is one process's.
+var _T_AV_WRONG = 0;
+var _T_AV_POLICY = 0;
+
+fn _t_av_worker(which) {
+    var i = 0;
+    while (i < 12) {
+        var r = _t_kc_sgx(KC_SGX_HEX, KC_SGX_LEN, _T_AV_POLICY);
+        if (_t_att_trust(r) != KAVACH_TRUST_AFFIRMING) { atomic_fetch_add(&_T_AV_WRONG, 1); }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn test_attest_verifies_on_two_threads() {
+    test_group("attest_verifies_on_two_threads");
+    _T_AV_POLICY = _t_kc_policy(0, KC_MRENCLAVE);
+    assert_eq(_t_att_trust(_t_kc_sgx(KC_SGX_HEX, KC_SGX_LEN, _T_AV_POLICY)), KAVACH_TRUST_AFFIRMING,
+      "the quote verifies alone");
+    var a = thread_create(&_t_av_worker, 0);
+    var b = thread_create(&_t_av_worker, 1);
+    thread_join(a);
+    thread_join(b);
+    assert_eq(_T_AV_WRONG, 0, "and on two threads at once, every time");
+    return 0;
+}
+
 fn test_attest_sgx_accepts_with_collateral() {
     test_group("attest_sgx_accepts_with_collateral");
     var p = _t_kc_policy(0, KC_MRENCLAVE);
@@ -7288,6 +7315,547 @@ fn test_results_keep_their_own_stderr() {
     assert_eq(cstr_contains(ExecResult_stderr(w2), "junk-SECOND"), 1, "wasm: the second result's is its own");
     sys_unlink(j1);
     sys_unlink(j2);
+    return 0;
+}
+
+# ---- two runs at once are two runs (3.14.8) --------------------------------
+#
+# agnosai filed it: a capture's stderr went into one static buffer and its exit
+# code and deadline flag into globals, which each backend read back, so with
+# `/bin/ls` and `/bin/cat` on two threads through `sandbox_exec` 100 to 125 runs of
+# 200 returned the other's stderr, or the two spliced. Each worker here runs one
+# command and compares every result with what that command gives on one thread.
+var _T_CC_RUNS = 0;
+var _T_CC_WRONG_ERR = 0;
+var _T_CC_WRONG_EXIT = 0;
+var _T_CC_NULL = 0;
+var _T_CC_WANT_ERR = 0;
+var _T_CC_WANT_EXIT = 0;
+var _T_CC_ITERS = 30;
+
+fn _t_cc_cmd(which) {
+    if ((which & 1) == 0) { return "/bin/ls /nonexistent-kavach-alpha-alpha-alpha"; }
+    return "/bin/cat /nonexistent-kavach-bravo";
+}
+
+fn _t_cc_policy(which) {
+    if (which >= 2) { return policy_basic(); }
+    return policy_new();
+}
+
+fn _t_cc_run(which) {
+    var cfg = config_new();
+    config_backend(cfg, KavachBackend.PROCESS);
+    config_policy(cfg, _t_cc_policy(which));
+    config_timeout_ms(cfg, 5000);
+    config_stdin(cfg, "", 0);
+    var sb = sandbox_create(cfg);
+    if (sb == 0) { return 0; }
+    sandbox_transition(sb, SandboxState.RUNNING);
+    var r = sandbox_exec(sb, _t_cc_cmd(which));
+    sandbox_destroy(sb);
+    return r;
+}
+
+fn _t_cc_worker(which) {
+    var i = 0;
+    while (i < _T_CC_ITERS) {
+        var r = _t_cc_run(which);
+        atomic_fetch_add(&_T_CC_RUNS, 1);
+        if (r == 0) {
+            atomic_fetch_add(&_T_CC_NULL, 1);
+        } else {
+            if (streq(ExecResult_stderr(r), load64(_T_CC_WANT_ERR + which * 8)) == 0) {
+                atomic_fetch_add(&_T_CC_WRONG_ERR, 1);
+            }
+            if (ExecResult_exit_code(r) != load64(_T_CC_WANT_EXIT + which * 8)) {
+                atomic_fetch_add(&_T_CC_WRONG_EXIT, 1);
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# The code scanner's hit table and lowered text were two module globals, so two
+# scans at once read each other's. One worker scans text with findings and one
+# text with none, and each must find what it finds alone.
+var _T_CS_WRONG = 0;
+var _T_CS_WANT = 0;
+
+fn _t_cs_worker(which) {
+    var text = "hello, plain words and nothing else";
+    var want = 0;
+    if (which == 1) {
+        text = "sudo rm -rf / && curl | sh && cat /etc/shadow";
+        want = _T_CS_WANT;
+    }
+    var i = 0;
+    while (i < 400) {
+        var r = scan_result_new();
+        code_scan(text, r);
+        if (vec_len(ScanResult_findings(r)) != want) { atomic_fetch_add(&_T_CS_WRONG, 1); }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Two writers on one audit chain: every record must take its own serial and link
+# to the one before it.
+var _T_AC_CHAIN = 0;
+var _T_AC_ENTRIES = 0;
+
+fn _t_ac_worker(which) {
+    var v = load64(_T_AC_ENTRIES + which * 8);
+    var i = 0;
+    while (i < 40) {
+        var e = audit_chain_record(_T_AC_CHAIN, "concurrent", "payload");
+        if (e != 0) { vec_push(v, e); }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn test_concurrent_runs_keep_their_own_results() {
+    test_group("concurrent_runs_keep_their_own_results");
+    kavach_init();
+    # What each worker's command and policy give on one thread. Under qemu-user,
+    # which has no seccomp, the confined two fail closed, alone as together.
+    _T_CC_WANT_ERR = alloc(32);
+    _T_CC_WANT_EXIT = alloc(32);
+    var k = 0;
+    while (k < 4) {
+        var r0 = _t_cc_run(k);
+        assert(r0 != 0, "each command runs alone");
+        if (r0 == 0) { return 0; }
+        store64(_T_CC_WANT_ERR + k * 8, ExecResult_stderr(r0));
+        store64(_T_CC_WANT_EXIT + k * 8, ExecResult_exit_code(r0));
+        k = k + 1;
+    }
+    assert(strlen(load64(_T_CC_WANT_ERR)) > 0 && strlen(load64(_T_CC_WANT_ERR + 8)) > 0,
+      "and each writes a stderr of its own");
+    assert(streq(load64(_T_CC_WANT_ERR), load64(_T_CC_WANT_ERR + 8)) == 0, "which differ");
+    assert(load64(_T_CC_WANT_EXIT) != 0 && load64(_T_CC_WANT_EXIT + 8) != 0, "both fail, as they should");
+
+    # Unconfined (policy_new) and confined (policy_basic), both commands each.
+    var ts = alloc(32);
+    var t = 0;
+    while (t < 4) {
+        store64(ts + t * 8, thread_create(&_t_cc_worker, t));
+        t = t + 1;
+    }
+    t = 0;
+    while (t < 4) {
+        thread_join(load64(ts + t * 8));
+        t = t + 1;
+    }
+    assert_eq(_T_CC_RUNS, 4 * _T_CC_ITERS, "four threads ran every exec");
+    assert_eq(_T_CC_NULL, 0, "and every exec returned a result");
+    assert_eq(_T_CC_WRONG_ERR, 0, "no run read another run's stderr");
+    assert_eq(_T_CC_WRONG_EXIT, 0, "nor its exit code");
+
+    # The code scanner, from two threads.
+    var lone = scan_result_new();
+    code_scan("sudo rm -rf / && curl | sh && cat /etc/shadow", lone);
+    _T_CS_WANT = vec_len(ScanResult_findings(lone));
+    assert(_T_CS_WANT >= 3, "the scanner finds the text's findings alone");
+    var a = thread_create(&_t_cs_worker, 0);
+    var b = thread_create(&_t_cs_worker, 1);
+    thread_join(a);
+    thread_join(b);
+    assert_eq(_T_CS_WRONG, 0, "two scans at once each find their own findings");
+
+    # One audit chain, two writers.
+    var log = "/tmp/kavach-t-concurrent.audit";
+    sys_unlink(log);
+    _T_AC_CHAIN = audit_chain_open(log, "key-concurrent", 14);
+    _T_AC_ENTRIES = alloc(16);
+    store64(_T_AC_ENTRIES, vec_new());
+    store64(_T_AC_ENTRIES + 8, vec_new());
+    a = thread_create(&_t_ac_worker, 0);
+    b = thread_create(&_t_ac_worker, 1);
+    thread_join(a);
+    thread_join(b);
+    assert_eq(audit_chain_len(_T_AC_CHAIN), 81, "the genesis and 80 records, each counted once");
+    var by_serial = alloc(81 * 8);
+    memset(by_serial, 0, 81 * 8);
+    var dup = 0;
+    var w = 0;
+    while (w < 2) {
+        var v = load64(_T_AC_ENTRIES + w * 8);
+        var j = 0;
+        while (j < vec_len(v)) {
+            var e = vec_get(v, j);
+            var sn = KavachAuditEntry_serial(e);
+            if (sn < 1 || sn > 80) { dup = dup + 1; }
+            else {
+                if (load64(by_serial + sn * 8) != 0) { dup = dup + 1; }
+                store64(by_serial + sn * 8, e);
+            }
+            j = j + 1;
+        }
+        w = w + 1;
+    }
+    assert_eq(dup, 0, "no two records took one serial");
+    var broken = 0;
+    var sn2 = 2;
+    while (sn2 <= 80) {
+        var cur = load64(by_serial + sn2 * 8);
+        var prev = load64(by_serial + (sn2 - 1) * 8);
+        if (cur == 0 || prev == 0) { broken = broken + 1; }
+        else {
+            if (streq(KavachAuditEntry_prev_hmac(cur), KavachAuditEntry_hmac(prev)) == 0) { broken = broken + 1; }
+        }
+        sn2 = sn2 + 1;
+    }
+    assert_eq(broken, 0, "and each links to the one before it");
+    audit_chain_close(_T_AC_CHAIN);
+    sys_unlink(log);
+    return 0;
+}
+
+# ---- a policy denying network, with no namespace (3.14.8) ------------------
+#
+# agnosai filed that `network_enabled = 0` was enforced by a network namespace
+# alone, which an unprivileged process on Ubuntu 24.04 cannot have. The payload
+# half: each socket a payload might reach the network with, one line each, the
+# fd as "ok" or the negative errno.
+
+# A sockaddr_in for 127.0.0.1:`port` in `sa` (16 bytes).
+fn _t_net_sa(sa, port) {
+    memset(sa, 0, 16);
+    store16(sa, 2);
+    store8(sa + 2, (port >> 8) & 255);
+    store8(sa + 3, port & 255);
+    store32(sa + 4, 0x0100007F);
+    return 0;
+}
+
+fn _t_net_line(label, r) {
+    _t_payload_put(label);
+    if (r >= 0) { _t_payload_put(" ok\n"); }
+    else {
+        _t_payload_put(" ");
+        _t_payload_num(r);
+        _t_payload_put("\n");
+    }
+    return 0;
+}
+
+# A socket of (domain, type, protocol), closed again: "ok" or the errno.
+fn _t_net_sock(label, domain, type, proto) {
+    var fd = sys_socket(domain, type, proto);
+    if (fd >= 0) { sys_close(fd); }
+    return _t_net_line(label, fd);
+}
+
+fn _t_net_payload(port, other) {
+    # SAFETY: PR_SET_DUMPABLE 0, as `_t_rootfs_payload` does.
+    syscall(SYS_PRCTL, 4, 0, 0, 0, 0);
+    var sa[16];
+    var fd = sys_socket(2, 1, 0);
+    _t_net_sa(&sa, port);
+    var r = fd;
+    if (fd >= 0) { r = sys_connect(fd, &sa, 16); sys_close(fd); }
+    _t_net_line("tcp", r);
+    fd = sys_socket(2, 1, 0);
+    _t_net_sa(&sa, other);
+    r = fd;
+    if (fd >= 0) { r = sys_connect(fd, &sa, 16); sys_close(fd); }
+    _t_net_line("tcp-other", r);
+    fd = sys_socket(2, 1, 0);
+    _t_net_sa(&sa, 0);
+    r = fd;
+    if (fd >= 0) { r = sys_bind(fd, &sa, 16); sys_close(fd); }
+    _t_net_line("bind", r);
+    # TCP Fast Open connects from sendto, with no connect(2).
+    fd = sys_socket(2, 1, 0);
+    _t_net_sa(&sa, other);
+    r = fd;
+    if (fd >= 0) { r = sys_sendto(fd, "x", 1, 0x20000000, &sa, 16); sys_close(fd); }
+    _t_net_line("tfo", r);
+    # MPTCP and SCTP connects, which landlock's TCP rights may not cover.
+    fd = sys_socket(2, 1, 262);
+    _t_net_sa(&sa, other);
+    r = fd;
+    if (fd >= 0) { r = sys_connect(fd, &sa, 16); sys_close(fd); }
+    _t_net_line("mptcp-connect", r);
+    fd = sys_socket(2, 1, 132);
+    _t_net_sa(&sa, other);
+    r = fd;
+    if (fd >= 0) { r = sys_connect(fd, &sa, 16); sys_close(fd); }
+    _t_net_line("sctp-connect", r);
+    _t_net_sock("udp", 2, 2, 0);
+    _t_net_sock("udp6", 10, 2, 0);
+    _t_net_sock("raw", 2, 3, 1);
+    _t_net_sock("sctp", 2, 1, 132);
+    _t_net_sock("mptcp", 2, 1, 262);
+    _t_net_sock("tcp6", 10, 1, 0);
+    _t_net_sock("unix", 1, 1, 0);
+    _t_net_sock("netlink", 16, 3, 0);
+    _t_net_sock("packet", 17, 3, 0);
+    #ifdef CYRIUS_ARCH_X86
+    # SAFETY: io_uring_setup(1, params) with zeroed params makes a ring or fails,
+    # and the ring, if any, is closed at once. x86-64 only: cyrius renumbers a
+    # call on aarch64 by number, and 425 there is not this.
+    var params[128];
+    memset(&params, 0, 128);
+    var ring = syscall(_seccomp_native_nr(425, 425), 1, &params);
+    if (ring >= 0) { sys_close(ring); }
+    _t_net_line("uring", ring);
+    #endif
+    return 0;
+}
+
+# A listener on 127.0.0.1, port in `*port`. Returns its fd, or -1.
+fn _t_net_listen(port) {
+    var fd = sys_socket(2, 1, 0);
+    if (fd < 0) { return 0 - 1; }
+    var sa[16];
+    _t_net_sa(&sa, 0);
+    if (sys_bind(fd, &sa, 16) != 0) { sys_close(fd); return 0 - 1; }
+    if (sys_listen(fd, 16) != 0) { sys_close(fd); return 0 - 1; }
+    var len[8];
+    store32(&len, 16);
+    sys_getsockname(fd, &sa, &len);
+    store64(port, (load8(&sa + 2) << 8) | load8(&sa + 3));
+    return fd;
+}
+
+var _T_NET_CODE = 0 - 1;
+
+fn _t_net_cmd(exe, port, other) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, exe);
+    str_builder_add_cstr(sb, " --kv-net-payload ");
+    var nb[16];
+    var nn = fmt_int_buf(port, &nb);
+    store8(&nb + nn, 0);
+    str_builder_add_cstr(sb, &nb);
+    str_builder_add_cstr(sb, " ");
+    nn = fmt_int_buf(other, &nb);
+    store8(&nb + nn, 0);
+    str_builder_add_cstr(sb, &nb);
+    return str_data(str_builder_build(sb));
+}
+
+fn _t_net_exec(policy, exe, port, other) {
+    var r = process_exec(_t_pio_sandbox(policy), _t_net_cmd(exe, port, other));
+    _T_NET_CODE = ExecResult_exit_code(r);
+    return ExecResult_stdout(r);
+}
+
+# What each policy leaves a payload with no rootfs, through `sandbox_exec`'s path.
+fn _t_net_assert_denied(o, what) {
+    assert_eq(_T_NET_CODE, 0, _t_lbl(what, ": the probe runs"));
+    assert(_t_has_line(o, "tcp-other -13") == 1, _t_lbl(what, ": a TCP connect reads EACCES"));
+    assert(_t_has_line(o, "bind -13") == 1, _t_lbl(what, ": and a bind"));
+    assert(_t_has_line(o, "tfo -13") == 1, _t_lbl(what, ": and TCP Fast Open, which connects from sendto"));
+    assert(_t_has_line(o, "mptcp-connect -13") == 1, _t_lbl(what, ": and MPTCP, which landlock lets through"));
+    assert(_t_has_line(o, "sctp-connect -13") == 1, _t_lbl(what, ": and SCTP"));
+    assert(_t_has_line(o, "udp -13") == 1, _t_lbl(what, ": a UDP socket reads EACCES"));
+    assert(_t_has_line(o, "udp6 -13") == 1, _t_lbl(what, ": over IPv6 too"));
+    assert(_t_has_line(o, "packet -13") == 1, _t_lbl(what, ": and a packet socket"));
+    assert(_t_has_line(o, "unix ok") == 1, _t_lbl(what, ": a unix socket still opens"));
+    assert(_t_has_line(o, "netlink ok") == 1, _t_lbl(what, ": and a netlink one"));
+    assert(_t_has_line(o, "tcp6 ok") == 1, _t_lbl(what, ": a TCP socket opens, and landlock holds its connect"));
+    #ifdef CYRIUS_ARCH_X86
+    assert(_t_has_line(o, "uring -38") == 1, _t_lbl(what, ": io_uring reads ENOSYS"));
+    #endif
+    return 0;
+}
+
+# 3.14.8: a policy denying network has it denied with no namespace, where the kernel
+# has landlock ABI v4, on every confined payload. agnosai filed that it was enforced
+# by a network namespace alone, which Ubuntu 24.04 refuses an unprivileged process.
+fn test_network_denied_without_a_namespace() {
+    test_group("network_denied_without_a_namespace");
+    if (_t_runtime_is_native("/bin/sh") == 0) {
+        _t_oci_skip("this build is emulated: no payload of its arch starts here — not exercisable", 0);
+        return 0;
+    }
+    var port[8];
+    var lfd = _t_net_listen(&port);
+    var other[8];
+    var ofd = _t_net_listen(&other);
+    assert(lfd >= 0 && ofd >= 0, "two listeners on 127.0.0.1");
+    var exe = _t_self_path();
+    if (lfd < 0 || ofd < 0 || exe == 0) { return 0; }
+    var pa = load64(&port);
+    var pb = load64(&other);
+    # What has not changed: an unconfined payload and a policy allowing network.
+    var un = _t_net_exec(policy_new(), exe, pa, pb);
+    assert(_t_has_line(un, "tcp-other ok") == 1, "policy_new() runs unconfined and keeps the network");
+    assert(_t_has_line(un, "udp ok") == 1, "UDP too");
+    var on = policy_basic();
+    SandboxPolicy_set_network_enabled(on, 1);
+    var oo = _t_net_exec(on, exe, pa, pb);
+    assert(_t_has_line(oo, "tcp-other ok") == 1, "network_enabled = 1 keeps it under a filter");
+    assert(_t_has_line(oo, "udp ok") == 1, "UDP too");
+    if (security_landlock_abi_version() < 4) {
+        var o3 = _t_net_exec(policy_basic(), exe, pa, pb);
+        assert(_t_has_line(o3, "tcp-other ok") == 1, "below landlock ABI v4 nothing changes from 3.14.7");
+        _t_oci_skip("no landlock network rights here (ABI below 4) — not exercisable", 0);
+        sys_close(lfd);
+        sys_close(ofd);
+        return 0;
+    }
+    _t_net_assert_denied(_t_net_exec(policy_basic(), exe, pa, pb), "policy_basic");
+    _t_net_assert_denied(_t_net_exec(policy_strict(), exe, pa, pb), "policy_strict");
+    # A confined policy with no filter of its own gets the network rules all the same.
+    var lo = policy_new();
+    SandboxPolicy_set_landlock_signal(lo, 1);
+    _t_net_assert_denied(_t_net_exec(lo, exe, pa, pb), "a landlock scope and no filter");
+    # A port list: that port, and no other.
+    var pp = policy_basic();
+    assert_eq(policy_network_allow_tcp(pp, pa, KAVACH_TCP_CONNECT), 0, "a port list is set");
+    var po = _t_net_exec(pp, exe, pa, pb);
+    assert(_t_has_line(po, "tcp ok") == 1, "a port the policy names connects");
+    assert(_t_has_line(po, "tcp-other -13") == 1, "and another does not");
+    assert(_t_has_line(po, "bind -13") == 1, "nor does a bind it did not name");
+    assert(_t_has_line(po, "udp -13") == 1, "and UDP stays refused");
+    # The port list alone is a request for confinement.
+    var lp = policy_new();
+    policy_network_allow_tcp(lp, pa, KAVACH_TCP_CONNECT);
+    assert_eq(policy_wants_confinement(lp), 1, "a port list asks for the seam");
+    var lpo = _t_net_exec(lp, exe, pa, pb);
+    assert(_t_has_line(lpo, "tcp ok") == 1, "policy_new() with a port list connects to it");
+    assert(_t_has_line(lpo, "tcp-other -13") == 1, "and to nothing else");
+    # sandbox_spawn's payload, with no rootfs, is in a namespace when the host
+    # allows one, and held by landlock and the filter when it does not.
+    sys_close(lfd);
+    sys_close(ofd);
+    return 0;
+}
+
+# The policy API around the list (3.14.8).
+fn test_network_port_rules() {
+    test_group("network_port_rules");
+    var p = policy_new();
+    assert_eq(policy_network_tcp_rules(p), 0, "a new policy names no port");
+    assert_eq(policy_network_allow_tcp(p, 443, KAVACH_TCP_CONNECT), 0, "connect 443");
+    assert_eq(policy_network_allow_tcp(p, 443, KAVACH_TCP_CONNECT), 0, "twice");
+    assert_eq(SandboxPolicy_network_tcp_connect_len(p), 1, "is kept once, and the count follows the list");
+    assert_eq(SandboxPolicy_network_tcp_bind_len(p), 0, "and binds nothing");
+    assert_eq(policy_network_allow_tcp(p, 8080, KAVACH_TCP_BIND | KAVACH_TCP_CONNECT), 0, "both, 8080");
+    assert_eq(SandboxPolicy_network_tcp_bind_len(p), 1, "a bind");
+    assert_eq(SandboxPolicy_network_tcp_connect_len(p), 2, "and a second connect");
+    assert_eq(policy_network_tcp_rules(p), 1, "the policy names ports");
+    assert_eq(policy_network_allow_tcp(p, 65536, KAVACH_TCP_CONNECT), 0 - 1, "a port past 65535 is refused");
+    assert_eq(policy_network_allow_tcp(p, 0 - 1, KAVACH_TCP_CONNECT), 0 - 1, "and one below 0");
+    assert_eq(policy_network_allow_tcp(p, 80, 0), 0 - 1, "and no access");
+    assert_eq(policy_network_allow_tcp(0, 80, KAVACH_TCP_CONNECT), 0 - 1, "and no policy");
+    # A port list takes no network namespace, which would leave it nothing to reach.
+    assert_eq(_spawn_ns_flags(p, 0) & NS_NETWORK, 0, "a port list makes no network namespace");
+    assert((_spawn_ns_flags(policy_new(), 0) & NS_NETWORK) != 0, "where no list does, as before");
+    # Merged, both sides must allow a port, as both must allow the network.
+    var a = policy_new();
+    policy_network_allow_tcp(a, 443, KAVACH_TCP_CONNECT);
+    policy_network_allow_tcp(a, 80, KAVACH_TCP_CONNECT);
+    var b = policy_new();
+    policy_network_allow_tcp(b, 443, KAVACH_TCP_CONNECT);
+    var m = merge_policies(a, b);
+    assert_eq(SandboxPolicy_network_tcp_connect_len(m), 1, "merged, the ports both sides allow");
+    assert_eq(vec_get(SandboxPolicy_network_tcp_connect(m), 0), 443, "443");
+    var open = policy_new();
+    SandboxPolicy_set_network_enabled(open, 1);
+    var m2 = merge_policies(a, open);
+    assert_eq(SandboxPolicy_network_enabled(m2), 0, "a side denying network denies it merged");
+    assert_eq(SandboxPolicy_network_tcp_connect_len(m2), 2, "with that side's ports");
+    var none = policy_new();
+    var m3 = merge_policies(a, none);
+    assert_eq(policy_network_tcp_rules(m3), 0, "a side allowing no port leaves none");
+    assert(SandboxPolicy_network_tcp_connect(m) != SandboxPolicy_network_tcp_connect(a), "the merge owns its list");
+    return 0;
+}
+
+# A running process-backend sandbox under `policy`, with an empty stdin.
+fn _t_pio_sandbox(policy) {
+    var c = config_new();
+    SandboxConfig_set_backend(c, KavachBackend.PROCESS);
+    SandboxConfig_set_policy(c, policy);
+    config_timeout_ms(c, 5000);
+    config_stdin(c, "", 0);
+    var sb = sandbox_create(c);
+    sandbox_transition(sb, SandboxState.RUNNING);
+    return sb;
+}
+
+# What one run found stays on its result and its sandbox (3.14.8).
+fn test_results_carry_their_own_state() {
+    test_group("results_carry_their_own_state");
+    kavach_init();
+    var d = backend_error_result("a diagnostic");
+    assert_eq(exec_result_is_diagnostic(d), 1, "a diagnostic says so on the result");
+    var buf = alloc(8);
+    store8(buf, 0);
+    var o = backend_capture_finish(buf, 0, 8, "x", 0, 0);
+    assert_eq(exec_result_is_diagnostic(o), 0, "captured output says otherwise");
+    assert_eq(exec_result_is_diagnostic(d), 1, "and the first result still says it is one");
+    assert_eq(exec_result_is_diagnostic(exec_result_new()), 0, "a result built by hand is gated");
+    assert_eq(exec_result_is_diagnostic(0), 0, "and a null one is no diagnostic");
+
+    # The capture keeps its own result, whatever runs after it.
+    var b1 = alloc(64);
+    var c1 = confine_capture_new(_t_argv2("/bin/ls", "/nonexistent-kavach-ONE"), 0, 0, 0, 0, b1, 64,
+      0, 5000, 0, "", 0, 0, 0);
+    confine_capture_run(c1);
+    var b2 = alloc(64);
+    var c2 = confine_capture_new(_t_argv1("/bin/true"), 0, 0, 0, 0, b2, 64, 0, 5000, 0, "", 0, 0, 0);
+    confine_capture_run(c2);
+    assert(ConfineCapture_exit(c1) != 0, "the first capture keeps its failure");
+    assert_eq(ConfineCapture_exit(c2), 0, "the second its success");
+    assert_eq(cstr_contains(confine_capture_stderr(c1), "nonexistent-kavach-ONE"), 1, "the first its stderr");
+    assert_eq(ConfineCapture_err_len(c2), 0, "the second wrote none");
+    assert_eq(confine_last_exit(), 0, "the process-wide copy is the last capture's");
+    assert_eq(ConfineCapture_total(c2), 0, "a capture records its byte count");
+    confine_capture_release(c1);
+    assert_eq(ConfineCapture_err(c1), 0, "release gives the stderr buffer back");
+    assert_eq(strlen(confine_capture_stderr(c1)), 0, "and its stderr reads empty");
+    confine_capture_release(c1);
+    confine_capture_release(c2);
+
+    # Each sandbox keeps its own last scan.
+    var s1 = _t_pio_sandbox(policy_new());
+    var s2 = _t_pio_sandbox(policy_new());
+    var r1 = sandbox_exec(s1, "/bin/echo first");
+    var scan1 = sandbox_last_scan_result(s1);
+    var r2 = sandbox_exec(s2, "/bin/echo second");
+    assert(r1 != 0 && r2 != 0, "both sandboxes ran");
+    assert(scan1 != 0, "the first sandbox's scan is kept");
+    assert_eq(sandbox_last_scan_result(s1), scan1, "and is not the second's after it runs");
+    assert(sandbox_last_scan_result(s2) != scan1, "the second has its own");
+    assert_eq(sandbox_exec_last_scan_result(), sandbox_last_scan_result(s2), "the process-wide one is the latest");
+    assert(sandbox_last_assessment(s1) != 0, "and an assessment");
+    assert_eq(sandbox_last_attestation(s1), 0, "and no attestation, with none required");
+    assert_eq(sandbox_last_scan_result(0), 0, "a null sandbox has none");
+
+    # A payload inherits nothing of another capture's: a pipe that is not
+    # close-on-exec, as a capture on another thread holds, stays out of it.
+    var pfd[16];
+    sys_pipe(&pfd);
+    var rfd = load32(&pfd);
+    var wfd = load32(&pfd + 4);
+    var out = ExecResult_stdout(sandbox_exec(_t_pio_sandbox(policy_new()), "/bin/ls /proc/self/fd"));
+    var rb[16];
+    var rn = fmt_int_buf(rfd, &rb);
+    store8(&rb + rn, 0);
+    var wb[16];
+    var wn = fmt_int_buf(wfd, &wb);
+    store8(&wb + wn, 0);
+    assert(_t_has_line(out, "0") == 1, "the unconfined payload lists its own stdio");
+    assert_eq(_t_has_line(out, &rb), 0, "and not a pipe kavach held open");
+    assert_eq(_t_has_line(out, &wb), 0, "at either end");
+    # A runtime kavach runs through `kv_exec_capture` inherits nothing either.
+    var kb = alloc(4096);
+    var kn = kv_exec_capture(_t_argv2("/bin/ls", "/proc/self/fd"), kb, 4095);
+    if (kn < 0) { kn = 0; }
+    store8(kb + kn, 0);
+    assert(_t_has_line(kb, "1") == 1, "kv_exec_capture's child lists its stdout");
+    assert_eq(_t_has_line(kb, &rb), 0, "and not the pipe");
+    assert_eq(_t_has_line(kb, &wb), 0, "at either end");
+    sys_close(rfd);
+    sys_close(wfd);
     return 0;
 }
 
@@ -8811,7 +9379,8 @@ fn test_capability_masks() {
     config_capabilities(c, vec_new());
     assert_eq(confine_capabilities(c), 0, "an empty list is none, not the default");
     config_capabilities(c, bad);
-    assert_eq(confine_capabilities_refusal(c), 0, "with no rootfs a list is not read");
+    # 3.14.8: a list applies to every confined payload, so it is read with no rootfs.
+    assert(strstr(confine_capabilities_refusal(c), "CAP_NONSENSE") >= 0, "with no rootfs a bad list is refused too");
     config_rootfs(c, "/r");
     assert(confine_capabilities_refusal(c) != 0, "with one a bad list is refused");
     var adm = oci_default_capabilities();
@@ -8819,6 +9388,12 @@ fn test_capability_masks() {
     config_capabilities(c, adm);
     config_policy(c, policy_basic());
     assert_eq(confine_capabilities_refusal(c), 0, "the process filter compares numbers, so no name rule");
+    # CAP_SYS_ADMIN with no filter is a rootfs's rule: with none there is no /proc
+    # of the caller's to unmount.
+    config_policy(c, policy_new());
+    assert(confine_capabilities_refusal(c) != 0, "CAP_SYS_ADMIN, a rootfs and no filter are refused");
+    config_rootfs(c, 0);
+    assert_eq(confine_capabilities_refusal(c), 0, "and with no rootfs they are not");
 
     var cc = confine_capture_new(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
     assert_eq(ConfineCapture_caps(cc), KAVACH_CAPS_DEFAULT, "a capture defaults to the set");
@@ -8883,6 +9458,112 @@ fn test_bound_clears_inheritable_and_ambient() {
 # finds no /proc/self/cmdline and it has no argv. The mode is a file instead.
 
 var _T_ROOTFS_MARKER = "/tmp/kavach-t-rootfs-marker";
+
+# ---- a /dev of kavach's own (3.14.8) ---------------------------------------
+#
+# The payload half of the /dev groups: runc's default devices, each usable, and
+# none of the host's others. One line per probe.
+var _T_DEV_HOST = 0;
+
+# A host device a payload must not see, by index, as literals: 0 past the end.
+fn _t_dev_host_node(i) {
+    if (i == 0) { return "/dev/kmsg"; }
+    if (i == 1) { return "/dev/mem"; }
+    if (i == 2) { return "/dev/port"; }
+    if (i == 3) { return "/dev/loop-control"; }
+    if (i == 4) { return "/dev/fuse"; }
+    if (i == 5) { return "/dev/kvm"; }
+    if (i == 6) { return "/dev/sda"; }
+    if (i == 7) { return "/dev/nvme0n1"; }
+    if (i == 8) { return "/dev/vda"; }
+    if (i == 9) { return "/dev/dm-0"; }
+    if (i == 10) { return "/dev/net/tun"; }
+    if (i == 11) { return "/dev/mapper/control"; }
+    if (i == 12) { return "/dev/ttyS0"; }
+    if (i == 13) { return "/dev/snd"; }
+    if (i == 14) { return "/dev/input"; }
+    if (i == 15) { return "/dev/disk"; }
+    return 0;
+}
+
+# How many of those this process can see.
+fn _t_dev_host_count() {
+    var n = 0;
+    var i = 0;
+    while (_t_dev_host_node(i) != 0) {
+        var st[144];
+        if (kv_lstat(_t_dev_host_node(i), &st) == 0) { n = n + 1; }
+        i = i + 1;
+    }
+    return n;
+}
+
+fn _t_dev_probe() {
+    _t_payload_rbyte("zero", "/dev/zero");
+    _t_payload_rbyte("urandom", "/dev/urandom");
+    _t_payload_rbyte("nullread", "/dev/null");
+    var fd = file_open("/dev/null", O_WRONLY, 0);
+    var w = fd;
+    if (fd >= 0) { w = sys_write(fd, "x", 1); sys_close(fd); }
+    _t_payload_put("nullwrite ");
+    _t_payload_num(w);
+    _t_payload_put("\n");
+    var sh = file_open("/dev/shm/kv-probe", O_WRONLY | O_CREAT, 420);
+    _t_payload_put("shm ");
+    if (sh >= 0) { sys_close(sh); sys_unlink("/dev/shm/kv-probe"); _t_payload_put("ok\n"); }
+    else { _t_payload_num(sh); _t_payload_put("\n"); }
+    var sfs[2176];
+    var pts = 0;
+    if (sys_statfs("/dev/pts", &sfs) == 0 && (load64(&sfs) & 0xFFFFFFFF) == 0x1CD1) { pts = 1; }
+    _t_payload_put("pts ");
+    _t_payload_num(pts);
+    _t_payload_put("\n");
+    var tmp = 0;
+    if (sys_statfs("/dev", &sfs) == 0 && (load64(&sfs) & 0xFFFFFFFF) == 0x01021994) { tmp = 1; }
+    _t_payload_put("devtmpfs ");
+    _t_payload_num(tmp);
+    _t_payload_put("\n");
+    var lb[64];
+    var ln = sys_readlink("/dev/fd", &lb, 63);
+    var fdl = 0;
+    if (ln == 13 && memeq(&lb, "/proc/self/fd", 13) == 1) { fdl = 1; }
+    _t_payload_put("fdlink ");
+    _t_payload_num(fdl);
+    _t_payload_put("\n");
+    ln = sys_readlink("/dev/ptmx", &lb, 63);
+    var px = 0;
+    if (ln == 8 && memeq(&lb, "pts/ptmx", 8) == 1) { px = 1; }
+    _t_payload_put("ptmx ");
+    _t_payload_num(px);
+    _t_payload_put("\n");
+    _t_payload_put("hostcount ");
+    _t_payload_num(_t_dev_host_count());
+    _t_payload_put("\n");
+    return 0;
+}
+
+# What every payload given kavach's /dev must meet. `has_proc` is whether the
+# rootfs has a procfs at /proc, where runc's links into it are made.
+fn _t_dev_assert_own(o, code, what) { return _t_dev_assert_own_p(o, code, what, 1); }
+
+fn _t_dev_assert_own_p(o, code, what, has_proc) {
+    assert_eq(code, 0, _t_lbl(what, ": the payload runs"));
+    assert(_t_has_line(o, "zero 1") == 1, _t_lbl(what, ": /dev/zero reads"));
+    assert(_t_has_line(o, "urandom 1") == 1, _t_lbl(what, ": and /dev/urandom"));
+    assert(_t_has_line(o, "nullread 0") == 1, _t_lbl(what, ": /dev/null reads empty"));
+    assert(_t_has_line(o, "nullwrite 1") == 1, _t_lbl(what, ": and takes a write"));
+    assert(_t_has_line(o, "shm ok") == 1, _t_lbl(what, ": /dev/shm takes a file"));
+    assert(_t_has_line(o, "pts 1") == 1, _t_lbl(what, ": /dev/pts is a devpts"));
+    assert(_t_has_line(o, "devtmpfs 1") == 1, _t_lbl(what, ": /dev is a tmpfs"));
+    if (has_proc == 1) {
+        assert(_t_has_line(o, "fdlink 1") == 1, _t_lbl(what, ": /dev/fd links to /proc/self/fd"));
+    } else {
+        assert(_t_has_line(o, "fdlink 0") == 1, _t_lbl(what, ": with no /proc, no link into it dangles"));
+    }
+    assert(_t_has_line(o, "ptmx 1") == 1, _t_lbl(what, ": /dev/ptmx to pts/ptmx"));
+    assert(_t_has_line(o, "hostcount 0") == 1, _t_lbl(what, ": and none of the host's other devices is there"));
+    return 0;
+}
 
 fn _t_rootfs_mode() {
     var b[8];
@@ -8976,6 +9657,31 @@ fn _t_rootfs_payload(mode) {
             _t_payload_num(fd);
         }
         _t_payload_put("\n");
+        return 0;
+    }
+    if (mode == 6) { return _t_dev_probe(); }
+    if (mode == 7) {
+        # A sibling sandbox for the domain group to reach for, until it is ended.
+        sleep_ms(15000);
+        return 0;
+    }
+    if (mode == 8) {
+        # 3.14.8: which PID namespace and which /proc the payload is in.
+        _t_payload_put("pidone ");
+        if (sys_getpid() == 1) { _t_payload_put("1"); } else { _t_payload_put("0"); }
+        var sfs[2176];
+        var pr = 0;
+        if (sys_statfs("/proc", &sfs) == 0 && (load64(&sfs) & 0xFFFFFFFF) == KAVACH_PROC_SUPER_MAGIC) { pr = 1; }
+        _t_payload_put("\nproc ");
+        _t_payload_num(pr);
+        _t_payload_put("\n");
+        return 0;
+    }
+    if (mode == 9) { return 7; }
+    if (mode == 10) {
+        var ef = file_open("/dev/stderr", O_WRONLY | O_CREAT | O_APPEND, 420);
+        _t_net_line("stderr-create", ef);
+        if (ef >= 0) { sys_close(ef); }
         return 0;
     }
     if (mode == 3) {
@@ -9207,10 +9913,49 @@ fn _t_self_path() {
     return b;
 }
 
+# A pid a payload probes, from argv(3) (3.14.8), or 0.
+var _T_PROC_ARG = 0;
+
+# "/proc/<pid>/<what>" into `buf` (64 bytes).
+fn _t_proc_pid_path(buf, pid, what) {
+    memcpy(buf, "/proc/", 6);
+    var n = 6 + fmt_int_buf(pid, buf + 6);
+    store8(buf + n, 47);
+    var wn = strlen(what);
+    memcpy(buf + n + 1, what, wn);
+    store8(buf + n + 1 + wn, 0);
+    return buf;
+}
+
+# "<label> <rc>" for opening `path` read-only: "ok", or the negative errno.
+fn _t_payload_ropen(label, path, flags) {
+    var fd = file_open(path, O_RDONLY | flags, 0);
+    if (fd >= 0) { sys_close(fd); }
+    return _t_net_line(label, fd);
+}
+
+# The payload half of the landlock domain groups: what it reaches of its parent,
+# kavach, and of `_T_PROC_ARG`, another sandbox's payload, when one is named.
+fn _t_domain_probe() {
+    var pp = sys_getppid();
+    var b[64];
+    _t_net_line("kill-parent", sys_kill(pp, 0));
+    _t_payload_ropen("root-parent", _t_proc_pid_path(&b, pp, "root"), O_DIRECTORY);
+    _t_payload_ropen("environ-parent", _t_proc_pid_path(&b, pp, "environ"), 0);
+    if (_T_PROC_ARG > 0) {
+        _t_net_line("kill-target", sys_kill(_T_PROC_ARG, 0));
+        _t_payload_ropen("root-target", _t_proc_pid_path(&b, _T_PROC_ARG, "root/kv-secret"), 0);
+    }
+    return 0;
+}
+
 fn _t_proc_payload(mode) {
     # SAFETY: PR_SET_DUMPABLE 0, as `_t_rootfs_payload` does: a filter kill is a
     # core dump, and a core dump runs the host's core_pattern.
     syscall(SYS_PRCTL, 4, 0, 0, 0, 0);
+    if (mode == 3) { return _t_dev_probe(); }
+    if (mode == 4) { return _t_domain_probe(); }
+    if (mode == 5) { return _t_rootfs_payload_caps(); }
     if (mode == 0) {
         # The kernel's own word for each mount, which reads the same rootless,
         # where a write stops at EACCES first. See `_t_oci_payload`'s mode 3.
@@ -9283,6 +10028,18 @@ fn _t_proc_cmd(exe, mode) {
     var nb[8];
     store8(&nb, 48 + mode);
     store8(&nb + 1, 0);
+    str_builder_add_cstr(sb, &nb);
+    return str_data(str_builder_build(sb));
+}
+
+# The same with a pid for the payload to probe (3.14.8).
+fn _t_proc_cmd_arg(exe, mode, arg) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, _t_proc_cmd(exe, mode));
+    str_builder_add_cstr(sb, " ");
+    var nb[24];
+    var n = fmt_int_buf(arg, &nb);
+    store8(&nb + n, 0);
     str_builder_add_cstr(sb, &nb);
     return str_data(str_builder_build(sb));
 }
@@ -9503,6 +10260,36 @@ fn _t_cproc_child(root) {
     var link = _T_CPROC_LINK;
     if (sys_mount("proc", _t_lbl(link, "/realproc"), "proc", 0, 0) != 0) { sys_exit(6); }
     _t_cproc_save(6, _t_proc_exec(policy_basic(), link, "/payload", 0, 0));
+    # 3.14.8: the caller's /dev an rbind of the host's, as ADR-009 ran postgres.
+    # Through 3.14.7 a payload opened the host's disk there.
+    if (sys_mount("/dev", _t_lbl(root, "/dev"), 0, MS_REC_BIND, 0) != 0) { sys_exit(7); }
+    _t_cproc_save(7, _t_proc_exec(policy_basic(), root, "/payload", 3, 0));
+    _t_cproc_save(8, _t_proc_spawn(policy_new(), root, "/payload", 3));
+    # 3.14.8: a sibling sandbox holding the same twelve, its own rootfs and a file
+    # in it. Through 3.14.7 a payload with a caller's /proc read that file through
+    # /proc/<pid>/root, under both policies.
+    var sib = "/tmp/kavach-t-sibling";
+    var sibp = _t_oci_rootfs(sib);
+    if (sibp == 0) { sys_exit(8); }
+    file_write_all(_t_lbl(sib, "/kv-secret"), "sibling", 7);
+    _t_rootfs_set_mode(sib, 7);
+    var ssb = _t_oci_sandbox(KavachBackend.PROCESS, policy_basic(), sib);
+    Sandbox_set_state(ssb, SandboxState.RUNNING);
+    var ssp = sandbox_spawn(ssb, "/payload", 0);
+    if (ssp == 0) { sys_exit(9); }
+    sleep_ms(300);
+    var pb = _t_oci_sandbox(KavachBackend.PROCESS, policy_basic(), root);
+    var pr = process_exec(pb, _t_proc_cmd_arg("/payload", 4, spawned_pid(ssp)));
+    _T_PROC_CODE = ExecResult_exit_code(pr);
+    _t_cproc_save(9, ExecResult_stdout(pr));
+    var nb = _t_oci_sandbox(KavachBackend.PROCESS, policy_new(), root);
+    var nr = process_exec(nb, _t_proc_cmd_arg("/payload", 4, spawned_pid(ssp)));
+    _T_PROC_CODE = ExecResult_exit_code(nr);
+    _t_cproc_save(10, ExecResult_stdout(nr));
+    spawned_terminate(ssp, 100);
+    sys_unlink(_t_lbl(sib, "/kv-secret"));
+    sys_unlink(_t_lbl(sib, "/kv-mode"));
+    _t_oci_rootfs_clean(sib, sibp);
     sys_exit(0);
     return 0;
 }
@@ -9560,12 +10347,271 @@ fn test_process_rootfs_caller_proc() {
     var sl = _t_cproc_load(6);
     assert_eq(_T_PROC_CODE, SPAWN_EXIT_PROC, "a /proc symlinked to an unguarded procfs fails closed");
     assert_eq(_t_count(sl, "pattern"), 0, "and no payload ran");
+    assert(_t_dev_host_count() > 0, "the host has devices for a caller's /dev to carry");
+    var cd = _t_cproc_load(7);
+    _t_dev_assert_own(cd, _T_PROC_CODE, "caller's /dev, policy_basic, exec");
+    var cs = _t_cproc_load(8);
+    _t_dev_assert_own(cs, _T_PROC_CODE, "caller's /dev, policy_new, spawn");
+    # A sibling sandbox, reached for from a payload with a caller's /proc.
+    var abi = security_landlock_abi_version();
+    var sibs = _t_cproc_load(9);
+    var sibn = _t_cproc_load(10);
+    assert_eq(_T_PROC_CODE, 0, "the probe of a sibling sandbox runs");
+    if (abi >= 1) {
+        assert(_t_has_line(sibs, "root-target -13") == 1,
+          "policy_basic: a sibling sandbox's root is not reached through /proc/<pid>/root");
+        assert(_t_has_line(sibn, "root-target -13") == 1, "nor under policy_new");
+        assert(_t_has_line(sibs, "root-parent -13") == 1, "nor kavach's own");
+    } else {
+        _t_oci_skip("no landlock here, so a payload has no domain to keep it from a sibling", _t_oneline(sibs));
+    }
+    if (abi >= 6) {
+        assert(_t_has_line(sibs, "kill-target -1") == 1, "and a sibling sandbox takes no signal from it");
+        assert(_t_has_line(sibs, "kill-parent -1") == 1, "nor does kavach");
+    }
     kv_rmdir(_t_lbl(root, "/sys"));
     _t_oci_rootfs_clean(root, payload);
     sys_unlink(_t_lbl(link, "/proc"));
     kv_rmdir(_t_lbl(link, "/realproc"));
     kv_mkdir(_t_lbl(link, "/proc"), 493);
     _t_oci_rootfs_clean(link, lpayload);
+    return 0;
+}
+
+# 3.14.8: a rootfs's `dev` is kavach's own. Rootless, on a rootfs built here and on
+# a rootfs of "/", which carries the host's /dev, through both paths.
+fn test_process_rootfs_own_dev() {
+    test_group("process_rootfs_own_dev");
+    if (_t_runtime_is_native("/bin/sh") == 0) {
+        _t_oci_skip("this build is emulated: no payload of its arch starts here — not exercisable", 0);
+        return 0;
+    }
+    if (spawn_namespaces_available(_spawn_ns_flags(policy_new(), "/r")) == 0) {
+        _t_oci_skip("this host refuses the namespaces a rootfs needs — not exercisable", 0);
+        return 0;
+    }
+    var root = "/tmp/kavach-t-rootfs-dev";
+    var payload = _t_oci_rootfs(root);
+    assert(payload != 0, "the rootfs is built");
+    if (payload == 0) { return 0; }
+    var o = _t_rootfs_exec(policy_basic(), root, 6, 0);
+    _t_dev_assert_own_p(o, _T_ROOTFS_CODE, "a built rootfs, policy_basic, exec", 0);
+    o = _t_rootfs_exec(policy_new(), root, 6, 0);
+    _t_dev_assert_own_p(o, _T_ROOTFS_CODE, "a built rootfs, policy_new, exec", 0);
+    o = _t_rootfs_spawn(KavachBackend.PROCESS, policy_basic(), root, 6, 0);
+    _t_dev_assert_own_p(o, _T_ROOTFS_CODE, "a built rootfs, policy_basic, spawn", 0);
+    # nginx:alpine's error log is a link to /dev/stderr, opened with O_CREAT: with no
+    # /proc a link there would dangle and the open fail. With none, it makes a file.
+    o = _t_rootfs_exec(policy_basic(), root, 10, 0);
+    assert(_t_has_line(o, "stderr-create ok") == 1, "with no /proc, /dev/stderr opens with O_CREAT, as through 3.14.7");
+    var rdev = _t_lbl(root, "/dev");
+    var sb[144];
+    assert_eq(kv_lstat(_t_lbl(rdev, "/null"), &sb) == 0, 0, "and nothing was made in the caller's tree");
+
+    # A `dev` that is a symlink would resolve against the host before the pivot.
+    kv_rmdir(rdev);
+    sys_symlink("/tmp", rdev);
+    o = _t_rootfs_exec(policy_basic(), root, 6, 0);
+    assert_eq(_T_ROOTFS_CODE, SPAWN_EXIT_DEV, "a dev that is a symlink fails closed");
+    assert_eq(_t_count(o, "zero"), 0, "and no payload ran");
+    assert(spawn_exit_name(SPAWN_EXIT_DEV) != 0, "the code has a name");
+    sys_unlink(rdev);
+
+    # A rootfs with no dev keeps having none.
+    o = _t_rootfs_exec(policy_basic(), root, 6, 0);
+    assert_eq(_T_ROOTFS_CODE, 0, "a rootfs with no dev runs");
+    assert(_t_has_line(o, "zero -2") == 1, "and has no /dev/zero");
+    assert_eq(kv_lstat(rdev, &sb) == 0, 0, "and kavach made no dev in it");
+    kv_mkdir(rdev, 493);
+    sys_unlink(_t_lbl(root, "/kv-mode"));
+    _t_oci_rootfs_clean(root, payload);
+
+    # A rootfs of "/": the host's /dev is covered too.
+    var exe = _t_self_path();
+    if (exe == 0) { return 0; }
+    assert(_t_dev_host_count() > 0, "the host has devices to cover");
+    _t_dev_assert_own(_t_proc_exec(policy_basic(), "/", exe, 3, 0), _T_PROC_CODE, "rootfs /, policy_basic, exec");
+    _t_dev_assert_own(_t_proc_spawn(policy_new(), "/", exe, 3), _T_PROC_CODE, "rootfs /, policy_new, spawn");
+    return 0;
+}
+
+# 3.14.8: every confined payload has a landlock domain of its own, so it reaches
+# kavach through neither ptrace access nor a signal. Rootless, with no rootfs, where
+# the parent is the same uid and an unconfined payload reaches it, which the control
+# shows.
+fn test_payloads_have_a_landlock_domain() {
+    test_group("payloads_have_a_landlock_domain");
+    if (_t_runtime_is_native("/bin/sh") == 0) {
+        _t_oci_skip("this build is emulated: no payload of its arch starts here — not exercisable", 0);
+        return 0;
+    }
+    var exe = _t_self_path();
+    assert(exe != 0, "the test binary has a path");
+    if (exe == 0) { return 0; }
+    var abi = security_landlock_abi_version();
+    var cmd = _t_proc_cmd(exe, 4);
+    var un = ExecResult_stdout(process_exec(_t_pio_sandbox(policy_new()), cmd));
+    if (sys_getuid() != 0) {
+        assert(_t_has_line(un, "kill-parent ok") == 1, "an unconfined payload signals kavach, as before");
+        assert(_t_has_line(un, "root-parent ok") == 1, "and opens its /proc/<pid>/root");
+    }
+    if (abi == 0) {
+        _t_oci_skip("no landlock here, so a payload has no domain — not exercisable", 0);
+        return 0;
+    }
+    var bo = ExecResult_stdout(process_exec(_t_pio_sandbox(policy_basic()), cmd));
+    assert(_t_has_line(bo, "root-parent -13") == 1, "a confined payload opens no /proc/<pid>/root of kavach's");
+    assert(_t_has_line(bo, "environ-parent -13") == 1, "nor reads its environment");
+    var lo = policy_new();
+    policy_landlock_add(lo, "/", FS_READ_ONLY);
+    var la = ExecResult_stdout(process_exec(_t_pio_sandbox(lo), cmd));
+    assert(_t_has_line(la, "root-parent -13") == 1, "under a policy with no filter too");
+    var sp = _t_proc_spawn(policy_basic(), 0, exe, 4);
+    assert(_t_has_line(sp, "root-parent -13") == 1, "and from sandbox_spawn");
+    # Allowed network, no rules and no scope: below ABI v6 the domain is the
+    # allow-all ruleset's, and from ABI v6 the signal scope's.
+    var nb = policy_basic();
+    SandboxPolicy_set_network_enabled(nb, 1);
+    var no = ExecResult_stdout(process_exec(_t_pio_sandbox(nb), cmd));
+    assert(_t_has_line(no, "root-parent -13") == 1, "a confined payload allowed network has a domain too");
+    # A confined persistent guest is one too.
+    var g = persistent_spawn_confined_ns(cmd, policy_basic(), 0);
+    assert(g != 0, "a confined persistent guest spawns");
+    if (g != 0) {
+        var gb = alloc(4096);
+        var gn = 0;
+        while (gn < 4095) {
+            var rn = persistent_read(g, gb + gn, 4095 - gn);
+            if (rn <= 0) { break; }
+            gn = gn + rn;
+        }
+        store8(gb + gn, 0);
+        persistent_terminate(g);
+        assert(_t_has_line(gb, "root-parent -13") == 1, "and opens no /proc/<pid>/root of kavach's");
+    }
+    if (abi >= 6) {
+        assert(_t_has_line(bo, "kill-parent -1") == 1, "and signals kavach with no effect: EPERM");
+        assert(_t_has_line(la, "kill-parent -1") == 1, "under either policy");
+    }
+    return 0;
+}
+
+# 3.14.8: `sandbox_spawn` on an OCI sandbox runs `runc run` in the foreground, the
+# issue's Ask 4. Through 3.14.7 it detached on the process path, with no PID
+# namespace and no /proc of its own.
+fn test_oci_spawn_runs_through_runc() {
+    test_group("oci_spawn_runs_through_runc");
+    if (_oci_runtime_path() == 0) {
+        _t_oci_skip("no OCI runtime here — not exercisable", 0);
+        return 0;
+    }
+    if (_t_runtime_is_native(_oci_runtime_path()) == 0) {
+        _t_oci_skip("this build is emulated: qemu would answer for the payload — not exercisable", 0);
+        return 0;
+    }
+    kavach_init();
+    var root = "/tmp/kavach-t-oci-spawn";
+    var payload = _t_oci_rootfs(root);
+    assert(payload != 0, "the rootfs is built");
+    if (payload == 0) { return 0; }
+    var o = _t_rootfs_spawn(KavachBackend.OCI, policy_basic(), root, 8, 0);
+    if (_T_ROOTFS_CODE != 0 || cstr_contains(o, "pidone ") == 0) {
+        _t_oci_skip("no container starts on this host — not exercisable", _t_oneline(o));
+        sys_unlink(_t_lbl(root, "/kv-mode"));
+        _t_oci_rootfs_clean(root, payload);
+        return 0;
+    }
+    assert(_t_has_line(o, "pidone 1") == 1, "the payload is PID 1 in a PID namespace of its own");
+    assert(_t_has_line(o, "proc 1") == 1, "with runc's /proc");
+    var pp = _t_rootfs_spawn(KavachBackend.PROCESS, policy_basic(), root, 8, 0);
+    assert(_t_has_line(pp, "pidone 0") == 1, "where a process sandbox's spawn has kavach's (the control)");
+    _t_rootfs_spawn(KavachBackend.OCI, policy_basic(), root, 9, 0);
+    assert_eq(_T_ROOTFS_CODE, 7, "the container's exit status is the handle's");
+
+    # SIGKILL goes through `runc kill`, and the teardown leaves nothing.
+    _t_rootfs_set_mode(root, 7);
+    var sb = _t_oci_sandbox(KavachBackend.OCI, policy_basic(), root);
+    Sandbox_set_state(sb, SandboxState.RUNNING);
+    var sp = sandbox_spawn(sb, "/payload", 0);
+    assert(sp != 0, "a sleeping container spawns");
+    if (sp == 0) { return 0; }
+    var bundle = oci_spawned_bundle(sp);
+    assert(bundle != 0 && kavach_path_exists(bundle) == 1, "with a bundle of its own");
+    sleep_ms(500);
+    assert_eq(spawned_try_wait(sp), 0, "and runs on");
+    assert_eq(spawned_kill(sp, 9), 0, "SIGKILL is sent");
+    var t0 = mono_now_ns();
+    # Read runc's own wait status: through `runc kill` the container dies and runc
+    # exits with its 137; a SIGKILL sent to runc instead would leave runc killed.
+    var rst[8];
+    store64(&rst, 0);
+    kv_waitpid(spawned_pid(sp), &rst, 0);
+    var status = load32(&rst);
+    assert_eq(status & 127, 0, "runc is not what the SIGKILL hit: it exits on its own");
+    assert_eq((status >> 8) & 255, 137, "with the container's status, which died of it");
+    assert((mono_now_ns() - t0) / 1000000 < 5000, "at once");
+    assert_eq(_spawned_reap(sp, status), 137, "and the handle reads 137");
+    assert(bundle != 0 && kavach_path_exists(bundle) == 0, "its bundle is gone");
+    # A handle with no OCI context is a spawn that did not go through runc: an
+    # assertion, not a read through a null pointer.
+    var sctx = SpawnedProcess_ctx(sp);
+    assert(sctx != 0, "the handle is runc's");
+    if (sctx != 0) {
+        var st = _t_lbl(_oci_state_root(), _t_lbl("/", OciSpawn_id(sctx)));
+        assert_eq(kavach_path_exists(st), 0, "and so is runc's state for it");
+    }
+
+    # PID 1 ignores a SIGTERM it has no handler for, as under `docker stop`, so
+    # terminate ends it by its escalation, and still tears it down.
+    var sp2 = sandbox_spawn(sb, "/payload", 0);
+    assert(sp2 != 0, "a second container spawns");
+    if (sp2 == 0) { return 0; }
+    var b2 = oci_spawned_bundle(sp2);
+    sleep_ms(500);
+    var code = spawned_terminate(sp2, 400);
+    assert_eq(code, 137, "terminate ends it, by SIGKILL after the grace period");
+    assert(b2 != 0 && kavach_path_exists(b2) == 0, "and its bundle is gone");
+    sys_unlink(_t_lbl(root, "/kv-mode"));
+    _t_oci_rootfs_clean(root, payload);
+    return 0;
+}
+
+# 3.14.8: the issue's Ask 3, as the maintainer decided. A confined payload with no
+# rootfs holds `config_capabilities`, the twelve by default, as one with a rootfs
+# has since 3.14.6. Through 3.14.7 a uid 0 payload with no rootfs kept every
+# capability kavach held. Rootless, with nothing held, the bound changes nothing and
+# the payload still runs.
+fn test_bound_without_a_rootfs() {
+    test_group("bound_without_a_rootfs");
+    if (_t_runtime_is_native("/bin/sh") == 0) {
+        _t_oci_skip("this build is emulated: no payload of its arch starts here — not exercisable", 0);
+        return 0;
+    }
+    var exe = _t_self_path();
+    assert(exe != 0, "the test binary has a path");
+    if (exe == 0) { return 0; }
+    var cmd = _t_proc_cmd(exe, 5);
+    var bo = process_exec(_t_pio_sandbox(policy_basic()), cmd);
+    _T_ROOTFS_CODE = ExecResult_exit_code(bo);
+    var b = ExecResult_stdout(bo);
+    var sp = _t_proc_spawn(policy_basic(), 0, exe, 5);
+    var sp_code = _T_PROC_CODE;
+    var un = ExecResult_stdout(process_exec(_t_pio_sandbox(policy_new()), cmd));
+    if (sys_getuid() != 0) {
+        assert_eq(_T_ROOTFS_CODE, 0, "rootless, a confined payload with no rootfs still runs");
+        assert(_t_has_line(b, "eff 0") == 1, "holding nothing, as it held nothing before");
+        assert_eq(sp_code, 0, "and spawns");
+        return 0;
+    }
+    _t_rootfs_assert_default_set(b, "root, no rootfs, policy_basic, exec");
+    _T_ROOTFS_CODE = sp_code;
+    _t_rootfs_assert_default_set(sp, "root, no rootfs, policy_basic, spawn");
+    assert_eq(_t_has_line(un, "eff 2684618235"), 0, "an unconfined payload is not bounded (the control)");
+    var one = vec_new();
+    vec_push(one, "CAP_CHOWN");
+    var lo = _t_pio_sandbox(policy_basic());
+    config_capabilities(Sandbox_config(lo), one);
+    assert(_t_has_line(ExecResult_stdout(process_exec(lo, cmd)), "eff 1") == 1, "a list narrows it");
     return 0;
 }
 
@@ -9700,7 +10746,25 @@ fn test_score_what_is_applied() {
     var cfg = config_new();
     config_backend(cfg, KavachBackend.PROCESS);
     config_policy(cfg, s);
-    assert_eq(score_config(cfg), 61, "a config with no rootfs scores the same");
+    # 3.14.8: a confined payload denied network has it denied by landlock and the
+    # network filter, where the kernel has landlock ABI v4, and that scores 5.
+    var held = 0;
+    if (security_landlock_abi_version() >= 4) { held = 5; }
+    assert_eq(score_config(cfg), 61 + held, "a config with no rootfs scores what the kernel lets it apply");
+    var un = config_new();
+    config_backend(un, KavachBackend.PROCESS);
+    config_policy(un, policy_new());
+    assert_eq(score_config(un), 50, "policy_new() runs unconfined and scores no network");
+    var ports = policy_basic();
+    policy_network_allow_tcp(ports, 443, KAVACH_TCP_CONNECT);
+    var pcf = config_new();
+    config_backend(pcf, KavachBackend.PROCESS);
+    config_policy(pcf, ports);
+    var lst = 0;
+    if (held == 5) { lst = 3; }
+    assert_eq(score_config(pcf), 55 + lst, "a TCP list scores 3 where it is applied, and not the 5 for none");
+    config_rootfs(pcf, "/r");
+    assert_eq(score_config(pcf), 55 + lst, "with a rootfs too: a list takes no network namespace");
     config_require_namespaces(cfg, 1);
     assert_eq(score_config(cfg), 66, "with its namespaces required the network counts");
     config_rootfs(cfg, "/r");
@@ -9715,10 +10779,18 @@ fn test_score_what_is_applied() {
     var pc = config_new();
     config_backend(pc, KavachBackend.PROCESS);
     config_policy(pc, b);
-    assert_eq(score_spawn(oc), score_spawn(pc), "a spawn from an OCI sandbox scores as the process path");
+    # 3.14.8: an OCI sandbox's spawn runs `runc run`, where the backend is registered.
+    kavach_init();
+    assert_eq(score_spawn(oc), score_backend(KavachBackend.OCI, b), "a spawn from an OCI sandbox scores as OCI");
     assert_eq(score_spawn(pc), score_backend(KavachBackend.PROCESS, b) + 5,
-      "with its network namespace, which a spawn always asks for");
-    assert(score_spawn(oc) < score_backend(KavachBackend.OCI, b), "and below what OCI claims");
+      "a process sandbox's with its network namespace, which a spawn always asks for");
+    var gc = config_new();
+    config_backend(gc, KavachBackend.GVISOR);
+    config_policy(gc, b);
+    assert_eq(score_spawn(gc), score_spawn(pc), "a gVisor sandbox's still detaches on the process path");
+    backend_register_spawn(KavachBackend.OCI, 0);
+    assert_eq(score_spawn(oc), score_spawn(pc), "and an OCI sandbox's does where no OCI spawn is registered");
+    backend_register_spawn(KavachBackend.OCI, &oci_spawn);
     assert_eq(score_config(oc), score_backend(KavachBackend.OCI, b), "an OCI exec is score_backend's");
 
     # gVisor's spec carries no filter.
@@ -10163,8 +11235,10 @@ fn test_wasm_stdin_does_not_deadlock() {
 fn main() {
     args_init();
     alloc_init();
-    # The payload half of `test_process_rootfs_payload`: no /proc, so no argv.
-    if (argc() == 0) {
+    # The payload half of `test_process_rootfs_payload`: no /proc, so no argv. Under
+    # runc (3.14.8: an OCI sandbox's spawn) there is a /proc and argv[0], so the mode
+    # file, which only a test rootfs has at its top, says it is a payload.
+    if (argc() <= 1) {
         var rootfs_mode = _t_rootfs_mode();
         if (rootfs_mode >= 0) { return _t_rootfs_payload(rootfs_mode); }
     }
@@ -10173,7 +11247,15 @@ fn main() {
     if (argc() >= 3) {
         if (streq(argv(1), "--kv-oci-payload") == 1) { return _t_oci_payload(atoi(argv(2))); }
         # The payload half of the 3.14.7 /proc groups, which have a /proc to read argv from.
-        if (streq(argv(1), "--kv-proc-payload") == 1) { return _t_proc_payload(atoi(argv(2))); }
+        if (streq(argv(1), "--kv-proc-payload") == 1) {
+            if (argc() >= 4) { _T_PROC_ARG = atoi(argv(3)); }
+            return _t_proc_payload(atoi(argv(2)));
+        }
+        # The payload half of the 3.14.8 network groups: argv(2) the port it may
+        # reach, argv(3) one it may not.
+        if (streq(argv(1), "--kv-net-payload") == 1 && argc() >= 4) {
+            return _t_net_payload(atoi(argv(2)), atoi(argv(3)));
+        }
     }
     # The real-container group alone, for CI's run as root. See the workflow.
     if (argc() >= 2) {
@@ -10184,6 +11266,11 @@ fn main() {
             test_process_rootfs_guards_proc();
             test_process_rootfs_caller_proc();
             test_process_rootfs_read_only();
+            test_process_rootfs_own_dev();
+            test_oci_spawn_runs_through_runc();
+            test_payloads_have_a_landlock_domain();
+            test_network_denied_without_a_namespace();
+            test_bound_without_a_rootfs();
             return assert_summary();
         }
     }
@@ -10384,6 +11471,12 @@ fn main() {
     test_process_rootfs_guards_proc();
     test_process_rootfs_caller_proc();
     test_process_rootfs_read_only();
+    test_process_rootfs_own_dev();
+    test_payloads_have_a_landlock_domain();
+    test_oci_spawn_runs_through_runc();
+    test_network_denied_without_a_namespace();
+    test_network_port_rules();
+    test_bound_without_a_rootfs();
     test_capture_costs_what_was_written();
     test_score_what_is_applied();
     test_require_namespaces_without_a_filter();
@@ -10438,6 +11531,7 @@ fn main() {
     test_require_namespaces_is_opt_in();
     test_persistent_namespaces_are_opt_in_and_fail_closed();
     test_attest_sgx_accepts_with_collateral();
+    test_attest_verifies_on_two_threads();
     test_attest_sgx_rejects();
     test_attest_tcb_statuses();
     test_attest_collateral_revocation();
@@ -10453,6 +11547,8 @@ fn main() {
     test_capture_ends_a_full_stream();
     test_capture_payload_dies_with_kavach();
     test_results_keep_their_own_stderr();
+    test_concurrent_runs_keep_their_own_results();
+    test_results_carry_their_own_state();
     test_payload_stdin_is_empty_unless_asked();
     test_landlock_scopes_are_applied();
     test_landlock_confines_device_ioctls();

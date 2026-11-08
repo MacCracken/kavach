@@ -16,4 +16,6 @@ hashmap
 str
 net
 process
+atomic
+sync
 sandhi

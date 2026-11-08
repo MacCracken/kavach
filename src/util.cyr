@@ -442,6 +442,10 @@ fn kv_exec_capture(args, buf, buflen): i64 {
             sys_dup2(devnull, 2);
             sys_close(devnull);
         }
+        # 3.14.8: nothing inherited reaches the runtime but its stdio and its pin,
+        # as in every capture: another thread's capture pipes are not close-on-exec.
+        _kv_exec_keep_fd = pin;
+        _spawn_close_inherited(3);
         kv_exec_child(pin, cmd, argv, envp);
         sys_exit(127);
     }

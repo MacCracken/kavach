@@ -7,6 +7,237 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.14.8] — 2026-11-07
+
+The last of the process-backend issue, and agnosai's two issues. Every confined process-path payload now has a landlock
+domain of its own, so it reaches no other payload through `/proc/<pid>/root` and, from landlock ABI v6, signals nothing
+outside it. A rootfs's `dev` is kavach's own, so a caller's rbind of the host's `/dev` no longer hands a root payload the
+host's disks. A confined payload with no rootfs holds the twelve capabilities, as one with a rootfs has since 3.14.6, and
+`sandbox_spawn` on an OCI sandbox runs `runc run`. A policy denying network has it denied with no namespace, by landlock's
+TCP rights and a network filter, with a TCP port list. And two runs on two threads are two runs: through 3.14.7 a run read
+another's stderr, the gate another scan's findings, and two audit records took one serial. This is the roadmap's 3.14.8,
+with every open issue in `docs/development/issues/`. The maintainer's four choices are in
+[ADR-011](docs/adr/011-dev-pids-and-network-on-the-process-path.md). **2227** assertions on x86-64, from 2003, and
+**1726** on aarch64 under qemu, from 1649.
+
+### ⚠ Behaviour changes
+
+- **A confined payload denied network has no network, without a namespace**, where the kernel has landlock ABI v4 (Linux
+  6.7). `policy_basic()` and `policy_strict()` set `network_enabled = 0` and confine, so their payloads with no rootfs lose
+  the host's network, which they kept through 3.14.7: TCP connects and binds, UDP and every other family but AF_UNIX and
+  AF_NETLINK read EACCES, and `io_uring_setup` ENOSYS. To keep it, set `network_enabled = 1`, or name the ports with
+  `policy_network_allow_tcp`. `policy_new()` asks for no confinement and is unchanged. agnosai sets `network_enabled = 1`.
+  Below ABI v4 nothing changes.
+- **Every confined process-path payload is in a landlock domain of its own**, whatever the policy names, on
+  `sandbox_exec`, `sandbox_spawn`, persistent guests and the wasmtime process. It opens no other process's
+  `/proc/<pid>/root` or `environ` outside it, kavach's included (`environ` with the default capabilities: see Security), and
+  from ABI v6 sends no signal outside it: a payload signalling its parent reads EPERM. Its own children share its domain.
+- **A confined payload with no rootfs holds `config_capabilities`**, the twelve by default, on the same paths and on
+  `confine_child_caps`, which agnosai calls. Through 3.14.7 a uid 0 payload there held every capability kavach held. A
+  rootless one holds nothing either way and runs as before. A capability list is now read, and an unknown name refused, with
+  no rootfs too.
+- **A rootfs's `dev` is kavach's own**, as runc makes one: a tmpfs holding runc's default devices bound from the host's, a
+  devpts, a tmpfs `/dev/shm` and runc's links. A caller's `/dev`, and an image's own device nodes, are no longer seen. A
+  rootfs with no `dev` keeps none, and one whose `dev` is a symlink is refused with SPAWN_EXIT_DEV (113).
+- **`sandbox_spawn` on an OCI sandbox runs `runc run`** in the foreground. The handle's pid is runc's, which forwards
+  signals and exits with the container's status, and the payload has runc's PID namespace, `/proc`, masks and device rules.
+  It is PID 1 there, so a SIGTERM it has no handler for does nothing, as under `docker stop`, and `spawned_terminate` ends it
+  by its SIGKILL after the grace. stiva's `run -d` lands here. `score_spawn` scores it as OCI.
+- **A payload no longer inherits another thread's capture pipes**: every capture child closes what it inherited, as the
+  confined path has since 3.9.1, the unconfined capture and `kv_exec_capture` included.
+- **`score_config` gives the process backend 5 for `network_enabled = 0` with no namespace**, on a confined payload where
+  the kernel has landlock ABI v4, and 3 for a port list there. `policy_strict()` with no rootfs scores 66 there, where it
+  scored 61.
+
+### Added
+
+- **`policy_network_allow_tcp(p, port, access)`**, with `KAVACH_TCP_BIND` and `KAVACH_TCP_CONNECT`, and
+  `policy_network_tcp_rules(p)`: the TCP ports a payload denied network may still bind or connect to, as landlock NET_PORT
+  rules. The roadmap's "landlock TCP port rules". `network_tcp_bind_len` and `network_tcp_connect_len` follow the lists, and
+  `merge_policies` keeps the ports both sides allow.
+- **`security_apply_landlock_domain(rules, count, scopes, net_deny, tcp_bind, tcp_connect)`** and
+  **`security_net_seccomp_filter()`**: the domain, and the network rules landlock's TCP rights leave to a filter.
+- **`ConfineCapture`'s results**: `total`, `exit`, `timed_out`, `err`, `err_len`, with `confine_capture_release(c)` and
+  `confine_capture_stderr(c)`. **`backend_capture_result(c, …)`**, **`backend_run_start`**,
+  **`backend_set_capture_stderr_of(r, c)`**: a result from the capture a backend ran.
+- **`exec_result_is_diagnostic(r)`** (`ExecResult.diagnostic`), **`sandbox_last_scan_result`**, **`sandbox_last_assessment`**,
+  **`sandbox_last_attestation`**, **`backend_sandbox_nonce`**, **`backend_sandbox_nonce_len`**,
+  **`backend_sandbox_attach_quote`**: what an exec found, on its result and its sandbox.
+- **`backend_register_spawn`**, **`backend_spawn_fn`**, **`oci_spawn`**, **`oci_spawned_bundle`**, **`spawned_process_new`**,
+  and `SpawnedProcess`'s `kill_fn`, `reap_fn` and `ctx`: a backend's own detached spawn.
+- **`kavach_lock_cell(cell)`**: a mutex made on first use, which `audit_chain_record` and attestation take.
+- **SPAWN_EXIT_DEV (113)**, "cannot give the payload a /dev of its own in the rootfs".
+
+### Changed
+
+- **The backends read the capture they ran**: process, WASM, OCI, gVisor and SY-agnos. `confine_last_*`,
+  `backend_set_capture_stderr`, `backend_run_capture`, `backend_run_finish`, `oci_last_exit`, `_oci_run`,
+  `backend_result_is_diagnostic` and `sandbox_exec_last_*` stay, as the process's most recent, for a caller on one thread.
+- **`kavach_init` builds the shared caches** (the code scanner's automaton, the seccomp and capability tables, the syscall name
+  map, the OCI path lists) before a consumer starts a thread, and the syscall name map is published only when whole.
+- **`oci_container_id`'s counter and the audit netlink sequence are atomic.**
+- **`SANDBOX_POLICY_SIZE` 176, `SANDBOX_SIZE` 112, `EXEC_RESULT_SIZE` 64, `CONFINE_CAPTURE_SIZE` 160,
+  `SPAWNED_PROCESS_SIZE` 64**, each appended so no field moves.
+- **`[deps]` gains `sync`**, and `src/audit.cyr` includes `lib/atomic.cyr` and `lib/sync.cyr`, so `dist/kavach.deps` names
+  them. `dist/kavach-confine.deps` is unchanged.
+- **`tests/kavach.bcyr` includes `src/spawn.cyr`**: the OCI backend's spawn builds its handle there, and the bench build warned
+  of three undefined functions without it.
+
+### Fixed
+
+- **Two runs at once read each other's stderr** (agnosai,
+  [archived issue](docs/development/issues/archived/2026-11-07-agnosai-concurrent-runs-read-each-others-stderr.md)), and the
+  same class beside it. Each capture now has a stderr buffer, an exit code and a deadline flag of its own,
+  and each backend reads the capture it ran; the diagnostic flag is the result's, and the scan, assessment, attestation, nonce
+  and quote the sandbox's. Found beside it and fixed: the code scanner's hit table was a module global; the audit chain had no
+  lock; a payload inherited another thread's capture pipes, which held a capture open until that payload exited; any exec
+  cleared an attesting exec's nonce mid-dispatch, and quote verification shared one arena; `oci_container_id`'s counter and
+  the audit netlink sequence were a read and a write; the syscall name map was published before it was filled. The issue's
+  ⚠ on `_kv_exec_keep_fd` does not hold: every site sets it in the child, after `fork`. Four threads, `/bin/ls` and `/bin/cat`
+  on missing paths under `policy_new()` and `policy_basic()`, 30 runs each through `sandbox_exec`, against 3.14.7's `src/`
+  with the same test, three runs:
+
+  | | 3.14.7 | 3.14.8 |
+  |---|---|---|
+  | runs whose stderr was not their own, of 120 | 64 to 80 | 0 |
+  | runs whose exit code was not their own, of 120 | 0 | 0 |
+  | code scans on two threads finding another scan's findings, of 800 | 552 to 600 | 0 |
+  | audit records on two threads, 80 written: entries counted, with the genesis | 42 to 43 | 81 |
+  | …records that took another's serial | 38 to 39 | 0 |
+- **A policy denying network was enforced by a network namespace alone** (agnosai,
+  [archived issue](docs/development/issues/archived/2026-11-07-agnosai-a-policy-denying-network-needs-a-namespace.md)).
+  Now, as the issue proposed: landlock's TCP rights in the payload's domain, the
+  issue's second ask as a network filter of its own, and its ports as `policy_network_allow_tcp`. The filter is loaded
+  whether the policy enables seccomp or not, because landlock alone let an MPTCP connect and an SCTP connect through
+  (measured). From inside the payload, rootless, no rootfs, no namespace, `policy_basic()` and `policy_strict()` alike, against
+  a driver built from 3.14.7's `src/`:
+
+  | Payload with `network_enabled = 0` | 3.14.7 | 3.14.8 |
+  |---|---|---|
+  | TCP connect to a listener, TCP bind, TCP Fast Open (`sendto` with MSG_FASTOPEN) | **connect**, each | EACCES, each |
+  | MPTCP connect to a listener | **connects** | EACCES |
+  | SCTP connect | **goes out** (ECONNREFUSED) | EACCES |
+  | UDP and UDP over IPv6 socket | **open** | EACCES |
+  | raw and packet socket | EPERM, no CAP_NET_RAW | EACCES |
+  | `io_uring_setup` | **a ring** | ENOSYS |
+  | AF_UNIX, AF_NETLINK, a TCP socket before its connect | open | open |
+  | `policy_network_allow_tcp(p, P, KAVACH_TCP_CONNECT)`: connect to P, to another port | no such call | connects, EACCES |
+- **The rest of the process-backend issue**
+  ([archived](docs/development/issues/archived/2026-11-06-process-backend-keeps-every-capability.md)): a caller's `/dev`,
+  `/proc/<pid>/root`, no rootfs as root (Ask 3) and `sandbox_spawn` on an OCI sandbox (Ask 4), as the Security table shows.
+
+### Security
+
+Measured as root in a throwaway privileged container, through kavach's public paths, by a rig built from 3.14.7's `src/` and
+3.14.8's (`docs/development/issues/repros/2026-11-07-consumer-images-on-3.14.8.{cyr,sh}`), `policy_basic()` and
+`policy_new()` alike where both ran. The OCI row ran in a read-only chroot of this machine's root, for its runc 1.5.2:
+
+| | 3.14.7 | 3.14.8 |
+|---|---|---|
+| the caller's `/dev` an rbind of the host's: open the host's disk (`/dev/nvme0n1`) read-only | **opened** | ENOENT |
+| with a caller's `/proc`: open a file in a sibling sandbox's root through `/proc/<pid>/root` | **read it** | EACCES |
+| …signal that sibling (`kill(pid, 0)`), and kavach | **0**, both | EPERM, both |
+| no rootfs, `policy_basic()`: `CapEff` | **every capability** | `00000000a00405fb` |
+| `sandbox_spawn`, OCI sandbox: the handle, and the payload's PID | the payload, in kavach's PID namespace | runc, the payload PID 1 |
+
+And the images ADR-009 ran, their filesystems as the rootfs:
+
+| | 3.14.7 | 3.14.8 |
+|---|---|---|
+| postgres entry point, the caller's `/dev` and `/proc`: answers `pg_isready`, stops on SIGTERM | yes, exit 0 | yes, exit 0 |
+| postgres entry point, the caller's `/proc` only | fails: `/dev/null: Permission denied` | answers, exit 0 |
+| nginx, network allowed | serves | serves |
+| nginx, network denied, port 80 to bind (`policy_network_allow_tcp`) | no such list: no page | **serves** |
+| nginx, network denied | no page | no page |
+| nginx detached from an OCI sandbox, network allowed | serves, as the handle | serves under runc, PID 1, exit 0 on SIGTERM |
+
+⚠ **Measured, and not closed:** a confined payload holding CAP_SYS_ADMIN or CAP_PERFMON opens kavach's `/proc/<pid>/environ`
+through its domain; `/proc/<pid>/root` and a signal stay refused. The twelve plus one capability at a time, as root: those two
+open it, CAP_SYS_PTRACE and the other 26 do not. Neither is in the default set. `SECURITY.md` and ADR-011 say so.
+
+**Found by the rig, fixed before release:** kavach's `/dev` first carried runc's links into `/proc` whatever the rootfs held.
+nginx:alpine's error log is a link to `/dev/stderr`, which then dangled with no `/proc`, and nginx exited 1 where 3.14.7 served.
+The links are made only where the rootfs has a procfs at `/proc`.
+
+### Still open
+
+- **gVisor's `sandbox_spawn`** detaches on the process path, and its filter waits for a machine with runsc.
+- **A uid 0 payload with no rootfs is on the host's files**, whatever it holds, unless a landlock rule bounds it.
+- **CAP_SYS_ADMIN or CAP_PERFMON opens kavach's `/proc/<pid>/environ` through the domain** (measured, not traced to the
+  kernel's code). Neither is in the default set.
+- **sigil's TDX type-6 parse**, upstream. Rechecked, measured: `test_attest_real_intel_quotes` still finds sigil 3.13.15
+  refusing Intel's quote and kavach's unwrap accepting it. The pin is still cyrius 6.7.18, the newest toolchain here.
+
+### Tests
+
+- **New groups.** `test_concurrent_runs_keep_their_own_results` (four threads through `sandbox_exec`, the code scanner on two,
+  one audit chain on two), `test_results_carry_their_own_state`, `test_attest_verifies_on_two_threads`,
+  `test_payloads_have_a_landlock_domain`, `test_network_denied_without_a_namespace`, `test_network_port_rules`,
+  `test_bound_without_a_rootfs`, `test_process_rootfs_own_dev` and `test_oci_spawn_runs_through_runc`. Each payload probe runs
+  inside the payload. The root halves are in CI's root job (`--kv-oci-only`), with the sibling sandbox and a caller's `/dev` in
+  `test_process_rootfs_caller_proc`. `test_capability_masks` and `test_score_what_is_applied` assert the new contracts where they
+  asserted 3.14.7's.
+- **Counts.** 2003 to 2227 rootless on x86-64, which is the sum of the new groups as they run here; 1649 to 1726 on aarch64 under
+  qemu, where the payload groups take their "emulated" skip and landlock and seccomp are absent. The root groups went from 219 to
+  389 in `ubuntu:24.04`, with no runc, and 486 in a read-only chroot of this machine's root, with its runc 1.5.2.
+- **Before-runs.** Against 3.14.7's `src/`: the concurrency group fails 5 of 14 (above), the network probe reads every row as
+  open (above), and the rig reads every 3.14.7 cell in the Security tables.
+- **26 mutants**, each a new check reverted in a scratch copy of the tree: every one fails the suite but one. The first pass left
+  two standing and killed a third only by crashing the suite, and each one's test was rebuilt to fail it:
+  - SIGKILL to runc instead of `runc kill`: runc's death reads 137 too, and the teardown cleans up, so the test now reads runc's
+    own wait status.
+  - `kv_exec_capture` keeping inherited descriptors: it had no test.
+  - No OCI spawn registered: that one was killed by a segfault, a test reading the container id through a null context, and is
+    now killed by assertions.
+
+  Bounding only with a rootfs fails only as root, and did, in the container. **One survives, and the check stays:** a domain
+  with nothing to handle below ABI v6 gets the allow-all ruleset, and this kernel's ABI 10 always has the signal scope, so it is
+  not reached here. A runner on a kernel from 5.13 to 6.11 would reach it.
+- **Found on the way.** The `/dev` links regression (Security). Under runc a test payload has a `/proc`, so it reads its mode from
+  its mode file and not from having no argv. `_t_has_line` matches a prefix on the first line, which turned "pid 1" true for any
+  PID starting with 1: the probe prints `pidone`.
+- ⚠ Every run here shares this machine's Arch kernel, 7.2.14 with landlock ABI 10 and no AppArmor. CI's `ubuntu-26.04` jobs will
+  be the first run of the new groups under AppArmor and on another landlock ABI.
+
+### Verified
+
+`cyrius fmt --check` clean on every source and test file and the rig, `cyrius lint` 0 warnings, `cyrius vet`,
+`scripts/check-symbols.py`, `cyrius distlib --all` and `scripts/check-bundles.py` (both bundles; `dist/kavach.deps` gains
+`atomic` and `sync`, `dist/kavach-confine.deps` unchanged), builds for `--aarch64` and `--agnos` with no new warning, and the
+CI security scan run locally (`bash -e`). Under `qemu-aarch64 -strace` a confined child with no rootfs issues `prctl(PR_SET_NO_NEW_PRIVS)`, `landlock_create_ruleset` (444, which qemu-user does not know, so there is no landlock there), `capget`, `geteuid` and `capset`, each decoded by its aarch64 name, and the capture maps and unmaps its 64 KiB stderr buffer. `tests/samay_integration.tcyr` passes 12 of 12, the `duplicate fn` set is
+empty, as on 3.14.7, and the smoke banner reads `kavach v3.14.8` on x86-64 and on aarch64 under qemu.
+
+### Benchmarks
+
+Recorded as `3.14.8` in `benches/bench-history.csv`, 33 benches with the new `process_exec_confined_net_on`. Interleaved against
+the 3.14.7 tag (`scripts/bench-ab.py`, five rounds a side, pinned to one CPU), **every exec row's ranges overlap**, which reads as
+no measured change:
+
+| | 3.14.7 | 3.14.8 |
+|---|---|---|
+| `process_exec_echo` (unconfined, now closing what it inherited) | 2.691 ms | 2.666 ms |
+| `process_exec_confined` (`policy_strict()`, now with the domain's TCP rights, the network filter and the bound) | 2.671 ms | 2.706 ms |
+| `process_exec_large_output` | 120.905 ms | 119.435 ms |
+| `process_exec_stdin_1mib` | 11.855 ms | 12.288 ms |
+
+In the release row, `process_exec_confined_net_on`, the same policy with the network allowed, reads 2.671 ms against
+`process_exec_confined`'s 2.678 ms: denying the network costs an exec nothing measurable. Seven rows of the 32 separate, none on
+the exec path: `ct_streq_64` 13.3% slower (173 to 196 ns, code this release does not touch), `health_check_noop` 6.2% and
+`sandbox_full_lifecycle` 3.1% slower, `merge_policies_plain` 4.8% slower, and `http_path_extract` 9.8%,
+`code_scan_large_naive` 6.5% and `gate_clean_output` 1.9% faster. Read from the change and not profiled: a sandbox is 112 bytes
+and zeroed where it was 56, and a merge now merges the port lists. The others touch nothing this release changed.
+
+None of the benches enters a rootfs, so that was timed apart, as root in a container pinned to one CPU: both builds
+interleaved, 8 windows of 150 execs a side, the first dropped as warm-up, under `policy_basic()`. Medians per exec:
+
+| | 3.14.7 | 3.14.8 |
+|---|---|---|
+| a rootfs with a `dev` directory, which gets kavach's `/dev` | 6.42 ms (6.41 to 6.46) | **6.95 ms** (6.88 to 7.02) |
+| a rootfs with none | 6.50 ms (6.38 to 6.72) | 6.45 ms (6.36 to 6.60) |
+
+**kavach's own `/dev` costs a rootfs exec 0.53 ms, 8.3%**: a tmpfs, six binds, a devpts, a `/dev/shm` and the links, on every
+exec. A rootfs with no `dev` is unchanged.
+
 ## [3.14.7] — 2026-11-07
 
 A `/proc` or `/sys` that a caller mounts in a process-path rootfs is now what runc makes it, and an exec costs what its
@@ -116,7 +347,7 @@ filesystem as the rootfs with the caller's `/dev` and `/proc`, as ADR-009 ran it
 
 ### Still open
 
-In [the process-backend issue](docs/development/issues/2026-11-06-process-backend-keeps-every-capability.md), in
+In [the process-backend issue](docs/development/issues/archived/2026-11-06-process-backend-keeps-every-capability.md), in
 `SECURITY.md`, and pinned on the roadmap as 3.14.8:
 
 - **`/proc/<pid>/root` reaches a sibling sandbox.** Measured as root on both builds and both policies: with a caller's
@@ -263,7 +494,7 @@ Measured against the images ADR-008 used, as root, before and after, on the proc
 
 ### Still open
 
-In [the issue](docs/development/issues/2026-11-06-process-backend-keeps-every-capability.md), and in `SECURITY.md`:
+In [the issue](docs/development/issues/archived/2026-11-06-process-backend-keeps-every-capability.md), and in `SECURITY.md`:
 
 - **A `/proc` a caller mounted in a rootfs is not read-only.** kavach mounts none, but where a caller has, uid 0 with the
   twelve still opens `core_pattern` and `sysrq-trigger` to write, because that access is uid 0's, and not a capability's.

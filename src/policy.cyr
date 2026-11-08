@@ -25,6 +25,8 @@ struct SandboxPolicy {
     attest_rtmrs;
     attest_collateral;
     attest_tcb_accept;
+    network_tcp_bind;
+    network_tcp_connect;
 }
 
 # 104 (3.11.3): `landlock_rules` is appended, so no existing field offset moves
@@ -32,7 +34,9 @@ struct SandboxPolicy {
 # 136 (3.13.0): the four attestation fields are appended the same way.
 # 160 (3.14.2): the TDX RTMR allowlists, the collateral and the accepted TCB
 # statuses, appended the same way.
-var SANDBOX_POLICY_SIZE = 160;
+# 176 (3.14.8): the TCP ports a payload with no network may still bind and
+# connect to, behind the two counts that had no list until now.
+var SANDBOX_POLICY_SIZE = 176;
 
 fn policy_new() {
     var p = alloc(SANDBOX_POLICY_SIZE);
@@ -162,19 +166,99 @@ fn policy_landlock_is_deny_all(p) {
     return 0;
 }
 
+# What `policy_network_allow_tcp` allows: binding a TCP port, connecting to one,
+# or both (3.14.8). Landlock's own bits (LANDLOCK_ACCESS_NET_*).
+var KAVACH_TCP_BIND = 1;
+var KAVACH_TCP_CONNECT = 2;
+
+# Let a payload whose policy denies network (`network_enabled = 0`) still bind
+# TCP `port`, connect to it, or both (`access`, KAVACH_TCP_BIND | KAVACH_TCP_CONNECT),
+# as `policy_landlock_add` lets it reach a path. For "only 443": connect, 443.
+# Returns 0, or -1 for a port outside 0..65535 or no access. A port named twice
+# is kept once.
+#
+# Applied by landlock (ABI v4, Linux 6.7) on the process path, as a NET_PORT rule
+# of the payload's domain: every other TCP bind and connect reads EACCES. That
+# needs no namespace, so a policy naming a port makes the path create no network
+# namespace for it, which would leave nothing to connect to. Below ABI v4 the
+# payload has no landlock network rights and keeps the network.
+#
+# ⚠ TCP only. A payload with no network has its UDP, raw and other sockets refused
+# by the exec filter when the policy enables seccomp, so a name to resolve needs a
+# resolver over TCP, port 53, or an address. On the OCI and gVisor backends a
+# policy denying network gets an empty network namespace, where no port is
+# reachable: the list is stricter there, not looser. With `network_enabled = 1`
+# the list is kept and has no effect.
+#
+# Through 3.14.7 a policy carried `network_tcp_bind_len` and
+# `network_tcp_connect_len`, counts with no list and no setter; the counts now
+# follow the lists, as `landlock_rules_len` follows its rules.
+fn policy_network_allow_tcp(p, port, access) {
+    if (p == 0) { return 0 - 1; }
+    if (port < 0 || port > 65535) { return 0 - 1; }
+    if ((access & (KAVACH_TCP_BIND | KAVACH_TCP_CONNECT)) == 0) { return 0 - 1; }
+    if ((access & KAVACH_TCP_BIND) != 0) {
+        var b = SandboxPolicy_network_tcp_bind(p);
+        if (b == 0) {
+            b = vec_new();
+            SandboxPolicy_set_network_tcp_bind(p, b);
+        }
+        if (_policy_port_in(b, port) == 0) { vec_push(b, port); }
+        SandboxPolicy_set_network_tcp_bind_len(p, vec_len(b));
+    }
+    if ((access & KAVACH_TCP_CONNECT) != 0) {
+        var c = SandboxPolicy_network_tcp_connect(p);
+        if (c == 0) {
+            c = vec_new();
+            SandboxPolicy_set_network_tcp_connect(p, c);
+        }
+        if (_policy_port_in(c, port) == 0) { vec_push(c, port); }
+        SandboxPolicy_set_network_tcp_connect_len(p, vec_len(c));
+    }
+    return 0;
+}
+
+# 1 when `port` is in `ports`, a vec of ports or 0.
+fn _policy_port_in(ports, port) {
+    if (ports == 0) { return 0; }
+    var i = 0;
+    while (i < vec_len(ports)) {
+        if (vec_get(ports, i) == port) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# 1 when `p` names a TCP port a payload with no network may still use.
+fn policy_network_tcp_rules(p) {
+    if (p == 0) { return 0; }
+    var b = SandboxPolicy_network_tcp_bind(p);
+    var c = SandboxPolicy_network_tcp_connect(p);
+    if (b != 0 && vec_len(b) > 0) { return 1; }
+    if (c != 0 && vec_len(c) > 0) { return 1; }
+    return 0;
+}
+
 # Whether this policy asks for any child-side confinement.
 #
 # The routing predicate for `process_exec`: a policy answering 1 must not reach
 # a plain `exec_capture`, because that path has no seam between `fork` and
 # `execve` in which to install a filter. Answering on the policy rather than on
 # the rootfs is the whole of the 3.11.3 fix. A landlock scope asks for a ruleset
-# as a rule does (3.13.2).
+# as a rule does (3.13.2), and so does a TCP port rule (3.14.8).
+#
+# ⚠ `network_enabled = 0` alone does not (3.14.8). It is `policy_new()`'s default,
+# and the policy asking for nothing else runs unconfined, as it always has. Where
+# the payload is confined, for any other reason, the network is denied by
+# landlock and the exec filter (`_spawn_apply_landlock`).
 fn policy_wants_confinement(p) {
     if (p == 0) { return 0; }
     if (SandboxPolicy_seccomp_enabled(p) == 1) { return 1; }
     if (SandboxPolicy_landlock_rules_len(p) > 0) { return 1; }
     if (SandboxPolicy_landlock_abstract_unix(p) == 1) { return 1; }
     if (SandboxPolicy_landlock_signal(p) == 1) { return 1; }
+    # 3.14.8: a TCP port rule is a landlock rule, so it takes the seam too.
+    if (SandboxPolicy_network_enabled(p) == 0 && policy_network_tcp_rules(p) == 1) { return 1; }
     return 0;
 }
 

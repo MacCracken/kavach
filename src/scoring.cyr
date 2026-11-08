@@ -38,7 +38,7 @@ fn score_label(score) {
 #   - gVisor took 5 for `seccomp_enabled`. Its spec carries no filter, because
 #     runsc applies one only under `--oci-seccomp` and has no case for the
 #     action the OCI backend's filter uses (read in runsc's source, not run:
-#     docs/development/issues/2026-11-06-gvisor-policy-seccomp-is-not-applied.md).
+#     docs/development/issues/archived/2026-11-06-gvisor-policy-seccomp-is-not-applied.md).
 #     The sentry stands between its payload and the host either way.
 fn score_backend(backend, policy) {
     var score = base_score(backend);
@@ -56,10 +56,9 @@ fn score_backend(backend, policy) {
     if (SandboxPolicy_memory_limit_mb(policy) > 0) { score = score + 2; }
     elif (SandboxPolicy_cpu_limit_tenths(policy) > 0) { score = score + 2; }
 
-    # Landlock TCP ports (ABI v4) are not scored (3.13.2). The policy carries
-    # only `network_tcp_bind_len` and `network_tcp_connect_len`, counts with no
-    # port list behind them and no setter, so no rule can be built from them,
-    # and through 3.13.1 they added 3 for a restriction nothing applied.
+    # Landlock TCP ports (ABI v4) are not scored here (3.13.2). Through 3.13.1 the
+    # bare counts added 3 for a restriction nothing applied. Since 3.14.8 a list
+    # is applied on the process path, and `score_config` scores it there.
 
     # Landlock scoping (ABI v6), applied since 3.13.2 by `_spawn_apply_landlock`
     # where the kernel has ABI v6.
@@ -72,10 +71,24 @@ fn score_backend(backend, policy) {
 }
 
 # What the process path adds for `policy` past `score_backend`'s, when it creates
-# the policy's namespaces (`ns`) and enters a rootfs (`rootfs`).
-fn _score_process_path(policy, rootfs, ns) {
+# the policy's namespaces (`ns`), enters a rootfs (`rootfs`) and confines the
+# payload at all (`confined`).
+#
+# 3.14.8: a confined payload denied network has it denied with no namespace, by
+# landlock's TCP rule and the network filter, where the kernel has landlock ABI v4
+# (`_spawn_net_alone`), and that scores the 5 a network namespace does. A policy
+# naming TCP ports gets no namespace and no 5, since it has a network, and 3 for
+# the list where the list is applied: the score landlock's TCP ports had through
+# 3.13.1, when nothing applied them.
+fn _score_process_path(policy, rootfs, ns, confined) {
     var s = 0;
-    if (ns == 1 && SandboxPolicy_network_enabled(policy) == 0) { s = s + 5; }
+    if (SandboxPolicy_network_enabled(policy) == 0) {
+        var ports = policy_network_tcp_rules(policy);
+        var held = 0;
+        if (confined == 1 && security_landlock_abi_version() >= 4) { held = 1; }
+        if (ports == 0 && (ns == 1 || held == 1)) { s = s + 5; }
+        if (ports == 1 && held == 1) { s = s + 3; }
+    }
     if (rootfs != 0 && SandboxPolicy_read_only_rootfs(policy) == 1) { s = s + 3; }
     return s;
 }
@@ -89,7 +102,9 @@ fn _score_clamp(s) {
 # The score of what `sandbox_exec` applies for `cfg`, 0-100 (3.14.7). It is
 # `score_backend` for the config's backend and policy, and on the process backend
 # it adds what the config makes that path apply: the network namespace with a
-# rootfs or `config_require_namespaces`, and the read-only root with a rootfs.
+# rootfs or `config_require_namespaces`, or since 3.14.8 landlock and the network
+# filter on any confined payload where the kernel has them, a TCP port list, and
+# the read-only root with a rootfs.
 #[must_use]
 fn score_config(cfg) {
     if (cfg == 0) { return 0; }
@@ -101,22 +116,33 @@ fn score_config(cfg) {
         var rootfs = SandboxConfig_rootfs(cfg);
         var ns = 0;
         if (rootfs != 0 || SandboxConfig_require_ns(cfg) == 1) { ns = 1; }
-        s = s + _score_process_path(p, rootfs, ns);
+        var confined = ns;
+        if (policy_wants_confinement(p) == 1) { confined = 1; }
+        s = s + _score_process_path(p, rootfs, ns, confined);
     }
     return _score_clamp(s);
 }
 
-# The score of what `sandbox_spawn` applies for `cfg`, 0-100 (3.14.7). It reads no
-# backend, so a payload spawned from an OCI or gVisor sandbox runs on the process
+# The score of what `sandbox_spawn` applies for `cfg`, 0-100 (3.14.7). A payload
+# spawned from a sandbox whose backend has no spawn of its own runs on the process
 # path and scores as one, where `score_backend` gave it the backend's 55 or 70. Its
 # namespaces are always requested, and refused closed, so the network counts.
+#
+# 3.14.8: an OCI sandbox's spawn runs `runc run` (`oci_spawn`), where the OCI
+# backend is registered, and scores as an OCI exec does. gVisor's still detaches on
+# the process path.
 #[must_use]
 fn score_spawn(cfg) {
     if (cfg == 0) { return 0; }
+    var b = SandboxConfig_backend(cfg);
     var p = SandboxConfig_policy(cfg);
+    if (backend_spawn_fn(b) != 0) {
+        if (p == 0) { return base_score(b); }
+        return _score_clamp(score_backend(b, p));
+    }
     if (p == 0) { return base_score(KavachBackend.PROCESS); }
     var s = score_backend(KavachBackend.PROCESS, p);
-    s = s + _score_process_path(p, SandboxConfig_rootfs(cfg), 1);
+    s = s + _score_process_path(p, SandboxConfig_rootfs(cfg), 1, 1);
     return _score_clamp(s);
 }
 

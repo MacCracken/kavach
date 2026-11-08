@@ -1,6 +1,6 @@
 # ADR-010 — A caller's `/proc` and `/sys` in a process-path rootfs: runc's lists
 
-**Status**: Accepted
+**Status**: Accepted. Extended by [ADR-011](011-dev-pids-and-network-on-the-process-path.md) (v3.14.8): a caller's `/dev` and `/proc/<pid>/root`, which this ADR left open, are decided there.
 **Date**: 2026-11-07
 **Version**: v3.14.7
 
@@ -12,7 +12,7 @@ twelve capabilities. kavach mounts no `/proc` there, but a caller may, and the p
 `sysrq-trigger` to write. That access is uid 0's and not a capability's: `sysctl_perm` compares the euid with the
 global root, so no set reaches it. Under runc the read-only mounts from `runc spec`'s lists stop it, and the set keeps
 the mounts on. The full record is in
-[the issue](../development/issues/2026-11-06-process-backend-keeps-every-capability.md).
+[the issue](../development/issues/archived/2026-11-06-process-backend-keeps-every-capability.md).
 
 Measured as root through `sandbox_exec`, from inside the payload, opening and never writing, with the caller's
 `/proc` and `/sys` mounted in the rootfs, on 3.14.6:

@@ -100,3 +100,47 @@ Each behaviour the code depends on was measured, as each entry says.
   the same twelve is reachable, the host's init and kavach's own process read EACCES. **landlock(7)**, not measured: a
   sandboxed process cannot ptrace one outside its domain, one way that would close it.
 
+
+## `/dev`, other processes and the network on the process path, and an OCI spawn (`src/confine.cyr`, `src/security.cyr`, `src/backend_oci.cyr`, 3.14.8)
+
+Cited as documented; no man pages or kernel tree were at hand, so each behaviour the code depends on was measured, as
+each entry says. Linux 7.2.14, landlock ABI 10, runc 1.5.2.
+
+- **landlock(7)** and `Documentation/userspace-api/landlock.rst`, "Ptrace restrictions": a process inside a landlock
+  domain may ptrace only a process in its own domain or one nested in it. `/proc/<pid>/root`, `cwd` and `environ` take
+  that check (`ptrace_may_access`, mode READ_FSCREDS). Measured in 3.14.8: a confined payload reads EACCES opening
+  kavach's `/proc/<pid>/root` and `environ`, rootless, and as root a sibling sandbox's root, where 3.14.7 read the file.
+- **landlock(7)**, "Scope flags" (ABI v6, Linux 6.12): `LANDLOCK_SCOPE_SIGNAL` lets a process signal only inside its
+  domain. Measured: `kill(ppid, 0)` reads EPERM from a confined payload. `LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET` as in 3.13.2.
+- **landlock_create_ruleset(2)**: a ruleset handling no access right is refused (ENOMSG), which is why a domain with
+  nothing else to handle handles `LANDLOCK_ACCESS_FS_MAKE_BLOCK` and allows it beneath `/`. Not reached on ABI 10, where
+  the signal scope makes every domain: see the CHANGELOG's mutant list.
+- **landlock(7)**, "Network flags" (ABI v4, Linux 6.7): `LANDLOCK_ACCESS_NET_BIND_TCP` and `LANDLOCK_ACCESS_NET_CONNECT_TCP`
+  in `handled_access_net`, and `LANDLOCK_RULE_NET_PORT` with `struct landlock_net_port_attr { __u64 allowed_access; __u64
+  port; }`. Measured: with both handled and no rule, a TCP connect, a bind and a Fast Open `sendto(MSG_FASTOPEN)` read
+  EACCES; with a rule for one port, a connect there succeeds and to another reads EACCES. **Not covered, measured:** an
+  MPTCP socket (`IPPROTO_MPTCP`, 262) connected to a refused port, and an SCTP connect went out (ECONNREFUSED from no
+  listener), with landlock alone. landlock's network rights are TCP's, as the documentation says, and do not reach MPTCP.
+- **socket(2)**, **ip(7)**, **udp(7)**: the families (AF_UNIX 1, AF_INET 2, AF_INET6 10, AF_NETLINK 16), `SOCK_STREAM` (1)
+  and the type mask (`SOCK_TYPE_MASK`, 0xf, `include/linux/net.h`), and IPPROTO_TCP (6), the values the network filter
+  compares, the same on x86-64 and aarch64. **io_uring_setup(2)**: a ring opens sockets (`IORING_OP_SOCKET`, Linux 5.19)
+  with no `socket(2)` call for a filter to test; docker's default profile refuses `io_uring_setup` for the same reason.
+- **seccomp(2)**: filters stack, every one is evaluated, and the most restrictive action wins, which is what loading the
+  network filter beside the exec filter relies on.
+- **runc's `setupDev`, `createDevices` and `setupDevSymlinks`** (`libcontainer/rootfs_linux.go`, read as documented):
+  a tmpfs over `/dev` (`mode=755,size=65536k`), the default devices bound from the host rootless and created as root (kavach
+  binds both), a devpts with `newinstance,ptmxmode=0666,mode=0620,gid=5`, a tmpfs `/dev/shm` (`mode=1777,size=65536k`),
+  and the links `fd`, `stdin`, `stdout`, `stderr` and `ptmx`. kavach mounts no `/dev/mqueue`, which needs an IPC namespace.
+- **devpts.rst** (`Documentation/filesystems/devpts.rst`): a `newinstance` mount is a private instance, mountable in a user
+  namespace. Measured: rootless, in kavach's user namespace, it mounts without `gid=5`, which that namespace does not map.
+- **pid_namespaces(7)**: a namespace's init receives only signals it has a handler for, from inside the namespace or an
+  ancestor, except SIGKILL and SIGSTOP from an ancestor. Measured: a sleeping payload under `runc run` outlives a forwarded
+  SIGTERM, and `spawned_terminate` ends it with SIGKILL after the grace period, exit 137.
+- **runc run** (`runc run --help`, and `signals.go`'s handler): in the foreground runc forwards the signals it receives to
+  the container's init and exits with its status, and a SIGKILL to runc reaches only runc. Measured with runc 1.5.2,
+  rootless and as root: exit 7 comes back as 7, `runc kill <id> KILL` ends the container with 137, and `runc delete --force`
+  after runc is reaped leaves no state directory.
+- **capabilities(7)**, "Effect of user ID changes on capabilities" and "Capabilities and execution of programs by root":
+  only uid 0 takes the bounding set into its permitted set at `execve`; under `no_new_privs` a file's capabilities and a
+  set-id bit grant nothing. Why a caller that is not uid 0 and holds no CAP_SETPCAP is bounded without dropping its bounding
+  set. Measured as root: a confined payload with no rootfs reads `CapEff 00000000a00405fb`.

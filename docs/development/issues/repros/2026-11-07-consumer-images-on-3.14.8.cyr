@@ -1,0 +1,325 @@
+# 3.14.8's consumer runs (ADR-011): postgres's entry point and nginx in their images'
+# filesystems through kavach's public paths, before and after, a block device through a
+# caller's /dev, and nginx detached through runc on an OCI sandbox. x86-64.
+#
+#   cyrius build <this file> <dir>/rig-after      # from the repository root
+#   cyrius build <this file> <dir>/rig-before     # from a 3.14.7 tree, with the stand-in
+#                                                 # for policy_network_allow_tcp below
+#
+# It runs only as real root in a throwaway privileged container, with <dir> bound at /rig:
+# the .sh of the same name. A block device is opened read-only and closed; nothing is read.
+
+include "src/util.cyr"
+include "src/error.cyr"
+include "src/sys_error.cyr"
+include "src/sys_util.cyr"
+include "src/security.cyr"
+include "src/mac.cyr"
+include "src/kernel_audit.cyr"
+include "src/backend.cyr"
+include "src/policy.cyr"
+include "src/scoring.cyr"
+include "src/lifecycle.cyr"
+include "src/scanning_types.cyr"
+include "src/aho_corasick.cyr"
+include "src/scanning_secrets.cyr"
+include "src/scanning_code.cyr"
+include "src/scanning_data.cyr"
+include "src/scanning_gate.cyr"
+include "src/scanning_runtime.cyr"
+include "src/scanning_threat.cyr"
+include "src/audit.cyr"
+include "src/credential.cyr"
+include "src/credential_http.cyr"
+include "src/quarantine.cyr"
+include "src/cgroup.cyr"
+include "src/oci_spec.cyr"
+include "src/confine.cyr"
+include "src/backend_dispatch.cyr"
+include "src/backend_noop.cyr"
+include "src/backend_process.cyr"
+include "src/backend_gvisor.cyr"
+include "src/backend_oci.cyr"
+include "src/backend_wasm.cyr"
+include "src/backend_sy_agnos.cyr"
+include "src/backend_sgx.cyr"
+include "src/backend_sev.cyr"
+include "src/backend_tdx.cyr"
+include "src/backend_firecracker.cyr"
+include "src/persistent.cyr"
+include "src/spawn.cyr"
+include "src/composite.cyr"
+include "src/observability.cyr"
+include "src/attest_collateral.cyr"
+include "src/attestation.cyr"
+include "src/sandbox_exec.cyr"
+
+
+fn P(c) { sys_write(1, c, strlen(c)); return 0; }
+fn N(n) {
+    var b[24];
+    var k = fmt_int_buf(n, &b);
+    sys_write(1, &b, k);
+    return 0;
+}
+
+# A process sandbox on `rootfs` under policy_basic, network as `net` says: "on" (the
+# host's), "port" (denied, binding 80 allowed) or "off".
+fn rig_cfg(backend, rootfs, net) {
+    var cfg = config_new();
+    config_backend(cfg, backend);
+    var p = policy_basic();
+    if (streq(net, "on") == 1) { SandboxPolicy_set_network_enabled(p, 1); }
+    if (streq(net, "port") == 1) { P("port rule "); N(policy_network_allow_tcp(p, 80, 1)); P("\n"); }
+    config_policy(cfg, p);
+    config_rootfs(cfg, rootfs);
+    return cfg;
+}
+
+# 1 when /proc/<pid>/comm reads `name`.
+fn rig_comm_is(pid, name) {
+    var cp = alloc(64);
+    memcpy(cp, "/proc/", 6);
+    var cn = 6 + fmt_int_buf(pid, cp + 6);
+    memcpy(cp + cn, "/comm", 6);
+    var comm = alloc(64);
+    var k = file_read_all(cp, comm, 63);
+    if (k <= 0) { return 0; }
+    if (load8(comm + k - 1) == 10) { k = k - 1; }
+    store8(comm + k, 0);
+    return streq(comm, name);
+}
+
+# postgres's entry point, spawned in its image's filesystem, answered by pg_isready
+# over the socket in the rootfs. As 3.14.7's rig.
+fn rig_pg(rootfs) {
+    var cfg = rig_cfg(KavachBackend.PROCESS, rootfs, "off");
+    var env = vec_new();
+    vec_push(env, "POSTGRES_PASSWORD=kv");
+    vec_push(env, "PATH=/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin");
+    vec_push(env, "PGDATA=/var/lib/postgresql/data");
+    config_env(cfg, env);
+    var sb = sandbox_create(cfg);
+    sandbox_transition(sb, SandboxState.RUNNING);
+    var sp = sandbox_spawn(sb, "/usr/local/bin/docker-entrypoint.sh postgres", "/tmp/pg.log");
+    if (sp == 0) { P("pg spawn refused\n"); return 1; }
+    var i = 0;
+    var ok = 0;
+    while (i < 120 && ok == 0) {
+        sleep_ms(500);
+        if (spawned_try_wait(sp) == 1) { P("pg exited early\n"); break; }
+        # The entry point answers pg_isready from a temporary server while it
+        # initialises; wait until the handle's process is the server itself.
+        if (rig_comm_is(spawned_pid(sp), "postgres") == 0) {
+            i = i + 1;
+            continue;
+        }
+        var a = vec_new();
+        vec_push(a, "/usr/sbin/chroot");
+        vec_push(a, rootfs);
+        vec_push(a, "/usr/local/bin/pg_isready");
+        vec_push(a, "-h");
+        vec_push(a, "/var/run/postgresql");
+        var b = alloc(4096);
+        var n = kv_exec_capture(a, b, 4095);
+        if (n > 0) {
+            store8(b + n, 0);
+            if (cstr_contains(b, "accepting connections") == 1) { P("pg_isready: "); P(b); ok = 1; }
+        }
+        i = i + 1;
+    }
+    P("pg answered "); N(ok); P("\n");
+    P("pg exit "); N(spawned_terminate(sp, 5000)); P("\n");
+    return 0;
+}
+
+# GET / from 127.0.0.1:80: 1 when nginx's page comes back.
+fn rig_get() {
+    var fd = sys_socket(2, 1, 0);
+    if (fd < 0) { return 0; }
+    var sa[16];
+    memset(&sa, 0, 16);
+    store16(&sa, 2);
+    store8(&sa + 2, 0);
+    store8(&sa + 3, 80);
+    store32(&sa + 4, 0x0100007F);
+    if (sys_connect(fd, &sa, 16) != 0) { sys_close(fd); return 0; }
+    var req = "GET / HTTP/1.0\r\n\r\n";
+    sys_write(fd, req, strlen(req));
+    var b = alloc(8192);
+    var n = 0;
+    while (n < 8191) {
+        var r = sys_read(fd, b + n, 8191 - n);
+        if (r <= 0) { break; }
+        n = n + r;
+    }
+    store8(b + n, 0);
+    sys_close(fd);
+    return cstr_contains(b, "Welcome to nginx");
+}
+
+# nginx in its image's filesystem, `daemon off`, network as `net` says, through
+# `sandbox_spawn` on `backend`. Served or not, then stopped.
+fn rig_nginx(backend, rootfs, net) {
+    var cfg = rig_cfg(backend, rootfs, net);
+    var sb = sandbox_create(cfg);
+    if (sb == 0) { P("nginx sandbox refused\n"); return 1; }
+    sandbox_transition(sb, SandboxState.RUNNING);
+    var argv = vec_new();
+    vec_push(argv, "/usr/sbin/nginx");
+    vec_push(argv, "-g");
+    vec_push(argv, "daemon off;");
+    var sp = sandbox_spawn_argv(sb, argv, "/tmp/nginx.log");
+    if (sp == 0) { P("nginx spawn refused\n"); return 1; }
+    # What the handle's pid is: nginx itself on the process path, runc under it.
+    sleep_ms(300);
+    var cp = alloc(64);
+    memcpy(cp, "/proc/", 6);
+    var cn = 6 + fmt_int_buf(spawned_pid(sp), cp + 6);
+    memcpy(cp + cn, "/comm", 6);
+    var comm = alloc(64);
+    var k = file_read_all(cp, comm, 63);
+    if (k < 0) { k = 0; }
+    store8(comm + k, 0);
+    P("handle "); P(comm);
+    var i = 0;
+    var ok = 0;
+    while (i < 40 && ok == 0) {
+        sleep_ms(250);
+        if (spawned_try_wait(sp) == 1) { P("nginx exited "); N(spawned_exit_code(sp)); P("\n"); break; }
+        ok = rig_get();
+        i = i + 1;
+    }
+    P("nginx "); P(net); P(" served "); N(ok); P("\n");
+    if (spawned_alive(sp) == 1) { P("nginx exit "); N(spawned_terminate(sp, 5000)); P("\n"); }
+    return 0;
+}
+
+# Open `path` read-only in a payload of `rootfs`, and close it.
+fn rig_devopen(rootfs, path) {
+    var cfg = rig_cfg(KavachBackend.PROCESS, rootfs, "off");
+    var sb = sandbox_create(cfg);
+    sandbox_transition(sb, SandboxState.RUNNING);
+    var cmd = alloc(strlen(path) + 32);
+    memcpy(cmd, "/payload --devopen ", 19);
+    memcpy(cmd + 19, path, strlen(path) + 1);
+    var r = sandbox_exec(sb, cmd);
+    if (r == 0) { P("devopen: no result\n"); return 1; }
+    P(ExecResult_stdout(r));
+    return 0;
+}
+
+# The payload's CapEff, from capget, and its parent's /proc/<pid>/root and a signal to it.
+fn rig_capsprobe() {
+    var hdr[8];
+    var d[24];
+    store32(&hdr, 0x20080522);
+    store32(&hdr + 4, 0);
+    memset(&d, 0, 24);
+    sys_capget(&hdr, &d);
+    P("CapEff "); N(load32(&d) | (load32(&d + 12) << 32)); P("\n");
+    return 0;
+}
+
+# Reach for `pid`'s root and `pid` itself, and the parent's.
+fn rig_reach(pid) {
+    var b = alloc(64);
+    memcpy(b, "/proc/", 6);
+    var n = 6 + fmt_int_buf(pid, b + 6);
+    memcpy(b + n, "/root/marker-b", 15);
+    var fd = file_open(b, O_RDONLY, 0);
+    P("sibling-root ");
+    if (fd >= 0) { sys_close(fd); P("read\n"); } else { N(fd); P("\n"); }
+    P("sibling-kill "); N(sys_kill(pid, 0)); P("\n");
+    P("parent-kill "); N(sys_kill(sys_getppid(), 0)); P("\n");
+    return 0;
+}
+
+# A sibling sandbox in `b` (a sleeping payload), and a payload in `a`, whose caller
+# mounted /proc there, reaching for it.
+fn rig_sibling(a, b, pol) {
+    var cs = rig_cfg(KavachBackend.PROCESS, b, "off");
+    var ss = sandbox_create(cs);
+    sandbox_transition(ss, SandboxState.RUNNING);
+    var sp = sandbox_spawn(ss, "/payload --sleep", 0);
+    if (sp == 0) { P("sibling spawn refused\n"); return 1; }
+    sleep_ms(400);
+    var ca = rig_cfg(KavachBackend.PROCESS, a, "off");
+    if (streq(pol, "new") == 1) { config_policy(ca, policy_new()); }
+    var sa = sandbox_create(ca);
+    sandbox_transition(sa, SandboxState.RUNNING);
+    var cmd = alloc(64);
+    memcpy(cmd, "/payload --reach ", 17);
+    var cn = 17 + fmt_int_buf(spawned_pid(sp), cmd + 17);
+    store8(cmd + cn, 0);
+    var r = sandbox_exec(sa, cmd);
+    P("--- policy_"); P(pol); P("\n");
+    if (r != 0) { P(ExecResult_stdout(r)); }
+    spawned_kill(sp, 9);
+    spawned_wait(sp);
+    return 0;
+}
+
+# A payload with no rootfs under policy_basic: its CapEff.
+fn rig_caps(self) {
+    var cfg = config_new();
+    config_backend(cfg, KavachBackend.PROCESS);
+    config_policy(cfg, policy_basic());
+    config_stdin(cfg, "", 0);
+    var sb = sandbox_create(cfg);
+    sandbox_transition(sb, SandboxState.RUNNING);
+    var cmd = alloc(strlen(self) + 16);
+    memcpy(cmd, self, strlen(self));
+    memcpy(cmd + strlen(self), " --capsprobe", 13);
+    var r = sandbox_exec(sb, cmd);
+    if (r != 0) { P("no rootfs, policy_basic: "); P(ExecResult_stdout(r)); }
+    return 0;
+}
+
+fn main() {
+    args_init();
+    alloc_init();
+    kavach_init();
+    # A rootfs with no /proc gives the payload no argv: the timing run's payload, which exits.
+    if (argc() == 0) { return 0; }
+    if (argc() >= 2 && streq(argv(1), "--capsprobe") == 1) { return rig_capsprobe(); }
+    if (argc() >= 2 && streq(argv(1), "--noop") == 1) { return 0; }
+    if (argc() >= 4 && streq(argv(1), "--time") == 1) {
+        # --time <rootfs> <n>: µs per exec of n, policy_basic, a payload that exits at once.
+        var cfg = rig_cfg(KavachBackend.PROCESS, argv(2), "off");
+        config_stdin(cfg, "", 0);
+        var sb = sandbox_create(cfg);
+        sandbox_transition(sb, SandboxState.RUNNING);
+        var n = atoi(argv(3));
+        var t0 = mono_now_ns();
+        var k = 0;
+        var bad = 0;
+        while (k < n) {
+            var r = sandbox_exec(sb, "/payload --noop");
+            if (r == 0 || ExecResult_exit_code(r) != 0) { bad = bad + 1; }
+            k = k + 1;
+        }
+        P("us-per-exec "); N((mono_now_ns() - t0) / 1000 / n); P(" failed "); N(bad); P("\n");
+        return 0;
+    }
+    if (argc() >= 2 && streq(argv(1), "--sleep") == 1) { sleep_ms(20000); return 0; }
+    if (argc() >= 3 && streq(argv(1), "--reach") == 1) { return rig_reach(atoi(argv(2))); }
+    if (argc() >= 3 && streq(argv(1), "--caps") == 1) { return rig_caps(argv(2)); }
+    if (argc() >= 5 && streq(argv(1), "--sibling") == 1) { return rig_sibling(argv(2), argv(3), argv(4)); }
+    if (argc() >= 3 && streq(argv(1), "--devopen") == 1) {
+        # The payload's half. Opens read-only and closes. Nothing is read.
+        P("devopen "); P(argv(2)); P(" ");
+        var fd = file_open(argv(2), O_RDONLY, 0);
+        if (fd >= 0) { sys_close(fd); P("opened\n"); } else { N(fd); P("\n"); }
+        return 0;
+    }
+    if (argc() >= 3 && streq(argv(1), "--pg") == 1) { return rig_pg(argv(2)); }
+    if (argc() >= 4 && streq(argv(1), "--nginx") == 1) { return rig_nginx(KavachBackend.PROCESS, argv(2), argv(3)); }
+    if (argc() >= 4 && streq(argv(1), "--oci-nginx") == 1) { return rig_nginx(KavachBackend.OCI, argv(2), argv(3)); }
+    if (argc() >= 4 && streq(argv(1), "--dev") == 1) { return rig_devopen(argv(2), argv(3)); }
+    P("usage\n");
+    return 2;
+}
+
+var exit_code = main();
+syscall(SYS_EXIT, exit_code);

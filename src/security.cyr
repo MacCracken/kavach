@@ -53,7 +53,13 @@ enum LandlockConst {
     # process, only inside its own landlock domain.
     LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET = 1;
     LANDLOCK_SCOPE_SIGNAL = 2;
+    # ABI v4 network rights (3.14.8): bind and connect a TCP socket. A ruleset
+    # handling them refuses both with EACCES, except to a port a NET_PORT rule
+    # names. UDP, raw and unix sockets are not landlock network rights.
+    LANDLOCK_ACCESS_NET_BIND_TCP = 1;
+    LANDLOCK_ACCESS_NET_CONNECT_TCP = 2;
     LANDLOCK_RULE_PATH_BENEATH = 1;
+    LANDLOCK_RULE_NET_PORT = 2;
     # Flag to `landlock_create_ruleset` that asks for the ABI version instead of
     # creating a ruleset. Returns the version as a positive integer.
     LANDLOCK_CREATE_RULESET_VERSION = 1;
@@ -244,6 +250,30 @@ fn security_apply_landlock_scoped(rules, count, scopes): i64 {
     }
     defer { syscall(SYS_CLOSE, ruleset_fd); }
 
+    var walk_t, walk_v = _landlock_add_rules(ruleset_fd, rules, count, abi);
+    if (is_err_result(walk_t) == 1) { return Err(walk_v); }
+
+    # Set no_new_privs (required by Landlock)
+    var ret = syscall(SYS_PRCTL, 38, 1, 0, 0, 0);
+    if (ret < 0) {
+        return kavach_err_syscall_failed(0 - ret, "PR_SET_NO_NEW_PRIVS failed");
+    }
+
+    ret = syscall(SYS_LANDLOCK_RESTRICT_SELF, ruleset_fd, 0);
+    if (ret < 0) {
+        return kavach_err_syscall_failed(0 - ret, "landlock_restrict_self failed");
+    }
+
+    return Ok(0);
+    #endif
+}
+
+# Add the first `count` rules of `rules` to `ruleset_fd`, at `abi`. Ok(0) or Err.
+fn _landlock_add_rules(ruleset_fd, rules, count, abi): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return kavach_err_not_supported("LANDLOCK");
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
     # 3.11.3: bound the walk by the list as well as the count. A caller asking
     # for a ruleset with **no** path-beneath rules — total filesystem denial,
     # which `policy_landlock_deny_all` expresses as a non-zero count over an
@@ -313,17 +343,148 @@ fn security_apply_landlock_scoped(rules, count, scopes): i64 {
         idx = idx + 1;
     }
 
-    # Set no_new_privs (required by Landlock)
+    return Ok(0);
+    #endif
+}
+
+# A landlock domain for a payload (3.14.8): the policy's filesystem rules and
+# scopes as `security_apply_landlock_scoped` takes them, its network, and a domain
+# whatever else it asks for. Returns Ok(0), or Err when a ruleset was due and could
+# not be applied. A kernel with no landlock gets none, as before.
+#
+#   - **Always a domain.** A process inside a landlock domain may ptrace, and so
+#     reach through `/proc/<pid>/root`, only a process in that domain or one below
+#     it. Through 3.14.7 a payload with a caller's `/proc` read a file in a sibling
+#     sandbox's root, as root, under both policies: the sibling held the same
+#     twelve capabilities, which is all the ptrace check compared. Each payload now
+#     has a domain of its own, and with ABI v6 its signals stay inside it too
+#     (LANDLOCK_SCOPE_SIGNAL), so a root payload holding CAP_KILL signals neither a
+#     sibling nor kavach. A kernel below ABI v6 with nothing else to handle gets a
+#     ruleset that handles one right, making a block device, and allows it beneath
+#     "/": every path is allowed, and the domain is there.
+#   - **The network** (ABI v4). `net_deny` 1 handles TCP bind and connect, so both
+#     read EACCES, with no namespace and no privilege: agnosai filed that a policy
+#     denying network was enforced only by a network namespace, which Ubuntu 24.04,
+#     docker's default seccomp profile and GitHub's runners refuse to an
+#     unprivileged process. `tcp_bind` and `tcp_connect` are vecs of ports the
+#     payload may still bind or connect to (`policy_network_allow_tcp`), or 0.
+#     Below ABI v4 the network part is left out, as a scope is below ABI v6.
+#
+# ⚠ Landlock's network rights are plain TCP's: measured, an MPTCP connect and an
+# SCTP connect go out past them. UDP, raw sockets, the other families and io_uring
+# are refused by `security_net_seccomp_filter` instead, which the confinement
+# sequence loads beside this ruleset wherever it hands it `net_deny`.
+fn security_apply_landlock_domain(rules, count, scopes, net_deny, tcp_bind, tcp_connect): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return kavach_err_not_supported("LANDLOCK");
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    var abi = security_landlock_abi_version();
+    if (abi == 0) { return Ok(0); }
+    var handled_fs = 0;
+    if (count > 0) { handled_fs = _landlock_handled_access(abi); }
+    var scoped = 0;
+    if (abi >= 6) {
+        scoped = (scopes & (LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET | LANDLOCK_SCOPE_SIGNAL))
+        | LANDLOCK_SCOPE_SIGNAL;
+    }
+    var handled_net = 0;
+    if (net_deny == 1 && abi >= 4) {
+        handled_net = LANDLOCK_ACCESS_NET_BIND_TCP | LANDLOCK_ACCESS_NET_CONNECT_TCP;
+    }
+    var allow_all = 0;
+    if (handled_fs == 0 && scoped == 0 && handled_net == 0) {
+        handled_fs = LANDLOCK_ACCESS_FS_MAKE_BLOCK;
+        allow_all = 1;
+    }
+
+    # SAFETY: LandlockRulesetAttr is { handled_access_fs: u64, handled_access_net:
+    # u64 (ABI v4), scoped: u64 (ABI v6) }, 24 bytes, and `attr` is 24 bytes, so
+    # every store64 lands inside it. The size passed is the shortest that holds
+    # what is set, so a kernel that cannot read a tail it does not know is never
+    # handed one.
+    var attr[24];
+    store64(&attr, handled_fs);
+    store64(&attr + 8, handled_net);
+    store64(&attr + 16, scoped);
+    var attr_size = 8;
+    if (handled_net != 0) { attr_size = 16; }
+    if (scoped != 0) { attr_size = 24; }
+    var ruleset_fd = syscall(SYS_LANDLOCK_CREATE_RULESET, &attr, attr_size, 0);
+    if (ruleset_fd < 0) {
+        var errno = 0 - ruleset_fd;
+        if (errno == ENOSYS) { return Ok(0); }
+        if (errno == EOPNOTSUPP) { return Ok(0); }
+        return kavach_err_syscall_failed(errno, "landlock_create_ruleset failed");
+    }
+    defer { syscall(SYS_CLOSE, ruleset_fd); }
+
+    if (allow_all == 1) {
+        var all_t, all_v = _landlock_add_path(ruleset_fd, "/", LANDLOCK_ACCESS_FS_MAKE_BLOCK);
+        if (is_err_result(all_t) == 1) { return Err(all_v); }
+    } else {
+        if (count > 0) {
+            var add_t, add_v = _landlock_add_rules(ruleset_fd, rules, count, abi);
+            if (is_err_result(add_t) == 1) { return Err(add_v); }
+        }
+    }
+    if (handled_net != 0) {
+        var pb_t, pb_v = _landlock_add_ports(ruleset_fd, tcp_bind, LANDLOCK_ACCESS_NET_BIND_TCP);
+        if (is_err_result(pb_t) == 1) { return Err(pb_v); }
+        var pc_t, pc_v = _landlock_add_ports(ruleset_fd, tcp_connect, LANDLOCK_ACCESS_NET_CONNECT_TCP);
+        if (is_err_result(pc_t) == 1) { return Err(pc_v); }
+    }
+
     var ret = syscall(SYS_PRCTL, 38, 1, 0, 0, 0);
     if (ret < 0) {
         return kavach_err_syscall_failed(0 - ret, "PR_SET_NO_NEW_PRIVS failed");
     }
-
     ret = syscall(SYS_LANDLOCK_RESTRICT_SELF, ruleset_fd, 0);
     if (ret < 0) {
         return kavach_err_syscall_failed(0 - ret, "landlock_restrict_self failed");
     }
+    return Ok(0);
+    #endif
+}
 
+# One path-beneath rule granting `access` under `path`. Ok(0) or Err.
+fn _landlock_add_path(ruleset_fd, path, access): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return kavach_err_not_supported("LANDLOCK");
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    # O_PATH = 0x200000, O_CLOEXEC = 0x80000, the same on x86-64 and aarch64.
+    var fd = sys_open(path, 0x280000, 0);
+    if (fd < 0) { return kavach_err_syscall_failed(0 - fd, "landlock open path failed"); }
+    var beneath[16];
+    store64(&beneath, access);
+    store32(&beneath + 8, fd);
+    var r = syscall(SYS_LANDLOCK_ADD_RULE, ruleset_fd, LANDLOCK_RULE_PATH_BENEATH, &beneath, 0);
+    syscall(SYS_CLOSE, fd);
+    if (r < 0) { return kavach_err_syscall_failed(0 - r, "landlock_add_rule failed"); }
+    return Ok(0);
+    #endif
+}
+
+# A NET_PORT rule granting `access` for each port in `ports` (a vec, or 0).
+# Two rules for one port, bind and connect, merge into one in the kernel.
+fn _landlock_add_ports(ruleset_fd, ports, access): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return kavach_err_not_supported("LANDLOCK");
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    if (ports == 0) { return Ok(0); }
+    var i = 0;
+    while (i < vec_len(ports)) {
+        # SAFETY: LandlockNetPortAttr is { allowed_access: u64, port: u64 }, 16
+        # bytes, and `np` is 16.
+        var np[16];
+        store64(&np, access);
+        store64(&np + 8, vec_get(ports, i));
+        var r = syscall(SYS_LANDLOCK_ADD_RULE, ruleset_fd, LANDLOCK_RULE_NET_PORT, &np, 0);
+        if (r < 0) { return kavach_err_syscall_failed(0 - r, "landlock_add_rule (port) failed"); }
+        i = i + 1;
+    }
     return Ok(0);
     #endif
 }
@@ -339,6 +500,7 @@ enum BpfConst {
     BPF_JMP_JGE_K = 0x35;
     BPF_JMP_JSET_K = 0x45;
     BPF_RET_K = 0x06;
+    BPF_ALU_AND_K = 0x54;               # BPF_ALU | BPF_AND | BPF_K
     SECCOMP_RET_ALLOW = 0x7FFF0000;
     SECCOMP_RET_ERRNO = 0x00050000;     # | errno, returned to the caller
     SECCOMP_RET_KILL_PROCESS = 0x80000000;
@@ -352,6 +514,7 @@ enum BpfConst {
     SECCOMP_DATA_ARCH = 4;
     SECCOMP_DATA_ARG0 = 16;             # __u64 args[6]; the low word, little-endian
     SECCOMP_DATA_ARG1 = 24;             # args[1], low word
+    SECCOMP_DATA_ARG2 = 32;             # args[2], low word
     SECCOMP_DATA_ARG4 = 48;             # args[4], low word
     SECCOMP_DATA_ARG4_HI = 52;          # args[4], high word
     SECCOMP_DATA_ARG5 = 56;             # args[5], low word
@@ -927,6 +1090,88 @@ fn security_create_exec_seccomp_filter(): i64 {
     return Ok(info);
 }
 
+# Socket families, the stream type and the TCP protocol number as Linux's
+# `socket(2)` takes them (linux/socket.h, linux/net.h, linux/in.h): data the
+# network rules below compare with `seccomp_data.args`, the same on x86-64 and
+# aarch64. Kavach's own, and not lib/net.cyr's AF_INET and SOCK_STREAM: that
+# module is not in `[lib.confine]`, and its AF_INET6 is the host's, 30 on Darwin.
+var KAVACH_AF_UNIX = 1;
+var KAVACH_AF_INET = 2;
+var KAVACH_AF_INET6 = 10;
+var KAVACH_AF_NETLINK = 16;
+var KAVACH_SOCK_STREAM = 1;
+var KAVACH_IPPROTO_TCP = 6;
+
+# The network rules a confined payload denied network needs beyond landlock's TCP
+# rights (3.14.8), as a filter of their own, loaded on top of any other. agnosai's
+# filing named UDP: landlock refuses a TCP bind and connect, and a payload could
+# still send a DNS query. Measured on Linux 7.2.14 (landlock ABI 10) with landlock
+# holding TCP: an MPTCP socket connected to a port the rule refused, and an SCTP
+# connect went out, so landlock's TCP rights are plain TCP's and nothing more.
+#
+#   - `socket(2)` is allowed for AF_UNIX and AF_NETLINK, which stay on the host,
+#     and for AF_INET and AF_INET6 only as a TCP stream: SOCK_STREAM, protocol 0
+#     or IPPROTO_TCP, which landlock then holds to the policy's ports. Anything
+#     else (UDP, raw, SCTP, MPTCP, packet, vsock and the rest) reads EACCES, as
+#     landlock refuses a connect, so a payload sees a refusal and not a kill.
+#   - `io_uring_setup` reads ENOSYS, as clone3 does in the exec filter: a ring
+#     opens sockets with no `socket(2)` call to test, and a payload falls back.
+#   - Every other call is allowed: this filter is the network's, and the policy's
+#     own filter, when it has one, is loaded beside it.
+#
+# Layout (p prologue instructions):
+#
+#   p        JEQ socket -> p+1, else p+12
+#   p+1..+5  LD args[0]: AF_UNIX, AF_NETLINK -> ALLOW; AF_INET, AF_INET6 -> p+6;
+#            else EACCES
+#   p+6..+8  LD args[1], AND 0xf: SOCK_STREAM -> p+9, else EACCES
+#   p+9..+11 LD args[2]: 0, IPPROTO_TCP -> ALLOW, else EACCES
+#   p+12     JEQ io_uring_setup -> ENOSYS, else ALLOW
+#   p+13     RET ALLOW
+#   p+14     RET ERRNO | ENOSYS
+#   p+15     RET ERRNO | EACCES
+#   p+16     RET KILL                       (the prologue's foreign arch or x32)
+#
+# 22 instructions on x86-64, 21 on aarch64. Written into a static buffer, with no
+# allocation, because the child after `fork` loads it and may not allocate; the
+# bytes are the same on every write, so writing it again changes nothing.
+var KAVACH_NET_FILTER_MAX = 24;
+var _SECCOMP_NET_FILTER[24];
+var _SECCOMP_NET_INFO[2];
+
+fn security_net_seccomp_filter(): i64 {
+    var filter = &_SECCOMP_NET_FILTER;
+    var p = _seccomp_prologue_len();
+    var allow_idx = p + 13;
+    var nosys_idx = p + 14;
+    var acces_idx = p + 15;
+    var kill_idx = p + 16;
+    _seccomp_write_prologue(filter, kill_idx);
+    # A BPF jump counts instructions to SKIP: from index a, target t is t - a - 1.
+    security_bpf_write_insn(filter, p * 8, BPF_JMP_JEQ_K, 0, 11, _seccomp_native_nr(41, 198));  # socket
+    security_bpf_write_insn(filter, (p + 1) * 8, BPF_LD_W_ABS, 0, 0, SECCOMP_DATA_ARG0);
+    security_bpf_write_insn(filter, (p + 2) * 8, BPF_JMP_JEQ_K, allow_idx - (p + 2) - 1, 0, KAVACH_AF_UNIX);
+    security_bpf_write_insn(filter, (p + 3) * 8, BPF_JMP_JEQ_K, allow_idx - (p + 3) - 1, 0, KAVACH_AF_NETLINK);
+    security_bpf_write_insn(filter, (p + 4) * 8, BPF_JMP_JEQ_K, 1, 0, KAVACH_AF_INET);
+    security_bpf_write_insn(filter, (p + 5) * 8, BPF_JMP_JEQ_K, 0, acces_idx - (p + 5) - 1, KAVACH_AF_INET6);
+    security_bpf_write_insn(filter, (p + 6) * 8, BPF_LD_W_ABS, 0, 0, SECCOMP_DATA_ARG1);
+    security_bpf_write_insn(filter, (p + 7) * 8, BPF_ALU_AND_K, 0, 0, 15);
+    security_bpf_write_insn(filter, (p + 8) * 8, BPF_JMP_JEQ_K, 0, acces_idx - (p + 8) - 1, KAVACH_SOCK_STREAM);
+    security_bpf_write_insn(filter, (p + 9) * 8, BPF_LD_W_ABS, 0, 0, SECCOMP_DATA_ARG2);
+    security_bpf_write_insn(filter, (p + 10) * 8, BPF_JMP_JEQ_K, allow_idx - (p + 10) - 1, 0, 0);
+    security_bpf_write_insn(filter, (p + 11) * 8, BPF_JMP_JEQ_K, allow_idx - (p + 11) - 1,
+      acces_idx - (p + 11) - 1, KAVACH_IPPROTO_TCP);
+    security_bpf_write_insn(filter, (p + 12) * 8, BPF_JMP_JEQ_K, nosys_idx - (p + 12) - 1,
+      allow_idx - (p + 12) - 1, _seccomp_native_nr(425, 425));                         # io_uring_setup
+    security_bpf_write_insn(filter, allow_idx * 8, BPF_RET_K, 0, 0, SECCOMP_RET_ALLOW);
+    security_bpf_write_insn(filter, nosys_idx * 8, BPF_RET_K, 0, 0, SECCOMP_RET_ERRNO | ENOSYS);
+    security_bpf_write_insn(filter, acces_idx * 8, BPF_RET_K, 0, 0, SECCOMP_RET_ERRNO | EACCES);
+    security_bpf_write_insn(filter, kill_idx * 8, BPF_RET_K, 0, 0, SECCOMP_RET_KILL_PROCESS);
+    store64(&_SECCOMP_NET_INFO, filter);
+    store64(&_SECCOMP_NET_INFO + 8, (kill_idx + 1) * 8);
+    return &_SECCOMP_NET_INFO;
+}
+
 # Create a basic seccomp filter allowing safe syscalls.
 # Returns Result: Ok(filter_ptr) where payload is {ptr, len}.
 # The caller must use the returned pointer and length with security_load_seccomp.
@@ -1068,78 +1313,83 @@ var _syscall_map = 0;
 
 fn security_syscall_map_reset(): i64 { _syscall_map = 0; return 0; }
 
+# Built into a map of its own and published last (3.14.8), as `_seccomp_deny_list`
+# publishes its table: until then the map was published empty and filled in place,
+# so a lookup on another thread could find a name missing that was about to be
+# there.
 fn _syscall_map_init(): i64 {
     if (_syscall_map != 0) { return 0; }
-    _syscall_map = map_new();
+    var m = map_new();
     #                 name, x86-64, aarch64
-    _syscall_map_row("read", 0, 63);
-    _syscall_map_row("write", 1, 64);
-    _syscall_map_row("open", 2, 0 - 1);
-    _syscall_map_row("close", 3, 57);
-    _syscall_map_row("stat", 4, 0 - 1);
-    _syscall_map_row("fstat", 5, 80);
-    _syscall_map_row("lseek", 8, 62);
-    _syscall_map_row("mmap", 9, 222);
-    _syscall_map_row("mprotect", 10, 226);
-    _syscall_map_row("munmap", 11, 215);
-    _syscall_map_row("brk", 12, 214);
-    _syscall_map_row("rt_sigreturn", 15, 139);
-    _syscall_map_row("ioctl", 16, 29);
-    _syscall_map_row("access", 21, 0 - 1);
-    _syscall_map_row("pipe", 22, 0 - 1);
-    _syscall_map_row("dup", 32, 23);
-    _syscall_map_row("dup2", 33, 0 - 1);
-    _syscall_map_row("getpid", 39, 172);
-    _syscall_map_row("socket", 41, 198);
-    _syscall_map_row("connect", 42, 203);
-    _syscall_map_row("accept", 43, 202);
-    _syscall_map_row("sendto", 44, 206);
-    _syscall_map_row("recvfrom", 45, 207);
-    _syscall_map_row("bind", 49, 200);
-    _syscall_map_row("listen", 50, 201);
-    _syscall_map_row("fork", 57, 0 - 1);
-    _syscall_map_row("execve", 59, 221);
-    _syscall_map_row("exit", 60, 93);
-    _syscall_map_row("wait4", 61, 260);
-    _syscall_map_row("kill", 62, 129);
-    _syscall_map_row("fcntl", 72, 25);
-    _syscall_map_row("fsync", 74, 82);
-    _syscall_map_row("getcwd", 79, 17);
-    _syscall_map_row("chdir", 80, 49);
-    _syscall_map_row("mkdir", 83, 0 - 1);
-    _syscall_map_row("rmdir", 84, 0 - 1);
-    _syscall_map_row("unlink", 87, 0 - 1);
-    _syscall_map_row("chmod", 90, 0 - 1);
-    _syscall_map_row("getuid", 102, 174);
-    _syscall_map_row("getgid", 104, 176);
-    _syscall_map_row("geteuid", 107, 175);
-    _syscall_map_row("getegid", 108, 177);
-    _syscall_map_row("getppid", 110, 173);
-    _syscall_map_row("setsid", 112, 157);
-    _syscall_map_row("prctl", 157, 167);
-    _syscall_map_row("mount", 165, 40);
-    _syscall_map_row("umount2", 166, 39);
-    _syscall_map_row("gettid", 186, 178);
-    _syscall_map_row("futex", 202, 98);
-    _syscall_map_row("getdents64", 217, 61);
-    _syscall_map_row("set_tid_address", 218, 96);
-    _syscall_map_row("clock_gettime", 228, 113);
-    _syscall_map_row("exit_group", 231, 94);
-    _syscall_map_row("openat", 257, 56);
-    _syscall_map_row("set_robust_list", 273, 99);
-    _syscall_map_row("pipe2", 293, 59);
-    _syscall_map_row("epoll_create1", 291, 20);
-    _syscall_map_row("getrandom", 318, 278);
-    _syscall_map_row("rseq", 334, 293);
+    _syscall_map_row(m, "read", 0, 63);
+    _syscall_map_row(m, "write", 1, 64);
+    _syscall_map_row(m, "open", 2, 0 - 1);
+    _syscall_map_row(m, "close", 3, 57);
+    _syscall_map_row(m, "stat", 4, 0 - 1);
+    _syscall_map_row(m, "fstat", 5, 80);
+    _syscall_map_row(m, "lseek", 8, 62);
+    _syscall_map_row(m, "mmap", 9, 222);
+    _syscall_map_row(m, "mprotect", 10, 226);
+    _syscall_map_row(m, "munmap", 11, 215);
+    _syscall_map_row(m, "brk", 12, 214);
+    _syscall_map_row(m, "rt_sigreturn", 15, 139);
+    _syscall_map_row(m, "ioctl", 16, 29);
+    _syscall_map_row(m, "access", 21, 0 - 1);
+    _syscall_map_row(m, "pipe", 22, 0 - 1);
+    _syscall_map_row(m, "dup", 32, 23);
+    _syscall_map_row(m, "dup2", 33, 0 - 1);
+    _syscall_map_row(m, "getpid", 39, 172);
+    _syscall_map_row(m, "socket", 41, 198);
+    _syscall_map_row(m, "connect", 42, 203);
+    _syscall_map_row(m, "accept", 43, 202);
+    _syscall_map_row(m, "sendto", 44, 206);
+    _syscall_map_row(m, "recvfrom", 45, 207);
+    _syscall_map_row(m, "bind", 49, 200);
+    _syscall_map_row(m, "listen", 50, 201);
+    _syscall_map_row(m, "fork", 57, 0 - 1);
+    _syscall_map_row(m, "execve", 59, 221);
+    _syscall_map_row(m, "exit", 60, 93);
+    _syscall_map_row(m, "wait4", 61, 260);
+    _syscall_map_row(m, "kill", 62, 129);
+    _syscall_map_row(m, "fcntl", 72, 25);
+    _syscall_map_row(m, "fsync", 74, 82);
+    _syscall_map_row(m, "getcwd", 79, 17);
+    _syscall_map_row(m, "chdir", 80, 49);
+    _syscall_map_row(m, "mkdir", 83, 0 - 1);
+    _syscall_map_row(m, "rmdir", 84, 0 - 1);
+    _syscall_map_row(m, "unlink", 87, 0 - 1);
+    _syscall_map_row(m, "chmod", 90, 0 - 1);
+    _syscall_map_row(m, "getuid", 102, 174);
+    _syscall_map_row(m, "getgid", 104, 176);
+    _syscall_map_row(m, "geteuid", 107, 175);
+    _syscall_map_row(m, "getegid", 108, 177);
+    _syscall_map_row(m, "getppid", 110, 173);
+    _syscall_map_row(m, "setsid", 112, 157);
+    _syscall_map_row(m, "prctl", 157, 167);
+    _syscall_map_row(m, "mount", 165, 40);
+    _syscall_map_row(m, "umount2", 166, 39);
+    _syscall_map_row(m, "gettid", 186, 178);
+    _syscall_map_row(m, "futex", 202, 98);
+    _syscall_map_row(m, "getdents64", 217, 61);
+    _syscall_map_row(m, "set_tid_address", 218, 96);
+    _syscall_map_row(m, "clock_gettime", 228, 113);
+    _syscall_map_row(m, "exit_group", 231, 94);
+    _syscall_map_row(m, "openat", 257, 56);
+    _syscall_map_row(m, "set_robust_list", 273, 99);
+    _syscall_map_row(m, "pipe2", 293, 59);
+    _syscall_map_row(m, "epoll_create1", 291, 20);
+    _syscall_map_row(m, "getrandom", 318, 278);
+    _syscall_map_row(m, "rseq", 334, 293);
+    _syscall_map = m;
     return 0;
 }
 
 # One name-map row: the number for the architecture this binary was built
 # for. A name that architecture does not have (-1) is left out, so it maps
 # to -1 rather than to some other call's number.
-fn _syscall_map_row(name, x86_64_nr, aarch64_nr): i64 {
+fn _syscall_map_row(m, name, x86_64_nr, aarch64_nr): i64 {
     var nr = _seccomp_native_nr(x86_64_nr, aarch64_nr);
-    if (nr >= 0) { map_set(_syscall_map, name, nr); }
+    if (nr >= 0) { map_set(m, name, nr); }
     return 0;
 }
 

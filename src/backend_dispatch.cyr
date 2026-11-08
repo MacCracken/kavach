@@ -6,7 +6,8 @@
 #   0: exec_fn(sandbox, command) -> ExecResult*
 #   8: health_fn(sandbox) -> 1/0
 #  16: destroy_fn(sandbox) -> 0 ok, nonzero err
-#  24: reserved
+#  24: spawn_fn(sandbox, command, log_path) -> SpawnedProcess* or 0 (3.14.8), or
+#      none: `sandbox_spawn` then detaches the payload on the process path
 var _backend_table[320];
 var BACKEND_SLOT_SIZE = 32;
 
@@ -38,6 +39,16 @@ fn backend_register_destroy(backend_id, fp) {
     store64(_backend_slot(backend_id) + 16, fp);
     return 0;
 }
+
+# A backend's own detached spawn (3.14.8): the OCI backend's runs `runc run`.
+fn backend_register_spawn(backend_id, fp) {
+    store64(_backend_slot(backend_id) + 24, fp);
+    return 0;
+}
+
+# The spawn `backend_id` registered, or 0 when `sandbox_spawn` detaches its payload
+# on the process path.
+fn backend_spawn_fn(backend_id) { return _backend_fp(backend_id, 24); }
 
 # Dispatch entry points. Callers pass sandbox pointer (contains config).
 # Returns 0 on missing implementation, after logging an error.

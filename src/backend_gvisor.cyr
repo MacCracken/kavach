@@ -26,9 +26,10 @@ fn _gvisor_runsc_path() {
 # is written only when runsc itself failed. Read from runsc's source: this
 # machine has no runsc to run it on, and the tests drive a stand-in that does
 # what the source does.
+# Returns the run's capture (3.14.8), or 0 when there is no log path to give runsc.
 fn _gvisor_run(runsc, bundle, container_id, network, cfg, out_buf, out_cap) {
     var log_path = _oci_log_path(container_id);
-    if (log_path == 0) { return 0 - 1; }
+    if (log_path == 0) { return 0; }
     var args = vec_new();
     vec_push(args, runsc);
     vec_push(args, "--log");
@@ -41,7 +42,7 @@ fn _gvisor_run(runsc, bundle, container_id, network, cfg, out_buf, out_cap) {
     vec_push(args, container_id);
     # A leftover log would read as this run's failure (see _oci_run).
     kv_unlink(log_path);
-    return backend_run_capture(args, cfg, out_buf, out_cap);
+    return backend_run_start(args, cfg, out_buf, out_cap);
 }
 
 # The message in runsc's log: the first `"msg"` of its JSON error lines, or the
@@ -122,13 +123,16 @@ fn _gvisor_exec_with(runsc, sandbox, command, start_ns) {
     }
     var out_cap = 1048576;
     var out_buf = backend_capture_buf(out_cap);
-    var n = _gvisor_run(runsc, bundle, container_id, network, cfg, out_buf, out_cap);
+    var gc = _gvisor_run(runsc, bundle, container_id, network, cfg, out_buf, out_cap);
     var end_ns = mono_now_ns();
     var runsc_log = _oci_take_log(container_id);
     # ⚠ Through 3.13.1 this was `backend_capture_finish` over `kv_exec_capture`:
     # exit 0 for any container that ran (measured with a stand-in runsc exiting
     # 7), its stderr sent to /dev/null, no deadline and kavach's own stdin.
-    var r = backend_run_finish(out_buf, n, out_cap, "runsc run failed", start_ns, end_ns);
+    # 3.14.8: runsc's outcome is this capture's, not `confine_last_*`.
+    var r = 0;
+    if (gc == 0) { r = backend_capture_finish(out_buf, 0 - 1, out_cap, "runsc run failed", start_ns, end_ns); }
+    else { r = backend_capture_result(gc, "runsc run failed", start_ns, end_ns); }
     backend_capture_release(out_buf, out_cap);
 
     _gvisor_delete(runsc, container_id);

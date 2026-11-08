@@ -128,6 +128,13 @@ var ATTEST_NONCE_MAX = 64;
 var _attest_arena = 0;
 var _attest_parsed[256];
 
+# The scratch above, and `attest_collateral.cyr`'s, are one process's, so a quote
+# is verified under this lock (3.14.8): two verifications at once on two threads
+# reset one arena under each other. `kavach_attest_sgx_quote` and
+# `kavach_attest_tdx_quote` take it; the collateral's status accessors read what
+# the last check under it found.
+var _attest_verify_lock = 0;
+
 fn _attest_scratch() {
     if (_attest_arena == 0) {
         _attest_arena = arena_new(131072);
@@ -268,6 +275,14 @@ fn _attest_tdx_debug(q) {
 
 # Verify an SGX DCAP v3 quote against `policy`. Returns an AttestationResult.
 fn kavach_attest_sgx_quote(quote, quote_len, policy, nonce, nonce_len, now) {
+    var m = kavach_lock_cell(&_attest_verify_lock);
+    if (m != 0) { mutex_lock(m); }
+    var r = _attest_sgx_quote(quote, quote_len, policy, nonce, nonce_len, now);
+    if (m != 0) { mutex_unlock(m); }
+    return r;
+}
+
+fn _attest_sgx_quote(quote, quote_len, policy, nonce, nonce_len, now) {
     var r = kavach_attestation_result_new(KavachBackend.SGX);
     AttestationResult_set_trust(r, KAVACH_TRUST_CONTRAINDICATED);
     AttestationResult_set_fresh_at(r, now);
@@ -332,6 +347,14 @@ fn _attest_tdx_parse(quote, quote_len, q, arena) {
 # measurement is MRTD; there is no signer, and `svn` stays 0 (the TDX module's
 # TEE_TCB_SVN is 16 bytes, not one number).
 fn kavach_attest_tdx_quote(quote, quote_len, policy, nonce, nonce_len, now) {
+    var m = kavach_lock_cell(&_attest_verify_lock);
+    if (m != 0) { mutex_lock(m); }
+    var r = _attest_tdx_quote(quote, quote_len, policy, nonce, nonce_len, now);
+    if (m != 0) { mutex_unlock(m); }
+    return r;
+}
+
+fn _attest_tdx_quote(quote, quote_len, policy, nonce, nonce_len, now) {
     var r = kavach_attestation_result_new(KavachBackend.TDX);
     AttestationResult_set_trust(r, KAVACH_TRUST_CONTRAINDICATED);
     AttestationResult_set_fresh_at(r, now);

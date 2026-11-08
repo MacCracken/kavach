@@ -172,10 +172,23 @@ fn backend_at(i) {
 #
 # Set by the two diagnostic constructors, cleared by the capture path, so the
 # flag always describes the result the caller is holding.
+#
+# ⚠ Since 3.14.8 the result carries it (`ExecResult_diagnostic`), and that is what
+# `sandbox_exec` reads. This flag is the process's most recent, which with two
+# dispatches on two threads is either one's: agnosai filed the race. Kept for a
+# caller on one thread.
 var _backend_diag_only = 0;
 
 #[must_use]
 fn backend_result_is_diagnostic() { return _backend_diag_only; }
+
+# Whether `r` is a diagnostic rather than captured output (3.14.8). 0 for a null
+# result, which no gate is asked to scan.
+#[must_use]
+fn exec_result_is_diagnostic(r) {
+    if (r == 0) { return 0; }
+    return ExecResult_diagnostic(r);
+}
 
 # Clear the flag before a dispatch (3.12.9). Only the two diagnostic
 # constructors set it and only `backend_capture_finish` cleared it, so a backend
@@ -207,6 +220,31 @@ fn backend_attach_quote(buf, len) {
     return 0;
 }
 
+# The nonce `sandbox_exec` set for `sandbox`'s exec in flight, and its length (0
+# when the policy did not ask for attestation), and the quote a backend hands back
+# for it (3.14.8). They live on the sandbox, so an exec on another thread neither
+# sees this one's nonce nor clears it. Through 3.14.7 only the process-wide pair
+# above existed, which every exec cleared before and after its dispatch, so an exec
+# that did not attest cleared the nonce of one that did, mid-dispatch. The pair
+# above is still set for an attesting exec, under a lock, for a backend written
+# against it.
+fn backend_sandbox_nonce(sandbox) {
+    if (sandbox == 0) { return 0; }
+    return Sandbox_attest_nonce(sandbox);
+}
+
+fn backend_sandbox_nonce_len(sandbox) {
+    if (sandbox == 0) { return 0; }
+    return Sandbox_attest_nonce_len(sandbox);
+}
+
+fn backend_sandbox_attach_quote(sandbox, buf, len) {
+    if (sandbox == 0) { return 0 - 1; }
+    Sandbox_set_quote(sandbox, buf);
+    Sandbox_set_quote_len(sandbox, len);
+    return 0;
+}
+
 # Set the nonce for the next dispatch and drop the last dispatch's quote, which
 # must not stand in for this one's (the same reasoning as
 # `backend_diagnostic_reset`).
@@ -223,6 +261,7 @@ fn backend_attest_reset(nonce, len) {
 fn backend_error_result(msg) {
     _backend_diag_only = 1;
     var r = exec_result_new();
+    ExecResult_set_diagnostic(r, 1);
     ExecResult_set_exit_code(r, 1);
     ExecResult_set_stdout(r, "");
     ExecResult_set_stderr(r, msg);
@@ -236,6 +275,7 @@ fn backend_error_result(msg) {
 fn backend_guard_result(violations) {
     _backend_diag_only = 1;
     var r = exec_result_new();
+    ExecResult_set_diagnostic(r, 1);
     ExecResult_set_exit_code(r, 126);
     var v0 = vec_get(violations, 0);
     ExecResult_set_stderr(r, GuardViolation_description(v0));
@@ -322,12 +362,46 @@ fn backend_capture_finish(out_buf, n, out_cap, fail_msg, start_ns, end_ns) {
 # results, so every result shared one stderr and an earlier result's changed to
 # a later exec's (measured: after a second `sandbox_exec`, the first result's
 # stderr read the second's error, through the same pointer).
+#
+# ⚠ The process's last capture, for a caller with one thread. Since 3.14.8
+# kavach's backends use `backend_set_capture_stderr_of` with the capture they ran.
 fn backend_set_capture_stderr(r) {
     var n = confine_last_stderr_len();
     var p = alloc(n + 1);
     memcpy(p, confine_last_stderr(), n);
     store8(p + n, 0);
     exec_result_set_stderr_n(r, p, n);
+    return r;
+}
+
+# Set `r`'s stderr to a copy of capture `c`'s (3.14.8), which no other capture
+# writes.
+fn backend_set_capture_stderr_of(r, c) {
+    var n = ConfineCapture_err_len(c);
+    var e = ConfineCapture_err(c);
+    if (e == 0) { n = 0; }
+    var p = alloc(n + 1);
+    if (n > 0) { memcpy(p, e, n); }
+    store8(p + n, 0);
+    exec_result_set_stderr_n(r, p, n);
+    return r;
+}
+
+# The ExecResult for capture `c` once it has run (3.14.8): `backend_capture_finish`'s
+# over its buffer, then its exit status, its deadline flag and a copy of its stderr,
+# all read from `c`. A capture that failed (`total < 0`) keeps
+# `backend_capture_finish`'s (1, `fail_msg`). Releases `c`'s stderr buffer and not
+# its stdout one, which is the caller's.
+fn backend_capture_result(c, fail_msg, start_ns, end_ns) {
+    var n = ConfineCapture_total(c);
+    var r = backend_capture_finish(ConfineCapture_buf(c), n, ConfineCapture_buflen(c), fail_msg,
+      start_ns, end_ns);
+    if (r != 0 && n >= 0) {
+        ExecResult_set_exit_code(r, ConfineCapture_exit(c));
+        ExecResult_set_timed_out(r, ConfineCapture_timed_out(c));
+        backend_set_capture_stderr_of(r, c);
+    }
+    confine_capture_release(c);
     return r;
 }
 
@@ -342,10 +416,21 @@ fn backend_set_capture_stderr(r) {
 # `kv_exec_capture`, which sends stderr to /dev/null, reports no exit status
 # and has no deadline kavach sets, and hands the runtime kavach's own stdin.
 fn backend_run_capture(args, cfg, out_buf, out_cap) {
+    var c = backend_run_start(args, cfg, out_buf, out_cap);
+    var n = ConfineCapture_total(c);
+    confine_capture_release(c);
+    return n;
+}
+
+# The same run, handing back its capture (3.14.8), for `backend_capture_result`:
+# the run's outcome is then the capture's own, whatever runs on another thread.
+fn backend_run_start(args, cfg, out_buf, out_cap) {
     var tmo = 0;
     if (cfg != 0) { tmo = SandboxConfig_timeout_ms(cfg); }
-    return confine_capture_input_env_wd(args, 0, 0, 0, 0, out_buf, out_cap, 0, tmo, 0,
+    var c = confine_capture_new(args, 0, 0, 0, 0, out_buf, out_cap, 0, tmo, 0,
       _config_payload_stdin(cfg), _config_payload_stdin_len(cfg), 0, 0);
+    confine_capture_run(c);
+    return c;
 }
 
 # The ExecResult for a `backend_run_capture` run: `backend_capture_finish`'s,

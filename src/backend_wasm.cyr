@@ -370,17 +370,17 @@ fn wasm_exec(sandbox, command) {
     # 0. Through 3.13.0 no policy confined wasmtime, and through 3.13.1 only
     # landlock rules did: seccomp and the scopes were not applied (3.13.2).
     var do_confine = policy_wants_confinement(policy);
-    var n = confine_capture_input(args, run_policy, 0, 0, sec, out_buf, out_cap, 0,
-      timeout, do_confine, _config_payload_stdin(cfg), _config_payload_stdin_len(cfg));
+    var c = confine_capture_new(args, run_policy, 0, 0, sec, out_buf, out_cap, 0,
+      timeout, do_confine, _config_payload_stdin(cfg), _config_payload_stdin_len(cfg), 0, 0);
+    confine_capture_run(c);
     var end_ns = mono_now_ns();
 
-    var r = backend_capture_finish(out_buf, n, out_cap, "wasmtime run failed", start_ns, end_ns);
+    # 3.14.8: the guest's exit status, deadline flag and stderr are this capture's.
+    # Through 3.14.7 they were read back from `confine_last_*`, which agnosai's WASM
+    # tier, running calls on several threads, could read from another call: it reads
+    # stderr to tell a module over its store limits from a guest that failed.
+    var r = backend_capture_result(c, "wasmtime run failed", start_ns, end_ns);
     backend_capture_release(out_buf, out_cap);
-    if (r != 0) {
-        ExecResult_set_exit_code(r, confine_last_exit());
-        ExecResult_set_timed_out(r, confine_last_timed_out());
-        backend_set_capture_stderr(r);
-    }
     return r;
 }
 

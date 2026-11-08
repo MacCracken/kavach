@@ -10,6 +10,7 @@
 #   seccomp_enabled        OR  of the two sides
 #   seccomp_profile        "strict" wins over "basic" wins over None
 #   network_enabled        AND (both must allow)
+#   network_tcp_* ports    both must allow (3.14.8): see _merge_tcp_ports
 #   read_only_rootfs       OR  (either enforces)
 #   landlock rules         union, in a fresh list; deny-all if either is
 #   landlock_abstract_unix OR
@@ -91,13 +92,67 @@ fn merge_policies(base, overlay) {
       _min_nz(SandboxPolicy_max_pids(base),
         SandboxPolicy_max_pids(overlay)));
 
-    SandboxPolicy_set_network_tcp_bind_len(out,
-      _max(SandboxPolicy_network_tcp_bind_len(base),
-        SandboxPolicy_network_tcp_bind_len(overlay)));
-    SandboxPolicy_set_network_tcp_connect_len(out,
-      _max(SandboxPolicy_network_tcp_connect_len(base),
-        SandboxPolicy_network_tcp_connect_len(overlay)));
+    _merge_tcp_ports(out, base, overlay);
     _merge_attestation(out, base, overlay);
+    return out;
+}
+
+# TCP ports (3.14.8). The network is merged as both must allow it, so a port is
+# too: a side allowing network restricts nothing and the other side's list stands;
+# two sides denying it leave the ports both name. A side denying network with no
+# list allows no port, so leaves none. Merged lists are fresh, as landlock's are,
+# and the counts follow them. Through 3.14.7 the counts, which had no list, were
+# merged as their maximum.
+fn _merge_tcp_ports(out, base, overlay) {
+    var bo = SandboxPolicy_network_enabled(base);
+    var oo = SandboxPolicy_network_enabled(overlay);
+    if (bo == 1 && oo == 1) { return 0; }
+    var bind = 0;
+    var conn = 0;
+    if (bo == 1) {
+        bind = _ports_copy(SandboxPolicy_network_tcp_bind(overlay));
+        conn = _ports_copy(SandboxPolicy_network_tcp_connect(overlay));
+    } elif (oo == 1) {
+        bind = _ports_copy(SandboxPolicy_network_tcp_bind(base));
+        conn = _ports_copy(SandboxPolicy_network_tcp_connect(base));
+    } else {
+        bind = _ports_both(SandboxPolicy_network_tcp_bind(base), SandboxPolicy_network_tcp_bind(overlay));
+        conn = _ports_both(SandboxPolicy_network_tcp_connect(base), SandboxPolicy_network_tcp_connect(overlay));
+    }
+    SandboxPolicy_set_network_tcp_bind(out, bind);
+    SandboxPolicy_set_network_tcp_connect(out, conn);
+    var bl = 0;
+    if (bind != 0) { bl = vec_len(bind); }
+    var cl = 0;
+    if (conn != 0) { cl = vec_len(conn); }
+    SandboxPolicy_set_network_tcp_bind_len(out, bl);
+    SandboxPolicy_set_network_tcp_connect_len(out, cl);
+    return 0;
+}
+
+# A fresh copy of a port list, or 0 for none.
+fn _ports_copy(v) {
+    if (v == 0) { return 0; }
+    var out = vec_new();
+    var i = 0;
+    while (i < vec_len(v)) {
+        vec_push(out, vec_get(v, i));
+        i = i + 1;
+    }
+    return out;
+}
+
+# The ports in both lists, as a fresh list, or 0 when that is none.
+fn _ports_both(a, b) {
+    if (a == 0 || b == 0) { return 0; }
+    var out = vec_new();
+    var i = 0;
+    while (i < vec_len(a)) {
+        var port = vec_get(a, i);
+        if (_policy_port_in(b, port) == 1) { vec_push(out, port); }
+        i = i + 1;
+    }
+    if (vec_len(out) == 0) { return 0; }
     return out;
 }
 

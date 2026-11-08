@@ -287,8 +287,8 @@ fn audit_nlmsg_len(buf): i64 {
 var _audit_seq = 0;
 
 fn _audit_next_seq(): i64 {
-    _audit_seq = _audit_seq + 1;
-    return _audit_seq;
+    # 3.14.8: one atomic step, so two threads' requests never share a number.
+    return atomic_fetch_add(&_audit_seq, 1) + 1;
 }
 
 # struct nlmsgerr's `error` is an s32; `load32` zero-extends, so -1 read as

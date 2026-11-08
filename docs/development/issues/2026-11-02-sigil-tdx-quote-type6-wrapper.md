@@ -3,7 +3,8 @@
 **Status:** open upstream. **Worked around in kavach 3.14.2** (`_attest_tdx_parse`, `src/attestation.cyr`), and
 kavach verifies real quotes through it. Rechecked at kavach 3.14.4: unchanged, and not repaired there. Rechecked
 at kavach 3.14.7 (2026-11-07), measured: `tdx_quote_parse` on the real quote still returns 0 and `_attest_tdx_parse`
-1. The pin is still cyrius 6.7.18, the newest toolchain installed here, so no sigil past 3.13.15 can reach kavach yet. The fix
+1. Rechecked at kavach 3.14.8 (2026-11-07), measured the same way by `test_attest_real_intel_quotes`: unchanged. The pin is
+still cyrius 6.7.18, the newest toolchain installed here, so no sigil past 3.13.15 can reach kavach yet. The fix
 belongs in sigil, whose rules need the maintainer's go-ahead for what ships in it, and it reaches kavach only
 when the cyrius pin moves to a snapshot that folds it (CLAUDE.md hazard 4). The workaround stays until then.
 **Checked against:** sigil **3.13.15**, the snapshot sigil of the cyrius 6.7.18 pin (CLAUDE.md hazard 4):

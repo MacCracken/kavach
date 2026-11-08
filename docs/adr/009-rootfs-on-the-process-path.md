@@ -1,6 +1,6 @@
 # ADR-009 — A rootfs on the process path: pivot_root and the default set
 
-**Status**: Accepted
+**Status**: Accepted. Extended by [ADR-011](011-dev-pids-and-network-on-the-process-path.md) (v3.14.8): its open items (no rootfs as root, `sandbox_spawn` on an OCI sandbox) are decided there.
 **Date**: 2026-11-06
 **Version**: v3.14.6
 
@@ -21,7 +21,7 @@ The rootfs was entered with `chroot`, which moves a process's root and leaves th
 The payload held CAP_SYS_CHROOT and the filter has no `chroot` row, so three calls took it out, as root and rootless:
 `chroot("sub")`, `chdir("..")` to the top, `chroot(".")`. It needed no fd from outside, as the code's comment had said
 it did. The full record is in
-[the issue](../development/issues/2026-11-06-process-backend-keeps-every-capability.md).
+[the issue](../development/issues/archived/2026-11-06-process-backend-keeps-every-capability.md).
 
 ADR-008's set could not simply be copied. It keeps CAP_SYS_CHROOT for images that call `chroot`, which is safe under
 runc's `pivot_root` and was the escape under kavach's `chroot`. Measured with the twelve applied to the payload, the

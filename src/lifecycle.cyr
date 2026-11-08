@@ -64,6 +64,14 @@ fn valid_transition(from, to) {
 # credential sitting after one was **released as PASS**. Appended after
 # `timed_out` so no existing field offset moves.
 #
+# `diagnostic` (3.14.8): 1 when the result is kavach's own explanation of why no
+# payload ran (`backend_error_result`, `backend_guard_result`), not captured
+# output, so `sandbox_exec` passes it by the gates. Through 3.14.7 that was one
+# process-wide flag, `backend_result_is_diagnostic()`, set by the result's
+# constructor and read after the dispatch, so with two dispatches at once one
+# could skip the gate on the other's say. A result built any other way reads 0,
+# which is the gated answer.
+#
 # NB: keep field comments OUT of this struct body — `#derive(accessors)` reads
 # each line as a field.
 #derive(accessors)
@@ -75,9 +83,10 @@ struct ExecResult {
     timed_out;
     stdout_len;
     stderr_len;
+    diagnostic;
 }
 
-var EXEC_RESULT_SIZE = 56;
+var EXEC_RESULT_SIZE = 64;
 
 fn exec_result_new() {
     var r = alloc(EXEC_RESULT_SIZE);
@@ -425,9 +434,21 @@ struct Sandbox {
     started_at;
     stopped_at;
     argv;           # the vec a sandbox_*_argv call is running, or 0
+    last_scan;
+    last_assessment;
+    last_attestation;
+    attest_nonce;
+    attest_nonce_len;
+    quote;
+    quote_len;
 }
 
-var SANDBOX_SIZE = 56;
+# 112 (3.14.8): what `sandbox_exec` found for this sandbox's last exec, and the
+# attestation nonce and quote of the exec in flight, appended so no field moves.
+# Through 3.14.7 they were process-wide globals (`sandbox_exec_last_scan_result`
+# and the rest, which still read the process's most recent), so two sandboxes
+# exec'ing at once on two threads read each other's.
+var SANDBOX_SIZE = 112;
 
 # Sandbox IDs: 64 bits from /dev/urandom, UUID-v4-equivalent for
 # correlation. Collision probability across 2^32 sandboxes is ~2^-32.
@@ -452,6 +473,7 @@ fn sandbox_create(config) {
         return 0;
     }
     var s = alloc(SANDBOX_SIZE);
+    memset(s, 0, SANDBOX_SIZE);
     Sandbox_set_id(s, rand_u64());
     Sandbox_set_config(s, config);
     Sandbox_set_state(s, SandboxState.CREATED);

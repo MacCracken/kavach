@@ -59,19 +59,21 @@ Items tracked in [ADR-004](docs/adr/004-deferred-features.md) and
 [ADR-005](docs/adr/005-v2-hardening-pass.md) with documented residual risk
 and unblocking conditions:
 
-- **A payload with no rootfs, as root, is on the host's files.** It holds what kavach holds. No capability set would
-  bound it: `/proc/sys/kernel/core_pattern` and files root owns open to write with `CapEff` zero, because that access
-  is uid 0's. A landlock rule is what bounds it (`policy_landlock_add`), and no preset names one.
-- **A `/dev` a caller mounted in a process-path rootfs is the host's.** The process path has no device cgroup, so where
-  a caller binds the host's `/dev` into a rootfs, a payload running as uid 0 opens the host's disks (measured:
-  `/dev/nvme0n1`, read-only). Under runc the device rules refuse a node the spec does not list.
-- **`/proc/<pid>/root` reaches a sibling sandbox.** A process-path payload has no PID namespace, so where a caller
-  mounted a `/proc` in its rootfs, it reads files in the root of another sandbox's payload that holds no more than
-  the same twelve capabilities (measured as root). The host's init and kavach's own process read EACCES.
-- **`sandbox_spawn` reads no backend.** A sandbox configured for OCI forks without a runtime: it holds the default set,
-  `pivot_root` and the `/proc` and `/sys` guard, with no PID namespace and no `/proc` of its own. Since v3.14.7
-  `score_spawn` scores it as the process path it takes.
-  All four are in `docs/development/issues/2026-11-06-process-backend-keeps-every-capability.md`, and pinned for 3.14.8.
+- **A payload with no rootfs, as root, is on the host's files.** Since v3.14.8 a confined one holds the default set, as
+  one with a rootfs does, and an unconfined one (`policy_new()`) still holds what kavach holds. No capability set bounds
+  uid 0 from what root owns: `/proc/sys/kernel/core_pattern` and files root owns open to write with `CapEff` zero,
+  because that access is uid 0's. A landlock rule is what bounds it (`policy_landlock_add`), and no preset names one.
+- **A policy denying network is enforced without a namespace only on landlock ABI v4 (Linux 6.7) or later.** There a
+  confined payload's TCP is held by landlock and the rest by a network filter, since v3.14.8. Below it, and for an
+  unconfined `policy_new()` payload, the network is denied only in a network namespace of its own, which a rootfs or
+  `config_require_namespaces` gives it, or not at all, and `score_config` gives no credit for it.
+- **A confined payload holding CAP_SYS_ADMIN or CAP_PERFMON reads kavach's `/proc/<pid>/environ`** through its landlock
+  domain (measured as root on Linux 7.2.14; `/proc/<pid>/root` and signals stay refused). Neither is in the default
+  twelve, so this needs a `config_capabilities` list naming one. kavach's environment is the consumer's: keep secrets out
+  of it, or out of such a list.
+- **gVisor's `sandbox_spawn` detaches on the process path.** Since v3.14.8 an OCI sandbox's runs under runc; a gVisor
+  sandbox's holds the default set, `pivot_root`, kavach's `/dev` and the `/proc` guard, with no PID namespace of its own,
+  and `score_spawn` scores it as that path.
 - **HTTP credential proxy** — direct env/file/stdin injection and the
   loopback HTTP proxy (`GET /v1/secret/<name>`) ship; HTTPS `CONNECT`
   tunnelling is not implemented
@@ -84,6 +86,20 @@ and unblocking conditions:
 
 Resolved since earlier releases:
 
+- **v3.14.8:**
+  - a payload in a process-path rootfs met the `/dev` its caller left there, and with an rbind of the host's, a payload
+    running as uid 0 opened the host's disk. A rootfs's `dev` is now kavach's own, as runc makes one: a tmpfs of runc's
+    default devices, a devpts and a `/dev/shm`. CHANGELOG 3.14.8, ADR-011.
+  - with a caller's `/proc`, a payload read files in another sandbox's root through `/proc/<pid>/root`, as root, and
+    could signal kavach and every process of its uid. Every confined payload now has a landlock domain of its own,
+    which refuses ptrace access outside it and, from ABI v6, its signals. CHANGELOG 3.14.8, ADR-011.
+  - a confined payload with no rootfs, as root, kept every capability kavach held, CAP_SYS_MODULE and CAP_SYS_RAWIO
+    among them. It now holds `config_capabilities`, the default twelve. CHANGELOG 3.14.8.
+  - `sandbox_spawn` on an OCI sandbox detached on the process path, with no PID namespace and no `/proc` of its own,
+    and now runs `runc run`. CHANGELOG 3.14.8.
+  - with runs on several threads, a run read another's stderr, the gate another scan's findings, and two audit records
+    took one serial; a payload inherited another thread's capture pipes. Each is now the run's own, or locked
+    (agnosai). CHANGELOG 3.14.8.
 - **v3.14.7:**
   - where a caller had mounted a `/proc` or `/sys` in a process-path rootfs, a payload running as uid 0 opened
     `core_pattern`, `sysrq-trigger`, an IRQ affinity and a sysfs file to write, and through a `/proc` that was an rbind

@@ -151,17 +151,13 @@ fn process_exec(sandbox, command) {
         n = confine_capture_run(capture);
         cgroup_teardown(cgroup_path);
         var end_rf = mono_now_ns();
-        var rr = backend_capture_finish(buf, n, PROCESS_MAX_OUTPUT, "exec failed", start_ns, end_rf);
-        backend_capture_release(buf, PROCESS_MAX_OUTPUT);
         # Surface the payload's real exit code. Reporting 0 for a command that
         # never ran is how the missing-rootfs bug looked healthy for so long.
-        if (rr != 0) {
-            ExecResult_set_exit_code(rr, confine_last_exit());
-            ExecResult_set_timed_out(rr, confine_last_timed_out());
-            # 3.11.5: the payload's own stderr, where this field was "". A copy
-            # since 3.13.2: the capture's buffer is reused by the next exec.
-            backend_set_capture_stderr(rr);
-        }
+        # 3.11.5: the payload's own stderr, where this field was "". A copy since
+        # 3.13.2. 3.14.8: all three read from this capture, and not from
+        # `confine_last_*`, which another thread's capture rewrites.
+        var rr = backend_capture_result(capture, "exec failed", start_ns, end_rf);
+        backend_capture_release(buf, PROCESS_MAX_OUTPUT);
         return rr;
     }
 
@@ -172,18 +168,14 @@ fn process_exec(sandbox, command) {
     # `/bin/ls` on a missing path, real exit 2, both came back 0) and no
     # `timeout_ms` was ever enforced. One capture, so neither can drift again.
     buf = backend_capture_buf(PROCESS_MAX_OUTPUT);
-    n = confine_capture_input_env_wd(args, 0, 0, cgroup_path, 0, buf, PROCESS_MAX_OUTPUT, 0, tmo, 0,
+    var plain = confine_capture_new(args, 0, 0, cgroup_path, 0, buf, PROCESS_MAX_OUTPUT, 0, tmo, 0,
       pexec_in, pexec_in_len, pexec_env, pexec_wd);
+    n = confine_capture_run(plain);
     cgroup_teardown(cgroup_path);
     var end_ns = mono_now_ns();
 
-    var pr = backend_capture_finish(buf, n, PROCESS_MAX_OUTPUT, "exec failed", start_ns, end_ns);
+    var pr = backend_capture_result(plain, "exec failed", start_ns, end_ns);
     backend_capture_release(buf, PROCESS_MAX_OUTPUT);
-    if (pr != 0) {
-        ExecResult_set_exit_code(pr, confine_last_exit());
-        ExecResult_set_timed_out(pr, confine_last_timed_out());
-        backend_set_capture_stderr(pr);
-    }
     return pr;
 }
 

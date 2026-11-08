@@ -11,6 +11,10 @@
 #   - timestamp is epoch-seconds decimal, not ISO 8601 rfc3339
 #   - reopen/verify-on-open is stubbed until fs line-read is wired
 
+# 3.14.8: the chain's lock. Included here so `dist/kavach.deps` names them.
+include "lib/atomic.cyr"
+include "lib/sync.cyr"
+
 # ---- Hex encoding --------------------------------------------------------
 
 var _HEX_CHARS = "0123456789abcdef";
@@ -67,6 +71,10 @@ fn kavach_audit_entry_new() {
 
 # ---- AuditChain ----------------------------------------------------------
 
+# `lock` (3.14.8): held from reading the chain's head to writing the next one.
+# `sandbox_exec` records to one process-wide chain (`sandbox_exec_set_audit_chain`),
+# and two records at once read the same head: two entries with one serial and one
+# `prev_hmac`, so the log no longer verifies as a chain.
 #derive(accessors)
 struct AuditChain {
     log_path;
@@ -74,6 +82,21 @@ struct AuditChain {
     hmac_key_len;
     last_hmac;
     next_serial;
+    lock;
+}
+
+var AUDIT_CHAIN_SIZE = 48;
+
+# The mutex in `*cell`, made on first use (3.14.8). The first thread to publish
+# one wins and every other uses it, so a lock nobody made at startup is still one
+# lock. Never 0 unless the allocator is out.
+fn kavach_lock_cell(cell) {
+    var m = atomic_load(cell);
+    if (m != 0) { return m; }
+    var fresh = mutex_new();
+    if (fresh == 0) { return 0; }
+    if (atomic_cas(cell, 0, fresh) == 1) { return fresh; }
+    return atomic_load(cell);
 }
 
 # Compute HMAC-SHA256 over a cstr message; return 65-byte hex cstr.
@@ -264,7 +287,8 @@ fn _audit_append(path, line, len) {
 # wherever the caller last recorded — file-based reload/verify is a TODO.
 fn audit_chain_open(log_path, hmac_key, hmac_key_len) {
     sha256_global_init();
-    var c = alloc(40);
+    var c = alloc(AUDIT_CHAIN_SIZE);
+    AuditChain_set_lock(c, 0);
     AuditChain_set_log_path(c, log_path);
     AuditChain_set_hmac_key(c, hmac_key);
     AuditChain_set_hmac_key_len(c, hmac_key_len);
@@ -279,6 +303,16 @@ fn audit_chain_open(log_path, hmac_key, hmac_key_len) {
 # Record an event. event_type and payload must be cstrs; payload should be
 # pre-serialized (no escape handling here).
 fn audit_chain_record(chain, event_type, payload) {
+    # SAFETY: `lock` is the chain's sixth field, at +40 of AUDIT_CHAIN_SIZE (48),
+    # which `audit_chain_open` allocates and zeroes.
+    var m = kavach_lock_cell(chain + 40);
+    if (m != 0) { mutex_lock(m); }
+    var entry = _audit_chain_record_locked(chain, event_type, payload);
+    if (m != 0) { mutex_unlock(m); }
+    return entry;
+}
+
+fn _audit_chain_record_locked(chain, event_type, payload) {
     var serial = AuditChain_next_serial(chain);
     var ts_buf[24];
     var ts_len = fmt_int_buf(clock_epoch_secs(), &ts_buf);

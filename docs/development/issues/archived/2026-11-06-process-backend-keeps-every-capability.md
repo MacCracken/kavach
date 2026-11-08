@@ -1,4 +1,4 @@
-# 2026-11-06 — a process-backend payload keeps every capability, and a rootfs does not hold it — OPEN IN PART
+# 2026-11-06 — a process-backend payload keeps every capability, and a rootfs does not hold it — RESOLVED (3.14.6 to 3.14.8)
 
 **Discovered:** 2026-11-06, measuring the process backend as root after kavach 3.14.5 closed the same hole on the
 OCI backend.
@@ -7,11 +7,13 @@ rootfs still does not hold, so a payload reads whatever the rootless uid can.
 **Affects:** every kavach release with a process backend: `confine_child_wd` and `_spawn_enter_rootfs`
 (`src/confine.cyr`), `_seccomp_deny_list` (`src/security.cyr`), `sandbox_spawn` (`src/spawn.cyr`) and persistent
 guests. Consumers that reach them, stiva's `run -d` among them, whatever backend the sandbox names.
-**Status:** 🟡 OPEN IN PART. A rootfs is ✅ **resolved in kavach 3.14.6**, by the maintainer's choice of `pivot_root`
-([ADR-009](../../adr/009-rootfs-on-the-process-path.md)), and a `/proc` the caller mounted there is ✅ **resolved in
-3.14.7** ([ADR-010](../../adr/010-proc-and-sys-in-a-process-path-rootfs.md)), with the two scoring items under "Also
-seen" and Ask 4's scoring. See the resolutions at the end. Still open: no rootfs as root (Ask 3), a detached OCI payload
-that never meets runc (Ask 4's other half), and `/proc/<pid>/root`, measured in 3.14.7. What follows is as filed, measured against 3.14.5 on x86-64, Linux 7.2.14 and runc 1.5.2.
+**Status:** ✅ **RESOLVED.** A rootfs in kavach 3.14.6, by the maintainer's choice of `pivot_root`
+([ADR-009](../../adr/009-rootfs-on-the-process-path.md)); a `/proc` the caller mounted there in 3.14.7
+([ADR-010](../../adr/010-proc-and-sys-in-a-process-path-rootfs.md)), with the two scoring items under "Also seen" and Ask
+4's scoring; and in 3.14.8 the rest, as the maintainer decided each ([ADR-011](../../adr/011-dev-pids-and-network-on-the-process-path.md)):
+a caller's `/dev`, `/proc/<pid>/root`, no rootfs as root (Ask 3) and `sandbox_spawn` on an OCI sandbox (Ask 4). See the
+resolutions at the end. One thing stays as it is, and `SECURITY.md` says it: a uid 0 payload with no rootfs is on the
+host's files, which no capability set bounds. What follows is as filed, measured against 3.14.5 on x86-64, Linux 7.2.14 and runc 1.5.2.
 
 ## What happens
 
@@ -308,3 +310,56 @@ throwaway privileged container: the before and after above, `/proc/<pid>/root`, 
   opened and closed, and nothing was read). uid 0 owns the node, so no capability is needed for that. It reads the same
   on 3.14.6, which has the same path. A caller adding `/dev` this way hands the payload the host's block devices.
 
+
+## Resolution (3.14.8)
+
+**The four left open, as the maintainer decided each** ([ADR-011](../../adr/011-dev-pids-and-network-on-the-process-path.md)):
+
+- **`/proc/<pid>/root`: a landlock domain on every confined payload**, whatever the policy names, on `sandbox_exec`,
+  `sandbox_spawn`, persistent guests and the wasmtime process. A process in a landlock domain may ptrace only inside it, so a
+  payload opens no other's `/proc/<pid>/root`; on ABI v6 its signals are scoped too. Chosen over a PID namespace with a
+  `/proc` of kavach's own.
+- **A caller's `/dev`: a `/dev` of kavach's own** wherever the rootfs has a `dev` directory, as runc makes one: a tmpfs
+  of runc's default devices bound from the host's, a devpts, a `/dev/shm` and runc's links. A `dev` that is a symlink is
+  refused (113). Chosen over covering only a mounted `dev` and over a cgroup device program.
+- **Ask 3, no rootfs as root: the bound on every confined payload.** `config_capabilities`, the twelve by default, applies
+  with no rootfs too, and on a confined persistent guest. The unconfined path `policy_new()` takes is unchanged.
+- **Ask 4, `sandbox_spawn` on an OCI sandbox: `runc run` in the foreground**, through a backend spawn slot the OCI backend
+  registers. runc is the handle's pid, forwards signals and exits with the container's status; `spawned_kill` sends a SIGKILL
+  through `runc kill`; runc's state and the bundle go once it is reaped. `score_spawn` scores it as OCI.
+
+Measured as root through kavach's public paths, from inside the payload, by a rig built from 3.14.7's `src/` and from
+3.14.8's ([`repros/2026-11-07-consumer-images-on-3.14.8.{cyr,sh}`](../repros/)), under `policy_basic()` and `policy_new()`
+alike where both ran:
+
+| | 3.14.7 | 3.14.8 |
+|---|---|---|
+| the caller's `/dev` an rbind of the host's: open the host's disk (`/dev/nvme0n1`) read-only | **opened** | ENOENT |
+| with a caller's `/proc`: open a file in a sibling sandbox's root through `/proc/<pid>/root` | **read it** | EACCES |
+| …signal that sibling (`kill(pid, 0)`), and kavach | **0**, both | EPERM, both |
+| no rootfs, `policy_basic()`: `CapEff` | **`000001ffffffffff`**, every capability | `00000000a00405fb` |
+| `sandbox_spawn`, OCI sandbox: the handle, and the payload's PID | the payload, in kavach's PID namespace | runc, and the payload PID 1 |
+
+And the consumers ADR-009 ran, the images' filesystems as the rootfs:
+
+| | 3.14.7 | 3.14.8 |
+|---|---|---|
+| postgres entry point, the caller's `/dev` and `/proc`: answers `pg_isready`, stops on SIGTERM | yes, exit 0 | yes, exit 0 |
+| postgres entry point, the caller's `/proc` only | fails: `/dev/null: Permission denied` | answers, exit 0: kavach's `/dev` |
+| the caller's `/dev` an rbind of the host's: a payload opens the host's disk read-only | **opened** | ENOENT |
+| nginx, network allowed: serves a page | yes, exit 0 | yes, exit 0 |
+| nginx, network denied, port 80 to bind (`policy_network_allow_tcp`) | no such list: no page, in a namespace of its own | **serves**, exit 0 |
+| nginx, network denied | no page | no page |
+| nginx detached from an OCI sandbox (`sandbox_spawn`), network allowed | serves; nginx is the handle, in kavach's PID namespace | serves; runc is the handle, nginx PID 1; SIGTERM forwarded, exit 0 |
+
+The rig found a regression on the way, fixed before release: with runc's links into `/proc` made whatever the rootfs held,
+nginx:alpine's error log, a link to `/dev/stderr`, dangled with no `/proc` and nginx exited 1. They are now made only where a
+procfs is at `/proc`. `test_process_rootfs_own_dev` holds it.
+
+**Also measured on the way, and fixed: the network.** agnosai filed that a policy denying network was enforced by a namespace
+alone ([archived](2026-11-07-agnosai-a-policy-denying-network-needs-a-namespace.md)); with the domain on every confined
+payload, its TCP half became landlock's, and its other half a filter of its own.
+
+Tests: `test_process_rootfs_own_dev`, `test_payloads_have_a_landlock_domain`, `test_bound_without_a_rootfs` and
+`test_oci_spawn_runs_through_runc`, rootless and in CI's root job, and the sibling sandbox in `test_process_rootfs_caller_proc`
+as root.

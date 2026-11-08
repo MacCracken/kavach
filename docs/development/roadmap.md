@@ -2,7 +2,7 @@
 
 > **Principle**: Security correctness first, then backend breadth, then performance. Every sandbox gets a number.
 
-This roadmap is **future-facing only** — shipped work lives in [CHANGELOG.md](../../CHANGELOG.md). Current release: **v3.14.7**. Toolchain pin: cc `6.7.18`; sigil `3.13.15` (the snapshot's — see CLAUDE.md hazard 4), samay `1.5.1`, ai-hwaccel `2.5.6` (agnosys dropped at v3.5.0 — its security backends are internalized). 3.14.0 to 3.14.2 went to the uutils exec fix, the `basic` filter's socket writes, the cyrius 6.7.9 and 6.7.18 moves, and the open fixes: Intel's attestation collateral, the TDX RTMRs, the runtimes' own diagnostics and aarch64 namespaces. 3.14.3 and 3.14.4 followed with what stiva and agnosai filed: real argv, seccomp and `no_new_privs` on the OCI backend, and the WASM capture. 3.14.5 to 3.14.7 bounded what a payload holds: the capability set and `/proc` masks on the OCI spec, `pivot_root` and the same set on the process path, and runc's `/proc` and `/sys` lists there too, with the capture buffer agnosai filed and the scoring of what each path applies. They came ahead of the SEV-SNP arc pinned as 3.14.x below; the arcs keep their numbers until they are re-pinned.
+This roadmap is **future-facing only** — shipped work lives in [CHANGELOG.md](../../CHANGELOG.md). Current release: **v3.14.8**. Toolchain pin: cc `6.7.18`; sigil `3.13.15` (the snapshot's — see CLAUDE.md hazard 4), samay `1.5.1`, ai-hwaccel `2.5.6` (agnosys dropped at v3.5.0 — its security backends are internalized). 3.14.0 to 3.14.2 went to the uutils exec fix, the `basic` filter's socket writes, the cyrius 6.7.9 and 6.7.18 moves, and the open fixes: Intel's attestation collateral, the TDX RTMRs, the runtimes' own diagnostics and aarch64 namespaces. 3.14.3 and 3.14.4 followed with what stiva and agnosai filed: real argv, seccomp and `no_new_privs` on the OCI backend, and the WASM capture. 3.14.5 to 3.14.7 bounded what a payload holds: the capability set and `/proc` masks on the OCI spec, `pivot_root` and the same set on the process path, and runc's `/proc` and `/sys` lists there too, with the capture buffer agnosai filed and the scoring of what each path applies. 3.14.8 closed the process-backend issue and agnosai's two: a landlock domain on every confined payload, kavach's own `/dev` in a rootfs, the capability bound with no rootfs, `sandbox_spawn` on an OCI sandbox through `runc run`, the network denied without a namespace with a TCP port list, and a run's result its own on any thread. They came ahead of the SEV-SNP arc pinned as 3.14.x below; the arcs keep their numbers until they are re-pinned.
 
 **Every release below is pinned.** Each names what ships in it, in the order the principle sets. To
 move an item, edit this file; do not let it drift. **An arc also takes the open fixes in the code it
@@ -13,26 +13,6 @@ a `bench-history.csv` row labeled with the version, a CHANGELOG entry with measu
 work in 3.20) can be pulled forward; items with one say what it is.
 
 ---
-
-## 3.14.8 — a payload's `/dev` and PIDs on the process path
-
-3.14.7 made a caller's `/proc` and `/sys` in a rootfs what runc makes them
-([ADR-010](../adr/010-proc-and-sys-in-a-process-path-rootfs.md)). Two things measured on the way are not runc's either,
-and both reach past a sandbox ([issue](issues/2026-11-06-process-backend-keeps-every-capability.md)):
-
-- [ ] **A `/dev` the caller mounted.** As root, with the caller's `/dev` an rbind of the host's, as ADR-009 ran postgres,
-  a payload holding the twelve opened the host's disk (`/dev/nvme0n1`) read-only. runc's device cgroup refuses a node
-  the spec does not list, and the process path has none. **Decide** between a `/dev` of kavach's own, a tmpfs holding
-  runc's default nodes bound from the host, and a cgroup v2 device program over the caller's.
-- [ ] **`/proc/<pid>/root`.** With a caller's `/proc`, a payload read a file in another sandbox's root, as root, under
-  both policies: a sibling holding the same twelve passes the ptrace check. **Decide** between a PID namespace with a
-  `/proc` of kavach's own, as runc mounts one, and a landlock domain on every payload, which refuses ptrace access outside
-  it.
-- [ ] **Decide** Ask 3: what a payload with no rootfs holds as root. `SECURITY.md` says what it is today.
-- [ ] **Decide** Ask 4's other half: `sandbox_spawn` on an OCI sandbox detaches on the process path. It is scored as that
-  since 3.14.7 (`score_spawn`), and could detach through runc instead.
-- [ ] Assert each from inside a payload, as root in CI's root job, and run nginx and the postgres entry point before and
-  after, as ADR-009 did.
 
 ## 3.14.x — TEE attestation II: SEV-SNP, and SGX sealing
 
@@ -111,11 +91,20 @@ release, with the payload's exit status brought out of the guest as 3.14 and 3.1
 ## Beyond 3.x — unpinned
 
 - `seccomp_enabled` on gVisor: pass `--oci-seccomp` with a filter runsc accepts, or stop scoring it
-  ([issue](issues/2026-11-06-gvisor-policy-seccomp-is-not-applied.md)). Needs a machine
+  ([issue](issues/archived/2026-11-06-gvisor-policy-seccomp-is-not-applied.md)). Needs a machine
   with runsc to run it on.
-- Landlock TCP port rules (ABI v4): a port list and a setter behind `network_tcp_bind_len` and
-  `network_tcp_connect_len`, as `policy_landlock_add` gave the filesystem rules, scored again
-  once applied. Through 3.13.1 the bare counts added 3 to the score; 3.13.2 stopped that.
+- gVisor's `sandbox_spawn` through `runsc run`, as 3.14.8 gave OCI's through `runc run`. It detaches on the process path
+  and `score_spawn` scores it as that. Needs a machine with runsc, as gVisor's filter does.
+- The landlock domain's allow-all fallback, for a kernel below ABI v6 with a confined payload allowed network and
+  naming no rule: 3.14.8's test asserts the domain from inside the payload, and on this machine's ABI 10 the signal
+  scope makes it, so only a runner on a kernel from 5.13 to 6.11 reaches the fallback. Run it on one.
+- A uid 0 payload with no rootfs is on the host's files whatever it holds. A preset or a config flag naming a landlock
+  rule for its working directory would bound it, as `policy_landlock_add` can today by hand.
+- A confined payload holding CAP_SYS_ADMIN or CAP_PERFMON opens kavach's `/proc/<pid>/environ` through its landlock domain
+  (measured in 3.14.8; `root` and signals stay refused). Trace it in the kernel's code, then refuse those two in a list with
+  no rootfs, or say so where the list is read.
+- MPTCP and SCTP connects get past landlock's TCP rights (measured on 7.2.14, ABI 10), which 3.14.8's network filter
+  covers where it loads. Worth filing upstream, so landlock alone can hold a payload with no filter.
 - The rest of [Foreign Platform Containers](#foreign-platform-containers): Windows and macOS
   guests, display through aethersafta, audio through dhvani, clipboard, USB and GPU passthrough,
   phylax boundary scanning, libro audit, templates.

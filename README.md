@@ -12,6 +12,16 @@ classification, credential proxy, HMAC-SHA256 audit chain — all in pure Cyrius
 
 ## Status
 
+**v3.14.8 — every confined payload in a landlock domain of its own, a `/dev` of kavach's, the network denied with no
+namespace, and a run's result its own on any thread.** With a caller's `/proc`, a root payload read a sibling sandbox's files
+through `/proc/<pid>/root`, and with a caller's `/dev`, the host's disk; a root payload with no rootfs held every capability;
+and an OCI sandbox's `sandbox_spawn` had no PID namespace. Each is closed as the maintainer decided
+([ADR-011](docs/adr/011-dev-pids-and-network-on-the-process-path.md)), and the spawn runs `runc run`. A policy denying network
+is now held by landlock's TCP rights and a network filter where Ubuntu refuses the namespace, with a TCP port list
+(`policy_network_allow_tcp`). Two runs on two threads read each other's stderr in 64 to 80 of 120 runs, and now in none.
+postgres and nginx run as before, and nginx with only port 80 to bind. **2227** assertions green on x86-64, **1726** on
+aarch64 under qemu.
+
 **v3.14.7 — a caller's `/proc` and `/sys` in a process-path rootfs are what runc makes them, and an exec costs what it
 printed.** Where a caller mounts a `/proc` in a rootfs, as the postgres entry point needs, uid 0 opened `core_pattern`,
 `sysrq-trigger` and an IRQ affinity to write, and through an rbind of `/proc` binfmt_misc's `register`. They now read
@@ -20,14 +30,14 @@ no filter ([ADR-010](docs/adr/010-proc-and-sys-in-a-process-path-rootfs.md)). A 
 heap for good and now costs 2,588 B. `read_only_rootfs` and `config_require_namespaces` are applied where they were scored
 or promised, and `score_backend` stops scoring what the process and gVisor backends do not apply. A caller's `/dev` and
 `/proc/<pid>/root` were measured on the way and are
-[open](docs/development/issues/2026-11-06-process-backend-keeps-every-capability.md). **2003** assertions green on x86-64,
+[open](docs/development/issues/archived/2026-11-06-process-backend-keeps-every-capability.md). **2003** assertions green on x86-64,
 **1649** on aarch64 under qemu.
 
 **v3.14.6 — a rootfs on the process path holds.** A payload there is now entered with `pivot_root` and holds the same
 twelve capabilities as an OCI container, on `sandbox_exec` and `sandbox_spawn`, whatever backend the sandbox names.
 Through 3.14.5 it held every capability and left its rootfs in three calls, as root and rootless, under
 `policy_basic()`. nginx and the postgres entry point behave as they did. A payload with no rootfs is unchanged, and
-[what is still open](docs/development/issues/2026-11-06-process-backend-keeps-every-capability.md) is filed.
+[what is still open](docs/development/issues/archived/2026-11-06-process-backend-keeps-every-capability.md) is filed.
 **1900** assertions green on x86-64, **1611** on aarch64 under qemu.
 
 **v3.14.5 — a bounded capability set and a masked `/proc` on every OCI container.** Under any policy a container
@@ -366,11 +376,11 @@ cyrius deps
 cyrius build src/main.cyr build/kavach
 ./build/kavach
 
-# Run the test suite (2003 assertions; run from the repository root,
+# Run the test suite (2227 assertions; run from the repository root,
 # since the real-Intel attestation vectors are read from tests/data/).
 cyrius test tests/kavach.tcyr
 
-# Run the bench harness (32 benches).
+# Run the bench harness (33 benches).
 cyrius bench tests/kavach.bcyr
 
 # Cleanliness gates. Run these individually — `cyrius audit` is the

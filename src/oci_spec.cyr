@@ -16,8 +16,9 @@ var _oci_id_counter = 1;
 fn oci_container_id(prefix) {
     var ts_buf[24];
     var ts_len = fmt_int_buf(clock_epoch_secs(), &ts_buf);
-    var ctr = _oci_id_counter;
-    _oci_id_counter = _oci_id_counter + 1;
+    # 3.14.8: one atomic step, so two threads never take one number. The random
+    # tail kept the ids apart anyway; the counter now says so on its own.
+    var ctr = atomic_fetch_add(&_oci_id_counter, 1);
     var ctr_buf[24];
     var ctr_len = fmt_int_buf(ctr, &ctr_buf);
     var rand_id = rand_hex_id();
@@ -270,7 +271,7 @@ fn _oci_paths_json() {
 # Not for gVisor. runsc applies a spec's filter only under `--oci-seccomp`, and
 # then refuses SCMP_ACT_KILL_PROCESS as an invalid action (runsc/specutils/
 # seccomp/seccomp.go), so a spec written for runc would be ignored or refused.
-# See docs/development/issues/2026-11-06-gvisor-policy-seccomp-is-not-applied.md.
+# See docs/development/issues/archived/2026-11-06-gvisor-policy-seccomp-is-not-applied.md.
 fn _oci_seccomp_json(config) {
     if (_oci_wants_filter(config) == 0) { return ""; }
     var sb = str_builder_new();

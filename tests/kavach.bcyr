@@ -37,6 +37,9 @@ include "src/backend_sgx.cyr"
 include "src/backend_sev.cyr"
 include "src/backend_tdx.cyr"
 include "src/backend_firecracker.cyr"
+# 3.14.8: the OCI backend registers a spawn (`oci_spawn`), which builds its handle
+# with spawn.cyr's constructor.
+include "src/spawn.cyr"
 include "src/composite.cyr"
 include "src/observability.cyr"
 include "src/attest_collateral.cyr"
@@ -256,6 +259,19 @@ fn bench_process_exec_large_output() {
 # `confine_child` runs rather than the plain fork/exec.
 fn bench_process_exec_confined() {
     return _bench_exec("/bin/echo hi", policy_strict());
+}
+
+# 3.14.8: the same confined exec with the network allowed. `process_exec_confined`'s
+# policy denies it, so that payload also gets landlock's TCP rights and the network
+# filter; the difference between the two is what denying the network costs an exec.
+var _BENCH_NET_ON = 0;
+
+fn bench_process_exec_confined_net_on() {
+    if (_BENCH_NET_ON == 0) {
+        _BENCH_NET_ON = policy_strict();
+        SandboxPolicy_set_network_enabled(_BENCH_NET_ON, 1);
+    }
+    return _bench_exec("/bin/echo hi", _BENCH_NET_ON);
 }
 
 # stdin past the pipe's capacity, delivered from inside the drain loop (3.14.4).
@@ -578,6 +594,10 @@ fn main() {
     var b25 = bench_new("process_exec_confined");
     bench_run(b25, &bench_process_exec_confined, 50);
     vec_push(benches, b25);
+
+    var b38 = bench_new("process_exec_confined_net_on");
+    bench_run(b38, &bench_process_exec_confined_net_on, 50);
+    vec_push(benches, b38);
 
     var b36 = bench_new("process_exec_stdin_1mib");
     bench_run(b36, &bench_process_exec_stdin_1mib, 50);

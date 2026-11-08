@@ -15,3 +15,4 @@ accepted — supersession is recorded via status updates, not rewrites.
 | [008](008-oci-capability-default.md) | The OCI capability default, and how a payload asks for more | Accepted | v3.14.5 |
 | [009](009-rootfs-on-the-process-path.md) | A rootfs on the process path: pivot_root and the default set | Accepted | v3.14.6 |
 | [010](010-proc-and-sys-in-a-process-path-rootfs.md) | A caller's `/proc` and `/sys` in a process-path rootfs: runc's lists | Accepted | v3.14.7 |
+| [011](011-dev-pids-and-network-on-the-process-path.md) | `/dev`, other processes, capabilities and the network on the process path, and an OCI spawn through runc | Accepted | v3.14.8 |

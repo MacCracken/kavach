@@ -182,9 +182,10 @@ fn _persistent_spawn_inner(command, policy, seccomp_info, want_ns, uid, gid) {
         # which is what lets a confined guest still read its stdin; and all three
         # come before `execve` because a filter installed after it is too late by
         # definition.
+        var nsf = 0;
         if (want_ns != 0 && policy != 0) {
             if (syscall(SYS_PRCTL, 38, 1, 0, 0, 0) < 0) { sys_exit(SPAWN_EXIT_NNP); }
-            var nsf = _spawn_ns_flags(policy, 0);
+            nsf = _spawn_ns_flags(policy, 0);
             if (nsf != 0) {
                 if (is_ok(security_create_namespace(nsf)) == 0) { sys_exit(SPAWN_EXIT_NS); }
                 if ((nsf & NS_USER) != 0) {
@@ -194,13 +195,26 @@ fn _persistent_spawn_inner(command, policy, seccomp_info, want_ns, uid, gid) {
                 }
             }
         }
-        if (_spawn_apply_landlock(policy) != 0) { sys_exit(SPAWN_EXIT_LANDLOCK); }
+        # 3.14.8: a confined guest is a confined process-path payload, so it gets
+        # a landlock domain of its own and holds the default set, as `confine_child`
+        # gives them. NO_NEW_PRIVS first, which the bound relies on when it cannot
+        # drop the bounding set. An unconfined guest (`persistent_spawn`, policy 0)
+        # gets none of it, as before.
+        var net_alone = _spawn_net_alone(policy, nsf);
+        if (policy != 0) {
+            if (_spawn_apply_landlock(policy, net_alone) != 0) { sys_exit(SPAWN_EXIT_LANDLOCK); }
+            if (syscall(SYS_PRCTL, 38, 1, 0, 0, 0) < 0) { sys_exit(SPAWN_EXIT_NNP); }
+            if (_spawn_bound_capabilities(KAVACH_CAPS_DEFAULT) != 0) { sys_exit(SPAWN_EXIT_CAPS); }
+        }
         if (seccomp_info != 0) {
             if (syscall(SYS_PRCTL, 38, 1, 0, 0, 0) < 0) { sys_exit(SPAWN_EXIT_NNP); }
             if (is_ok(security_load_seccomp(security_seccomp_filter_ptr(seccomp_info),
                   security_seccomp_filter_len(seccomp_info))) == 0) {
                 sys_exit(SPAWN_EXIT_SECCOMP);
             }
+        }
+        if (net_alone == 1) {
+            if (_spawn_load_net_filter() != 0) { sys_exit(SPAWN_EXIT_SECCOMP); }
         }
         kv_exec_child(pin, vec_get(args, 0), argv, envp);
         sys_exit(127);
