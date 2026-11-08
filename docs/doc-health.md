@@ -6,7 +6,9 @@ type: state
 
 # Documentation Health — kavach
 
-> **Last refresh**: 2026-11-07 — current through **v3.14.8** (a landlock domain on every confined process-path payload; a rootfs's `dev` kavach's own; the capability bound with no rootfs; `sandbox_spawn` on an OCI sandbox through `runc run`, with a backend spawn slot; a policy denying network denied with no namespace, by landlock's TCP rights and a network filter, with `policy_network_allow_tcp`; a run's result its own on any thread; ADR-011; three issues archived, the sigil one rechecked).
+> **Last refresh**: 2026-11-08 — current through **v3.14.9** (a capture stores its length, so the gate reads a real payload's stdout past a NUL; binary stdout can now read QUARANTINE, recorded in `SECURITY.md` and the roadmap; 2241 tests, 1737 on aarch64 under qemu; `CLAUDE.md`, `README.md`, `SECURITY.md`, `roadmap.md` touched).
+>
+> **Prior refresh**: 2026-11-07 — current through **v3.14.8** (a landlock domain on every confined process-path payload; a rootfs's `dev` kavach's own; the capability bound with no rootfs; `sandbox_spawn` on an OCI sandbox through `runc run`, with a backend spawn slot; a policy denying network denied with no namespace, by landlock's TCP rights and a network filter, with `policy_network_allow_tcp`; a run's result its own on any thread; ADR-011; three issues archived, the sigil one rechecked).
 >
 > **Prior refresh**: 2026-11-07 — current through **v3.14.7** (a caller's `/proc` and `/sys` in a process-path rootfs made what runc makes them, from runc's lists moved to `security.cyr`; CAP_SYS_ADMIN refused with no filter; `read_only_rootfs` applied on that path; `config_require_namespaces` read under any policy; a capture costs what the payload wrote; `score_config`, `score_spawn`, and no unapplied modifiers for the process and gVisor backends; ADR-010; two issues archived).
 >

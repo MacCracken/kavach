@@ -12,6 +12,11 @@ classification, credential proxy, HMAC-SHA256 audit chain — all in pure Cyrius
 
 ## Status
 
+**v3.14.9 — a capture stores its length.** The gate has read an artifact's true length since 3.11.7, but no capture set one,
+so a real payload's credential behind a NUL was released as PASS. It now blocks. Binary stdout, which the gate used to see
+only up to its first NUL, can now read QUARANTINE (CHANGELOG 3.14.9). **2241** assertions green on x86-64, **1737** on
+aarch64 under qemu.
+
 **v3.14.8 — every confined payload in a landlock domain of its own, a `/dev` of kavach's, the network denied with no
 namespace, and a run's result its own on any thread.** With a caller's `/proc`, a root payload read a sibling sandbox's files
 through `/proc/<pid>/root`, and with a caller's `/dev`, the host's disk; a root payload with no rootfs held every capability;
@@ -19,8 +24,7 @@ and an OCI sandbox's `sandbox_spawn` had no PID namespace. Each is closed as the
 ([ADR-011](docs/adr/011-dev-pids-and-network-on-the-process-path.md)), and the spawn runs `runc run`. A policy denying network
 is now held by landlock's TCP rights and a network filter where Ubuntu refuses the namespace, with a TCP port list
 (`policy_network_allow_tcp`). Two runs on two threads read each other's stderr in 64 to 80 of 120 runs, and now in none.
-postgres and nginx run as before, and nginx with only port 80 to bind. **2227** assertions green on x86-64, **1726** on
-aarch64 under qemu.
+postgres and nginx run as before, and nginx with only port 80 to bind.
 
 **v3.14.7 — a caller's `/proc` and `/sys` in a process-path rootfs are what runc makes them, and an exec costs what it
 printed.** Where a caller mounts a `/proc` in a rootfs, as the postgres entry point needs, uid 0 opened `core_pattern`,
@@ -376,7 +380,7 @@ cyrius deps
 cyrius build src/main.cyr build/kavach
 ./build/kavach
 
-# Run the test suite (2227 assertions; run from the repository root,
+# Run the test suite (2241 assertions; run from the repository root,
 # since the real-Intel attestation vectors are read from tests/data/).
 cyrius test tests/kavach.tcyr
 

@@ -74,6 +74,8 @@ and unblocking conditions:
 - **gVisor's `sandbox_spawn` detaches on the process path.** Since v3.14.8 an OCI sandbox's runs under runc; a gVisor
   sandbox's holds the default set, `pivot_root`, kavach's `/dev` and the `/proc` guard, with no PID namespace of its own,
   and `score_spawn` scores it as that path.
+- **The gate has no binary path.** Since v3.14.9 it reads all of a payload's stdout, and the code scanner can quarantine
+  binary output (measured: random bytes and an XRGB gradient). It fails closed: the output is withheld, not released.
 - **HTTP credential proxy** — direct env/file/stdin injection and the
   loopback HTTP proxy (`GET /v1/secret/<name>`) ship; HTTPS `CONNECT`
   tunnelling is not implemented
@@ -86,6 +88,9 @@ and unblocking conditions:
 
 Resolved since earlier releases:
 
+- **v3.14.9:**
+  - a payload's stdout reached the externalization gate cut off at its first NUL, so a credential behind one was released as
+    PASS, though 3.11.7 had the gate read true lengths: no capture stored one. CHANGELOG 3.14.9.
 - **v3.14.8:**
   - a payload in a process-path rootfs met the `/dev` its caller left there, and with an rbind of the host's, a payload
     running as uid 0 opened the host's disk. A rootfs's `dev` is now kavach's own, as runc makes one: a tmpfs of runc's

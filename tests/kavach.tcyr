@@ -10770,6 +10770,53 @@ fn test_capture_costs_what_was_written() {
     return 0;
 }
 
+# 3.14.9: a capture stores what it wrote. `stdout_len` and the gate's use of it date
+# from 3.11.7, but no capture ever set the field, so a real payload's stdout was
+# measured by `strlen`. `test_gate_scans_past_an_embedded_nul` builds its result by
+# hand, which is how that went unseen. These run real payloads for that reason.
+fn test_capture_records_its_length() {
+    test_group("capture_records_its_length");
+    var buf = alloc(64);
+    memset(buf, 65, 64);
+    store8(buf + 2, 0);
+    var r = backend_capture_finish(buf, 5, 64, "x", 0, 0);
+    assert_eq(exec_result_stdout_len(r), 5, "the length is the bytes captured, past a NUL");
+    assert_eq(load8(ExecResult_stdout(r) + 3), 65, "and those bytes are in the copy");
+    var none = backend_capture_finish(buf, 0, 64, "x", 0, 0);
+    assert_eq(ExecResult_stdout_len(none), 0, "a capture of nothing stores 0, not unset");
+    var full = backend_capture_finish(buf, 64, 64, "x", 0, 0);
+    assert_eq(ExecResult_stdout_len(full), 63, "a full capture stores the clamped count, which is what the copy holds");
+    var failed = backend_capture_finish(buf, 0 - 1, 64, "x", 0, 0);
+    assert_eq(ExecResult_stdout_len(failed), 0 - 1, "a failed capture stores none");
+    assert_eq(exec_result_stdout_len(failed), 0, "and reads as empty");
+
+    # A real payload, down the unconfined capture and the confined one. Confining
+    # needs the host's seccomp and landlock, which an emulated build does not have.
+    var p = 0;
+    var paths = 2;
+    if (_t_runtime_is_native("/bin/sh") == 0) { paths = 1; }
+    while (p < paths) {
+        var pol = policy_new();
+        if (p == 1) { pol = policy_basic(); }
+        var rr = process_exec(_t_pio_sandbox(pol), "/usr/bin/printf ABC\\000DE");
+        assert_eq(ExecResult_exit_code(rr), 0, "the payload ran");
+        assert_eq(exec_result_stdout_len(rr), 6, "a real payload's length runs past its NUL");
+        assert_eq(load8(ExecResult_stdout(rr) + 4), 68, "with the bytes after it");
+        p = p + 1;
+    }
+
+    # What the length is for. The control first: the same credential after a newline
+    # must block, or the assertion below measures nothing.
+    var sb = _t_pio_sandbox(policy_new());
+    var ctl = process_exec(sb, "/usr/bin/printf ok\\012AKIAIOSFODNN7EXAMPLE");
+    assert_eq(ScanResult_verdict(gate_apply(ctl, ext_policy_default())), ScanVerdict.BLOCK,
+      "control: a real payload's credential after a newline blocks");
+    var hid = process_exec(sb, "/usr/bin/printf ok\\000AKIAIOSFODNN7EXAMPLE");
+    assert_eq(ScanResult_verdict(gate_apply(hid, ext_policy_default())), ScanVerdict.BLOCK,
+      "a real payload cannot hide a credential behind a NUL");
+    return 0;
+}
+
 # 3.14.7: a score counts what the path applies. See `score_backend`'s header.
 fn test_score_what_is_applied() {
     test_group("score_what_is_applied");
@@ -11512,6 +11559,7 @@ fn main() {
     test_network_port_rules();
     test_bound_without_a_rootfs();
     test_capture_costs_what_was_written();
+    test_capture_records_its_length();
     test_score_what_is_applied();
     test_require_namespaces_without_a_filter();
     test_spawn_terminate_escalates();

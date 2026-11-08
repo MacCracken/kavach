@@ -7,6 +7,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.14.9] — 2026-11-08
+
+A capture now stores how many bytes it wrote. 3.11.7 made the externalization gate measure an artifact by its true length
+and scan past an embedded NUL, but no capture ever set that length, so a real payload's stdout went on being measured by
+`strlen`, and a credential behind a NUL was released as PASS. Filed from mehman, whose surface capture stopped at the first
+NUL. **2241** assertions on x86-64, from 2227, and **1737** on aarch64 under qemu, from 1726.
+
+### ⚠ Behaviour changes
+
+- **A payload's stdout is scanned and sized past its first NUL**, on every backend, because all nine capture through
+  `backend_capture_finish`. Output with no NUL was scanned whole already and is unchanged.
+- **Binary stdout can now be quarantined where it passed.** The gate is a text scanner, and until now it saw binary output
+  only up to its first NUL. Under `ext_policy_default()`, 256 KiB of random bytes (four rounds) and a 256×256 XRGB gradient
+  each read QUARANTINE, on the code scanner's `command_injection` (HIGH). A solid colour and all zeros read PASS.
+  `sandbox_exec` returns 0 for those, as for any quarantined output. There is no binary path through the gate yet; see the
+  roadmap.
+- **That output now costs a scan.** A 256 KiB random frame through `sandbox_exec`, in mehman's capture path, took 8 ms on
+  3.14.8 and 153 ms here.
+
+### Fixed
+
+- **A capture never stored its length** (mehman). `backend_capture_finish` set stdout with the bare setter, so `stdout_len`
+  stayed -1 and `exec_result_stdout_len` fell back to `strlen`. It now stores the clamped count through
+  `exec_result_set_stdout_n`. stderr already stored its own. Nothing replaces a result's stdout afterwards but the gate's
+  redaction, which stores its own length too.
+
+  `/usr/bin/printf` as the payload, against 3.14.8's `backend.cyr` with the same test:
+
+  | | 3.14.8 | 3.14.9 |
+  |---|---|---|
+  | `exec_result_stdout_len` of `ABC\0DE`, under `policy_new()` and `policy_basic()` | 3 | 6 |
+  | gate verdict on `ok\0AKIAIOSFODNN7EXAMPLE` | **PASS** | BLOCK |
+  | gate verdict on the same with a newline for the NUL (the control) | BLOCK | BLOCK |
+
+### Tests
+
+- **`test_capture_records_its_length`**: 14 assertions, on real payloads down the unconfined and confined captures, with the
+  control. `test_gate_scans_past_an_embedded_nul` builds its result by hand, which is how this went unseen. An emulated
+  build takes the unconfined capture only, for 11.
+- **Before-run and mutant.** Against 3.14.8's `backend.cyr`, six of the 14 fail. Storing the count before its clamp fails one.
+- ⚠ In a default-privilege `ubuntu:26.04` container the suite fails 78 checks as root and 9 as uid 1000, on 3.14.8's tree and
+  on this one, and the two lists of failures are identical. CI's runners are not that container.
+- ⚠ **`concurrent_runs_keep_their_own_results` fails intermittently on aarch64 under qemu**, at "nor its exit code", and did
+  before this release: run alone, 8 of 40 runs on 3.14.8 and 7 of 40 here. This release does not touch that path. See the
+  roadmap.
+
+### Benchmarks
+
+Recorded as `3.14.9` in `benches/bench-history.csv`, 33 benches. Interleaved against the 3.14.8 tag (`scripts/bench-ab.py`,
+five rounds a side, pinned to one CPU), 32 of the 33 rows' ranges overlap, which reads as no measured change. The other is
+`score_backend_process_strict`, 13 ns to 14 ns, on a path this release does not touch.
+
+| | 3.14.8 | 3.14.9 |
+|---|---|---|
+| `process_exec_echo` | 2.674 ms | 2.676 ms |
+| `process_exec_confined` | 2.667 ms | 2.674 ms |
+| `process_exec_large_output` | 119.937 ms | 120.127 ms |
+| `gate_clean_output` | 341.89 µs | 341.29 µs |
+
+### Verified
+
+`cyrius fmt --check` clean on every source and test file, `cyrius lint` 0 warnings on `src/` (the test file's 103 are
+3.14.8's), `cyrius vet`, `scripts/check-symbols.py`, `cyrius distlib --all` and `scripts/check-bundles.py` (both sidecars
+unchanged), `cyrius deps --locked`, builds for `--aarch64` and `--agnos` with no new `duplicate fn`, layout or `undefined`
+warning, and the CI security scan run locally. `tests/samay_integration.tcyr` passes 12 of 12, and the smoke banner reads
+`kavach v3.14.9`. Consumer check: mehman's 134 assertions pass built against this tree.
+
 ## [3.14.8] — 2026-11-07
 
 The last of the process-backend issue, and agnosai's two issues. Every confined process-path payload now has a landlock
