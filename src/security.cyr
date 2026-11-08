@@ -705,6 +705,47 @@ fn security_capability_refusal(names) {
     return 0;
 }
 
+# ---- /proc and /sys paths a payload may not write (3.14.7) -----------------
+#
+# `runc spec` 1.5.2's `linux.maskedPaths` and `linux.readonlyPaths`, which the OCI
+# spec has written since 3.14.5. Here, not in `oci_spec.cyr`, because since 3.14.7
+# the process path applies them too, to a `/proc` or `/sys` the caller mounted in a
+# rootfs, and `[lib.confine]` carries this module and not that one, as with the
+# capability table.
+#
+# By index, as string literals, so a forked child reads them with no allocation.
+# Order is runc's. `/sys/firmware` stays in a list whose spec mounts no `/sys`, so
+# the lists are runc's and not a variant of them.
+
+var SECURITY_MASKED_PATHS = 10;
+var SECURITY_READONLY_PATHS = 5;
+
+# The `i`th masked path, or 0 past the end. A file is masked by the host's
+# /dev/null and a directory by an empty read-only tmpfs.
+fn security_masked_path(i) {
+    if (i == 0) { return "/proc/acpi"; }
+    if (i == 1) { return "/proc/asound"; }
+    if (i == 2) { return "/proc/kcore"; }
+    if (i == 3) { return "/proc/keys"; }
+    if (i == 4) { return "/proc/latency_stats"; }
+    if (i == 5) { return "/proc/timer_list"; }
+    if (i == 6) { return "/proc/timer_stats"; }
+    if (i == 7) { return "/proc/sched_debug"; }
+    if (i == 8) { return "/sys/firmware"; }
+    if (i == 9) { return "/proc/scsi"; }
+    return 0;
+}
+
+# The `i`th read-only path, or 0 past the end.
+fn security_readonly_path(i) {
+    if (i == 0) { return "/proc/bus"; }
+    if (i == 1) { return "/proc/fs"; }
+    if (i == 2) { return "/proc/irq"; }
+    if (i == 3) { return "/proc/sys"; }
+    if (i == 4) { return "/proc/sysrq-trigger"; }
+    return 0;
+}
+
 # `names` as a mask, each at its bit in /proc/self/status. A name the table does not
 # hold adds nothing, so a caller asks `security_capability_refusal` first.
 #[must_use]

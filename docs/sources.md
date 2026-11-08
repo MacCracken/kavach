@@ -68,3 +68,35 @@ kernel header references in `src/security.cyr`, ADR-005 and ADR-007).
   no list, and `capsFromNames` refuses a name it does not know; `MaskedPaths` and `ReadonlyPaths` are only cleared for
   logging, and `runsc/boot` does not read them.
 - **wasmtime 50.0.1**: `wasmtime run -W help`, for the option names in `_wasm_append_limits`; each was run.
+
+## A caller's `/proc` and `/sys` in a process-path rootfs (`src/confine.cyr`, 3.14.7)
+
+These are cited as documented and were not re-read for 3.14.7, where no man pages or kernel tree were at hand.
+Each behaviour the code depends on was measured, as each entry says.
+
+- **`runc spec` 1.5.2's `linux.maskedPaths` and `linux.readonlyPaths`**, as in 3.14.5, now the table in
+  `src/security.cyr`. **runc's `maskPath` and `readonlyPath`** (`libcontainer/rootfs_linux.go`), for the order
+  (read-only paths, then masks), the bind of `/dev/null` over a file and an empty read-only tmpfs over a directory, the
+  skip of a missing path, and the remount carrying the mount's existing flags.
+- **CVE-2025-31133** (runc): a masked path bound from a container's own `/dev/null`, which an
+  image can replace with a symlink. Why kavach binds the host's `/dev/null`, after checking that it is a character
+  device.
+- **mount_namespaces(7)**, "Restrictions on mount namespaces": mounts copied into a namespace owned by a less
+  privileged user namespace are locked together, and their flags (`MS_RDONLY`, `MS_NOSUID`, `MS_NODEV`, `MS_NOEXEC`, the
+  atime flags) cannot be cleared. Measured in 3.14.7: rootless, a remount without the mount's own nosuid, nodev and
+  noexec reads EPERM, a bind of a path holding a locked mount without `MS_REC` reads EINVAL, and a nested user namespace's
+  `umount2` of the masks reads EINVAL.
+- **statfs(2)**: `f_flags` reports the mount's flags as `ST_*` bits, which share `MS_*`'s values except
+  `ST_RELATIME` (4096) for `MS_RELATIME` (`1 << 21`). The 64-bit Linux `struct statfs` puts `f_type` at 0 and
+  `f_flags` at 80, on x86-64 and aarch64 alike (`include/uapi/asm-generic/statfs.h`); measured the same on both under
+  qemu. `PROC_SUPER_MAGIC` and `SYSFS_MAGIC` from `include/uapi/linux/magic.h`.
+- **mount(2)**: a bind's source must be on a mount in the caller's namespace, which is why the guard runs before
+  the pivot detaches the old root, and `MS_REMOUNT | MS_BIND` changes one mount's flags, not its superblock's.
+- **binfmt_misc** (`Documentation/admin-guide/binfmt-misc.rst`): a handler registered through `register` runs for
+  every matching exec on the host, and the `F` flag opens its interpreter at registration, in the registrar's root.
+  Measured in 3.14.7: through an rbind of a `/proc` carrying it, a payload opened `register` to write on 3.14.6.
+- **ptrace(2)**, "Ptrace access mode checking", for `/proc/<pid>/root`: a caller passes the check for a target
+  with the same uid whose permitted capabilities are a subset of its own. Measured in 3.14.7: a sibling sandbox holding
+  the same twelve is reachable, the host's init and kavach's own process read EACCES. **landlock(7)**, not measured: a
+  sandboxed process cannot ptrace one outside its domain, one way that would close it.
+

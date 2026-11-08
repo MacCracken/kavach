@@ -244,7 +244,45 @@ fn backend_guard_result(violations) {
     return r;
 }
 
+# A capture's buffer of `cap` bytes, for `backend_capture_finish` to copy from and
+# give back (3.14.7). An anonymous mapping, so it costs the pages the payload writes
+# into, and it goes back to the kernel after the copy. 0 when none could be had, which
+# every capture reads as a failed one.
+#
+# Through 3.14.6 each exec took `alloc(cap)`, 1 MiB, from a heap with no free, and the
+# result's stdout WAS that buffer, so it lived as long as the result and could never
+# be given back. agnosai measured 1,051,136 B of `alloc_used()` per `/bin/true` on the
+# process backend, and RSS from 9.5 MB to 421 MB over 400 execs: a payload printing
+# nothing cost what one printing 1 MiB cost.
+#
+# agnos has no mmap (`mmap_anon` answers 0 there), so it keeps `alloc`, and its
+# backend gets the copy without the release.
+fn backend_capture_buf(cap) {
+    if (cap <= 1) { return 0; }
+    #ifdef CYRIUS_TARGET_AGNOS
+    return alloc(cap);
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    return mmap_anon(cap);
+    #endif
+}
+
+# Give back a `backend_capture_buf` buffer, after `backend_capture_finish` or
+# `backend_run_finish` has copied it. ⛔ Only one of those: this unmaps.
+fn backend_capture_release(buf, cap) {
+    if (buf == 0) { return 0; }
+    #ifndef CYRIUS_TARGET_AGNOS
+    cyr_munmap(buf, cap);
+    #endif
+    return 0;
+}
+
 # Build the success/failure ExecResult from a captured-output buffer.
+#
+# 3.14.7: the result's stdout is a copy of the `n` bytes captured, so the caller can
+# give `out_buf` back (`backend_capture_release`) and a result costs what the payload
+# wrote. It is not released here, because a caller may pass a buffer of its own.
+# `out_buf == 0` is a capture that had no buffer, and reads as failed.
 #
 # SAFETY (M1, 3.3.1): `exec_capture` fills until `total >= buflen` and can
 # return exactly `out_cap`. Writing `store8(out_buf + n, 0)` with n == out_cap
@@ -258,16 +296,18 @@ fn backend_capture_finish(out_buf, n, out_cap, fail_msg, start_ns, end_ns) {
     # This IS captured payload output, so the gate must see it.
     _backend_diag_only = 0;
     var r = exec_result_new();
-    if (n < 0) {
+    if (n < 0 || out_buf == 0) {
         ExecResult_set_exit_code(r, 1);
         ExecResult_set_stdout(r, "");
         ExecResult_set_stderr(r, fail_msg);
     }
     else {
         if (n >= out_cap) { n = out_cap - 1; }
-        store8(out_buf + n, 0);
+        var out = alloc(n + 1);
+        memcpy(out, out_buf, n);
+        store8(out + n, 0);
         ExecResult_set_exit_code(r, 0);
-        ExecResult_set_stdout(r, out_buf);
+        ExecResult_set_stdout(r, out);
         ExecResult_set_stderr(r, "");
     }
     ExecResult_set_duration_ms(r, (end_ns - start_ns) / 1000000);

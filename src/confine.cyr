@@ -33,6 +33,8 @@ enum SpawnExit {
     SPAWN_EXIT_IDMAP = 118;
     SPAWN_EXIT_WORKDIR = 117;
     SPAWN_EXIT_CAPS = 116;
+    SPAWN_EXIT_PROC = 115;
+    SPAWN_EXIT_READONLY = 114;
 }
 
 # 3.14.6: the capabilities a payload with a rootfs keeps unless its config names
@@ -45,6 +47,25 @@ var KAVACH_CAPS_DEFAULT = 0xA00405FB;
 var KAVACH_PR_CAPBSET_READ = 23;
 var KAVACH_PR_CAPBSET_DROP = 24;
 var KAVACH_CAP_VERSION_3 = 0x20080522;
+
+# CAP_SYS_ADMIN's bit. With it and no filter a payload unmounts the read-only `/proc`
+# and `/sys`, and as root mounts a `/proc` of its own (3.14.7).
+var KAVACH_CAP_SYS_ADMIN = 21;
+
+# statfs(2) f_type values (linux/magic.h), and where f_type and f_flags sit in the
+# 64-bit Linux `struct statfs`, the same on x86-64 and aarch64. The stdlib's STATFS_*
+# name neither field.
+var KAVACH_PROC_SUPER_MAGIC = 0x9FA0;
+var KAVACH_SYSFS_MAGIC = 0x62656572;
+var KAVACH_STATFS_TYPE = 0;
+var KAVACH_STATFS_FLAGS = 80;
+
+# The mount flags the stdlib's MsFlag does not name, and statfs's ST_RELATIME, the one
+# ST_* bit whose MS_* counterpart has another value. The rest share them.
+var KAVACH_MS_NOATIME = 1024;
+var KAVACH_MS_NODIRATIME = 2048;
+var KAVACH_MS_RELATIME = 2097152;
+var KAVACH_ST_RELATIME = 4096;
 
 # Namespace flags implied by the policy.
 #
@@ -106,6 +127,203 @@ fn _spawn_write_idmaps(uid, gid) {
     return 0;
 }
 
+# ---- A caller's /proc and /sys in a rootfs (3.14.7) ------------------------
+#
+# A rootfs entered with no `/proc` of kavach's own may hold one the caller mounted:
+# the postgres entry point needs one (ADR-009). There, through 3.14.6, uid 0 with the
+# twelve opened `core_pattern` and `sysrq-trigger` to write, because that access is
+# uid 0's and not a capability's. These make a `/proc` and a `/sys` there what runc
+# makes them: `security_readonly_path`'s read-only and `security_masked_path`'s
+# masked, and a sysfs read-only, as runc's spec mounts one. See ADR-010.
+#
+# They run in the child, from `_spawn_enter_rootfs`, with the cwd at the top of the
+# new root, so every path is relative to it. ⛔ LINUX ONLY: on agnos `sys_mount`,
+# `sys_lstat` and `sys_statfs` take other arguments, so every body is out of that build.
+
+# 1 when `path` is a directory, not a symlink, on a filesystem of type `magic`.
+fn _spawn_is_fs(path, magic) {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    var st[144];
+    if (kv_lstat(path, &st) != 0) { return 0; }
+    if ((load32(&st + STAT_MODE) & 0xF000) != 0x4000) { return 0; }
+    var sfs[2176];
+    if (sys_statfs(path, &sfs) != 0) { return 0; }
+    if ((load64(&sfs + KAVACH_STATFS_TYPE) & 0xFFFFFFFF) != magic) { return 0; }
+    return 1;
+    #endif
+}
+
+# The flags a bind remount of `path` must carry over, or -1. In a user namespace the
+# kernel locks nosuid, nodev, noexec and the atime flags of every mount it copied,
+# and a remount that drops one reads EPERM, so they are read from the mount itself.
+fn _spawn_locked_flags(path) {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0 - 1;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    var sfs[2176];
+    if (sys_statfs(path, &sfs) != 0) { return 0 - 1; }
+    var st = load64(&sfs + KAVACH_STATFS_FLAGS);
+    var f = st & (MS_NOSUID | MS_NODEV | MS_NOEXEC | KAVACH_MS_NOATIME | KAVACH_MS_NODIRATIME);
+    if ((st & KAVACH_ST_RELATIME) != 0) { f = f | KAVACH_MS_RELATIME; }
+    return f;
+    #endif
+}
+
+# Bind `path` onto itself and remount it read-only. Returns 0, or -1.
+#
+# Not recursive first, so a mount below `path` is not carried into the bind: a
+# read-only remount is not recursive, and binfmt_misc under `/proc/sys`, or a cgroup
+# or debugfs under `/sys`, would keep its own flags and stay writable. The bind then
+# hides them. In a user namespace the kernel refuses that bind (EINVAL) when a locked
+# mount is below, and there it is recursive: such a mount is owned by a uid the
+# payload is not, and writing to it reads EACCES. A path the kernel does not have is
+# skipped, as runc skips it.
+fn _spawn_readonly(path) {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0 - 1;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    var r = sys_mount(path, path, 0, MS_BIND, 0);
+    if (r == 0 - ENOENT) { return 0; }
+    if (r == 0 - EINVAL) { r = sys_mount(path, path, 0, MS_REC_BIND, 0); }
+    if (r != 0) { return 0 - 1; }
+    var f = _spawn_locked_flags(path);
+    if (f < 0) { return 0 - 1; }
+    if (sys_mount(0, path, 0, MS_REMOUNT | MS_BIND | MS_RDONLY | f, 0) != 0) { return 0 - 1; }
+    return 0;
+    #endif
+}
+
+# Mask `path` as runc's maskPath does: the host's /dev/null over a file, and an empty
+# read-only tmpfs over a directory. Returns 0, or -1. A path the kernel does not have
+# is skipped. The caller has checked that /dev/null is a character device, so an
+# ENOENT here is the target's.
+fn _spawn_mask(path) {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0 - 1;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    var st[144];
+    var l = kv_lstat(path, &st);
+    if (l == 0 - ENOENT) { return 0; }
+    if (l != 0) { return 0 - 1; }
+    var r = 0;
+    if ((load32(&st + STAT_MODE) & 0xF000) == 0x4000) {
+        r = sys_mount("tmpfs", path, "tmpfs", MS_RDONLY, 0);
+    } else {
+        r = sys_mount("/dev/null", path, 0, MS_BIND, 0);
+    }
+    if (r != 0) { return 0 - 1; }
+    return 0;
+    #endif
+}
+
+# 1 when `p`, a path from the tables, is under `top`, which ends in a slash.
+fn _spawn_path_under(p, top) {
+    var n = strlen(top);
+    if (strlen(p) < n) { return 0; }
+    return memeq(p, top, n);
+}
+
+# Guard a `/proc` and a `/sys` at the top of the cwd. Returns 0, or -1 when one is
+# there and could not be guarded, and the payload must not run.
+#
+# Before the pivot, where /dev/null is the host's: a rootfs as kavach leaves it has
+# no /dev, and runc's own check on a rootfs's /dev/null exists because a payload's
+# image can make that one a symlink (CVE-2025-31133). The host's is checked too.
+#
+# ⚠ Only `/proc` and `/sys`, as runc's lists name them, and only as directories: a
+# symlink would resolve against the host here, so it is left to
+# `_spawn_proc_sys_held`, which refuses one that leads to an unguarded procfs. A
+# procfs the caller mounted anywhere else in the rootfs is not found: see ADR-010.
+fn _spawn_guard_proc_sys() {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0 - 1;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    var has_proc = _spawn_is_fs("proc", KAVACH_PROC_SUPER_MAGIC);
+    var has_sys = _spawn_is_fs("sys", KAVACH_SYSFS_MAGIC);
+    if (has_proc == 0 && has_sys == 0) { return 0; }
+    var st[144];
+    if (kv_lstat("/dev/null", &st) != 0) { return 0 - 1; }
+    if ((load32(&st + STAT_MODE) & 0xF000) != 0x2000) { return 0 - 1; }
+    # runc's order: the read-only paths, then the masks.
+    if (has_sys == 1) {
+        if (_spawn_readonly("sys") != 0) { return 0 - 1; }
+    }
+    var i = 0;
+    while (i < SECURITY_READONLY_PATHS) {
+        var rp = security_readonly_path(i) + 1;
+        if (has_proc == 1 && _spawn_path_under(rp, "proc/") == 1) {
+            if (_spawn_readonly(rp) != 0) { return 0 - 1; }
+        }
+        i = i + 1;
+    }
+    i = 0;
+    while (i < SECURITY_MASKED_PATHS) {
+        var mp = security_masked_path(i) + 1;
+        var want = 0;
+        if (has_proc == 1 && _spawn_path_under(mp, "proc/") == 1) { want = 1; }
+        if (has_sys == 1 && _spawn_path_under(mp, "sys/") == 1) { want = 1; }
+        if (want == 1) {
+            if (_spawn_mask(mp) != 0) { return 0 - 1; }
+        }
+        i = i + 1;
+    }
+    return 0;
+    #endif
+}
+
+# After the pivot, whether a `/proc` and a `/sys` the payload will meet are guarded.
+# Returns 0, or -1, and then the payload must not run.
+#
+# `_spawn_guard_proc_sys` runs before the pivot, where an absolute symlink in the
+# rootfs resolves against the host, so it guards only a `proc` or `sys` that is a
+# directory. After the pivot a symlink resolves inside the rootfs, and could lead to a
+# procfs nothing guarded. This follows it, as the payload will: a procfs at `/proc`
+# must have a read-only `/proc/sys`, and a sysfs at `/sys` must be read-only.
+fn _spawn_proc_sys_held() {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0 - 1;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    var sfs[2176];
+    if (sys_statfs("/proc", &sfs) == 0) {
+        if ((load64(&sfs + KAVACH_STATFS_TYPE) & 0xFFFFFFFF) == KAVACH_PROC_SUPER_MAGIC) {
+            var r = sys_statfs("/proc/sys", &sfs);
+            if (r != 0 && r != 0 - ENOENT) { return 0 - 1; }
+            if (r == 0 && (load64(&sfs + KAVACH_STATFS_FLAGS) & MS_RDONLY) == 0) { return 0 - 1; }
+        }
+    }
+    if (sys_statfs("/sys", &sfs) == 0) {
+        if ((load64(&sfs + KAVACH_STATFS_TYPE) & 0xFFFFFFFF) == KAVACH_SYSFS_MAGIC) {
+            if ((load64(&sfs + KAVACH_STATFS_FLAGS) & MS_RDONLY) == 0) { return 0 - 1; }
+        }
+    }
+    return 0;
+    #endif
+}
+
+# Remount the root read-only, for a policy with `read_only_rootfs` (3.14.7). Through
+# 3.14.6 the flag was scored and nothing on the process path applied it. Run after
+# the pivot, where `/` is the rootfs's own bind, so only that mount changes: a `/proc`
+# or `/sys` below keeps what `_spawn_guard_proc_sys` gave it. Returns 0, or -1.
+fn _spawn_readonly_root() {
+    #ifdef CYRIUS_TARGET_AGNOS
+    return 0 - 1;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    var f = _spawn_locked_flags("/");
+    if (f < 0) { return 0 - 1; }
+    if (sys_mount(0, "/", 0, MS_REMOUNT | MS_BIND | MS_RDONLY | f, 0) != 0) { return 0 - 1; }
+    return 0;
+    #endif
+}
+
 # Enter `rootfs` — the step whose absence made every container before 3.9.1 run
 # host binaries.
 #
@@ -132,6 +350,10 @@ fn _spawn_write_idmaps(uid, gid) {
 # escape. pivot_root(2) names a root on the initial ramfs as one such host (read, not
 # run). A caller that is itself chrooted onto a plain directory is refused sooner, at
 # the private mount, as it was through 3.14.5, and onto a mount point it works.
+#
+# 3.14.7: a `/proc` or `/sys` the caller mounted in the rootfs is made what runc makes
+# them (`_spawn_guard_proc_sys`), between the bind and the pivot. Returns 0, -1 when
+# the rootfs cannot be entered, or -2 when a `/proc` or `/sys` there cannot be guarded.
 fn _spawn_enter_rootfs(rootfs) {
     if (rootfs == 0) { return 0; }
     # ⛔ LINUX ONLY, AND IT MUST FAIL CLOSED ELSEWHERE. This is mount-namespace + pivot_root
@@ -151,14 +373,21 @@ fn _spawn_enter_rootfs(rootfs) {
     # EBUSY for a new root on the mount it would replace.
     if (streq(rootfs, "/") == 1) {
         if (syscall(SYS_CHDIR, "/") < 0) { return 0 - 1; }
+        if (_spawn_guard_proc_sys() != 0) { return 0 - 2; }
+        if (_spawn_proc_sys_held() != 0) { return 0 - 2; }
         return 0;
     }
     if (sys_mount(rootfs, rootfs, 0, MS_REC_BIND, 0) < 0) { return 0 - 1; }
     if (syscall(SYS_CHDIR, rootfs) < 0) { return 0 - 1; }
+    # Before the pivot: the mask's /dev/null is the host's, and a bind from a mount
+    # the pivot then detaches reads EINVAL. The cwd is the bind, so the relative
+    # paths resolve in it, and the mounts move with it.
+    if (_spawn_guard_proc_sys() != 0) { return 0 - 2; }
     if (sys_pivot_root(".", ".") < 0) { return 0 - 1; }
     if (sys_umount2(".", KAVACH_MNT_DETACH) < 0) { return 0 - 1; }
     # As runc does, because the kernel promises nothing about the cwd after this.
     if (syscall(SYS_CHDIR, "/") < 0) { return 0 - 1; }
+    if (_spawn_proc_sys_held() != 0) { return 0 - 2; }
     return 0;
     #endif
 }
@@ -242,13 +471,28 @@ fn _spawn_bound_capabilities(mask) {
 # is not refused, unlike `oci_capabilities_refusal`: that rule answers a runtime
 # resolving a filter by name and skipping one it does not know, and this filter
 # compares numbers, so `open_tree_attr` is denied here.
+#
+# 3.14.7: CAP_SYS_ADMIN with no filter is refused. It unmounts the read-only `/proc`
+# and `/sys` that `_spawn_guard_proc_sys` makes, and as root mounts a `/proc` of its
+# own, so with it the masks would mean nothing. A filter denies `mount`, `umount2`,
+# `move_mount` and the rest of the mount API, and there the masks hold.
 #[must_use]
 fn confine_capabilities_refusal(config) {
     if (config == 0) { return 0; }
     if (SandboxConfig_rootfs(config) == 0) { return 0; }
     var v = SandboxConfig_capabilities(config);
     if (v == 0) { return 0; }
-    return security_capability_refusal(v);
+    var unknown = security_capability_refusal(v);
+    if (unknown != 0) { return unknown; }
+    if (((security_capability_mask(v) >> KAVACH_CAP_SYS_ADMIN) & 1) == 1) {
+        var p = SandboxConfig_policy(config);
+        var filtered = 0;
+        if (p != 0) { filtered = SandboxPolicy_seccomp_enabled(p); }
+        if (filtered != 1) {
+            return "CAP_SYS_ADMIN with a rootfs needs a seccomp filter: without one it unmounts the read-only /proc";
+        }
+    }
+    return 0;
 }
 
 # `config`'s capabilities as a mask, for `confine_child_caps`. Built in the PARENT,
@@ -396,11 +640,13 @@ fn _spawn_redirect_stdio(log_path) {
 #
 # Order is security-relevant and is the reason this is one function rather than
 # a checklist each backend re-implements:
-#   fds -> cgroup -> NO_NEW_PRIVS -> namespaces (+idmap) -> rootfs -> landlock
-#   -> capabilities -> seccomp
+#   fds -> cgroup -> NO_NEW_PRIVS -> namespaces (+idmap) -> rootfs (+ a caller's
+#   /proc and /sys guarded) -> read-only root -> landlock -> capabilities -> seccomp
 # seccomp is last because it denies mount/pivot_root/unshare; rootfs entry precedes
 # landlock because landlock path rules resolve against the current root, and the
-# capabilities follow landlock because its rules open their paths.
+# capabilities follow landlock because its rules open their paths. The mounts that
+# guard `/proc` and make the root read-only come before the capabilities, which
+# take away the CAP_SYS_ADMIN they need and that would undo them.
 # `want_ns` (3.11.3) — whether to create namespaces as the policy requests.
 #
 # **1 for every caller that predates 3.11.3, and their behaviour is unchanged.**
@@ -478,12 +724,26 @@ fn confine_child_caps(policy, rootfs, cgroup_path, uid, gid, seccomp_info, want_
             if (_spawn_write_idmaps(uid, gid) != 0) { sys_exit(SPAWN_EXIT_IDMAP); }
         }
     }
-    if (_spawn_enter_rootfs(rootfs) != 0) { sys_exit(SPAWN_EXIT_ROOTFS); }
+    var entered = _spawn_enter_rootfs(rootfs);
+    if (entered == 0 - 2) { sys_exit(SPAWN_EXIT_PROC); }
+    if (entered != 0) { sys_exit(SPAWN_EXIT_ROOTFS); }
+    if (rootfs != 0 && policy != 0) {
+        if (SandboxPolicy_read_only_rootfs(policy) == 1) {
+            if (_spawn_readonly_root() != 0) { sys_exit(SPAWN_EXIT_READONLY); }
+        }
+    }
     # After the pivot, so the path resolves inside the container. See the fn's header.
     if (_spawn_enter_workdir(workdir) != 0) { sys_exit(SPAWN_EXIT_WORKDIR); }
 
     if (_spawn_apply_landlock(policy) != 0) { sys_exit(SPAWN_EXIT_LANDLOCK); }
     if (rootfs != 0) {
+        # 3.14.7: CAP_SYS_ADMIN with no filter unmounts the read-only `/proc` and, as
+        # root, mounts a `/proc` of its own, so it is refused without one. The
+        # parent refuses it sooner (`confine_capabilities_refusal`); this holds for a
+        # caller of `confine_child_caps` that passed the mask itself.
+        if (((caps >> KAVACH_CAP_SYS_ADMIN) & 1) == 1 && seccomp_info == 0) {
+            sys_exit(SPAWN_EXIT_CAPS);
+        }
         if (_spawn_bound_capabilities(caps) != 0) { sys_exit(SPAWN_EXIT_CAPS); }
     }
     if (seccomp_info != 0) {
@@ -514,6 +774,8 @@ fn spawn_exit_name(code) {
     if (code == SPAWN_EXIT_SECCOMP) { return "cannot load seccomp filter"; }
     if (code == SPAWN_EXIT_ROOTFS) { return "cannot enter rootfs"; }
     if (code == SPAWN_EXIT_CAPS) { return "cannot bound capabilities"; }
+    if (code == SPAWN_EXIT_PROC) { return "cannot make /proc or /sys in the rootfs read-only"; }
+    if (code == SPAWN_EXIT_READONLY) { return "cannot make the rootfs read-only"; }
     if (code == SPAWN_EXIT_IDMAP) {
         return "cannot write uid_map/gid_map (already inside a restricted user namespace?)";
     }
@@ -733,6 +995,9 @@ fn confine_capture_run(c) {
     #ifndef CYRIUS_TARGET_AGNOS
     var argc = vec_len(args);
     if (argc < 1) { return 0 - 1; }
+    # No buffer (3.14.7: `backend_capture_buf` answers 0 when it has none) is a
+    # failed capture, never a write through a null pointer.
+    if (buf == 0 || buflen < 2) { return 0 - 1; }
     var argv = alloc((argc + 1) * 8);
     var i = 0;
     while (i < argc) {

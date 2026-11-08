@@ -121,7 +121,7 @@ fn _gvisor_exec_with(runsc, sandbox, command, start_ns) {
           "OCI state directory under /tmp is not a private directory owned by this user; refusing to run");
     }
     var out_cap = 1048576;
-    var out_buf = alloc(out_cap);
+    var out_buf = backend_capture_buf(out_cap);
     var n = _gvisor_run(runsc, bundle, container_id, network, cfg, out_buf, out_cap);
     var end_ns = mono_now_ns();
     var runsc_log = _oci_take_log(container_id);
@@ -129,6 +129,7 @@ fn _gvisor_exec_with(runsc, sandbox, command, start_ns) {
     # exit 0 for any container that ran (measured with a stand-in runsc exiting
     # 7), its stderr sent to /dev/null, no deadline and kavach's own stdin.
     var r = backend_run_finish(out_buf, n, out_cap, "runsc run failed", start_ns, end_ns);
+    backend_capture_release(out_buf, out_cap);
 
     _gvisor_delete(runsc, container_id);
     oci_cleanup_bundle(bundle);

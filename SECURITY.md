@@ -43,8 +43,8 @@ with residual risk, see [ADR-005](docs/adr/005-v2-hardening-pass.md).
 
 | Version | Supported |
 |---------|-----------|
-| 3.13.x (Cyrius) | **Yes — active.** Fixes land in the next 3.13.x release; nothing is backported. |
-| < 3.13 (Cyrius) | No — upgrade to the latest 3.13.x. |
+| 3.14.x (Cyrius) | **Yes — active.** Fixes land in the next 3.14.x release; nothing is backported. |
+| < 3.14 (Cyrius) | No — upgrade to the latest 3.14.x. |
 | 1.x, 2.x (Rust) | End-of-life; archived in git history. |
 
 ## Response
@@ -62,11 +62,16 @@ and unblocking conditions:
 - **A payload with no rootfs, as root, is on the host's files.** It holds what kavach holds. No capability set would
   bound it: `/proc/sys/kernel/core_pattern` and files root owns open to write with `CapEff` zero, because that access
   is uid 0's. A landlock rule is what bounds it (`policy_landlock_add`), and no preset names one.
-- **A `/proc` a caller mounted in a process-path rootfs is not read-only.** kavach mounts none, but where a caller has,
-  a payload running as uid 0 opens `core_pattern` and `sysrq-trigger` to write. On the OCI backend the mounts stop that.
-- **`sandbox_spawn` reads no backend.** A sandbox configured for OCI forks without a runtime: it holds the default set
-  and gets `pivot_root`, with no PID namespace, no `/proc` and no masks, and `score_backend` scores it as OCI.
-  All three are in `docs/development/issues/2026-11-06-process-backend-keeps-every-capability.md`.
+- **A `/dev` a caller mounted in a process-path rootfs is the host's.** The process path has no device cgroup, so where
+  a caller binds the host's `/dev` into a rootfs, a payload running as uid 0 opens the host's disks (measured:
+  `/dev/nvme0n1`, read-only). Under runc the device rules refuse a node the spec does not list.
+- **`/proc/<pid>/root` reaches a sibling sandbox.** A process-path payload has no PID namespace, so where a caller
+  mounted a `/proc` in its rootfs, it reads files in the root of another sandbox's payload that holds no more than
+  the same twelve capabilities (measured as root). The host's init and kavach's own process read EACCES.
+- **`sandbox_spawn` reads no backend.** A sandbox configured for OCI forks without a runtime: it holds the default set,
+  `pivot_root` and the `/proc` and `/sys` guard, with no PID namespace and no `/proc` of its own. Since v3.14.7
+  `score_spawn` scores it as the process path it takes.
+  All four are in `docs/development/issues/2026-11-06-process-backend-keeps-every-capability.md`, and pinned for 3.14.8.
 - **HTTP credential proxy** — direct env/file/stdin injection and the
   loopback HTTP proxy (`GET /v1/secret/<name>`) ship; HTTPS `CONNECT`
   tunnelling is not implemented
@@ -79,6 +84,14 @@ and unblocking conditions:
 
 Resolved since earlier releases:
 
+- **v3.14.7:**
+  - where a caller had mounted a `/proc` or `/sys` in a process-path rootfs, a payload running as uid 0 opened
+    `core_pattern`, `sysrq-trigger`, an IRQ affinity and a sysfs file to write, and through a `/proc` that was an rbind
+    of the host's, binfmt_misc's `register`, whose handlers run for the host's execs. Both are now made what runc makes
+    them, from the same lists the OCI spec writes, and CAP_SYS_ADMIN, which would lift them, is refused with no filter
+    ([ADR-010](docs/adr/010-proc-and-sys-in-a-process-path-rootfs.md)). CHANGELOG 3.14.7.
+  - `config_require_namespaces` was ignored under a policy asking for no seccomp and no landlock, so a payload promised
+    a network namespace ran in kavach's. CHANGELOG 3.14.7.
 - **v3.14.6:**
   - a payload with a rootfs on the process path, and every `sandbox_spawn` whatever the backend, held every capability
     and left its rootfs by `chroot`, as root and rootless, under `policy_basic()`. From there, as root, it could open

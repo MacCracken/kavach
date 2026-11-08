@@ -61,7 +61,9 @@ fn process_exec(sandbox, command) {
         }
     }
 
-    var buf = alloc(PROCESS_MAX_OUTPUT);
+    # The capture's buffer is taken next to each capture (3.14.7), so a refusal
+    # in between gives nothing back, having taken nothing.
+    var buf = 0;
     var n = 0;
     # The deadline the config carries — accepted since forever, enforced since
     # 3.11.4.
@@ -103,11 +105,19 @@ fn process_exec(sandbox, command) {
     # `/bin/cat` of a file outside any allowed path returned its 33 bytes.
     # `_spawn_enter_rootfs(0)` already returns 0, and `_spawn_ns_flags` already
     # takes `rootfs` into account, so the confined path needs no rootfs to work.
+    #
+    # **And so does `config_require_namespaces`** (3.14.7). With a policy asking
+    # for neither seccomp nor landlock this branch was skipped, and the flag with
+    # it: `policy_new()` with the flag set ran in kavach's network namespace
+    # (measured: `readlink /proc/self/ns/net` read kavach's own), where the flag
+    # promises namespaces or a refusal.
     var rootfs = 0;
     if (cfg != 0) { rootfs = SandboxConfig_rootfs(cfg); }
     var pol0 = 0;
     if (cfg != 0) { pol0 = SandboxConfig_policy(cfg); }
-    if (rootfs != 0 || policy_wants_confinement(pol0) == 1) {
+    var asks_ns = 0;
+    if (cfg != 0) { asks_ns = SandboxConfig_require_ns(cfg); }
+    if (rootfs != 0 || policy_wants_confinement(pol0) == 1 || asks_ns == 1) {
         var pol = pol0;
         var sec = 0;
         if (pol != 0) {
@@ -134,6 +144,7 @@ fn process_exec(sandbox, command) {
             if (SandboxConfig_require_ns(cfg) == 1) { want_ns = 1; }
         }
         # The workdir is applied inside the rootfs.
+        buf = backend_capture_buf(PROCESS_MAX_OUTPUT);
         var capture = confine_capture_new(args, pol, rootfs, cgroup_path, sec, buf,
           PROCESS_MAX_OUTPUT, want_ns, tmo, 1, pexec_in, pexec_in_len, pexec_env, pexec_wd);
         ConfineCapture_set_caps(capture, confine_capabilities(cfg));
@@ -141,6 +152,7 @@ fn process_exec(sandbox, command) {
         cgroup_teardown(cgroup_path);
         var end_rf = mono_now_ns();
         var rr = backend_capture_finish(buf, n, PROCESS_MAX_OUTPUT, "exec failed", start_ns, end_rf);
+        backend_capture_release(buf, PROCESS_MAX_OUTPUT);
         # Surface the payload's real exit code. Reporting 0 for a command that
         # never ran is how the missing-rootfs bug looked healthy for so long.
         if (rr != 0) {
@@ -159,12 +171,14 @@ fn process_exec(sandbox, command) {
     # ran reported `exit_code = 0` (measured: `/bin/false`, real exit 1, and
     # `/bin/ls` on a missing path, real exit 2, both came back 0) and no
     # `timeout_ms` was ever enforced. One capture, so neither can drift again.
+    buf = backend_capture_buf(PROCESS_MAX_OUTPUT);
     n = confine_capture_input_env_wd(args, 0, 0, cgroup_path, 0, buf, PROCESS_MAX_OUTPUT, 0, tmo, 0,
       pexec_in, pexec_in_len, pexec_env, pexec_wd);
     cgroup_teardown(cgroup_path);
     var end_ns = mono_now_ns();
 
     var pr = backend_capture_finish(buf, n, PROCESS_MAX_OUTPUT, "exec failed", start_ns, end_ns);
+    backend_capture_release(buf, PROCESS_MAX_OUTPUT);
     if (pr != 0) {
         ExecResult_set_exit_code(pr, confine_last_exit());
         ExecResult_set_timed_out(pr, confine_last_timed_out());

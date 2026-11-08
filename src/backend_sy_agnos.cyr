@@ -295,12 +295,13 @@ fn _sy_agnos_exec_with(runtime, sandbox, command, start_ns) {
     vec_push(sargs, "-i");
     vec_push(sargs, name);
     var out_cap = 1048576;
-    var out_buf = alloc(out_cap);
+    var out_buf = backend_capture_buf(out_cap);
     var n = confine_capture_input_env_wd(sargs, 0, 0, 0, 0, out_buf, out_cap, 0,
       _sy_agnos_left(timeout_ms, start_ns), 0, _config_payload_stdin(config), _config_payload_stdin_len(config), 0, 0);
     var end_ns = mono_now_ns();
     var timed_out = confine_last_timed_out();
     var r = backend_run_finish(out_buf, n, out_cap, "sy-agnos container run failed", start_ns, end_ns);
+    backend_capture_release(out_buf, out_cap);
 
     if (n >= 0 && timed_out == 0) {
         var iargs = vec_new();

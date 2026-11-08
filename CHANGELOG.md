@@ -7,6 +7,183 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.14.7] — 2026-11-07
+
+A `/proc` or `/sys` that a caller mounts in a process-path rootfs is now what runc makes it, and an exec costs what its
+payload wrote. Through 3.14.6, where a caller had mounted a `/proc` there, as the postgres entry point needs, uid 0
+with the twelve capabilities opened `core_pattern`, `sysrq-trigger`, an IRQ affinity and a sysfs file to write. Through
+an rbind of `/proc` it also opened binfmt_misc's `register`, whose handlers run for the host's execs. And every exec kept a
+1 MiB buffer for good. This is the roadmap's 3.14.7, with every open issue in `docs/development/issues/`: agnosai's
+capture buffer, kavach's own gVisor scoring issue, the scoring items of the process-backend issue, and a recheck of the
+sigil one, which is upstream's. The maintainer's choices are in
+[ADR-010](docs/adr/010-proc-and-sys-in-a-process-path-rootfs.md). **2003** assertions on x86-64, from 1900, and
+**1649** on aarch64 under qemu, from 1611.
+
+### ⚠ Behaviour changes
+
+- **A `/proc` or `/sys` in a process-path rootfs is guarded**, on `sandbox_exec`, `sandbox_spawn` and any caller of
+  `confine_child`. Where `proc` is a directory on a procfs, `runc spec`'s five read-only paths are made read-only and its
+  masked paths masked: the host's `/dev/null` over a file, an empty read-only tmpfs over a directory. Where `sys` is a
+  directory on a sysfs it is made read-only and `/sys/firmware` masked. The binds are not recursive, so as root a mount
+  below them (binfmt_misc under `/proc/sys`, cgroup or debugfs under `/sys`) is hidden from the payload. rootfs `/` is
+  guarded the same way, and its `/proc` and `/sys` are the host's. A rootfs with neither, as kavach leaves one, is
+  unchanged.
+- **A `/proc` symlinked to a procfs elsewhere in the rootfs is refused** with SPAWN_EXIT_PROC (115), as is any `/proc` or
+  `/sys` that could not be guarded. Before the pivot an absolute symlink resolves on the host, so the guard takes only a
+  directory, and after it a check follows the link as the payload would.
+- **A capability list naming CAP_SYS_ADMIN, with a rootfs and no seccomp filter, is refused.** With it the payload
+  unmounts the read-only paths, and as root mounts a `/proc` of its own. Under a filter it is allowed, and its `umount2`
+  is killed (exit 159). `confine_capabilities_refusal` gives the reason; a `confine_child_caps` caller passing the bit
+  itself gets SPAWN_EXIT_CAPS.
+- **`read_only_rootfs` applies on the process path with a rootfs**: the pivoted root is remounted read-only, and a create
+  at `/` reads EROFS. Through 3.14.6 it was scored and nothing on that path applied it. A failed remount is SPAWN_EXIT_READONLY
+  (114).
+- **`config_require_namespaces` is read under any policy.** Under one asking for no seccomp and no landlock the process
+  backend took its unconfined capture, which reads no namespaces, so the payload ran in kavach's network namespace where
+  the flag promises its own or a refusal. Measured: `readlink /proc/self/ns/net` read kavach's. It now runs in its own,
+  or exits 123 or 118 where the host refuses.
+- **`score_backend` scores only what the backend applies with no config to say more.** The process backend loses 5 for
+  `network_enabled = 0` and 3 for `read_only_rootfs`, which that path applies only with a rootfs or
+  `config_require_namespaces`, and gVisor loses 5 for `seccomp_enabled`, which its spec does not carry. Process under
+  `policy_strict()` reads 61 where it read 69, under `policy_basic()` 55 where it read 60, and gVisor under
+  `policy_basic()` 75 where it read 80. stiva's `security_score` and agnosai's `strength_for_policy` call `score_backend`
+  and will read the lower numbers. `score_config` and `score_spawn` score a config, below.
+- **`ExecResult_stdout` is a copy of the bytes captured**, not the capture buffer, so a result costs what its payload wrote.
+  A caller holding the pointer holds the copy.
+
+### Added
+
+- **`score_config(cfg)`**: `score_backend` for the config's backend and policy, adding on the process backend what the
+  config makes that path apply: the network namespace with a rootfs or `config_require_namespaces`, the read-only root with
+  a rootfs.
+- **`score_spawn(cfg)`**: what `sandbox_spawn` applies. It reads no backend, so an OCI sandbox's spawn scores as the process
+  path, 60 under `policy_basic()`, where `score_backend` gave its OCI 65.
+- **`security_masked_path(i)`**, **`security_readonly_path(i)`**, `SECURITY_MASKED_PATHS` (10), `SECURITY_READONLY_PATHS` (5):
+  runc's lists, by index, as string literals a forked child can read.
+- **`backend_capture_buf(cap)`** and **`backend_capture_release(buf, cap)`**: a capture's buffer as an anonymous mapping, and
+  giving it back after `backend_capture_finish` has copied it. agnos, which has no mmap, keeps `alloc`.
+- **SPAWN_EXIT_PROC (115)**, "cannot make /proc or /sys in the rootfs read-only", and **SPAWN_EXIT_READONLY (114)**,
+  "cannot make the rootfs read-only".
+
+### Changed
+
+- **runc's two lists moved from `oci_spec.cyr` to `security.cyr`**, as the capability table did in 3.14.6, because
+  `[lib.confine]` carries the one and not the other. The OCI spec writes the same JSON from them; a test holds it to 3.14.6's
+  literal.
+- **Every backend's exec captures into `backend_capture_buf` and releases it**, at the nine sites agnosai listed. The process
+  backend takes its buffer next to each capture, so a refusal before one takes nothing.
+- **The OCI spec's path lists are built once and kept.** Built from the table on every spec they cost `oci_spec_filtered`
+  5.5% in the first A/B; see Benchmarks.
+- **`src/util.cyr` includes `lib/mmap.cyr`**, for the confine sidecar (CLAUDE.md hazard 5): `check-bundles.py` caught
+  `dist/kavach-confine.cyr` calling `mmap_anon` with no mmap in its `.deps`.
+
+### Fixed
+
+- **Every exec kept its 1 MiB capture buffer for good** (agnosai,
+  [archived issue](docs/development/issues/archived/2026-11-06-agnosai-every-exec-keeps-its-1-mib-capture-buffer.md)). The
+  result's stdout was the buffer, from a heap with no free, so a payload printing nothing cost what one printing 1 MiB
+  cost. The issue's repro, both builds from this tree:
+
+  | | 3.14.6 | 3.14.7 |
+  |---|---|---|
+  | process, `/bin/true`, `alloc_used()` per exec | 1,051,156 B | 2,588 B |
+  | the same, VmRSS over 400 execs | 7.3 MB → 419 MB | 5.3 MB → 7.3 MB |
+  | wasm, wasmtime 50.0.1, an empty guest, `alloc_used()` per exec | 1,051,513 B | 2,945 B |
+
+  A buffer shared across execs was not taken: a result would hold a pointer into it only until the next exec, and two
+  threads capturing at once would share its bytes.
+- **A capture given no buffer wrote through a null pointer.** On 3.14.6 `backend_capture_finish(0, n, …)` and
+  `confine_capture` with a null buffer segfaulted. Both captures, and `kv_exec_capture`, now read it as a failed capture.
+
+### Security
+
+Measured as root in a throwaway privileged container, through kavach's public paths, from inside the payload, opening and
+never writing. The caller's `/proc` and `/sys` were mounted in the rootfs, under `policy_basic()` and `policy_new()`, on
+`sandbox_exec` and `sandbox_spawn`. Both builds come from this tree:
+
+| | 3.14.6 | 3.14.7 |
+|---|---|---|
+| open `core_pattern`, `sysrq-trigger`, `/proc/irq/default_smp_affinity` to write | **opened** | EROFS |
+| open `/sys/kernel/mm/transparent_hugepage/enabled` to write | **opened** | EROFS |
+| `/proc` an rbind carrying binfmt_misc: open its `register` to write | **opened** | ENOENT, hidden |
+| read `/proc/kcore`, `/proc/timer_list` | EPERM, a byte | 0 bytes, masked |
+| from a nested user namespace, `umount2` of `/proc/sys` and the mask | nothing mounted there to lift | EINVAL, locked |
+| a `/proc` symlinked to a procfs elsewhere in the rootfs | ran | refused, 115 |
+| CAP_SYS_ADMIN in the list, no filter | ran | refused |
+
+Rootless the writes read EACCES before and after, so that half is read from `mountinfo`. The postgres entry point, its image's
+filesystem as the rootfs with the caller's `/dev` and `/proc`, as ADR-009 ran it, answers `pg_isready` on both.
+
+### Still open
+
+In [the process-backend issue](docs/development/issues/2026-11-06-process-backend-keeps-every-capability.md), in
+`SECURITY.md`, and pinned on the roadmap as 3.14.8:
+
+- **`/proc/<pid>/root` reaches a sibling sandbox.** Measured as root on both builds and both policies: with a caller's
+  `/proc`, a payload read a file in another sandbox's root, whose payload holds the same twelve. The host's PID 1 and
+  kavach's own process read EACCES. A payload here has no PID namespace.
+- **A caller's `/dev` is the host's.** Measured as root on 3.14.7, with the caller's `/dev` an rbind of the host's: a payload
+  opened `/dev/nvme0n1` read-only. It opened and closed it and read nothing. runc's device cgroup refuses such a node, and the process path has none.
+- **No rootfs, as root (Ask 3)**, unchanged, and **`sandbox_spawn` on an OCI sandbox** still detaches on the process path, now
+  scored as that.
+- **gVisor's filter** waits for a machine with runsc: a wrong `--oci-seccomp` fails every gVisor sandbox, so only the score
+  changed ([archived issue](docs/development/issues/archived/2026-11-06-gvisor-policy-seccomp-is-not-applied.md)).
+- **sigil's TDX type-6 parse**, upstream. Rechecked, measured: `tdx_quote_parse` still returns 0 on the real quote and
+  kavach's unwrap 1. The pin is still cyrius 6.7.18.
+
+### Tests
+
+- **`test_process_rootfs_guards_proc`** runs rootless, through rootfs `/`, which carries the host's `/proc` and `/sys`: the
+  mounts from `mountinfo`, `/proc/kcore` reading as `/dev/null`, no unmount, a nested user namespace finding them locked, and
+  CAP_SYS_ADMIN refused with no filter and killed under one. **`test_process_rootfs_caller_proc`** runs as root, in CI's root
+  job: it mounts a `/proc` and `/sys` in a real rootfs, in a child's own mount namespace so the host's table is never
+  touched, and asserts EROFS from inside on both paths and both policies, and the symlinked `/proc` refused.
+  **`test_process_rootfs_read_only`**, **`test_capture_costs_what_was_written`**, **`test_score_what_is_applied`**,
+  **`test_require_namespaces_without_a_filter`** and **`test_proc_path_tables`** cover the rest.
+  `test_backend_capture_finish_clamp` reads the clamp from the copy.
+- The count went from 1900 to 2003 rootless, which is the sum of the new groups as they run here (one root group skips), and
+  the root groups from 216 to 219. Built against 3.14.6's `src/`, with stand-ins for the new names and without the two null-buffer
+  calls, which crash it, the new tests fail **53** times rootless and **104** times as root.
+- **23 mutants**, each a new check reverted in a scratch copy, rootless and, for the root-only ones, as root with binfmt_misc
+  mounted: 21 failed the suite. Two survive, and both checks stay. Requiring `proc` to be a directory before the pivot keeps the
+  guard from mounting through a symlink into kavach's own copy of the host's tree, which the pivot then detaches, so nothing a
+  payload sees differs. Checking that the host's `/dev/null` is a character device holds on every host here. A recursive bind first
+  fails only as root with a binfmt_misc mounted, which is the case it exists for.
+- ⚠ The root runs share this machine's Arch kernel (7.2.14, no AppArmor), in an `ubuntu:24.04` container with no runc, so the OCI
+  group skipped there. CI's `ubuntu-26.04` root job is the first run of the new groups under AppArmor.
+
+### Verified
+
+`cyrius fmt --check` clean on every changed file, `cyrius lint` 0 warnings, `cyrius vet`, `scripts/check-symbols.py`,
+`cyrius distlib --all` and `scripts/check-bundles.py` (both bundles), and builds for `--aarch64` and `--agnos`. Under
+`qemu-aarch64 -strace` the guard issues `newfstatat(…, AT_SYMLINK_NOFOLLOW)`, `statfs` and `mount(…, MS_BIND)`, and the capture
+`mmap` and `munmap` of 1 MiB. The `statfs` flags read the same on both arches (`2097166`, nosuid, nodev, noexec and
+relatime). `tests/samay_integration.tcyr` passes 12 of 12, and the `duplicate fn` set is empty, as on 3.14.6. The
+smoke banner reads `kavach v3.14.7` on x86-64 and on aarch64 under qemu.
+
+### Benchmarks
+
+Recorded as `3.14.7` in `benches/bench-history.csv`. Interleaved against the 3.14.6 tag (`scripts/bench-ab.py`, five rounds
+a side, pinned to one CPU), every exec row's ranges overlap, which reads as no measured change. That includes
+`process_exec_large_output`, which now copies its 1 MiB out of the mapping. `oci_spec_filtered` is 4.2% faster, 34.72 to 33.27 µs,
+because the path lists are built once. A first A/B, with the lists built from the table on every spec, read it 5.5% slower
+(34.98 to 36.91 µs), which is why they are cached. Two rows this change does not touch separate: `policy_strict_create` is 8.9% faster
+and `merge_policies_landlock` 4.1% slower, as it read 3.7% slower in the first A/B too. Neither is traced. The first recording
+of the row read many benches 3 to 22% slower than 3.14.6's row, while another session's builds held two cores. The A/B runs both
+builds under the same load and does not show them, so the row was recorded again after the cache.
+
+None of the 32 enters a rootfs, so that was timed apart, as root in a container pinned to one CPU: both builds interleaved,
+8 windows of 150 execs a side, the first dropped as warm-up. Medians per exec:
+
+| | 3.14.6 | 3.14.7 |
+|---|---|---|
+| a rootfs with the caller's `/proc` and `/sys` | 4.07 ms (4.05 to 4.10) | 3.93 ms (3.91 to 3.97) |
+| a rootfs with neither | 4.03 ms (4.02 to 4.16) | 3.99 ms (3.96 to 4.00) |
+
+The guard's mounts do not show at this resolution. Both rows are faster on 3.14.7, and the extra mounts cannot be the
+reason. The likely one is the capture: a 3.14.6 driver grows by 1 MiB of heap per exec, so its forks copy more. That was
+not isolated.
+
 ## [3.14.6] — 2026-11-06
 
 A rootfs on the process path holds. Through 3.14.5 a payload there held every capability and left its rootfs in three

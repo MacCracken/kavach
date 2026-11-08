@@ -24,14 +24,33 @@ fn score_label(score) {
     return "unknown";
 }
 
-# Score a backend with policy modifiers applied. Matches SY reference.
+# Score a backend with policy modifiers applied. Matches SY reference, less what a
+# backend does not apply.
+#
+# 3.14.7: a modifier counts only where the backend applies it with no config to say
+# more, which is all this function is given. Through 3.14.6:
+#
+#   - The process backend took 5 for `network_enabled = 0` and 3 for
+#     `read_only_rootfs`. With no rootfs it gives a payload neither: it runs in
+#     kavach's network namespace unless `config_require_namespaces` is set, and
+#     on the host's root. `score_config` adds them back where the config makes
+#     the path apply them, and `score_spawn` scores `sandbox_spawn`.
+#   - gVisor took 5 for `seccomp_enabled`. Its spec carries no filter, because
+#     runsc applies one only under `--oci-seccomp` and has no case for the
+#     action the OCI backend's filter uses (read in runsc's source, not run:
+#     docs/development/issues/2026-11-06-gvisor-policy-seccomp-is-not-applied.md).
+#     The sentry stands between its payload and the host either way.
 fn score_backend(backend, policy) {
     var score = base_score(backend);
 
-    if (SandboxPolicy_seccomp_enabled(policy) == 1) { score = score + 5; }
+    if (SandboxPolicy_seccomp_enabled(policy) == 1) {
+        if (backend != KavachBackend.GVISOR) { score = score + 5; }
+    }
     if (SandboxPolicy_landlock_rules_len(policy) > 0) { score = score + 3; }
-    if (SandboxPolicy_network_enabled(policy) == 0) { score = score + 5; }
-    if (SandboxPolicy_read_only_rootfs(policy) == 1) { score = score + 3; }
+    if (backend != KavachBackend.PROCESS) {
+        if (SandboxPolicy_network_enabled(policy) == 0) { score = score + 5; }
+        if (SandboxPolicy_read_only_rootfs(policy) == 1) { score = score + 3; }
+    }
 
     # Resource limits: +2 once if either memory or cpu is set
     if (SandboxPolicy_memory_limit_mb(policy) > 0) { score = score + 2; }
@@ -50,6 +69,55 @@ fn score_backend(backend, policy) {
     if (score > 100) { score = 100; }
     if (score < 0) { score = 0; }
     return score;
+}
+
+# What the process path adds for `policy` past `score_backend`'s, when it creates
+# the policy's namespaces (`ns`) and enters a rootfs (`rootfs`).
+fn _score_process_path(policy, rootfs, ns) {
+    var s = 0;
+    if (ns == 1 && SandboxPolicy_network_enabled(policy) == 0) { s = s + 5; }
+    if (rootfs != 0 && SandboxPolicy_read_only_rootfs(policy) == 1) { s = s + 3; }
+    return s;
+}
+
+fn _score_clamp(s) {
+    if (s > 100) { return 100; }
+    if (s < 0) { return 0; }
+    return s;
+}
+
+# The score of what `sandbox_exec` applies for `cfg`, 0-100 (3.14.7). It is
+# `score_backend` for the config's backend and policy, and on the process backend
+# it adds what the config makes that path apply: the network namespace with a
+# rootfs or `config_require_namespaces`, and the read-only root with a rootfs.
+#[must_use]
+fn score_config(cfg) {
+    if (cfg == 0) { return 0; }
+    var b = SandboxConfig_backend(cfg);
+    var p = SandboxConfig_policy(cfg);
+    if (p == 0) { return base_score(b); }
+    var s = score_backend(b, p);
+    if (b == KavachBackend.PROCESS) {
+        var rootfs = SandboxConfig_rootfs(cfg);
+        var ns = 0;
+        if (rootfs != 0 || SandboxConfig_require_ns(cfg) == 1) { ns = 1; }
+        s = s + _score_process_path(p, rootfs, ns);
+    }
+    return _score_clamp(s);
+}
+
+# The score of what `sandbox_spawn` applies for `cfg`, 0-100 (3.14.7). It reads no
+# backend, so a payload spawned from an OCI or gVisor sandbox runs on the process
+# path and scores as one, where `score_backend` gave it the backend's 55 or 70. Its
+# namespaces are always requested, and refused closed, so the network counts.
+#[must_use]
+fn score_spawn(cfg) {
+    if (cfg == 0) { return 0; }
+    var p = SandboxConfig_policy(cfg);
+    if (p == 0) { return base_score(KavachBackend.PROCESS); }
+    var s = score_backend(KavachBackend.PROCESS, p);
+    s = s + _score_process_path(p, SandboxConfig_rootfs(cfg), 1);
+    return _score_clamp(s);
 }
 
 # Rank all available backends by score under `policy`. Returns strongest

@@ -14,3 +14,4 @@ accepted — supersession is recorded via status updates, not rewrites.
 | [007](007-syscall-numbers-across-architectures.md) | Syscall numbers across architectures: native-ABI seccomp, and refusal over native numbers | Accepted | v3.12.8 |
 | [008](008-oci-capability-default.md) | The OCI capability default, and how a payload asks for more | Accepted | v3.14.5 |
 | [009](009-rootfs-on-the-process-path.md) | A rootfs on the process path: pivot_root and the default set | Accepted | v3.14.6 |
+| [010](010-proc-and-sys-in-a-process-path-rootfs.md) | A caller's `/proc` and `/sys` in a process-path rootfs: runc's lists | Accepted | v3.14.7 |

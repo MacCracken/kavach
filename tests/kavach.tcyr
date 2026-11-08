@@ -127,10 +127,11 @@ fn test_score_modifiers() {
     var m = policy_minimal();
     assert_eq(score_backend(KavachBackend.NOOP, m), 5, "noop+minimal = 5");
 
-    # Strict policy on Process: base 50 + seccomp 5 + no-net 5 + ro 3 + mem/cpu 2
-    # + scope abstract 2 + scope signal 2 = 69
+    # Strict policy on Process: base 50 + seccomp 5 + mem/cpu 2 + scope abstract 2
+    # + scope signal 2 = 61. Through 3.14.6 it took no-net 5 and ro 3 as well, which
+    # the process path applies only with a rootfs: see `score_config`.
     var s = policy_strict();
-    assert_eq(score_backend(KavachBackend.PROCESS, s), 69, "process+strict = 69");
+    assert_eq(score_backend(KavachBackend.PROCESS, s), 61, "process+strict = 61, since 3.14.7");
 
     # Firecracker clamped to 100 under strict.
     var f = score_backend(KavachBackend.FIRECRACKER, s);
@@ -2799,8 +2800,11 @@ fn test_backend_capture_finish_clamp() {
     memset(buf, 65, cap);                     # fill with 'A', no NUL anywhere
     var r = backend_capture_finish(buf, cap, cap, "fail", 0, 0);
     assert_eq(ExecResult_exit_code(r), 0, "success path on full buffer");
-    # NUL clamped to cap-1 (in-bounds), never written at buf+cap (overflow).
-    assert_eq(load8(buf + cap - 1), 0, "NUL clamped to cap-1");
+    # The count clamped to cap-1, never read or written at buf+cap (overflow). Since
+    # 3.14.7 the stdout is a copy, so the clamp shows in its length, and the
+    # caller's buffer is left as it was.
+    assert_eq(strlen(ExecResult_stdout(r)), cap - 1, "count clamped to cap-1");
+    assert_eq(load8(buf + cap - 1), 65, "and the caller's buffer is not written");
     var r2 = backend_capture_finish(buf, 0 - 1, cap, "fail", 0, 0);
     assert_eq(ExecResult_exit_code(r2), 1, "n<0 -> failure result");
     return 0;
@@ -8960,6 +8964,20 @@ fn _t_rootfs_payload(mode) {
         if (mk == 0) { sys_unlink("/kv-node"); }
         return 0;
     }
+    if (mode == 5) {
+        # 3.14.7: a create at the top of the rootfs, for `read_only_rootfs`.
+        var fd = file_open("/kv-ro-probe", O_WRONLY | O_CREAT, 420);
+        _t_payload_put("create ");
+        if (fd >= 0) {
+            sys_close(fd);
+            sys_unlink("/kv-ro-probe");
+            _t_payload_num(0);
+        } else {
+            _t_payload_num(fd);
+        }
+        _t_payload_put("\n");
+        return 0;
+    }
     if (mode == 3) {
         # Only with no filter, which would kill it.
         _t_payload_put("mount ");
@@ -9170,6 +9188,554 @@ fn test_process_rootfs_payload() {
     sys_unlink(_t_lbl(root, "/kv-mode"));
     kv_rmdir(sub);
     _t_oci_rootfs_clean(root, payload);
+    return 0;
+}
+
+# ---- 3.14.7: a /proc and /sys the caller mounted in a rootfs -----------------
+#
+# Through 3.14.6, where a caller had mounted a /proc in a process-path rootfs, as
+# the postgres entry point needs, uid 0 with the twelve opened `core_pattern` and
+# `sysrq-trigger` to write. These assert from inside the payload, which here has
+# a /proc, so it takes its mode from argv.
+
+# The absolute path of this test binary, for a payload on rootfs "/".
+fn _t_self_path() {
+    var b = alloc(4096);
+    var n = sys_readlink("/proc/self/exe", b, 4095);
+    if (n <= 0) { return 0; }
+    store8(b + n, 0);
+    return b;
+}
+
+fn _t_proc_payload(mode) {
+    # SAFETY: PR_SET_DUMPABLE 0, as `_t_rootfs_payload` does: a filter kill is a
+    # core dump, and a core dump runs the host's core_pattern.
+    syscall(SYS_PRCTL, 4, 0, 0, 0, 0);
+    if (mode == 0) {
+        # The kernel's own word for each mount, which reads the same rootless,
+        # where a write stops at EACCES first. See `_t_oci_payload`'s mode 3.
+        _t_payload_mounted("rosys", " /proc/sys ro,");
+        _t_payload_mounted("rosysrq", " /proc/sysrq-trigger ro,");
+        _t_payload_mounted("roirq", " /proc/irq ro,");
+        _t_payload_mounted("kcoremask", " /proc/kcore ");
+        _t_payload_mounted("rosysfs", " /sys ro,");
+        _t_payload_mounted("fwmask", " /sys/firmware ro,");
+        # Each opens and never writes.
+        _t_payload_wopen("pattern", "/proc/sys/kernel/core_pattern");
+        _t_payload_wopen("sysrq", "/proc/sysrq-trigger");
+        _t_payload_wopen("irq", "/proc/irq/default_smp_affinity");
+        _t_payload_wopen("thp", "/sys/kernel/mm/transparent_hugepage/enabled");
+        # binfmt_misc is a mount below /proc/sys where systemd mounts one. A
+        # recursive bind would have carried it in writable, and a handler
+        # registered there runs for the host's execs.
+        _t_payload_wopen("binfmt", "/proc/sys/fs/binfmt_misc/register");
+        _t_payload_rbyte("kcore", "/proc/kcore");
+        return 0;
+    }
+    if (mode == 1) {
+        # With no filter only, which kills a `umount2`.
+        _t_payload_put("unmount-sys ");
+        _t_payload_num(sys_umount2("/proc/sys", 2));        # MNT_DETACH
+        _t_payload_put("\nunmount-kcore ");
+        _t_payload_num(sys_umount2("/proc/kcore", 2));
+        _t_payload_put("\nunmount-sysfs ");
+        _t_payload_num(sys_umount2("/sys", 2));
+        _t_payload_put("\n");
+        _t_payload_mounted("still-sys", " /proc/sys ro,");
+        _t_payload_mounted("still-kcore", " /proc/kcore ");
+        _t_payload_wopen("pattern", "/proc/sys/kernel/core_pattern");
+        return 0;
+    }
+    if (mode == 2) {
+        # A nested user namespace holds every capability again, and the kernel
+        # locks the mounts it copied into it: umount reads EINVAL.
+        var u = sys_unshare(CLONE_NEWUSER | CLONE_NEWNS);
+        _t_payload_put("nested ");
+        _t_payload_num(u);
+        _t_payload_put("\n");
+        if (u != 0) { return 0; }
+        _t_payload_put("unmount-sys ");
+        _t_payload_num(sys_umount2("/proc/sys", 2));
+        _t_payload_put("\nunmount-kcore ");
+        _t_payload_num(sys_umount2("/proc/kcore", 2));
+        _t_payload_put("\nmount ");
+        _t_payload_num(sys_mount("proc", "/proc", "proc", 0, 0));
+        _t_payload_put("\n");
+        _t_payload_mounted("still-sys", " /proc/sys ro,");
+        _t_payload_mounted("still-kcore", " /proc/kcore ");
+        _t_payload_wopen("pattern", "/proc/sys/kernel/core_pattern");
+        return 0;
+    }
+    return 0;
+}
+
+fn _t_proc_cmd(exe, mode) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, exe);
+    str_builder_add_cstr(sb, " --kv-proc-payload ");
+    var nb[8];
+    store8(&nb, 48 + mode);
+    store8(&nb + 1, 0);
+    str_builder_add_cstr(sb, &nb);
+    return str_data(str_builder_build(sb));
+}
+
+var _T_PROC_CODE = 0 - 1;
+
+fn _t_proc_exec(policy, root, exe, mode, caps) {
+    var sb = _t_oci_sandbox(KavachBackend.PROCESS, policy, root);
+    if (caps != 0) { config_capabilities(Sandbox_config(sb), caps); }
+    var r = process_exec(sb, _t_proc_cmd(exe, mode));
+    _T_PROC_CODE = ExecResult_exit_code(r);
+    return ExecResult_stdout(r);
+}
+
+# The same through `sandbox_spawn`. 0 when the spawn is refused.
+fn _t_proc_spawn(policy, root, exe, mode) {
+    var log = "/tmp/kavach-t-proc.log";
+    sys_unlink(log);
+    var sb = _t_oci_sandbox(KavachBackend.PROCESS, policy, root);
+    Sandbox_set_state(sb, SandboxState.RUNNING);
+    var sp = sandbox_spawn(sb, _t_proc_cmd(exe, mode), log);
+    if (sp == 0) { return 0; }
+    var waited = 0;
+    while (waited < 10000) {
+        if (spawned_try_wait(sp) == 1) { break; }
+        sleep_ms(5);
+        waited = waited + 5;
+    }
+    _T_PROC_CODE = spawned_terminate(sp, 100);
+    var buf = alloc(65536);
+    var n = file_read_all(log, buf, 65535);
+    if (n < 0) { n = 0; }
+    store8(buf + n, 0);
+    sys_unlink(log);
+    return buf;
+}
+
+# What every payload with a /proc and /sys there must meet, as any uid. A write
+# stops at EACCES rootless, so the mounts are read from mountinfo, and as root the
+# writes must read EROFS.
+fn _t_proc_assert_guarded(o, what) {
+    assert_eq(_T_PROC_CODE, 0, _t_lbl(what, ": the payload runs"));
+    assert(_t_has_line(o, "rosys 1") == 1, _t_lbl(what, ": /proc/sys is read-only"));
+    assert(_t_has_line(o, "rosysrq 1") == 1, _t_lbl(what, ": and /proc/sysrq-trigger"));
+    assert(_t_has_line(o, "roirq 1") == 1, _t_lbl(what, ": and /proc/irq"));
+    assert(_t_has_line(o, "kcoremask 1") == 1, _t_lbl(what, ": /proc/kcore is masked"));
+    assert(_t_has_line(o, "kcore 0") == 1, _t_lbl(what, ": and reads as /dev/null"));
+    assert(_t_has_line(o, "rosysfs 1") == 1, _t_lbl(what, ": /sys is read-only"));
+    assert(_t_has_line(o, "fwmask 1") == 1, _t_lbl(what, ": and /sys/firmware masked"));
+    assert_eq(_t_count(o, "opened"), 0, _t_lbl(what, ": nothing opens to write"));
+    if (sys_getuid() == 0) {
+        assert(_t_has_line(o, "pattern -30") == 1, _t_lbl(what, ": as root core_pattern reads EROFS"));
+        assert(_t_has_line(o, "sysrq -30") == 1, _t_lbl(what, ": and sysrq-trigger"));
+        assert(_t_has_line(o, "irq -30") == 1, _t_lbl(what, ": and an irq affinity"));
+    }
+    return 0;
+}
+
+# The two tables, and the OCI spec written from them, as it was by hand.
+fn test_proc_path_tables() {
+    test_group("proc_path_tables");
+    assert_eq(SECURITY_MASKED_PATHS, 10, "runc's ten masked paths");
+    assert_eq(SECURITY_READONLY_PATHS, 5, "and five read-only ones");
+    assert_eq(security_masked_path(SECURITY_MASKED_PATHS), 0, "nothing past the masked end");
+    assert_eq(security_readonly_path(SECURITY_READONLY_PATHS), 0, "nor the read-only end");
+    var i = 0;
+    var bad = 0;
+    while (i < SECURITY_MASKED_PATHS) {
+        var p = security_masked_path(i);
+        if (_spawn_path_under(p + 1, "proc/") == 0 && _spawn_path_under(p + 1, "sys/") == 0) { bad = bad + 1; }
+        i = i + 1;
+    }
+    i = 0;
+    while (i < SECURITY_READONLY_PATHS) {
+        if (_spawn_path_under(security_readonly_path(i) + 1, "proc/") == 0) { bad = bad + 1; }
+        i = i + 1;
+    }
+    assert_eq(bad, 0, "every path is under /proc or /sys, which is all the child guards");
+    # 3.14.6's literal, so the spec did not change when the table moved.
+    var want = ",\"maskedPaths\":[\"/proc/acpi\",\"/proc/asound\",\"/proc/kcore\",\"/proc/keys\",\"/proc/latency_stats\",\"/proc/timer_list\",\"/proc/timer_stats\",\"/proc/sched_debug\",\"/sys/firmware\",\"/proc/scsi\"],\"readonlyPaths\":[\"/proc/bus\",\"/proc/fs\",\"/proc/irq\",\"/proc/sys\",\"/proc/sysrq-trigger\"]";
+    assert_eq(streq(_oci_paths_json(), want), 1, "the OCI spec's lists are unchanged");
+    return 0;
+}
+
+# A rootfs of "/" carries the host's /proc and /sys, so this runs rootless, where
+# kavach makes the user namespace. As root it is the host's own tree.
+fn test_process_rootfs_guards_proc() {
+    test_group("process_rootfs_guards_proc");
+    if (spawn_namespaces_available(_spawn_ns_flags(policy_new(), "/")) == 0) {
+        _t_oci_skip("this host refuses the namespaces a rootfs needs — not exercisable", 0);
+        return 0;
+    }
+    var exe = _t_self_path();
+    assert(exe != 0, "the test binary has a path");
+    if (exe == 0) { return 0; }
+    _t_proc_assert_guarded(_t_proc_exec(policy_basic(), "/", exe, 0, 0), "policy_basic, exec");
+    _t_proc_assert_guarded(_t_proc_exec(policy_new(), "/", exe, 0, 0), "policy_new, exec");
+    _t_proc_assert_guarded(_t_proc_spawn(policy_basic(), "/", exe, 0), "policy_basic, spawn");
+
+    # The twelve hold no CAP_SYS_ADMIN, so the mounts stay.
+    var um = _t_proc_exec(policy_new(), "/", exe, 1, 0);
+    assert_eq(_T_PROC_CODE, 0, "the unmount probe finishes");
+    assert(_t_has_line(um, "unmount-sys -1") == 1, "/proc/sys does not come off: EPERM");
+    assert(_t_has_line(um, "unmount-kcore -1") == 1, "nor /proc/kcore's mask");
+    assert(_t_has_line(um, "unmount-sysfs -1") == 1, "nor /sys");
+    assert(_t_has_line(um, "still-sys 1") == 1, "and /proc/sys is still read-only");
+
+    var ns = _t_proc_exec(policy_new(), "/", exe, 2, 0);
+    assert_eq(_T_PROC_CODE, 0, "the nested probe finishes");
+    if (_t_has_line(ns, "nested 0") == 1) {
+        assert(_t_has_line(ns, "unmount-sys -22") == 1, "a nested user namespace finds the mount locked");
+        assert(_t_has_line(ns, "unmount-kcore -22") == 1, "and the mask");
+        assert(_t_has_line(ns, "still-sys 1") == 1, "which stays");
+        assert(_t_has_line(ns, "still-kcore 1") == 1, "both of them");
+        assert_eq(_t_has_line(ns, "mount 0"), 0, "and no /proc of its own mounts");
+        assert_eq(_t_count(ns, "opened"), 0, "nothing opens to write from there either");
+    } else {
+        _t_oci_skip("this host gives a payload no nested user namespace", _t_oneline(ns));
+    }
+
+    # CAP_SYS_ADMIN unmounts all of it, so with no filter it is refused.
+    var adm = oci_default_capabilities();
+    vec_push(adm, "CAP_SYS_ADMIN");
+    var refused = _t_proc_exec(policy_new(), "/", exe, 0, adm);
+    assert(_T_PROC_CODE != 0, "CAP_SYS_ADMIN with no filter fails the exec");
+    assert_eq(_t_count(refused, "rosys"), 0, "and no payload ran");
+    var cfg = config_new();
+    config_rootfs(cfg, "/");
+    config_policy(cfg, policy_new());
+    config_capabilities(cfg, adm);
+    assert(confine_capabilities_refusal(cfg) != 0, "the parent says why");
+    config_policy(cfg, policy_basic());
+    assert_eq(confine_capabilities_refusal(cfg), 0, "under a filter it is not refused");
+    var held = _t_proc_exec(policy_basic(), "/", exe, 0, adm);
+    _t_proc_assert_guarded(held, "CAP_SYS_ADMIN under the filter");
+    var killed = _t_proc_exec(policy_basic(), "/", exe, 1, adm);
+    assert_eq(_T_PROC_CODE, 128 + 31, "and its umount is killed by the filter");
+    assert_eq(_t_count(killed, "unmount-sys 0"), 0, "before anything comes off");
+
+    # A caller of `confine_child_caps` passing the bit itself meets the same refusal.
+    var c = confine_capture_new(_t_argv1("/bin/true"), policy_new(), "/", 0, 0, alloc(64), 64,
+      1, 10000, 1, 0, 0, 0, 0);
+    ConfineCapture_set_caps(c, KAVACH_CAPS_DEFAULT | (1 << KAVACH_CAP_SYS_ADMIN));
+    confine_capture_run(c);
+    assert_eq(confine_last_exit(), SPAWN_EXIT_CAPS, "the child refuses the bit with no filter");
+    assert(spawn_exit_name(SPAWN_EXIT_PROC) != 0, "the new codes have names");
+    assert(spawn_exit_name(SPAWN_EXIT_READONLY) != 0, "both of them");
+    return 0;
+}
+
+# As root, with a rootfs whose caller mounted /proc and /sys, as the issue's third
+# row did. The mounts are made in a child's own mount namespace, so the host's
+# table is never touched, and the child writes each payload's output to a file.
+var _T_CPROC_DIR = "/tmp/kavach-t-cproc";
+var _T_CPROC_LINK = "/tmp/kavach-t-cproc-link";
+
+fn _t_cproc_out(k) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "/tmp/kavach-t-cproc-out-");
+    var nb[8];
+    store8(&nb, 48 + k);
+    store8(&nb + 1, 0);
+    str_builder_add_cstr(sb, &nb);
+    return str_data(str_builder_build(sb));
+}
+
+fn _t_cproc_save(k, o) {
+    var p = _t_cproc_out(k);
+    sys_unlink(p);
+    var b[16];
+    var n = fmt_int_buf(_T_PROC_CODE, &b);
+    store8(&b + n, 10);
+    file_write_all(p, &b, n + 1);
+    if (o != 0) {
+        var f = file_open(p, O_WRONLY | O_APPEND, 0);
+        if (f >= 0) {
+            sys_write(f, o, strlen(o));
+            sys_close(f);
+        }
+    }
+    return 0;
+}
+
+fn _t_cproc_load(k) {
+    var p = _t_cproc_out(k);
+    var buf = alloc(65536);
+    var n = file_read_all(p, buf, 65535);
+    if (n < 0) { n = 0; }
+    store8(buf + n, 0);
+    sys_unlink(p);
+    _T_PROC_CODE = atoi(buf);
+    var nl = 0;
+    while (nl < n && load8(buf + nl) != 10) { nl = nl + 1; }
+    if (nl < n) { return buf + nl + 1; }
+    return buf + n;
+}
+
+fn _t_cproc_child(root) {
+    if (sys_unshare(CLONE_NEWNS) != 0) { sys_exit(2); }
+    if (sys_mount(0, "/", 0, MS_REC_PRIVATE, 0) != 0) { sys_exit(3); }
+    if (sys_mount("proc", _t_lbl(root, "/proc"), "proc", 0, 0) != 0) { sys_exit(4); }
+    if (sys_mount("sysfs", _t_lbl(root, "/sys"), "sysfs", 0, 0) != 0) { sys_exit(5); }
+    _t_cproc_save(0, _t_proc_exec(policy_basic(), root, "/payload", 0, 0));
+    _t_cproc_save(1, _t_proc_exec(policy_new(), root, "/payload", 0, 0));
+    _t_cproc_save(2, _t_proc_spawn(policy_basic(), root, "/payload", 0));
+    _t_cproc_save(3, _t_proc_spawn(policy_new(), root, "/payload", 0));
+    _t_cproc_save(4, _t_proc_exec(policy_new(), root, "/payload", 1, 0));
+    _t_cproc_save(5, _t_proc_exec(policy_new(), root, "/payload", 2, 0));
+    # A /proc that is a symlink to a procfs elsewhere in the rootfs: before the pivot
+    # it would resolve on the host, so it is not guarded there, and after it the
+    # payload would follow it. It must not run.
+    var link = _T_CPROC_LINK;
+    if (sys_mount("proc", _t_lbl(link, "/realproc"), "proc", 0, 0) != 0) { sys_exit(6); }
+    _t_cproc_save(6, _t_proc_exec(policy_basic(), link, "/payload", 0, 0));
+    sys_exit(0);
+    return 0;
+}
+
+fn test_process_rootfs_caller_proc() {
+    test_group("process_rootfs_caller_proc");
+    if (sys_getuid() != 0) {
+        _t_oci_skip("mounting a /proc in a rootfs needs root: CI's root job runs this", 0);
+        return 0;
+    }
+    if (_t_runtime_is_native("/bin/sh") == 0) {
+        _t_oci_skip("this build is emulated: no payload of its arch starts here — not exercisable", 0);
+        return 0;
+    }
+    var root = _T_CPROC_DIR;
+    var payload = _t_oci_rootfs(root);
+    assert(payload != 0, "the rootfs is built");
+    if (payload == 0) { return 0; }
+    kv_mkdir(_t_lbl(root, "/sys"), 493);
+    var link = _T_CPROC_LINK;
+    var lpayload = _t_oci_rootfs(link);
+    assert(lpayload != 0, "the symlinked rootfs is built");
+    if (lpayload == 0) { return 0; }
+    kv_rmdir(_t_lbl(link, "/proc"));
+    kv_mkdir(_t_lbl(link, "/realproc"), 493);
+    sys_symlink("/realproc", _t_lbl(link, "/proc"));
+    var pid = kv_fork();
+    if (pid == 0) { _t_cproc_child(root); }
+    var st[8];
+    store64(&st, 0);
+    kv_waitpid(pid, &st, 0);
+    assert_eq((load32(&st) >> 8) & 255, 0, "the child mounted /proc and /sys and ran every payload");
+    _t_proc_assert_guarded(_t_cproc_load(0), "caller's /proc, policy_basic, exec");
+    _t_proc_assert_guarded(_t_cproc_load(1), "caller's /proc, policy_new, exec");
+    _t_proc_assert_guarded(_t_cproc_load(2), "caller's /proc, policy_basic, spawn");
+    _t_proc_assert_guarded(_t_cproc_load(3), "caller's /proc, policy_new, spawn");
+    var um = _t_cproc_load(4);
+    assert(_t_has_line(um, "unmount-sys -1") == 1, "caller's /proc: /proc/sys does not come off");
+    assert(_t_has_line(um, "pattern -30") == 1, "and core_pattern still reads EROFS");
+    var ns = _t_cproc_load(5);
+    if (_t_has_line(ns, "nested 0") == 1) {
+        assert(_t_has_line(ns, "unmount-sys -22") == 1, "caller's /proc: locked in a nested namespace");
+        assert(_t_has_line(ns, "still-sys 1") == 1, "and still read-only");
+        assert_eq(_t_has_line(ns, "mount 0"), 0, "and no /proc of its own");
+        assert(_t_has_line(ns, "pattern -30") == 1 || _t_has_line(ns, "pattern -13") == 1,
+          "and core_pattern stays shut");
+    } else {
+        _t_oci_skip("this host gives a payload no nested user namespace", _t_oneline(ns));
+    }
+    var sl = _t_cproc_load(6);
+    assert_eq(_T_PROC_CODE, SPAWN_EXIT_PROC, "a /proc symlinked to an unguarded procfs fails closed");
+    assert_eq(_t_count(sl, "pattern"), 0, "and no payload ran");
+    kv_rmdir(_t_lbl(root, "/sys"));
+    _t_oci_rootfs_clean(root, payload);
+    sys_unlink(_t_lbl(link, "/proc"));
+    kv_rmdir(_t_lbl(link, "/realproc"));
+    kv_mkdir(_t_lbl(link, "/proc"), 493);
+    _t_oci_rootfs_clean(link, lpayload);
+    return 0;
+}
+
+# 3.14.7: `read_only_rootfs` was scored and nothing on the process path applied it.
+fn test_process_rootfs_read_only() {
+    test_group("process_rootfs_read_only");
+    if (_t_runtime_is_native("/bin/sh") == 0) {
+        _t_oci_skip("this build is emulated: no payload of its arch starts here — not exercisable", 0);
+        return 0;
+    }
+    if (spawn_namespaces_available(_spawn_ns_flags(policy_new(), "/r")) == 0) {
+        _t_oci_skip("this host refuses the namespaces a rootfs needs — not exercisable", 0);
+        return 0;
+    }
+    var root = "/tmp/kavach-t-rootfs-ro";
+    var payload = _t_oci_rootfs(root);
+    assert(payload != 0, "the rootfs is built");
+    if (payload == 0) { return 0; }
+    var rw = _t_rootfs_exec(policy_basic(), root, 5, 0);
+    assert_eq(_T_ROOTFS_CODE, 0, "the write probe runs");
+    assert(_t_has_line(rw, "create 0") == 1, "with no flag the rootfs takes a file");
+    var ro = policy_basic();
+    SandboxPolicy_set_read_only_rootfs(ro, 1);
+    var out = _t_rootfs_exec(ro, root, 5, 0);
+    assert_eq(_T_ROOTFS_CODE, 0, "the write probe runs read-only");
+    assert(_t_has_line(out, "create -30") == 1, "and the create reads EROFS");
+    var sp = _t_rootfs_spawn(KavachBackend.PROCESS, ro, root, 5, 0);
+    assert(_t_has_line(sp, "create -30") == 1, "on spawn too");
+    var pn = policy_new();
+    SandboxPolicy_set_read_only_rootfs(pn, 1);
+    assert(_t_has_line(_t_rootfs_exec(pn, root, 5, 0), "create -30") == 1, "and with no filter");
+    sys_unlink(_t_lbl(root, "/kv-ro-probe"));
+    sys_unlink(_t_lbl(root, "/kv-mode"));
+    _t_oci_rootfs_clean(root, payload);
+    return 0;
+}
+
+# 3.14.7: a result's stdout is a copy of what the payload wrote, and the capture's
+# 1 MiB goes back. Through 3.14.6 each exec kept it: agnosai measured 1,051,136 B of
+# `alloc_used()` per `/bin/true`.
+fn _t_true_sandbox(policy) {
+    var cfg = config_new();
+    config_backend(cfg, KavachBackend.PROCESS);
+    config_policy(cfg, policy);
+    config_timeout_ms(cfg, 5000);
+    var sb = alloc(SANDBOX_SIZE);
+    Sandbox_set_config(sb, cfg);
+    return sb;
+}
+
+# This process's VmSize in KiB, from /proc/self/status, or -1. `alloc_used()` counts
+# the heap and not a mapping, so a capture buffer never unmapped shows only here.
+fn _t_vm_size_kb() {
+    var b = alloc(8192);
+    var n = file_read_all("/proc/self/status", b, 8191);
+    if (n <= 0) { return 0 - 1; }
+    store8(b + n, 0);
+    var at = strstr(b, "VmSize:");
+    if (at < 0) { return 0 - 1; }
+    var p = b + at + 7;
+    while (load8(p) == 32 || load8(p) == 9) { p = p + 1; }
+    return atoi(p);
+}
+
+fn test_capture_costs_what_was_written() {
+    test_group("capture_costs_what_was_written");
+    assert_eq(backend_capture_buf(0), 0, "no buffer of no bytes");
+    assert_eq(backend_capture_buf(1), 0, "nor of one, which holds only the NUL");
+    var none = backend_capture_finish(0, 5, 1024, "no buffer", 0, 0);
+    assert_eq(ExecResult_exit_code(none), 1, "a capture with no buffer reads as failed");
+    assert_eq(streq(ExecResult_stderr(none), "no buffer"), 1, "with its message");
+    assert_eq(confine_capture(_t_argv1("/bin/true"), 0, 0, 0, 0, 0, 4096, 0, 1000, 0), 0 - 1,
+      "and the capture refuses a null buffer rather than writing through it");
+    assert_eq(kv_exec_capture(_t_argv1("/bin/true"), 0, 4096), 0 - 1, "and so does the TEE launchers' capture");
+
+    var buf = backend_capture_buf(4096);
+    assert(buf != 0, "a buffer is had");
+    memcpy(buf, "abc", 3);
+    var r = backend_capture_finish(buf, 3, 4096, "x", 0, 0);
+    assert_eq(streq(ExecResult_stdout(r), "abc"), 1, "the result holds what was written");
+    assert(ExecResult_stdout(r) != buf, "in a copy, not the buffer, which went back");
+
+    var types = vec_new();
+    vec_push(types, policy_new());
+    vec_push(types, policy_basic());
+    var t = 0;
+    while (t < 2) {
+        var sb = _t_true_sandbox(vec_get(types, t));
+        process_exec(sb, "/bin/true");
+        var before = alloc_used();
+        var i = 0;
+        while (i < 20) {
+            process_exec(sb, "/bin/true");
+            i = i + 1;
+        }
+        var per = (alloc_used() - before) / 20;
+        var vm1 = _t_vm_size_kb();
+        # The ExecResult, its stderr, the argv and the envp are what is left, a few
+        # hundred bytes. 64 KiB is room for those, and a sixteenth of what it was.
+        var pb = alloc(32);
+        store8(pb + fmt_int_buf(per, pb), 0);
+        assert(per < 65536, _t_lbl(_t_lbl("an exec of /bin/true costs its result, not 1 MiB: ", pb), " B"));
+        # And the mapping goes back: 20 more execs leave VmSize where it was, give or
+        # take the heap, where an unmapped buffer each would add 20 MiB.
+        i = 0;
+        while (i < 20) {
+            process_exec(sb, "/bin/true");
+            i = i + 1;
+        }
+        var vm2 = _t_vm_size_kb();
+        if (vm1 > 0 && vm2 > 0) { assert(vm2 - vm1 < 4096, "the capture's mapping is given back"); }
+        t = t + 1;
+    }
+
+    var sb2 = _t_true_sandbox(policy_new());
+    var one = process_exec(sb2, "/bin/echo one");
+    var two = process_exec(sb2, "/bin/echo two");
+    assert_eq(streq(ExecResult_stdout(one), "one\n"), 1, "an earlier result keeps its stdout");
+    assert_eq(streq(ExecResult_stdout(two), "two\n"), 1, "and a later one has its own");
+    var yes = process_exec(sb2, "/usr/bin/yes");
+    assert_eq(strlen(ExecResult_stdout(yes)), PROCESS_MAX_OUTPUT - 1, "the 1 MiB ceiling still holds");
+    return 0;
+}
+
+# 3.14.7: a score counts what the path applies. See `score_backend`'s header.
+fn test_score_what_is_applied() {
+    test_group("score_what_is_applied");
+    var s = policy_strict();
+    # 50 + seccomp 5 + limits 2 + the two scopes 2 + 2: no network or read-only root
+    # with no config to say there is a rootfs.
+    assert_eq(score_backend(KavachBackend.PROCESS, s), 61, "process+strict = 61");
+    var cfg = config_new();
+    config_backend(cfg, KavachBackend.PROCESS);
+    config_policy(cfg, s);
+    assert_eq(score_config(cfg), 61, "a config with no rootfs scores the same");
+    config_require_namespaces(cfg, 1);
+    assert_eq(score_config(cfg), 66, "with its namespaces required the network counts");
+    config_rootfs(cfg, "/r");
+    assert_eq(score_config(cfg), 69, "and with a rootfs the read-only root as well");
+    assert_eq(score_config(0), 0, "no config scores 0");
+
+    # `sandbox_spawn` reads no backend.
+    var b = policy_basic();
+    var oc = config_new();
+    config_backend(oc, KavachBackend.OCI);
+    config_policy(oc, b);
+    var pc = config_new();
+    config_backend(pc, KavachBackend.PROCESS);
+    config_policy(pc, b);
+    assert_eq(score_spawn(oc), score_spawn(pc), "a spawn from an OCI sandbox scores as the process path");
+    assert_eq(score_spawn(pc), score_backend(KavachBackend.PROCESS, b) + 5,
+      "with its network namespace, which a spawn always asks for");
+    assert(score_spawn(oc) < score_backend(KavachBackend.OCI, b), "and below what OCI claims");
+    assert_eq(score_config(oc), score_backend(KavachBackend.OCI, b), "an OCI exec is score_backend's");
+
+    # gVisor's spec carries no filter.
+    var nf = policy_new();
+    assert_eq(score_backend(KavachBackend.GVISOR, b), score_backend(KavachBackend.GVISOR, nf),
+      "gVisor scores no filter it does not apply");
+    assert_eq(score_backend(KavachBackend.OCI, b), score_backend(KavachBackend.OCI, nf) + 5,
+      "where OCI, which applies one, still scores it");
+    return 0;
+}
+
+# 3.14.7: with a policy asking for neither seccomp nor landlock, the process path
+# took its unconfined capture and never read `config_require_namespaces`.
+fn test_require_namespaces_without_a_filter() {
+    test_group("require_namespaces_without_a_filter");
+    var cfg = config_new();
+    config_backend(cfg, KavachBackend.PROCESS);
+    config_policy(cfg, policy_new());
+    config_timeout_ms(cfg, 10000);
+    config_require_namespaces(cfg, 1);
+    var sb = alloc(SANDBOX_SIZE);
+    Sandbox_set_config(sb, cfg);
+    var own = alloc(128);
+    var on = sys_readlink("/proc/self/ns/net", own, 127);
+    if (on < 0) { on = 0; }
+    store8(own + on, 0);
+    var r = process_exec(sb, "/usr/bin/readlink /proc/self/ns/net");
+    var code = ExecResult_exit_code(r);
+    if (code == 123 || code == 118) {
+        assert_eq(1, 1, "refused closed: no namespaces on this host");
+        return 0;
+    }
+    assert_eq(code, 0, "the payload runs, in namespaces or not at all");
+    assert(strlen(ExecResult_stdout(r)) > 0, "and names its network namespace");
+    assert_eq(cstr_contains(ExecResult_stdout(r), own), 0, "which is not kavach's");
     return 0;
 }
 
@@ -9588,6 +10154,8 @@ fn main() {
     # output from here: stdout is what the test reads.
     if (argc() >= 3) {
         if (streq(argv(1), "--kv-oci-payload") == 1) { return _t_oci_payload(atoi(argv(2))); }
+        # The payload half of the 3.14.7 /proc groups, which have a /proc to read argv from.
+        if (streq(argv(1), "--kv-proc-payload") == 1) { return _t_proc_payload(atoi(argv(2))); }
     }
     # The real-container group alone, for CI's run as root. See the workflow.
     if (argc() >= 2) {
@@ -9595,6 +10163,9 @@ fn main() {
             test_oci_payload_observes_the_filter();
             test_bound_clears_inheritable_and_ambient();
             test_process_rootfs_payload();
+            test_process_rootfs_guards_proc();
+            test_process_rootfs_caller_proc();
+            test_process_rootfs_read_only();
             return assert_summary();
         }
     }
@@ -9791,6 +10362,13 @@ fn main() {
     test_capability_masks();
     test_bound_clears_inheritable_and_ambient();
     test_process_rootfs_payload();
+    test_proc_path_tables();
+    test_process_rootfs_guards_proc();
+    test_process_rootfs_caller_proc();
+    test_process_rootfs_read_only();
+    test_capture_costs_what_was_written();
+    test_score_what_is_applied();
+    test_require_namespaces_without_a_filter();
     test_spawn_terminate_escalates();
     test_spawn_null_handles();
     test_spawn_namespaces_environment_aware();

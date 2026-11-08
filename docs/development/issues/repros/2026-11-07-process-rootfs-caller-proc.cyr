@@ -1,0 +1,223 @@
+# What a payload in a process-path rootfs reaches when its caller mounted /proc, /sys or
+# /dev there, through kavach's public paths: 3.14.7's measurements (ADR-010, and the
+# 2026-11-06 process-backend issue's 3.14.7 section). The same binary is the driver and
+# the payload, since each rootfs it reads argv in has a /proc. x86-64.
+#
+#   cyrius build <this file> <dir>/rig-after      # from the repository root
+#   cyrius build <this file> <dir>/rig-before     # from a 3.14.6 tree, for the before half
+#
+# It runs only as real root in a throwaway privileged container, with <dir> bound at /rig:
+# the .sh of the same name. Every probe OPENS and never writes, reads /proc/kcore and
+# /proc/timer_list for one byte, and opens a block device read-only and closes it.
+
+include "src/util.cyr"
+include "src/error.cyr"
+include "src/sys_error.cyr"
+include "src/sys_util.cyr"
+include "src/security.cyr"
+include "src/mac.cyr"
+include "src/kernel_audit.cyr"
+include "src/backend.cyr"
+include "src/policy.cyr"
+include "src/scoring.cyr"
+include "src/lifecycle.cyr"
+include "src/scanning_types.cyr"
+include "src/aho_corasick.cyr"
+include "src/scanning_secrets.cyr"
+include "src/scanning_code.cyr"
+include "src/scanning_data.cyr"
+include "src/scanning_gate.cyr"
+include "src/scanning_runtime.cyr"
+include "src/scanning_threat.cyr"
+include "src/audit.cyr"
+include "src/credential.cyr"
+include "src/credential_http.cyr"
+include "src/quarantine.cyr"
+include "src/cgroup.cyr"
+include "src/oci_spec.cyr"
+include "src/confine.cyr"
+include "src/backend_dispatch.cyr"
+include "src/backend_noop.cyr"
+include "src/backend_process.cyr"
+include "src/backend_gvisor.cyr"
+include "src/backend_oci.cyr"
+include "src/backend_wasm.cyr"
+include "src/backend_sy_agnos.cyr"
+include "src/backend_sgx.cyr"
+include "src/backend_sev.cyr"
+include "src/backend_tdx.cyr"
+include "src/backend_firecracker.cyr"
+include "src/persistent.cyr"
+include "src/spawn.cyr"
+include "src/composite.cyr"
+include "src/observability.cyr"
+include "src/attest_collateral.cyr"
+include "src/attestation.cyr"
+include "src/sandbox_exec.cyr"
+
+# 3.14.7 rig: what a payload in a process-path rootfs reaches, through kavach's
+# public paths, as root in a throwaway privileged container. Opens, never writes.
+fn P(c) { sys_write(1, c, strlen(c)); return 0; }
+fn N(n) { var b[32]; var l = fmt_int_buf(n, &b); sys_write(1, &b, l); return 0; }
+fn rig_cat2(a, b) {
+    var la = strlen(a); var lb = strlen(b);
+    var r = alloc(la + lb + 1);
+    memcpy(r, a, la); memcpy(r + la, b, lb + 1);
+    return r;
+}
+fn rig_itoa(n) { var b = alloc(32); store8(b + fmt_int_buf(n, b), 0); return b; }
+
+fn rig_wopen(label, path) {
+    P(label); P(" ");
+    var fd = file_open(path, O_WRONLY, 0);
+    if (fd >= 0) { sys_close(fd); P("opened\n"); return 0; }
+    N(fd); P("\n"); return 0;
+}
+fn rig_rbyte(label, path) {
+    P(label); P(" ");
+    var fd = file_open(path, O_RDONLY, 0);
+    if (fd < 0) { N(fd); }
+    else { var b[8]; N(sys_read(fd, &b, 1)); sys_close(fd); }
+    P("\n"); return 0;
+}
+
+fn rig_report() {
+    rig_wopen("core_pattern", "/proc/sys/kernel/core_pattern");
+    rig_wopen("sysrq-trigger", "/proc/sysrq-trigger");
+    rig_wopen("irq-affinity", "/proc/irq/default_smp_affinity");
+    rig_wopen("sys-thp", "/sys/kernel/mm/transparent_hugepage/enabled");
+    rig_wopen("binfmt-register", "/proc/sys/fs/binfmt_misc/register");
+    rig_rbyte("kcore", "/proc/kcore");
+    rig_rbyte("timer_list", "/proc/timer_list");
+    P("umount-sys "); N(sys_umount2("/proc/sys", 2)); P("\n");
+    return 0;
+}
+
+fn rig_probe(pid, path) {
+    var p = rig_cat2(rig_cat2(rig_cat2("/proc/", pid), "/root"), path);
+    rig_rbyte(rig_cat2("root-of ", pid), p);
+    return 0;
+}
+
+fn rig_sandbox(polname, rootfs) {
+    var cfg = config_new();
+    config_backend(cfg, KavachBackend.PROCESS);
+    var p = policy_new();
+    if (streq(polname, "basic") == 1) { p = policy_basic(); }
+    config_policy(cfg, p);
+    config_rootfs(cfg, rootfs);
+    config_timeout_ms(cfg, 15000);
+    var sb = sandbox_create(cfg);
+    sandbox_transition(sb, SandboxState.RUNNING);
+    return sb;
+}
+
+fn rig_run(polname, rootfs, cmd) {
+    P("=== "); P(polname); P(" "); P(rootfs); P(" "); P(cmd); P("\n");
+    var r = sandbox_exec(rig_sandbox(polname, rootfs), cmd);
+    P(ExecResult_stdout(r));
+    P("exit "); N(ExecResult_exit_code(r)); P("\n");
+    if (strlen(ExecResult_stderr(r)) > 0) { P("stderr "); P(ExecResult_stderr(r)); P("\n"); }
+    return 0;
+}
+
+fn rig_drive(polname) {
+    rig_run(polname, "/tmp/rigB", "/payload --report");
+    rig_run(polname, "/tmp/rigC", "/payload --report");
+    # A sibling sandbox holding the same twelve, asleep in rootfs A, which has no /proc.
+    var sp = spawned_pid(sandbox_spawn(rig_sandbox(polname, "/tmp/rigA"), "/payload", 0));
+    sleep_ms(300);
+    P("sibling "); N(sp); P("\n");
+    rig_run(polname, "/tmp/rigB", rig_cat2(rig_cat2("/payload --probe ", rig_itoa(sp)), " /marker-a"));
+    rig_run(polname, "/tmp/rigB", "/payload --probe 1 /etc/hostname");
+    rig_run(polname, "/tmp/rigB", rig_cat2(rig_cat2("/payload --probe ", rig_itoa(sys_getpid())), " /etc/hostname"));
+    sys_kill(sp, 9);
+    return 0;
+}
+
+# postgres's entry point, spawned in its image's filesystem with /dev and /proc added,
+# answered by pg_isready over the socket in the rootfs.
+fn rig_pg(rootfs) {
+    var cfg = config_new();
+    config_backend(cfg, KavachBackend.PROCESS);
+    config_policy(cfg, policy_basic());
+    config_rootfs(cfg, rootfs);
+    var env = vec_new();
+    vec_push(env, "POSTGRES_PASSWORD=kv");
+    vec_push(env, "PATH=/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin");
+    vec_push(env, "PGDATA=/var/lib/postgresql/data");
+    config_env(cfg, env);
+    var sb = sandbox_create(cfg);
+    sandbox_transition(sb, SandboxState.RUNNING);
+    var sp = sandbox_spawn(sb, "/usr/local/bin/docker-entrypoint.sh postgres", "/tmp/pg.log");
+    if (sp == 0) { P("pg spawn refused\n"); return 1; }
+    var i = 0;
+    var ok = 0;
+    while (i < 120 && ok == 0) {
+        sleep_ms(500);
+        if (spawned_try_wait(sp) == 1) { P("pg exited early\n"); break; }
+        var a = vec_new();
+        vec_push(a, "/usr/sbin/chroot");
+        vec_push(a, rootfs);
+        vec_push(a, "/usr/local/bin/pg_isready");
+        vec_push(a, "-h");
+        vec_push(a, "/var/run/postgresql");
+        var b = alloc(4096);
+        var n = kv_exec_capture(a, b, 4095);
+        if (n > 0) {
+            store8(b + n, 0);
+            if (cstr_contains(b, "accepting connections") == 1) { P("pg_isready: "); P(b); ok = 1; }
+        }
+        i = i + 1;
+    }
+    P("pg answered "); N(ok); P("\n");
+    P("pg exit "); N(spawned_terminate(sp, 3000)); P("\n");
+    return 0;
+}
+
+fn main() {
+    args_init();
+    alloc_init();
+    kavach_init();
+    if (argc() == 0) {
+        # A rootfs with /kv-noop is a timing run: exit at once.
+        if (file_open("/kv-noop", O_RDONLY, 0) >= 0) { return 0; }
+        var i = 0;
+        while (i < 200) { sleep_ms(100); i = i + 1; }
+        return 0;
+    }
+    if (streq(argv(1), "--report") == 1) { return rig_report(); }
+    if (streq(argv(1), "--noop") == 1) { return 0; }
+    if (argc() >= 5 && streq(argv(1), "--time") == 1) {
+        # --time <rootfs> <cmd> <n>: ms per exec of n, policy_basic.
+        var sb = rig_sandbox("basic", argv(2));
+        var n = atoi(argv(4));
+        var t0 = mono_now_ns();
+        var k = 0;
+        var bad = 0;
+        while (k < n) {
+            var r = sandbox_exec(sb, argv(3));
+            if (ExecResult_exit_code(r) != 0) { bad = bad + 1; }
+            k = k + 1;
+        }
+        var us = (mono_now_ns() - t0) / 1000 / n;
+        P("us-per-exec "); N(us); P(" failed "); N(bad); P("\n");
+        return 0;
+    }
+    if (argc() >= 4 && streq(argv(1), "--probe") == 1) { return rig_probe(argv(2), argv(3)); }
+    if (argc() >= 3 && streq(argv(1), "--drive") == 1) { return rig_drive(argv(2)); }
+    if (argc() >= 3 && streq(argv(1), "--pg") == 1) { return rig_pg(argv(2)); }
+    if (argc() >= 3 && streq(argv(1), "--devopen") == 1) {
+        # Opens read-only and closes. Nothing is read.
+        P("devopen "); P(argv(2)); P(" ");
+        var fd = file_open(argv(2), O_RDONLY, 0);
+        if (fd >= 0) { sys_close(fd); P("opened\n"); } else { N(fd); P("\n"); }
+        return 0;
+    }
+    if (argc() >= 4 && streq(argv(1), "--devdrive") == 1) {
+        rig_run(argv(2), "/tmp/rigD", rig_cat2("/payload --devopen ", argv(3)));
+        return 0;
+    }
+    P("usage\n");
+    return 2;
+}

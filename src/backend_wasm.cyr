@@ -339,7 +339,7 @@ fn wasm_exec(sandbox, command) {
     vec_push(args, wasm_path);
 
     var out_cap = 1048576;
-    var out_buf = alloc(out_cap);
+    var out_buf = backend_capture_buf(out_cap);
 
     # 3.11.8: `confine_capture_input`, not the stdlib's `exec_capture`.
     #
@@ -375,6 +375,7 @@ fn wasm_exec(sandbox, command) {
     var end_ns = mono_now_ns();
 
     var r = backend_capture_finish(out_buf, n, out_cap, "wasmtime run failed", start_ns, end_ns);
+    backend_capture_release(out_buf, out_cap);
     if (r != 0) {
         ExecResult_set_exit_code(r, confine_last_exit());
         ExecResult_set_timed_out(r, confine_last_timed_out());

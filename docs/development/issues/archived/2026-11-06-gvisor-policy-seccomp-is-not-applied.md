@@ -1,8 +1,10 @@
-# 2026-11-06 — a gVisor sandbox's `seccomp_enabled` is stored and scored, and kavach applies no filter — OPEN
+# 2026-11-06 — a gVisor sandbox's `seccomp_enabled` is stored and scored, and kavach applies no filter — RESOLVED (scoring); the filter waits for runsc
 
 **Discovered:** 2026-11-06, adding the filter to the OCI spec in kavach 3.14.4. **Severity:** Low.
 **Affects:** every kavach release with a gVisor backend: `_gvisor_run` (`src/backend_gvisor.cyr`).
-**Status:** 🔴 OPEN. Read from runsc's source, not run: this machine has no runsc.
+**Status:** ✅ **RESOLVED in kavach 3.14.7** by the second ask: `score_backend` no longer scores `seccomp_enabled` on
+this backend. The first ask, a filter runsc applies, waits for a machine with runsc; see the resolution at the end.
+Read from runsc's source, not run: this machine has no runsc.
 
 ## What happens
 
@@ -31,3 +33,17 @@ Run this on a machine that has runsc, before changing the argv:
 2. Or stop scoring `seccomp_enabled` on this backend, and say so in `docs/architecture/overview.md`.
 
 A wrong flag fails every gVisor sandbox on the default policy, which is why this was not shipped unrun.
+
+## Resolution (3.14.7)
+
+**Ask 2.** `score_backend(KavachBackend.GVISOR, policy)` adds nothing for `seccomp_enabled`, so a gVisor sandbox scores
+what its spec carries: under `policy_basic()` 75 where it read 80. The OCI backend, which applies the filter, still
+takes the 5. `test_score_what_is_applied` holds both, and failed against 3.14.6. `docs/architecture/overview.md`'s
+scoring row says so.
+
+**Ask 1 is not done.** This machine still has no runsc, and at 3.14.2 downloading one to run here was refused as
+external code. A wrong flag fails every gVisor sandbox on the default policy, so `--oci-seccomp` and `SCMP_ACT_KILL`
+stay unshipped until they can be run. It is on the roadmap's Blocked list, with the SGX and TDX launchers, for the
+same reason: a backend built against a tool never run would be a claim, not a fix. When it lands, the 5 comes back
+with it.
+

@@ -275,7 +275,7 @@ fn _oci_exec_with(runtime, sandbox, command, start_ns) {
     }
 
     var out_cap = 1048576;
-    var out_buf = alloc(out_cap);
+    var out_buf = backend_capture_buf(out_cap);
     var n = _oci_run(runtime, bundle, container_id, Sandbox_config(sandbox), out_buf, out_cap);
     var end_ns = mono_now_ns();
     var runclog = _oci_take_log(container_id);
@@ -297,6 +297,7 @@ fn _oci_exec_with(runtime, sandbox, command, start_ns) {
     # status on its own failure, so the exit code alone cannot say which
     # happened. The log file can.
     if (strlen(runclog) > 0) {
+        backend_capture_release(out_buf, out_cap);
         return backend_error_result(_oci_diag("OCI runtime run failed: ", runclog));
     }
 
@@ -304,7 +305,9 @@ fn _oci_exec_with(runtime, sandbox, command, start_ns) {
     # it, and its stderr, which DOES belong to the payload and so DOES get
     # scanned (before 3.9.2 it went to /dev/null and bypassed the gate). When
     # n < 0 the capture itself failed and its own (1, fail_msg) pair is the truth.
-    return backend_run_finish(out_buf, n, out_cap, "OCI runtime run failed", start_ns, end_ns);
+    var r = backend_run_finish(out_buf, n, out_cap, "OCI runtime run failed", start_ns, end_ns);
+    backend_capture_release(out_buf, out_cap);
+    return r;
 }
 
 # "<prefix><detail>" with the detail trimmed of trailing newlines, as a fresh

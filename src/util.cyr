@@ -38,6 +38,10 @@ include "lib/io.cyr"
 include "lib/ct.cyr"
 include "lib/slice.cyr"
 include "lib/random.cyr"
+# 3.14.7: `backend_capture_buf` maps its buffer with `mmap_anon` and gives it back with
+# `cyr_munmap`. `backend.cyr` is in `[lib.confine]`, and nothing put mmap in that sidecar
+# (`check-bundles.py` caught it), so it is here for the same reason.
+include "lib/mmap.cyr"
 
 # ---- portable filesystem-removal shims -----------------------------------
 # ⛔ THE AGNOS AND LINUX SYSCALL WRAPPERS HAVE DIFFERENT ARITIES, and kavach called the Linux form
@@ -402,6 +406,9 @@ fn kv_exec_capture(args, buf, buflen): i64 {
     #ifndef CYRIUS_TARGET_AGNOS
     var argc = vec_len(args);
     if (argc < 1) { return 0 - 1; }
+    # No buffer (3.14.7: `backend_capture_buf` answers 0 when it has none) is a
+    # failed capture, never a write through a null pointer.
+    if (buf == 0 || buflen < 2) { return 0 - 1; }
     var cmd = vec_get(args, 0);
     var argv = alloc((argc + 1) * 8);
     var avi = 0;

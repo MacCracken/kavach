@@ -5,6 +5,7 @@ io
 ct
 slice
 random
+mmap
 string
 fmt
 alloc

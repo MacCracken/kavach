@@ -8,8 +8,10 @@ rootfs still does not hold, so a payload reads whatever the rootless uid can.
 (`src/confine.cyr`), `_seccomp_deny_list` (`src/security.cyr`), `sandbox_spawn` (`src/spawn.cyr`) and persistent
 guests. Consumers that reach them, stiva's `run -d` among them, whatever backend the sandbox names.
 **Status:** 🟡 OPEN IN PART. A rootfs is ✅ **resolved in kavach 3.14.6**, by the maintainer's choice of `pivot_root`
-([ADR-009](../../adr/009-rootfs-on-the-process-path.md)); see the resolution at the end. Three things stay open, listed
-there. What follows is as filed, measured against 3.14.5 on x86-64, Linux 7.2.14 and runc 1.5.2.
+([ADR-009](../../adr/009-rootfs-on-the-process-path.md)), and a `/proc` the caller mounted there is ✅ **resolved in
+3.14.7** ([ADR-010](../../adr/010-proc-and-sys-in-a-process-path-rootfs.md)), with the two scoring items under "Also
+seen" and Ask 4's scoring. See the resolutions at the end. Still open: no rootfs as root (Ask 3), a detached OCI payload
+that never meets runc (Ask 4's other half), and `/proc/<pid>/root`, measured in 3.14.7. What follows is as filed, measured against 3.14.5 on x86-64, Linux 7.2.14 and runc 1.5.2.
 
 ## What happens
 
@@ -238,3 +240,71 @@ which hands back every capability, stays in and mounts nothing. nginx and the po
   so the payload was held tighter and the test was wrong. Every run here shared one Arch kernel with no AppArmor, whatever
   the container's distribution, so none could show this. AppArmor's restriction on unprivileged user namespaces is the
   likely cause. It is not measured: the skip now prints the payload's numbers, and CI raises it as a warning.
+
+## Resolution in part (3.14.7)
+
+**A `/proc` the caller mounted.** As the maintainer decided ([ADR-010](../../adr/010-proc-and-sys-in-a-process-path-rootfs.md)):
+`runc spec`'s two full lists from one table in `security.cyr`, which the OCI spec writes from too; the host's
+`/dev/null` over a masked file; CAP_SYS_ADMIN refused with no filter. Where a rootfs holds a procfs at `/proc` or a
+sysfs at `/sys`, they are made what runc makes them, between the bind and the pivot, and checked again after it. Measured
+as root through kavach's public paths, from inside the payload, opening and never writing, the caller's `/proc` and `/sys`
+in the rootfs, `policy_basic()` and `policy_new()` alike:
+
+| | 3.14.6 | 3.14.7 |
+|---|---|---|
+| open `core_pattern`, `sysrq-trigger`, `/proc/irq/default_smp_affinity` to write | **allowed** | EROFS |
+| open `/sys/kernel/mm/transparent_hugepage/enabled` to write | **allowed** | EROFS |
+| `/proc` an rbind carrying binfmt_misc: open its `register` to write | **allowed** | ENOENT: the bind hides it |
+| read `/proc/kcore`, `/proc/timer_list` | EPERM, a byte | 0 bytes: masked |
+| with no filter, `umount2` of `/proc/sys`, `/proc/kcore`, `/sys` | nothing to lift | EPERM |
+| from a nested user namespace, the same | nothing to lift | EINVAL: locked |
+| a `/proc` symlinked to a procfs elsewhere in the rootfs | not reached | refused, SPAWN_EXIT_PROC |
+| CAP_SYS_ADMIN in the list, no filter | ran | refused |
+
+The postgres entry point, its image as the rootfs with the caller's `/dev` and `/proc`, answers `pg_isready` on both, as
+ADR-009 ran it. Rootless the writes read EACCES before and after, so the tests read `mountinfo` for that half.
+
+**`read_only_rootfs`**, from "Also seen", applies on this path with a rootfs: a remount of the pivoted root. A create at
+`/` reads EROFS, on `sandbox_exec` and `sandbox_spawn`.
+
+**Scoring, from "Also seen" and Ask 4.** `score_backend` no longer gives the process backend 5 for `network_enabled = 0`
+or 3 for `read_only_rootfs`, which that path applies only with a rootfs or `config_require_namespaces`. `score_config`
+adds them back where the config makes the path apply them, and `score_spawn` scores `sandbox_spawn`, which reads no
+backend: an OCI sandbox's spawn scores 60 under `policy_basic()`, as the process path, where `score_backend` gave it 65.
+
+**Found on the way: `config_require_namespaces` was ignored with a policy asking for no seccomp and no landlock.** That
+policy took the unconfined capture, which reads no namespaces, so `policy_new()` with the flag set ran in kavach's
+network namespace. Measured: the payload's `readlink /proc/self/ns/net` read kavach's own. The flag now takes the
+confined path, which creates the namespaces or refuses closed.
+
+**Measured, and open: `/proc/<pid>/root` reaches a sibling sandbox.** A payload here has no PID namespace, so a caller's
+`/proc` lists the host's processes, and a ptrace access check is all that stands at `/proc/<pid>/root`. As root, on 3.14.6
+and 3.14.7 alike, under both policies:
+
+| From a payload whose caller mounted `/proc`, reading `/proc/<pid>/root/<file>` | Result |
+|---|---|
+| another sandbox's payload, spawned with the same twelve, its own rootfs | **reads the file** |
+| the host's PID 1 | EACCES |
+| kavach's own process | EACCES |
+
+The two that hold, hold because their capabilities are not a subset of the payload's. Any uid 0 process holding no more
+than the twelve is reachable, every sibling sandbox among them. Rootless a payload's user namespace is not its target's, and
+the check needs CAP_SYS_PTRACE in the target's: that is reasoning, not a measurement. Neither 3.14.6's `pivot_root` nor 3.14.7's masks
+reach this. A PID namespace with a `/proc` of kavach's own, which is runc's answer, or a landlock domain on every payload,
+which refuses ptrace access outside its domain, would. It is on the roadmap.
+
+**Repro**: `repros/2026-11-07-process-rootfs-caller-proc.{cyr,sh}`, the driver and payload in one binary and the script for a
+throwaway privileged container: the before and after above, `/proc/<pid>/root`, the caller's `/dev`, and postgres.
+
+**Still open.**
+
+- **No rootfs, as root (Ask 3).** Unchanged.
+- **`sandbox_spawn` on an OCI sandbox (Ask 4).** Scored as what it is since 3.14.7, and still detached on the process path:
+  no runc, no PID namespace, no `/proc` of its own.
+- **`/proc/<pid>/root`**, above.
+- **A `/dev` the caller mounted reaches the host's disks.** Under runc a device cgroup refuses a node the spec does not
+  list, and the process path has none. Measured as root in 3.14.7, under both policies, with the caller's `/dev` an
+  rbind of the host's as ADR-009 ran postgres: the payload opened `/dev/nvme0n1`, the host's disk, read-only (it was
+  opened and closed, and nothing was read). uid 0 owns the node, so no capability is needed for that. It reads the same
+  on 3.14.6, which has the same path. A caller adding `/dev` this way hands the payload the host's block devices.
+

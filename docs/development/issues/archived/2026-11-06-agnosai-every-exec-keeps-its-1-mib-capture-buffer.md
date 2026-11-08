@@ -1,11 +1,11 @@
-# Every exec keeps its 1 MiB capture buffer for good — OPEN
+# Every exec keeps its 1 MiB capture buffer for good — RESOLVED
 
 **Discovered:** 2026-11-06, by agnosai, measuring what a WASM call costs after 3.14.4 removed its input cap (agnosai
 roadmap B40). **Severity:** Medium for a long-lived consumer. Nothing fails, and memory only goes up.
 **Affects:** kavach 3.14.6, every backend's exec: `src/backend_wasm.cyr:342`, `backend_process.cyr:64`,
 `backend_oci.cyr:278`, `backend_gvisor.cyr:124`, `backend_sy_agnos.cyr:298`, `backend_firecracker.cyr:114`,
 `backend_sgx.cyr:134`, `backend_sev.cyr:69` and `backend_tdx.cyr:72`.
-**Status:** 🔴 OPEN.
+**Status:** ✅ **RESOLVED in kavach 3.14.7**, by the first of the two asks; see the resolution at the end.
 
 Each exec takes `alloc(out_cap)` or `alloc(PROCESS_MAX_OUTPUT)`, 1 MiB, from a global heap with no free, whatever the
 payload writes. `backend_capture_finish` then hands that buffer to the `ExecResult` as its stdout
@@ -62,3 +62,40 @@ problem and can stay.
 agnosai reads the stdout into a `Str` of its own straight after `sandbox_exec`, by `strlen`, and needs nothing past
 that. Its tool tiers that go through kavach pay this per call: WASM today, and the process, Python and OCI tiers once
 its roadmap B35 routes them here.
+
+## Resolution (3.14.7)
+
+**A reused buffer and a copy, the first ask, made per exec with a mapping instead of a shared buffer.** Each backend
+takes its capture buffer from `backend_capture_buf`, an anonymous mapping of the same 1 MiB, so the capture costs the
+pages the payload writes into. `backend_capture_finish` puts a copy of the `n` bytes captured in the result, and the
+backend gives the mapping back with `backend_capture_release`. All nine sites the issue names do this, and the process
+backend now takes its buffer next to each capture, so a refusal before it takes nothing. agnos has no mmap, so there the
+buffer is still `alloc`, and its backend gets the copy without the release.
+
+A buffer shared between execs was the other way to reuse one, and was not taken. A result would then hold a pointer
+into it only until the next exec, and two threads capturing at once would write into the same bytes, where today each
+has its own stdout.
+
+The issue's repro, on x86-64 and Arch's kernel, both builds from this tree:
+
+| | 3.14.6 | 3.14.7 |
+|---|---|---|
+| process, `/bin/true`, `alloc_used()` per exec | 1,051,156 B | 2,588 B |
+| the same, VmRSS over 400 execs | 7.3 MB → 419 MB | 5.3 MB → 7.3 MB |
+| wasm, wasmtime 50.0.1, an empty guest, `alloc_used()` per exec | 1,051,513 B | 2,945 B |
+
+The 2,588 B are the result, its stderr, the argv and the envp. ⚠ The THP explanation for RSS growing with the
+buffer rather than with the bytes written stays a guess: with the buffer gone the RSS no longer grows, so there is
+nothing left to measure it on.
+
+**Behaviour.** `ExecResult_stdout` is no longer the capture buffer, so a caller keeping the pointer keeps a copy of
+the bytes, as agnosai's note asked. `backend_capture_finish` does not release a buffer, because a caller may pass one
+of its own: the release is the backend's. The capture's 1 MiB ceiling is unchanged, and so is its one-byte
+truncation at the exact-fill boundary. A capture given no buffer (`backend_capture_buf` answering 0) reads as a
+failed one, never a write through a null pointer, in both `confine_capture_run` and `kv_exec_capture`.
+
+**Tests.** `test_capture_costs_what_was_written` holds `/bin/true` under 64 KiB of `alloc_used()` per exec, on the
+unconfined and the confined capture. `alloc_used()` does not see a mapping, so the same group holds VmSize to under
+4 MiB of growth over 20 more execs, where a buffer that was never unmapped adds 20 MiB. It also checks that a result
+keeps its own stdout after a later exec, and that the ceiling holds. Against 3.14.6 the group fails.
+

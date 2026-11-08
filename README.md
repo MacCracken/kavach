@@ -12,6 +12,17 @@ classification, credential proxy, HMAC-SHA256 audit chain — all in pure Cyrius
 
 ## Status
 
+**v3.14.7 — a caller's `/proc` and `/sys` in a process-path rootfs are what runc makes them, and an exec costs what it
+printed.** Where a caller mounts a `/proc` in a rootfs, as the postgres entry point needs, uid 0 opened `core_pattern`,
+`sysrq-trigger` and an IRQ affinity to write, and through an rbind of `/proc` binfmt_misc's `register`. They now read
+EROFS, from the same `runc spec` lists the OCI backend writes, and CAP_SYS_ADMIN, which would lift them, is refused with
+no filter ([ADR-010](docs/adr/010-proc-and-sys-in-a-process-path-rootfs.md)). A `/bin/true` exec cost 1,051,156 B of
+heap for good and now costs 2,588 B. `read_only_rootfs` and `config_require_namespaces` are applied where they were scored
+or promised, and `score_backend` stops scoring what the process and gVisor backends do not apply. A caller's `/dev` and
+`/proc/<pid>/root` were measured on the way and are
+[open](docs/development/issues/2026-11-06-process-backend-keeps-every-capability.md). **2003** assertions green on x86-64,
+**1649** on aarch64 under qemu.
+
 **v3.14.6 — a rootfs on the process path holds.** A payload there is now entered with `pivot_root` and holds the same
 twelve capabilities as an OCI container, on `sandbox_exec` and `sandbox_spawn`, whatever backend the sandbox names.
 Through 3.14.5 it held every capability and left its rootfs in three calls, as root and rootless, under
@@ -355,11 +366,11 @@ cyrius deps
 cyrius build src/main.cyr build/kavach
 ./build/kavach
 
-# Run the test suite (1803 assertions; run from the repository root,
+# Run the test suite (2003 assertions; run from the repository root,
 # since the real-Intel attestation vectors are read from tests/data/).
 cyrius test tests/kavach.tcyr
 
-# Run the bench harness (30 benches).
+# Run the bench harness (32 benches).
 cyrius bench tests/kavach.bcyr
 
 # Cleanliness gates. Run these individually — `cyrius audit` is the
@@ -390,7 +401,7 @@ consumer's `cyrius.cyml`:
 [deps.kavach]
 git     = "https://github.com/MacCracken/kavach.git"
 path    = "../kavach"          # local sibling checkout (optional)
-tag     = "3.14.6"
+tag     = "3.14.7"
 modules = ["dist/kavach.cyr"]
 
 # OPTIONAL since 3.13.3 (cyrius 6.6.20): dist/kavach.deps is now the

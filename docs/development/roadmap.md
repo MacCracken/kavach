@@ -2,7 +2,7 @@
 
 > **Principle**: Security correctness first, then backend breadth, then performance. Every sandbox gets a number.
 
-This roadmap is **future-facing only** — shipped work lives in [CHANGELOG.md](../../CHANGELOG.md). Current release: **v3.14.6**. Toolchain pin: cc `6.7.18`; sigil `3.13.15` (the snapshot's — see CLAUDE.md hazard 4), samay `1.5.1`, ai-hwaccel `2.5.6` (agnosys dropped at v3.5.0 — its security backends are internalized). 3.14.0 to 3.14.2 went to the uutils exec fix, the `basic` filter's socket writes, the cyrius 6.7.9 and 6.7.18 moves, and the open fixes: Intel's attestation collateral, the TDX RTMRs, the runtimes' own diagnostics and aarch64 namespaces. 3.14.3 and 3.14.4 followed with what stiva and agnosai filed: real argv, seccomp and `no_new_privs` on the OCI backend, and the WASM capture. They came ahead of the SEV-SNP arc pinned as 3.14.x below; the arcs keep their numbers until they are re-pinned.
+This roadmap is **future-facing only** — shipped work lives in [CHANGELOG.md](../../CHANGELOG.md). Current release: **v3.14.7**. Toolchain pin: cc `6.7.18`; sigil `3.13.15` (the snapshot's — see CLAUDE.md hazard 4), samay `1.5.1`, ai-hwaccel `2.5.6` (agnosys dropped at v3.5.0 — its security backends are internalized). 3.14.0 to 3.14.2 went to the uutils exec fix, the `basic` filter's socket writes, the cyrius 6.7.9 and 6.7.18 moves, and the open fixes: Intel's attestation collateral, the TDX RTMRs, the runtimes' own diagnostics and aarch64 namespaces. 3.14.3 and 3.14.4 followed with what stiva and agnosai filed: real argv, seccomp and `no_new_privs` on the OCI backend, and the WASM capture. 3.14.5 to 3.14.7 bounded what a payload holds: the capability set and `/proc` masks on the OCI spec, `pivot_root` and the same set on the process path, and runc's `/proc` and `/sys` lists there too, with the capture buffer agnosai filed and the scoring of what each path applies. They came ahead of the SEV-SNP arc pinned as 3.14.x below; the arcs keep their numbers until they are re-pinned.
 
 **Every release below is pinned.** Each names what ships in it, in the order the principle sets. To
 move an item, edit this file; do not let it drift. **An arc also takes the open fixes in the code it
@@ -14,29 +14,25 @@ work in 3.20) can be pulled forward; items with one say what it is.
 
 ---
 
-## 3.14.7 — a read-only `/proc` in a process-path rootfs
+## 3.14.8 — a payload's `/dev` and PIDs on the process path
 
-In a rootfs whose caller mounted `/proc`, a uid 0 payload still opens `core_pattern` and
-`sysrq-trigger` to write. That access is uid 0's, so 3.14.6's capability set does not reach it, and
-kavach mounts no `/proc` of its own. A caller has a reason to: the postgres entry point needs one on
-this path ([issue](issues/2026-11-06-process-backend-keeps-every-capability.md)).
+3.14.7 made a caller's `/proc` and `/sys` in a rootfs what runc makes them
+([ADR-010](../adr/010-proc-and-sys-in-a-process-path-rootfs.md)). Two things measured on the way are not runc's either,
+and both reach past a sandbox ([issue](issues/2026-11-06-process-backend-keeps-every-capability.md)):
 
-- [ ] After the pivot, where a `/proc` is there, make `/proc/sys` and `/proc/sysrq-trigger` read-only
-  and mask `/proc/kcore`, before the capabilities and seccomp, which take `mount` away. A prototype
-  held for those three paths, with the twelve: `core_pattern` read EROFS, and `umount` read EPERM, or
-  EINVAL from a nested user namespace.
-- [ ] **Decide** the paths. The OCI spec writes `runc spec`'s two full lists, and they live in
-  `oci_spec.cyr`, which `[lib.confine]` does not carry, as the capability table did.
-- [ ] **Decide** what masks `/proc/kcore`. The prototype bound the host's `/dev/null`, and after the
-  pivot a rootfs may have none.
-- [ ] **Decide** what a list naming CAP_SYS_ADMIN gets: with every capability `umount` worked and
-  `core_pattern` opened again, so the mounts hold only with the set.
-- [ ] Assert from inside a payload, with a `/proc` mounted in the rootfs, as CI's root job: rootless
-  a sysctl opened to write reads EACCES with or without the mount, so that half reads `mountinfo`.
-- [ ] Run the postgres entry point on a rootfs with `/dev` and `/proc` before and after, as ADR-009
-  did.
-- [ ] Measure `/proc/<pid>/root`. A payload here has no PID namespace, so it names the host's root
-  for any process that ptrace access lets it read.
+- [ ] **A `/dev` the caller mounted.** As root, with the caller's `/dev` an rbind of the host's, as ADR-009 ran postgres,
+  a payload holding the twelve opened the host's disk (`/dev/nvme0n1`) read-only. runc's device cgroup refuses a node
+  the spec does not list, and the process path has none. **Decide** between a `/dev` of kavach's own, a tmpfs holding
+  runc's default nodes bound from the host, and a cgroup v2 device program over the caller's.
+- [ ] **`/proc/<pid>/root`.** With a caller's `/proc`, a payload read a file in another sandbox's root, as root, under
+  both policies: a sibling holding the same twelve passes the ptrace check. **Decide** between a PID namespace with a
+  `/proc` of kavach's own, as runc mounts one, and a landlock domain on every payload, which refuses ptrace access outside
+  it.
+- [ ] **Decide** Ask 3: what a payload with no rootfs holds as root. `SECURITY.md` says what it is today.
+- [ ] **Decide** Ask 4's other half: `sandbox_spawn` on an OCI sandbox detaches on the process path. It is scored as that
+  since 3.14.7 (`score_spawn`), and could detach through runc instead.
+- [ ] Assert each from inside a payload, as root in CI's root job, and run nginx and the postgres entry point before and
+  after, as ADR-009 did.
 
 ## 3.14.x — TEE attestation II: SEV-SNP, and SGX sealing
 
@@ -159,6 +155,18 @@ Each entry carries **what it means**, **who owns the upstream work**, and **trig
 - **Trigger condition.** Access to an SGX (DCAP) or TDX host, or a CI runner with one. Then render
   and sign the manifest (SGX), boot a TD with TDVF and a QGS socket (TDX), and test both against
   the attestation gate, collateral included.
+
+### gVisor's seccomp filter — awaiting runsc
+
+- **What it means.** runsc applies a spec's `linux.seccomp` only under `--oci-seccomp`, and its `convertAction` has no
+  `SCMP_ACT_KILL_PROCESS`, the action the OCI backend's filter uses (read in runsc's source). So a gVisor spec carries no
+  filter, and since 3.14.7 `score_backend` scores none
+  ([issue](issues/archived/2026-11-06-gvisor-policy-seccomp-is-not-applied.md)). The sentry stands between the payload
+  and the host either way.
+- **Who owns it.** kavach. What blocks it is verification: a wrong flag fails every gVisor sandbox on the default policy,
+  and at 3.14.2 downloading runsc to run here was refused as external code.
+- **Trigger condition.** A machine with runsc. Then emit the filter with `SCMP_ACT_KILL` for gVisor, pass `--oci-seccomp`
+  when the spec carries one, run a payload under it, and give the 5 back.
 
 ### sigil: TDX quotes in Intel's layout, and quote v5
 

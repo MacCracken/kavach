@@ -183,7 +183,8 @@ fn _oci_capabilities_json(config) {
 }
 
 # `linux.maskedPaths` and `linux.readonlyPaths`, with a leading comma: the lists
-# `runc spec` 1.5.2 writes.
+# `runc spec` 1.5.2 writes, from `security_masked_path` and `security_readonly_path`
+# since 3.14.7, which the process path reads too.
 #
 # A filter cannot stand in for them, because writing a sysctl is an `open` and a
 # `write`, and a core pattern naming a program runs that program on the host.
@@ -199,14 +200,35 @@ fn _oci_capabilities_json(config) {
 # mounts no /sys. It stays, so the lists are runc's and not a variant of them.
 #
 # runsc's boot path applies neither (read, not run). Its /proc is its own.
+#
+# Built once and kept (3.14.7): the tables are fixed, and the 35 appends cost
+# `oci_spec_filtered` 5.5% when they ran for every spec. The spec copies it.
+var _OCI_PATHS_JSON = 0;
+
 fn _oci_paths_json() {
+    if (_OCI_PATHS_JSON != 0) { return _OCI_PATHS_JSON; }
     var sb = str_builder_new();
-    str_builder_add_cstr(sb, ",\"maskedPaths\":[\"/proc/acpi\",\"/proc/asound\",\"/proc/kcore\",\"/proc/keys\",");
-    str_builder_add_cstr(sb, "\"/proc/latency_stats\",\"/proc/timer_list\",\"/proc/timer_stats\",");
-    str_builder_add_cstr(sb, "\"/proc/sched_debug\",\"/sys/firmware\",\"/proc/scsi\"]");
-    str_builder_add_cstr(sb, ",\"readonlyPaths\":[\"/proc/bus\",\"/proc/fs\",\"/proc/irq\",\"/proc/sys\",");
-    str_builder_add_cstr(sb, "\"/proc/sysrq-trigger\"]");
-    return str_data(str_builder_build(sb));
+    str_builder_add_cstr(sb, ",\"maskedPaths\":[");
+    var i = 0;
+    while (i < SECURITY_MASKED_PATHS) {
+        if (i > 0) { str_builder_add_cstr(sb, ","); }
+        str_builder_add_cstr(sb, "\"");
+        str_builder_add_cstr(sb, security_masked_path(i));
+        str_builder_add_cstr(sb, "\"");
+        i = i + 1;
+    }
+    str_builder_add_cstr(sb, "],\"readonlyPaths\":[");
+    i = 0;
+    while (i < SECURITY_READONLY_PATHS) {
+        if (i > 0) { str_builder_add_cstr(sb, ","); }
+        str_builder_add_cstr(sb, "\"");
+        str_builder_add_cstr(sb, security_readonly_path(i));
+        str_builder_add_cstr(sb, "\"");
+        i = i + 1;
+    }
+    str_builder_add_cstr(sb, "]");
+    _OCI_PATHS_JSON = str_data(str_builder_build(sb));
+    return _OCI_PATHS_JSON;
 }
 
 # The exec-safe filter as a `linux.seccomp` member, with its leading comma: what
