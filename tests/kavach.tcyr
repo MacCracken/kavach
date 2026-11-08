@@ -10435,6 +10435,24 @@ fn test_process_rootfs_own_dev() {
     return 0;
 }
 
+# 1 when `sandbox_spawn` under `policy`, with `rootfs` (or 0), gets the namespaces it
+# asks for here. It always asks, and refuses closed where the host will not give
+# them: CI's ubuntu-26.04 runners refuse an unprivileged user namespace its uid_map
+# (118), and docker's default seccomp profile refuses the unshare itself (123).
+fn _t_spawn_ns_ok(policy, rootfs) {
+    return spawn_namespaces_available(_spawn_ns_flags(policy, rootfs));
+}
+
+# Where the host refuses them: the spawn refused closed and its payload ran nothing,
+# which is the contract, and the probe that needed a payload is skipped with why.
+fn _t_spawn_refused(code, out, probe, what) {
+    assert(code == SPAWN_EXIT_NS || code == SPAWN_EXIT_IDMAP,
+      _t_lbl(what, ": where the host refuses its namespaces, sandbox_spawn refuses closed (123 or 118)"));
+    assert_eq(_t_count(out, probe), 0, _t_lbl(what, ": and its payload ran nothing"));
+    _t_oci_skip(_t_lbl(what, ": this host refuses sandbox_spawn's namespaces, so the payload's check did not run"), 0);
+    return 0;
+}
+
 # 3.14.8: every confined payload has a landlock domain of its own, so it reaches
 # kavach through neither ptrace access nor a signal. Rootless, with no rootfs, where
 # the parent is the same uid and an unconfined payload reaches it, which the control
@@ -10467,7 +10485,11 @@ fn test_payloads_have_a_landlock_domain() {
     var la = ExecResult_stdout(process_exec(_t_pio_sandbox(lo), cmd));
     assert(_t_has_line(la, "root-parent -13") == 1, "under a policy with no filter too");
     var sp = _t_proc_spawn(policy_basic(), 0, exe, 4);
-    assert(_t_has_line(sp, "root-parent -13") == 1, "and from sandbox_spawn");
+    if (_t_spawn_ns_ok(policy_basic(), 0) == 1) {
+        assert(_t_has_line(sp, "root-parent -13") == 1, "and from sandbox_spawn");
+    } else {
+        _t_spawn_refused(_T_PROC_CODE, sp, "root-parent", "the domain, sandbox_spawn");
+    }
     # Allowed network, no rules and no scope: below ABI v6 the domain is the
     # allow-all ruleset's, and from ABI v6 the signal scope's.
     var nb = policy_basic();
@@ -10524,7 +10546,13 @@ fn test_oci_spawn_runs_through_runc() {
     assert(_t_has_line(o, "pidone 1") == 1, "the payload is PID 1 in a PID namespace of its own");
     assert(_t_has_line(o, "proc 1") == 1, "with runc's /proc");
     var pp = _t_rootfs_spawn(KavachBackend.PROCESS, policy_basic(), root, 8, 0);
-    assert(_t_has_line(pp, "pidone 0") == 1, "where a process sandbox's spawn has kavach's (the control)");
+    if (_t_spawn_ns_ok(policy_basic(), root) == 1) {
+        assert(_t_has_line(pp, "pidone 0") == 1, "where a process sandbox's spawn has kavach's (the control)");
+    } else {
+        # runc gets its namespaces where kavach's own are refused: CI's runners give
+        # runc an AppArmor profile that allows them.
+        _t_spawn_refused(_T_ROOTFS_CODE, pp, "pidone", "the OCI spawn's control, a process sandbox's spawn");
+    }
     _t_rootfs_spawn(KavachBackend.OCI, policy_basic(), root, 9, 0);
     assert_eq(_T_ROOTFS_CODE, 7, "the container's exit status is the handle's");
 
@@ -10596,16 +10624,22 @@ fn test_bound_without_a_rootfs() {
     var b = ExecResult_stdout(bo);
     var sp = _t_proc_spawn(policy_basic(), 0, exe, 5);
     var sp_code = _T_PROC_CODE;
+    var sp_ns = _t_spawn_ns_ok(policy_basic(), 0);
     var un = ExecResult_stdout(process_exec(_t_pio_sandbox(policy_new()), cmd));
     if (sys_getuid() != 0) {
         assert_eq(_T_ROOTFS_CODE, 0, "rootless, a confined payload with no rootfs still runs");
         assert(_t_has_line(b, "eff 0") == 1, "holding nothing, as it held nothing before");
-        assert_eq(sp_code, 0, "and spawns");
+        if (sp_ns == 1) { assert_eq(sp_code, 0, "and spawns"); }
+        else { _t_spawn_refused(sp_code, sp, "eff ", "the bound, sandbox_spawn"); }
         return 0;
     }
     _t_rootfs_assert_default_set(b, "root, no rootfs, policy_basic, exec");
-    _T_ROOTFS_CODE = sp_code;
-    _t_rootfs_assert_default_set(sp, "root, no rootfs, policy_basic, spawn");
+    if (sp_ns == 1) {
+        _T_ROOTFS_CODE = sp_code;
+        _t_rootfs_assert_default_set(sp, "root, no rootfs, policy_basic, spawn");
+    } else {
+        _t_spawn_refused(sp_code, sp, "eff ", "root, the bound, sandbox_spawn");
+    }
     assert_eq(_t_has_line(un, "eff 2684618235"), 0, "an unconfined payload is not bounded (the control)");
     var one = vec_new();
     vec_push(one, "CAP_CHOWN");

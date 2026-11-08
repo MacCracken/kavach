@@ -196,8 +196,16 @@ The links are made only where the rootfs has a procfs at `/proc`.
 - **Found on the way.** The `/dev` links regression (Security). Under runc a test payload has a `/proc`, so it reads its mode from
   its mode file and not from having no argv. `_t_has_line` matches a prefix on the first line, which turned "pid 1" true for any
   PID starting with 1: the probe prints `pidone`.
-- ⚠ Every run here shares this machine's Arch kernel, 7.2.14 with landlock ABI 10 and no AppArmor. CI's `ubuntu-26.04` jobs will
-  be the first run of the new groups under AppArmor and on another landlock ABI.
+- ⚠ Every run here shares this machine's Arch kernel, 7.2.14 with landlock ABI 10 and no AppArmor. **CI's first run of the new
+  groups, on `ubuntu-26.04` x86-64 and native aarch64, failed three checks there**, each a `sandbox_spawn` whose payload was to
+  report from inside: the domain, the bound with no rootfs, and the process-sandbox control in the OCI spawn group. Those runners
+  refuse an unprivileged user namespace its uid_map, and `sandbox_spawn` always asks for its namespaces and refused closed, with
+  118, as its contract says; the tests had assumed it would run. runc got its namespaces on the same runner, so the OCI half
+  passed. Each of the three now asserts the refusal (123 or 118) and that nothing ran, and skips the payload's check with the
+  reason, where `spawn_namespaces_available` says the host refuses them; where it allows them nothing changed, and the count
+  here is still 2227. Reproduced here as uid 1000 in an unprivileged container, whose seccomp profile refuses the `unshare`
+  (123): the two checks failed there before the change and assert the refusal after. The container's two other failures, a
+  `clone3` probe and the OCI state directory's owner check, are its own: 3.14.7's suite fails the same two there.
 
 ### Verified
 
