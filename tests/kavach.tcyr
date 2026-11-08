@@ -9264,6 +9264,13 @@ fn _t_proc_payload(mode) {
         _t_payload_mounted("still-sys", " /proc/sys ro,");
         _t_payload_mounted("still-kcore", " /proc/kcore ");
         _t_payload_wopen("pattern", "/proc/sys/kernel/core_pattern");
+        # Last, because it covers /proc. A tmpfs needs only the namespace's own
+        # CAP_SYS_ADMIN, so 0 here says those capabilities work, and the lock is
+        # what refused the unmounts. Where it fails they never reached the lock:
+        # CI's ubuntu-26.04 root jobs, as `test_process_rootfs_payload` records.
+        _t_payload_put("tmpfs ");
+        _t_payload_num(sys_mount("tmpfs", "/proc", "tmpfs", 0, 0));
+        _t_payload_put("\n");
         return 0;
     }
     return 0;
@@ -9386,12 +9393,18 @@ fn test_process_rootfs_guards_proc() {
     var ns = _t_proc_exec(policy_new(), "/", exe, 2, 0);
     assert_eq(_T_PROC_CODE, 0, "the nested probe finishes");
     if (_t_has_line(ns, "nested 0") == 1) {
-        assert(_t_has_line(ns, "unmount-sys -22") == 1, "a nested user namespace finds the mount locked");
-        assert(_t_has_line(ns, "unmount-kcore -22") == 1, "and the mask");
-        assert(_t_has_line(ns, "still-sys 1") == 1, "which stays");
+        # What must hold on any host, asserted on every one.
+        assert(_t_has_line(ns, "still-sys 1") == 1, "a nested user namespace: /proc/sys stays");
         assert(_t_has_line(ns, "still-kcore 1") == 1, "both of them");
         assert_eq(_t_has_line(ns, "mount 0"), 0, "and no /proc of its own mounts");
         assert_eq(_t_count(ns, "opened"), 0, "nothing opens to write from there either");
+        if (_t_has_line(ns, "tmpfs 0") == 1) {
+            assert(_t_has_line(ns, "unmount-sys -22") == 1, "a nested user namespace finds the mount locked");
+            assert(_t_has_line(ns, "unmount-kcore -22") == 1, "and the mask");
+        } else {
+            _t_oci_skip("this host gives a nested user namespace no mount, so the unmounts never reached the lock",
+              _t_oneline(ns));
+        }
     } else {
         _t_oci_skip("this host gives a payload no nested user namespace", _t_oneline(ns));
     }
@@ -9531,11 +9544,16 @@ fn test_process_rootfs_caller_proc() {
     assert(_t_has_line(um, "pattern -30") == 1, "and core_pattern still reads EROFS");
     var ns = _t_cproc_load(5);
     if (_t_has_line(ns, "nested 0") == 1) {
-        assert(_t_has_line(ns, "unmount-sys -22") == 1, "caller's /proc: locked in a nested namespace");
-        assert(_t_has_line(ns, "still-sys 1") == 1, "and still read-only");
+        assert(_t_has_line(ns, "still-sys 1") == 1, "caller's /proc: still read-only in a nested namespace");
         assert_eq(_t_has_line(ns, "mount 0"), 0, "and no /proc of its own");
         assert(_t_has_line(ns, "pattern -30") == 1 || _t_has_line(ns, "pattern -13") == 1,
           "and core_pattern stays shut");
+        if (_t_has_line(ns, "tmpfs 0") == 1) {
+            assert(_t_has_line(ns, "unmount-sys -22") == 1, "caller's /proc: locked in a nested namespace");
+        } else {
+            _t_oci_skip("caller's /proc: a nested user namespace mounts nothing here, so the lock was not reached",
+              _t_oneline(ns));
+        }
     } else {
         _t_oci_skip("this host gives a payload no nested user namespace", _t_oneline(ns));
     }

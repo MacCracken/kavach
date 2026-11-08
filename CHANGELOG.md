@@ -107,7 +107,7 @@ never writing. The caller's `/proc` and `/sys` were mounted in the rootfs, under
 | open `/sys/kernel/mm/transparent_hugepage/enabled` to write | **opened** | EROFS |
 | `/proc` an rbind carrying binfmt_misc: open its `register` to write | **opened** | ENOENT, hidden |
 | read `/proc/kcore`, `/proc/timer_list` | EPERM, a byte | 0 bytes, masked |
-| from a nested user namespace, `umount2` of `/proc/sys` and the mask | nothing mounted there to lift | EINVAL, locked |
+| from a nested user namespace, `umount2` of `/proc/sys` and the mask | nothing mounted there to lift | EINVAL, locked (here; see Tests for CI) |
 | a `/proc` symlinked to a procfs elsewhere in the rootfs | ran | refused, 115 |
 | CAP_SYS_ADMIN in the list, no filter | ran | refused |
 
@@ -150,7 +150,15 @@ In [the process-backend issue](docs/development/issues/2026-11-06-process-backen
   payload sees differs. Checking that the host's `/dev/null` is a character device holds on every host here. A recursive bind first
   fails only as root with a binfmt_misc mounted, which is the case it exists for.
 - ⚠ The root runs share this machine's Arch kernel (7.2.14, no AppArmor), in an `ubuntu:24.04` container with no runc, so the OCI
-  group skipped there. CI's `ubuntu-26.04` root job is the first run of the new groups under AppArmor.
+  group skipped there. CI's two `ubuntu-26.04` root jobs, x86-64 and native aarch64, were the first run of the new groups under
+  AppArmor, and both failed three checks: from a nested user namespace, `umount2` of `/proc/sys` and the mask did not read
+  EINVAL. Every check of what the payload reached passed there. Both mounts stayed, nothing mounted, and nothing opened to write.
+  On the same host `test_process_rootfs_payload` reads `mount -13` from a nested namespace, so the likely reading is that a
+  nested namespace's capabilities do not work there, and the unmounts are refused before the kernel reaches the lock. The payload
+  now also mounts a tmpfs from that namespace, which needs only the namespace's own CAP_SYS_ADMIN. Where it mounts, EINVAL is
+  required, as before. Where it does not, the check skips and prints the payload's numbers, and CI raises that as a warning.
+  The skip branch was run here in a scratch copy that drops every capability in the nested namespace: 2002 rootless and 218 as
+  root, each skip counting one. The cause is still read and not measured. CI's next run prints the errnos.
 
 ### Verified
 

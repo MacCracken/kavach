@@ -108,6 +108,10 @@ Measured as above, on 3.14.7, under `policy_basic()` and `policy_new()`, on `san
 | with no filter, `umount2("/proc/sys")` | EPERM | EPERM |
 | from a nested user namespace, `umount2("/proc/sys")` | nothing mounted there to lift | EINVAL: locked |
 
+- The EINVAL row is this machine's, whose kernel has no AppArmor. On CI's `ubuntu-26.04` root jobs a nested user namespace
+  mounts nothing, and its `umount2` did not read EINVAL, though both mounts stayed: the unmount is refused before the kernel
+  reaches the lock. The test requires EINVAL only where a tmpfs mounts from that namespace, and skips with the numbers
+  otherwise.
 - Rootless the same mounts are made, and the writes read EACCES before and after, so the tests read them from
   `mountinfo`. `test_process_rootfs_guards_proc` does that with rootfs `/`, which carries the host's `/proc` and `/sys`.
   `test_process_rootfs_caller_proc` runs as root, mounting a `/proc` and `/sys` in a child's own mount namespace, so

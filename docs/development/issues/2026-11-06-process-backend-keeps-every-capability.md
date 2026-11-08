@@ -257,7 +257,7 @@ in the rootfs, `policy_basic()` and `policy_new()` alike:
 | `/proc` an rbind carrying binfmt_misc: open its `register` to write | **allowed** | ENOENT: the bind hides it |
 | read `/proc/kcore`, `/proc/timer_list` | EPERM, a byte | 0 bytes: masked |
 | with no filter, `umount2` of `/proc/sys`, `/proc/kcore`, `/sys` | nothing to lift | EPERM |
-| from a nested user namespace, the same | nothing to lift | EINVAL: locked |
+| from a nested user namespace, the same | nothing to lift | EINVAL: locked. On CI's `ubuntu-26.04` root jobs not EINVAL, the mounts still held: that namespace mounts nothing there |
 | a `/proc` symlinked to a procfs elsewhere in the rootfs | not reached | refused, SPAWN_EXIT_PROC |
 | CAP_SYS_ADMIN in the list, no filter | ran | refused |
 
